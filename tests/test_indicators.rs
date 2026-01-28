@@ -103,23 +103,13 @@ fn test_stochastic_range() {
     // %K and %D should be in [0, 100]
     for (i, &k) in result.k.iter().enumerate() {
         if !k.is_nan() {
-            assert!(
-                k >= 0.0 && k <= 100.0,
-                "%K at index {} is out of range: {}",
-                i,
-                k
-            );
+            assert!(k >= 0.0 && k <= 100.0, "%K at index {} is out of range: {}", i, k);
         }
     }
 
     for (i, &d) in result.d.iter().enumerate() {
         if !d.is_nan() {
-            assert!(
-                d >= 0.0 && d <= 100.0,
-                "%D at index {} is out of range: {}",
-                i,
-                d
-            );
+            assert!(d >= 0.0 && d <= 100.0, "%D at index {} is out of range: {}", i, d);
         }
     }
 }

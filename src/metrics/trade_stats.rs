@@ -117,11 +117,9 @@ impl TradeStatistics {
 
         // Average holding period
         if stats.total_trades > 0 {
-            stats.avg_holding_period = trades
-                .iter()
-                .map(|t| t.holding_period() as f64)
-                .sum::<f64>()
-                / stats.total_trades as f64;
+            stats.avg_holding_period =
+                trades.iter().map(|t| t.holding_period() as f64).sum::<f64>()
+                    / stats.total_trades as f64;
         }
 
         // Consecutive wins/losses
@@ -231,22 +229,13 @@ pub fn stats_by_exit_reason(
 pub fn stats_by_direction(trades: &[Trade]) -> (TradeStatistics, TradeStatistics) {
     use crate::core::types::Direction;
 
-    let long_trades: Vec<Trade> = trades
-        .iter()
-        .filter(|t| t.direction == Direction::Long)
-        .cloned()
-        .collect();
+    let long_trades: Vec<Trade> =
+        trades.iter().filter(|t| t.direction == Direction::Long).cloned().collect();
 
-    let short_trades: Vec<Trade> = trades
-        .iter()
-        .filter(|t| t.direction == Direction::Short)
-        .cloned()
-        .collect();
+    let short_trades: Vec<Trade> =
+        trades.iter().filter(|t| t.direction == Direction::Short).cloned().collect();
 
-    (
-        TradeStatistics::from_trades(&long_trades),
-        TradeStatistics::from_trades(&short_trades),
-    )
+    (TradeStatistics::from_trades(&long_trades), TradeStatistics::from_trades(&short_trades))
 }
 
 #[cfg(test)]

@@ -83,31 +83,22 @@ impl BasketBacktest {
 
         // Verify all instruments have same length
         for (ohlcv, signals) in instruments {
-            assert_eq!(
-                ohlcv.len(),
-                n_bars,
-                "All instruments must have same number of bars"
-            );
+            assert_eq!(ohlcv.len(), n_bars, "All instruments must have same number of bars");
             assert_eq!(signals.len(), n_bars, "Signals must match OHLCV length");
         }
 
         // Synchronize signals
-        let entry_signals: Vec<&[bool]> = instruments
-            .iter()
-            .map(|(_, s)| s.entries.as_slice())
-            .collect();
-        let exit_signals: Vec<&[bool]> = instruments
-            .iter()
-            .map(|(_, s)| s.exits.as_slice())
-            .collect();
+        let entry_signals: Vec<&[bool]> =
+            instruments.iter().map(|(_, s)| s.entries.as_slice()).collect();
+        let exit_signals: Vec<&[bool]> =
+            instruments.iter().map(|(_, s)| s.exits.as_slice()).collect();
 
         let synced_entries = self.synchronizer.sync_entries(&entry_signals);
         let synced_exits = self.synchronizer.sync_exits(&exit_signals);
 
         // Clean signals
-        let (clean_entries, clean_exits) = self
-            .signal_processor
-            .clean_signals(&synced_entries, &synced_exits);
+        let (clean_entries, clean_exits) =
+            self.signal_processor.clean_signals(&synced_entries, &synced_exits);
 
         // Initialize state
         let mut cash = self.config.base.initial_capital;
@@ -136,8 +127,7 @@ impl BasketBacktest {
                     if let Some(pos) = positions[inst_idx].take() {
                         let exit_price = ohlcv.close[i];
                         let fees =
-                            self.fee_model
-                                .calculate(exit_price, pos.size, signals.direction);
+                            self.fee_model.calculate(exit_price, pos.size, signals.direction);
 
                         let pnl = (exit_price - pos.entry_price)
                             * pos.size
@@ -145,11 +135,8 @@ impl BasketBacktest {
                             - fees;
 
                         let cost_basis = pos.entry_price * pos.size;
-                        let return_pct = if cost_basis > 0.0 {
-                            pnl / cost_basis * 100.0
-                        } else {
-                            0.0
-                        };
+                        let return_pct =
+                            if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
                         cash += exit_price * pos.size - fees;
 
@@ -188,16 +175,11 @@ impl BasketBacktest {
                     let size = sizes[inst_idx];
                     if size > 0.0 {
                         let entry_price = ohlcv.close[i];
-                        let fees = self
-                            .fee_model
-                            .calculate(entry_price, size, signals.direction);
+                        let fees = self.fee_model.calculate(entry_price, size, signals.direction);
                         cash -= entry_price * size + fees;
 
-                        positions[inst_idx] = Some(PositionState {
-                            entry_idx: i,
-                            entry_price,
-                            size,
-                        });
+                        positions[inst_idx] =
+                            Some(PositionState { entry_idx: i, entry_price, size });
                     }
                 }
             }
@@ -229,20 +211,14 @@ impl BasketBacktest {
         for (inst_idx, (ohlcv, signals)) in instruments.iter().enumerate() {
             if let Some(pos) = positions[inst_idx].take() {
                 let exit_price = ohlcv.close[last_idx];
-                let fees = self
-                    .fee_model
-                    .calculate(exit_price, pos.size, signals.direction);
+                let fees = self.fee_model.calculate(exit_price, pos.size, signals.direction);
 
                 let pnl =
                     (exit_price - pos.entry_price) * pos.size * signals.direction.multiplier()
                         - fees;
 
                 let cost_basis = pos.entry_price * pos.size;
-                let return_pct = if cost_basis > 0.0 {
-                    pnl / cost_basis * 100.0
-                } else {
-                    0.0
-                };
+                let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
                 trades.push(Trade {
                     id: trade_counter,
@@ -319,11 +295,7 @@ impl BasketBacktest {
         };
 
         let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades
-            .iter()
-            .filter(|t| t.pnl < 0.0)
-            .map(|t| t.pnl.abs())
-            .sum();
+        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
@@ -386,6 +358,7 @@ struct PositionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Direction;
 
     fn sample_instruments() -> Vec<(OhlcvData, CompiledSignals)> {
         let n = 20;
@@ -454,10 +427,7 @@ mod tests {
 
     #[test]
     fn test_sync_mode_all() {
-        let config = BasketConfig {
-            sync_mode: SyncMode::All,
-            ..Default::default()
-        };
+        let config = BasketConfig { sync_mode: SyncMode::All, ..Default::default() };
         let backtest = BasketBacktest::new(config);
         let instruments = sample_instruments();
 

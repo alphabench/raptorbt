@@ -108,12 +108,7 @@ pub struct ChandelierExit {
 impl ChandelierExit {
     /// Create a new Chandelier exit.
     pub fn new(multiplier: f64, atr: f64) -> Self {
-        Self {
-            multiplier,
-            atr,
-            highest_high: 0.0,
-            lowest_low: f64::MAX,
-        }
+        Self { multiplier, atr, highest_high: 0.0, lowest_low: f64::MAX }
     }
 
     /// Reset for new position.

@@ -54,10 +54,7 @@ pub struct PairsBacktest {
 impl PairsBacktest {
     /// Create a new pairs backtest.
     pub fn new(config: PairsConfig) -> Self {
-        Self {
-            fee_model: FeeModel::percentage(config.base.fees),
-            config,
-        }
+        Self { fee_model: FeeModel::percentage(config.base.fees), config }
     }
 
     /// Run pairs trading backtest.
@@ -114,11 +111,7 @@ impl PairsBacktest {
                 if let Some(pos) = position.take() {
                     let (pnl, fees) = self.close_position(&pos, leg1_price, leg2_price);
                     let cost_basis = pos.leg1_cost + pos.leg2_cost;
-                    let return_pct = if cost_basis > 0.0 {
-                        pnl / cost_basis * 100.0
-                    } else {
-                        0.0
-                    };
+                    let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
                     // Return capital
                     cash += pos.leg1_size * leg1_price + pos.leg2_size * leg2_price - fees;
@@ -240,11 +233,7 @@ impl PairsBacktest {
 
             let (pnl, fees) = self.close_position(&pos, leg1_price, leg2_price);
             let cost_basis = pos.leg1_cost + pos.leg2_cost;
-            let return_pct = if cost_basis > 0.0 {
-                pnl / cost_basis * 100.0
-            } else {
-                0.0
-            };
+            let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
             trades.push(Trade {
                 id: trade_counter,
@@ -281,11 +270,7 @@ impl PairsBacktest {
 
         let sum_x: f64 = leg2_prices.iter().sum();
         let sum_y: f64 = leg1_prices.iter().sum();
-        let sum_xy: f64 = leg1_prices
-            .iter()
-            .zip(leg2_prices.iter())
-            .map(|(y, x)| x * y)
-            .sum();
+        let sum_xy: f64 = leg1_prices.iter().zip(leg2_prices.iter()).map(|(y, x)| x * y).sum();
         let sum_x2: f64 = leg2_prices.iter().map(|x| x * x).sum();
 
         let denominator = n * sum_x2 - sum_x * sum_x;
@@ -313,11 +298,8 @@ impl PairsBacktest {
             * position.leg2_direction.multiplier();
 
         let exit_fees =
-            self.fee_model
-                .calculate(leg1_price, position.leg1_size, position.leg1_direction)
-                + self
-                    .fee_model
-                    .calculate(leg2_price, position.leg2_size, position.leg2_direction);
+            self.fee_model.calculate(leg1_price, position.leg1_size, position.leg1_direction)
+                + self.fee_model.calculate(leg2_price, position.leg2_size, position.leg2_direction);
 
         let total_pnl = leg1_pnl + leg2_pnl - exit_fees;
 
@@ -340,10 +322,8 @@ impl PairsBacktest {
 
         // For pairs, count trade pairs (every 2 trades = 1 round trip)
         let total_trades = trades.len() / 2;
-        let winning_trades = trades
-            .chunks(2)
-            .filter(|chunk| chunk.iter().map(|t| t.pnl).sum::<f64>() > 0.0)
-            .count();
+        let winning_trades =
+            trades.chunks(2).filter(|chunk| chunk.iter().map(|t| t.pnl).sum::<f64>() > 0.0).count();
         let losing_trades = total_trades.saturating_sub(winning_trades);
 
         let win_rate_pct = if total_trades > 0 {
@@ -353,11 +333,7 @@ impl PairsBacktest {
         };
 
         let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades
-            .iter()
-            .filter(|t| t.pnl < 0.0)
-            .map(|t| t.pnl.abs())
-            .sum();
+        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
@@ -463,11 +439,7 @@ mod tests {
 
     #[test]
     fn test_hedge_ratio_calculation() {
-        let config = PairsConfig {
-            dynamic_hedge: true,
-            hedge_lookback: 5,
-            ..Default::default()
-        };
+        let config = PairsConfig { dynamic_hedge: true, hedge_lookback: 5, ..Default::default() };
         let backtest = PairsBacktest::new(config);
 
         let leg1 = vec![100.0, 102.0, 104.0, 106.0, 108.0];

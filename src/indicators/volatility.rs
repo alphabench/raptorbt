@@ -88,14 +88,10 @@ pub struct BollingerBandsResult {
 /// BollingerBandsResult with middle, upper, lower bands, bandwidth, and %B
 pub fn bollinger_bands(data: &[f64], period: usize, std_dev: f64) -> Result<BollingerBandsResult> {
     if period == 0 {
-        return Err(RaptorError::invalid_parameter(
-            "Bollinger Bands period must be > 0",
-        ));
+        return Err(RaptorError::invalid_parameter("Bollinger Bands period must be > 0"));
     }
     if std_dev <= 0.0 {
-        return Err(RaptorError::invalid_parameter(
-            "Bollinger Bands std_dev must be > 0",
-        ));
+        return Err(RaptorError::invalid_parameter("Bollinger Bands std_dev must be > 0"));
     }
 
     let n = data.len();
@@ -106,13 +102,7 @@ pub fn bollinger_bands(data: &[f64], period: usize, std_dev: f64) -> Result<Boll
     let mut percent_b = vec![f64::NAN; n];
 
     if period > n {
-        return Ok(BollingerBandsResult {
-            middle,
-            upper,
-            lower,
-            bandwidth,
-            percent_b,
-        });
+        return Ok(BollingerBandsResult { middle, upper, lower, bandwidth, percent_b });
     }
 
     // Calculate SMA for middle band
@@ -130,11 +120,8 @@ pub fn bollinger_bands(data: &[f64], period: usize, std_dev: f64) -> Result<Boll
         let start = i + 1 - period;
 
         // Calculate standard deviation using population variance
-        let variance: f64 = data[start..=i]
-            .iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>()
-            / period as f64;
+        let variance: f64 =
+            data[start..=i].iter().map(|x| (x - mean).powi(2)).sum::<f64>() / period as f64;
         let std = variance.sqrt();
 
         // Calculate bands (std is always non-negative from sqrt)
@@ -153,13 +140,7 @@ pub fn bollinger_bands(data: &[f64], period: usize, std_dev: f64) -> Result<Boll
         }
     }
 
-    Ok(BollingerBandsResult {
-        middle,
-        upper,
-        lower,
-        bandwidth,
-        percent_b,
-    })
+    Ok(BollingerBandsResult { middle, upper, lower, bandwidth, percent_b })
 }
 
 /// Keltner Channels (ATR-based bands).
@@ -227,9 +208,7 @@ mod tests {
 
     #[test]
     fn test_bollinger_bands() {
-        let data: Vec<f64> = (1..=30)
-            .map(|x| x as f64 + (x as f64 * 0.1).sin())
-            .collect();
+        let data: Vec<f64> = (1..=30).map(|x| x as f64 + (x as f64 * 0.1).sin()).collect();
 
         let result = bollinger_bands(&data, 20, 2.0).unwrap();
 

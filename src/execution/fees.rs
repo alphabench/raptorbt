@@ -92,10 +92,7 @@ pub struct BrokerFees;
 impl BrokerFees {
     /// Interactive Brokers tiered pricing (approximate).
     pub fn interactive_brokers() -> FeeModel {
-        FeeModel::Custom {
-            base: 1.0,
-            per_share: 0.005,
-        }
+        FeeModel::Custom { base: 1.0, per_share: 0.005 }
     }
 
     /// Zero commission broker (like Robinhood).

@@ -321,10 +321,8 @@ pub fn is_highest(a: &[f64], window: usize) -> Vec<bool> {
             continue;
         }
 
-        let max_in_window = a[start..=i]
-            .iter()
-            .filter(|v| !v.is_nan())
-            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let max_in_window =
+            a[start..=i].iter().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
         result[i] = (current - max_in_window).abs() < 1e-10;
     }
@@ -355,10 +353,8 @@ pub fn is_lowest(a: &[f64], window: usize) -> Vec<bool> {
             continue;
         }
 
-        let min_in_window = a[start..=i]
-            .iter()
-            .filter(|v| !v.is_nan())
-            .fold(f64::INFINITY, |a, &b| a.min(b));
+        let min_in_window =
+            a[start..=i].iter().filter(|v| !v.is_nan()).fold(f64::INFINITY, |a, &b| a.min(b));
 
         result[i] = (current - min_in_window).abs() < 1e-10;
     }

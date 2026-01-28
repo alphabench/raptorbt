@@ -237,12 +237,7 @@ fn test_short_direction() {
 
     let ohlcv = OhlcvData {
         timestamps: (0..n as i64).collect(),
-        open: close
-            .iter()
-            .skip(1)
-            .chain(std::iter::once(&close[n - 1]))
-            .cloned()
-            .collect(),
+        open: close.iter().skip(1).chain(std::iter::once(&close[n - 1])).cloned().collect(),
         high: close.iter().map(|c| c + 1.0).collect(),
         low: close.iter().map(|c| c - 1.0).collect(),
         close: close.clone(),

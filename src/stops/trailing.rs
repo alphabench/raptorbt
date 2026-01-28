@@ -15,10 +15,7 @@ pub struct TrailingStop {
 impl TrailingStop {
     /// Create a new trailing stop.
     pub fn new(percent: f64) -> Self {
-        Self {
-            percent: percent.abs(),
-            activation_threshold: None,
-        }
+        Self { percent: percent.abs(), activation_threshold: None }
     }
 
     /// Create with activation threshold.
@@ -89,9 +86,7 @@ pub struct PointTrailingStop {
 impl PointTrailingStop {
     /// Create a new point-based trailing stop.
     pub fn new(points: f64) -> Self {
-        Self {
-            points: points.abs(),
-        }
+        Self { points: points.abs() }
     }
 }
 
@@ -137,10 +132,7 @@ pub struct StepTrailingStop {
 impl StepTrailingStop {
     /// Create a new step trailing stop.
     pub fn new(step_percent: f64, trail_percent: f64) -> Self {
-        Self {
-            step_percent: step_percent.abs(),
-            trail_percent: trail_percent.abs(),
-        }
+        Self { step_percent: step_percent.abs(), trail_percent: trail_percent.abs() }
     }
 
     /// Calculate stop for a given step level.

@@ -121,31 +121,19 @@ pub struct FillModel {
 
 impl Default for FillModel {
     fn default() -> Self {
-        Self {
-            fill_price: FillPrice::Close,
-            delay_to_next_bar: false,
-            fill_ratio: 1.0,
-        }
+        Self { fill_price: FillPrice::Close, delay_to_next_bar: false, fill_ratio: 1.0 }
     }
 }
 
 impl FillModel {
     /// Create a fill model that executes at close.
     pub fn at_close() -> Self {
-        Self {
-            fill_price: FillPrice::Close,
-            delay_to_next_bar: false,
-            fill_ratio: 1.0,
-        }
+        Self { fill_price: FillPrice::Close, delay_to_next_bar: false, fill_ratio: 1.0 }
     }
 
     /// Create a fill model that executes at next bar's open.
     pub fn at_next_open() -> Self {
-        Self {
-            fill_price: FillPrice::Open,
-            delay_to_next_bar: true,
-            fill_ratio: 1.0,
-        }
+        Self { fill_price: FillPrice::Open, delay_to_next_bar: true, fill_ratio: 1.0 }
     }
 
     /// Set partial fill ratio.
@@ -306,14 +294,7 @@ mod tests {
     use super::*;
 
     fn test_bar() -> OhlcvBar {
-        OhlcvBar {
-            timestamp: 0,
-            open: 100.0,
-            high: 105.0,
-            low: 95.0,
-            close: 102.0,
-            volume: 1000.0,
-        }
+        OhlcvBar { timestamp: 0, open: 100.0, high: 105.0, low: 95.0, close: 102.0, volume: 1000.0 }
     }
 
     #[test]

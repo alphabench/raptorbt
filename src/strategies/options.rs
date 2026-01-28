@@ -100,10 +100,7 @@ pub struct OptionsBacktest {
 impl OptionsBacktest {
     /// Create a new options backtest.
     pub fn new(config: OptionsConfig) -> Self {
-        Self {
-            fee_model: FeeModel::percentage(config.base.fees),
-            config,
-        }
+        Self { fee_model: FeeModel::percentage(config.base.fees), config }
     }
 
     /// Run options backtest.
@@ -158,11 +155,7 @@ impl OptionsBacktest {
                     let pnl = self.calculate_pnl(&pos, exit_price) - fees;
                     let cost_basis =
                         pos.entry_price * pos.contracts as f64 * self.config.lot_size as f64;
-                    let return_pct = if cost_basis > 0.0 {
-                        pnl / cost_basis * 100.0
-                    } else {
-                        0.0
-                    };
+                    let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
                     cash += exit_price * pos.contracts as f64 * self.config.lot_size as f64 - fees;
 
@@ -196,8 +189,7 @@ impl OptionsBacktest {
                 if contracts > 0 {
                     let entry_cost = option_price * contracts as f64 * self.config.lot_size as f64;
                     let fees =
-                        self.fee_model
-                            .calculate(option_price, contracts as f64, signals.direction);
+                        self.fee_model.calculate(option_price, contracts as f64, signals.direction);
 
                     cash -= entry_cost + fees;
 
@@ -237,16 +229,11 @@ impl OptionsBacktest {
             let last_idx = n - 1;
             let exit_price = option_prices[last_idx];
             let fees =
-                self.fee_model
-                    .calculate(exit_price, pos.contracts as f64, signals.direction);
+                self.fee_model.calculate(exit_price, pos.contracts as f64, signals.direction);
 
             let pnl = self.calculate_pnl(&pos, exit_price) - fees;
             let cost_basis = pos.entry_price * pos.contracts as f64 * self.config.lot_size as f64;
-            let return_pct = if cost_basis > 0.0 {
-                pnl / cost_basis * 100.0
-            } else {
-                0.0
-            };
+            let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
             trades.push(Trade {
                 id: trade_counter,
@@ -354,11 +341,7 @@ impl OptionsBacktest {
         };
 
         let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades
-            .iter()
-            .filter(|t| t.pnl < 0.0)
-            .map(|t| t.pnl.abs())
-            .sum();
+        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
@@ -436,11 +419,8 @@ mod tests {
 
     #[test]
     fn test_position_sizing_percent() {
-        let config = OptionsConfig {
-            size_type: SizeType::Percent(0.5),
-            lot_size: 50,
-            ..Default::default()
-        };
+        let config =
+            OptionsConfig { size_type: SizeType::Percent(0.5), lot_size: 50, ..Default::default() };
         let backtest = OptionsBacktest::new(config);
 
         // 50% of 100000 = 50000, option at 100 * lot 50 = 5000 per contract

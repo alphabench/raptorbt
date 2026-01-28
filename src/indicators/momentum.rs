@@ -100,9 +100,7 @@ pub fn macd(
         return Err(RaptorError::invalid_parameter("MACD periods must be > 0"));
     }
     if fast_period >= slow_period {
-        return Err(RaptorError::invalid_parameter(
-            "MACD fast period must be < slow period",
-        ));
+        return Err(RaptorError::invalid_parameter("MACD fast period must be < slow period"));
     }
 
     let n = data.len();
@@ -111,11 +109,7 @@ pub fn macd(
     let mut histogram = vec![f64::NAN; n];
 
     if slow_period > n {
-        return Ok(MacdResult {
-            macd_line,
-            signal_line,
-            histogram,
-        });
+        return Ok(MacdResult { macd_line, signal_line, histogram });
     }
 
     // Calculate fast and slow EMAs
@@ -163,11 +157,7 @@ pub fn macd(
         }
     }
 
-    Ok(MacdResult {
-        macd_line,
-        signal_line,
-        histogram,
-    })
+    Ok(MacdResult { macd_line, signal_line, histogram })
 }
 
 /// Stochastic oscillator result.
@@ -202,9 +192,7 @@ pub fn stochastic(
         return Err(RaptorError::length_mismatch(n, high.len()));
     }
     if k_period == 0 || d_period == 0 {
-        return Err(RaptorError::invalid_parameter(
-            "Stochastic periods must be > 0",
-        ));
+        return Err(RaptorError::invalid_parameter("Stochastic periods must be > 0"));
     }
 
     let mut k = vec![f64::NAN; n];
