@@ -1,5 +1,5 @@
 """
-RaptorBT - High-performance Rust backtesting engine for quant5.
+RaptorBT - High-performance Rust backtesting engine for Quant5.
 
 This module provides Python bindings for the Rust-based backtesting engine,
 offering significant performance improvements over vectorbt:

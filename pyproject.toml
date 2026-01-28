@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "raptorbt"
 version = "0.1.0"
-description = "High-performance Rust backtesting engine for quant5"
+description = "High-performance Rust backtesting engine for Quant5"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [

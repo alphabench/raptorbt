@@ -2,8 +2,8 @@
 name = "raptorbt"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance Rust backtesting engine for quant5"
-authors = ["quant5 team"]
+description = "High-performance Rust backtesting engine for Quant5"
+authors = ["Quant5 team"]
 license = "MIT"
 
 [lib]

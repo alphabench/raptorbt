@@ -475,7 +475,7 @@ config.set_risk_reward_target(ratio=2.0)  # 2:1 risk-reward ratio
 
 ## Python Integration
 
-RaptorBT integrates seamlessly with the quant5 golf runner through `rpbt.py`.
+RaptorBT integrates seamlessly with the Quant5 golf runner through `rpbt.py`.
 
 ### Enable RaptorBT
 
@@ -777,7 +777,7 @@ EOF
 
 ## License
 
-RaptorBT is proprietary software developed for the quant5 platform.
+RaptorBT is proprietary software developed for the Quant5 platform.
 
 ---
 
