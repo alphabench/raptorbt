@@ -1,0 +1,32 @@
+[package]
+name = "raptorbt"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Rust backtesting engine for quant5"
+authors = ["quant5 team"]
+license = "MIT"
+
+[lib]
+name = "raptorbt"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"] }
+numpy = "0.20"
+rayon = "1.8"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.5"
+approx = "0.5"
+
+[[bench]]
+name = "backtest_benchmark"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
