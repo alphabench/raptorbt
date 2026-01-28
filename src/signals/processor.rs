@@ -16,10 +16,7 @@ pub struct SignalProcessor {
 
 impl Default for SignalProcessor {
     fn default() -> Self {
-        Self {
-            allow_pyramiding: false,
-            max_pyramid_entries: 1,
-        }
+        Self { allow_pyramiding: false, max_pyramid_entries: 1 }
     }
 }
 
@@ -55,11 +52,7 @@ impl SignalProcessor {
     /// Tuple of (cleaned_entries, cleaned_exits)
     pub fn clean_signals(&self, entries: &[bool], exits: &[bool]) -> (Vec<bool>, Vec<bool>) {
         let n = entries.len();
-        assert_eq!(
-            n,
-            exits.len(),
-            "Entry and exit arrays must have same length"
-        );
+        assert_eq!(n, exits.len(), "Entry and exit arrays must have same length");
 
         let mut clean_entries = vec![false; n];
         let mut clean_exits = vec![false; n];
@@ -140,12 +133,7 @@ impl SignalProcessor {
         let mut clean_short_exits = vec![false; n];
 
         if n == 0 {
-            return (
-                clean_long_entries,
-                clean_long_exits,
-                clean_short_entries,
-                clean_short_exits,
-            );
+            return (clean_long_entries, clean_long_exits, clean_short_entries, clean_short_exits);
         }
 
         let mut current_direction: Option<Direction> = None;
@@ -189,12 +177,7 @@ impl SignalProcessor {
             }
         }
 
-        (
-            clean_long_entries,
-            clean_long_exits,
-            clean_short_entries,
-            clean_short_exits,
-        )
+        (clean_long_entries, clean_long_exits, clean_short_entries, clean_short_exits)
     }
 
     /// Generate exit-on-opposite-entry signals.
@@ -248,11 +231,8 @@ impl SignalProcessor {
             .filter_map(|(i, &e)| if e { Some(i) } else { None })
             .collect();
 
-        let exit_indices: Vec<usize> = exits
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &e)| if e { Some(i) } else { None })
-            .collect();
+        let exit_indices: Vec<usize> =
+            exits.iter().enumerate().filter_map(|(i, &e)| if e { Some(i) } else { None }).collect();
 
         (entry_indices, exit_indices)
     }

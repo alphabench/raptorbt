@@ -256,11 +256,7 @@ pub fn drawdown_periods(equity_curve: &[f64]) -> Vec<(usize, usize, f64)> {
 /// Calmar ratio
 pub fn calmar_ratio(total_return: f64, max_drawdown: f64) -> f64 {
     if max_drawdown <= 0.0 {
-        return if total_return > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
+        return if total_return > 0.0 { f64::INFINITY } else { 0.0 };
     }
     total_return / max_drawdown
 }

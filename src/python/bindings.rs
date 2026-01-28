@@ -115,12 +115,7 @@ pub struct PyStopConfig {
 impl PyStopConfig {
     #[new]
     fn new() -> Self {
-        Self {
-            stop_type: "none".to_string(),
-            percent: None,
-            multiplier: None,
-            period: None,
-        }
+        Self { stop_type: "none".to_string(), percent: None, multiplier: None, period: None }
     }
 
     #[staticmethod]
@@ -689,13 +684,7 @@ pub fn run_multi_backtest<'py>(
     low: PyReadonlyArray1<f64>,
     close: PyReadonlyArray1<f64>,
     volume: PyReadonlyArray1<f64>,
-    strategies: Vec<(
-        PyReadonlyArray1<bool>,
-        PyReadonlyArray1<bool>,
-        i32,
-        f64,
-        String,
-    )>,
+    strategies: Vec<(PyReadonlyArray1<bool>, PyReadonlyArray1<bool>, i32, f64, String)>,
     config: Option<&PyBacktestConfig>,
     combine_mode: &str,
 ) -> PyResult<PyBacktestResult> {
@@ -819,10 +808,7 @@ pub fn stochastic<'py>(
     let c = numpy_to_vec_f64(close);
     let result = indicators::momentum::stochastic(&h, &l, &c, k_period, d_period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    Ok((
-        vec_to_numpy_f64(py, result.k),
-        vec_to_numpy_f64(py, result.d),
-    ))
+    Ok((vec_to_numpy_f64(py, result.k), vec_to_numpy_f64(py, result.d)))
 }
 
 /// Average True Range.

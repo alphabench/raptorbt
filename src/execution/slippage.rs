@@ -36,10 +36,7 @@ impl SlippageModel {
 
     /// Create a volume-based slippage model.
     pub fn volume_based(base: f64, volume_factor: f64) -> Self {
-        SlippageModel::VolumeBased {
-            base,
-            volume_factor,
-        }
+        SlippageModel::VolumeBased { base, volume_factor }
     }
 
     /// Calculate slippage for a trade.
@@ -66,10 +63,7 @@ impl SlippageModel {
             SlippageModel::None => 0.0,
             SlippageModel::Percentage(rate) => price * rate,
             SlippageModel::Fixed(points) => *points,
-            SlippageModel::VolumeBased {
-                base,
-                volume_factor,
-            } => {
+            SlippageModel::VolumeBased { base, volume_factor } => {
                 if let Some(vol) = volume {
                     if vol > 0.0 {
                         base * (1.0 / (1.0 + vol * volume_factor))
@@ -131,11 +125,7 @@ pub struct MarketImpact {
 impl MarketImpact {
     /// Create a new market impact model.
     pub fn new(temporary: f64, permanent: f64, adv: f64) -> Self {
-        Self {
-            temporary_impact: temporary,
-            permanent_impact: permanent,
-            avg_daily_volume: adv,
-        }
+        Self { temporary_impact: temporary, permanent_impact: permanent, avg_daily_volume: adv }
     }
 
     /// Calculate market impact for an order.

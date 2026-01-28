@@ -13,9 +13,7 @@ pub struct SingleBacktest {
 impl SingleBacktest {
     /// Create a new single instrument backtest.
     pub fn new(config: BacktestConfig) -> Self {
-        Self {
-            engine: PortfolioEngine::new(config),
-        }
+        Self { engine: PortfolioEngine::new(config) }
     }
 
     /// Run the backtest.
@@ -181,12 +179,8 @@ mod tests {
         let low: Vec<f64> = close.iter().map(|x| x - 1.0).collect();
         let volume = vec![1000.0; 10];
 
-        let entries = vec![
-            false, true, false, false, false, false, false, false, false, false,
-        ];
-        let exits = vec![
-            false, false, false, false, false, true, false, false, false, false,
-        ];
+        let entries = vec![false, true, false, false, false, false, false, false, false, false];
+        let exits = vec![false, false, false, false, false, true, false, false, false, false];
 
         let result = backtest.run_from_arrays(
             &timestamps,

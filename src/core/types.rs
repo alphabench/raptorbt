@@ -73,14 +73,7 @@ impl OhlcvData {
         close: Vec<Price>,
         volume: Vec<f64>,
     ) -> Self {
-        Self {
-            timestamps,
-            open,
-            high,
-            low,
-            close,
-            volume,
-        }
+        Self { timestamps, open, high, low, close, volume }
     }
 
     /// Get the number of bars.
@@ -137,14 +130,7 @@ impl CompiledSignals {
         direction: Direction,
         weight: f64,
     ) -> Self {
-        Self {
-            symbol,
-            entries,
-            exits,
-            position_sizes: None,
-            direction,
-            weight,
-        }
+        Self { symbol, entries, exits, position_sizes: None, direction, weight }
     }
 
     /// Set position sizes.
@@ -375,13 +361,7 @@ impl BacktestResult {
         trades: Vec<Trade>,
         returns: Vec<f64>,
     ) -> Self {
-        Self {
-            metrics,
-            equity_curve,
-            drawdown_curve,
-            trades,
-            returns,
-        }
+        Self { metrics, equity_curve, drawdown_curve, trades, returns }
     }
 }
 

@@ -206,11 +206,7 @@ impl StreamingMetrics {
     /// Get profit factor (sum of profits / sum of losses).
     pub fn profit_factor(&self) -> f64 {
         if self.sum_negative == 0.0 {
-            return if self.sum_positive > 0.0 {
-                f64::INFINITY
-            } else {
-                0.0
-            };
+            return if self.sum_positive > 0.0 { f64::INFINITY } else { 0.0 };
         }
         self.sum_positive / self.sum_negative.abs()
     }

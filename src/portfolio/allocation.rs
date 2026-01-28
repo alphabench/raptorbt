@@ -151,18 +151,13 @@ impl CapitalAllocator {
                 let equal = 1.0 / n as f64;
                 vec![equal.min(*max); n]
             }
-            _ => weights
-                .map(|w| w.to_vec())
-                .unwrap_or_else(|| vec![1.0 / n as f64; n]),
+            _ => weights.map(|w| w.to_vec()).unwrap_or_else(|| vec![1.0 / n as f64; n]),
         };
 
         // Normalize weights
         let total_weight: f64 = instrument_weights.iter().sum();
         let normalized_weights: Vec<f64> = if total_weight > 0.0 {
-            instrument_weights
-                .iter()
-                .map(|w| w / total_weight)
-                .collect()
+            instrument_weights.iter().map(|w| w / total_weight).collect()
         } else {
             vec![1.0 / n as f64; n]
         };

@@ -1,5 +1,6 @@
 edition = "2021"
 max_width = 100
 use_small_heuristics = "Max"
-imports_granularity = "Module"
-group_imports = "StdExternalCrate"
+# Note: imports_granularity and group_imports require nightly Rust
+# imports_granularity = "Module"
+# group_imports = "StdExternalCrate"

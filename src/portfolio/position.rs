@@ -16,11 +16,7 @@ pub struct PositionManager {
 impl PositionManager {
     /// Create a new position manager.
     pub fn new(symbol: String) -> Self {
-        Self {
-            position: Position::new(),
-            trade_counter: 0,
-            symbol,
-        }
+        Self { position: Position::new(), trade_counter: 0, symbol }
     }
 
     /// Check if currently in a position.
@@ -67,15 +63,7 @@ impl PositionManager {
             return false;
         }
 
-        self.position.open(
-            idx,
-            price,
-            size,
-            direction,
-            stop_price,
-            target_price,
-            entry_fees,
-        );
+        self.position.open(idx, price, size, direction, stop_price, target_price, entry_fees);
         true
     }
 
@@ -131,11 +119,7 @@ impl PositionManager {
 
         // Calculate return percentage
         let cost_basis = pos.entry_price * pos.size;
-        let return_pct = if cost_basis > 0.0 {
-            pnl / cost_basis * 100.0
-        } else {
-            0.0
-        };
+        let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
         Trade {
             id: self.trade_counter,
@@ -270,16 +254,14 @@ mod tests {
         let mut pm = PositionManager::new("TEST".to_string());
 
         // Open position
-        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None));
+        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None, 0.0));
         assert!(pm.is_in_position());
 
         // Try to open another - should fail
-        assert!(!pm.open_position(1, 1001, 101.0, 10.0, Direction::Long, None, None));
+        assert!(!pm.open_position(1, 1001, 101.0, 10.0, Direction::Long, None, None, 0.0));
 
         // Close position with profit
-        let trade = pm
-            .close_position(5, 1005, 110.0, 1000, ExitReason::Signal, 2.0)
-            .unwrap();
+        let trade = pm.close_position(5, 1005, 110.0, 1000, ExitReason::Signal, 2.0).unwrap();
 
         assert!(!pm.is_in_position());
         assert_eq!(trade.entry_idx, 0);
@@ -295,12 +277,10 @@ mod tests {
     fn test_short_position() {
         let mut pm = PositionManager::new("TEST".to_string());
 
-        pm.open_position(0, 1000, 100.0, 10.0, Direction::Short, None, None);
+        pm.open_position(0, 1000, 100.0, 10.0, Direction::Short, None, None, 0.0);
 
         // Close with profit (price went down)
-        let trade = pm
-            .close_position(5, 1005, 90.0, 1000, ExitReason::Signal, 2.0)
-            .unwrap();
+        let trade = pm.close_position(5, 1005, 90.0, 1000, ExitReason::Signal, 2.0).unwrap();
 
         // P&L: (100 - 90) * 10 * -(-1) - 2 = 98
         // For short: (entry - exit) * size = (100 - 90) * 10 = 100 gross, minus 2 fees = 98
@@ -319,6 +299,7 @@ mod tests {
             Direction::Long,
             Some(95.0), // Stop at 95
             None,
+            0.0,
         );
 
         // Check stop not hit
@@ -332,7 +313,7 @@ mod tests {
     fn test_trailing_stop() {
         let mut pm = PositionManager::new("TEST".to_string());
 
-        pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None);
+        pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None, 0.0);
 
         // Update with higher price
         pm.update_price(110.0, 98.0);
@@ -353,7 +334,7 @@ mod tests {
     fn test_unrealized_pnl() {
         let mut pm = PositionManager::new("TEST".to_string());
 
-        pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None);
+        pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None, 0.0);
 
         // Price up
         let pnl = pm.unrealized_pnl(110.0);

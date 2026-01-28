@@ -49,38 +49,27 @@ impl RaptorError {
 
     /// Create an invalid parameter error.
     pub fn invalid_parameter(message: impl Into<String>) -> Self {
-        Self::InvalidParameter {
-            message: message.into(),
-        }
+        Self::InvalidParameter { message: message.into() }
     }
 
     /// Create an insufficient data error.
     pub fn insufficient_data(required: usize, available: usize) -> Self {
-        Self::InsufficientData {
-            required,
-            available,
-        }
+        Self::InsufficientData { required, available }
     }
 
     /// Create an invalid config error.
     pub fn invalid_config(message: impl Into<String>) -> Self {
-        Self::InvalidConfig {
-            message: message.into(),
-        }
+        Self::InvalidConfig { message: message.into() }
     }
 
     /// Create a division by zero error.
     pub fn division_by_zero(context: impl Into<String>) -> Self {
-        Self::DivisionByZero {
-            context: context.into(),
-        }
+        Self::DivisionByZero { context: context.into() }
     }
 
     /// Create an empty data error.
     pub fn empty_data(context: impl Into<String>) -> Self {
-        Self::EmptyData {
-            context: context.into(),
-        }
+        Self::EmptyData { context: context.into() }
     }
 }
 

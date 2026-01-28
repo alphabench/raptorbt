@@ -37,11 +37,7 @@ impl PortfolioEngine {
     /// Create a new portfolio engine with the given configuration.
     pub fn new(config: BacktestConfig) -> Self {
         let fee_model = FeeModel::percentage(config.fees);
-        let fill_price = if config.upon_bar_close {
-            FillPrice::Close
-        } else {
-            FillPrice::Open
-        };
+        let fill_price = if config.upon_bar_close { FillPrice::Close } else { FillPrice::Open };
 
         Self {
             config,
@@ -77,9 +73,8 @@ impl PortfolioEngine {
         assert_eq!(n, signals.len(), "OHLCV and signals must have same length");
 
         // Clean signals
-        let (entries, exits) = self
-            .signal_processor
-            .clean_signals(&signals.entries, &signals.exits);
+        let (entries, exits) =
+            self.signal_processor.clean_signals(&signals.entries, &signals.exits);
 
         // Initialize state
         let mut position = PositionManager::new(signals.symbol.clone());
@@ -224,8 +219,7 @@ impl PortfolioEngine {
                 if size > 0.0 {
                     // Calculate entry fees
                     let entry_fees =
-                        self.fee_model
-                            .calculate(adjusted_price, size, signals.direction);
+                        self.fee_model.calculate(adjusted_price, size, signals.direction);
 
                     // Calculate stop and target prices
                     let (stop_price, target_price) = self.calculate_stop_target(
@@ -253,11 +247,8 @@ impl PortfolioEngine {
             }
 
             // Calculate equity
-            let position_value = if position.is_in_position() {
-                close * position.position.size
-            } else {
-                0.0
-            };
+            let position_value =
+                if position.is_in_position() { close * position.position.size } else { 0.0 };
             let equity = cash + position_value;
             equity_curve[i] = equity;
 
@@ -295,13 +286,8 @@ impl PortfolioEngine {
         }
 
         // Calculate final metrics
-        let metrics = self.calculate_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &trades,
-            &streaming,
-        );
+        let metrics =
+            self.calculate_metrics(&equity_curve, &drawdown_curve, &returns, &trades, &streaming);
 
         BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
     }
@@ -396,10 +382,8 @@ impl PortfolioEngine {
         let total_trades = trades.len();
 
         // Separate closed vs open trades (EndOfData means still open)
-        let total_open_trades = trades
-            .iter()
-            .filter(|t| matches!(t.exit_reason, ExitReason::EndOfData))
-            .count();
+        let total_open_trades =
+            trades.iter().filter(|t| matches!(t.exit_reason, ExitReason::EndOfData)).count();
         let total_closed_trades = total_trades.saturating_sub(total_open_trades);
 
         // Open trade PnL
@@ -410,10 +394,8 @@ impl PortfolioEngine {
             .sum();
 
         // Only count closed trades for win/loss statistics
-        let closed_trades: Vec<_> = trades
-            .iter()
-            .filter(|t| !matches!(t.exit_reason, ExitReason::EndOfData))
-            .collect();
+        let closed_trades: Vec<_> =
+            trades.iter().filter(|t| !matches!(t.exit_reason, ExitReason::EndOfData)).collect();
 
         let winning_trades = closed_trades.iter().filter(|t| t.pnl > 0.0).count();
         let losing_trades = closed_trades.iter().filter(|t| t.pnl < 0.0).count();
@@ -428,37 +410,18 @@ impl PortfolioEngine {
         let total_fees_paid: f64 = trades.iter().map(|t| t.fees).sum();
 
         // Best and worst trade
-        let best_trade_pct = trades
-            .iter()
-            .map(|t| t.return_pct)
-            .fold(f64::NEG_INFINITY, |a, b| a.max(b));
-        let best_trade_pct = if best_trade_pct.is_infinite() {
-            0.0
-        } else {
-            best_trade_pct
-        };
+        let best_trade_pct =
+            trades.iter().map(|t| t.return_pct).fold(f64::NEG_INFINITY, |a, b| a.max(b));
+        let best_trade_pct = if best_trade_pct.is_infinite() { 0.0 } else { best_trade_pct };
 
-        let worst_trade_pct = trades
-            .iter()
-            .map(|t| t.return_pct)
-            .fold(f64::INFINITY, |a, b| a.min(b));
-        let worst_trade_pct = if worst_trade_pct.is_infinite() {
-            0.0
-        } else {
-            worst_trade_pct
-        };
+        let worst_trade_pct =
+            trades.iter().map(|t| t.return_pct).fold(f64::INFINITY, |a, b| a.min(b));
+        let worst_trade_pct = if worst_trade_pct.is_infinite() { 0.0 } else { worst_trade_pct };
 
         // Profit factor (based on closed trades)
-        let gross_profit: f64 = closed_trades
-            .iter()
-            .filter(|t| t.pnl > 0.0)
-            .map(|t| t.pnl)
-            .sum();
-        let gross_loss: f64 = closed_trades
-            .iter()
-            .filter(|t| t.pnl < 0.0)
-            .map(|t| t.pnl.abs())
-            .sum();
+        let gross_profit: f64 = closed_trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
+        let gross_loss: f64 =
+            closed_trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
@@ -498,22 +461,14 @@ impl PortfolioEngine {
         };
 
         let avg_win_pct = if winning_trades > 0 {
-            closed_trades
-                .iter()
-                .filter(|t| t.pnl > 0.0)
-                .map(|t| t.return_pct)
-                .sum::<f64>()
+            closed_trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.return_pct).sum::<f64>()
                 / winning_trades as f64
         } else {
             0.0
         };
 
         let avg_loss_pct = if losing_trades > 0 {
-            closed_trades
-                .iter()
-                .filter(|t| t.pnl < 0.0)
-                .map(|t| t.return_pct)
-                .sum::<f64>()
+            closed_trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.return_pct).sum::<f64>()
                 / losing_trades as f64
         } else {
             0.0
@@ -547,11 +502,7 @@ impl PortfolioEngine {
 
         // Holding period
         let avg_holding_period = if total_trades > 0 {
-            trades
-                .iter()
-                .map(|t| t.holding_period() as f64)
-                .sum::<f64>()
-                / total_trades as f64
+            trades.iter().map(|t| t.holding_period() as f64).sum::<f64>() / total_trades as f64
         } else {
             0.0
         };
@@ -574,11 +525,8 @@ impl PortfolioEngine {
         let years = num_periods / 365.25; // Convert to years using 365.25 days
         let total_return_frac = total_return_pct / 100.0;
         // CAGR = (end/start)^(1/years) - 1 = (1 + total_return)^(1/years) - 1
-        let cagr = if years > 0.0 {
-            (1.0 + total_return_frac).powf(1.0 / years) - 1.0
-        } else {
-            0.0
-        };
+        let cagr =
+            if years > 0.0 { (1.0 + total_return_frac).powf(1.0 / years) - 1.0 } else { 0.0 };
         let calmar_ratio = if max_drawdown_pct > 0.0 {
             cagr / (max_drawdown_pct / 100.0) // Both as fractions
         } else if total_return_pct > 0.0 {
@@ -686,27 +634,18 @@ impl PortfolioEngine {
         let mean = valid_returns.iter().sum::<f64>() / n_valid;
 
         // Calculate standard deviation
-        let variance = valid_returns
-            .iter()
-            .map(|r| (r - mean).powi(2))
-            .sum::<f64>()
-            / (n_valid - 1.0);
+        let variance =
+            valid_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_valid - 1.0);
         let std_dev = variance.sqrt();
 
         // Sharpe Ratio = (mean * periods_per_year) / (std_dev * sqrt(periods_per_year))
         // Simplified: Sharpe = mean / std_dev * sqrt(periods_per_year)
-        let sharpe_ratio = if std_dev > 0.0 {
-            (mean / std_dev) * periods_per_year.sqrt()
-        } else {
-            0.0
-        };
+        let sharpe_ratio =
+            if std_dev > 0.0 { (mean / std_dev) * periods_per_year.sqrt() } else { 0.0 };
 
         // Sortino Ratio - uses downside deviation (only negative returns)
-        let downside_returns: Vec<f64> = valid_returns
-            .iter()
-            .filter(|&&r| r < 0.0)
-            .copied()
-            .collect();
+        let downside_returns: Vec<f64> =
+            valid_returns.iter().filter(|&&r| r < 0.0).copied().collect();
 
         let downside_variance = if !downside_returns.is_empty() {
             downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n_valid // Divide by total count, not downside count
@@ -726,11 +665,7 @@ impl PortfolioEngine {
         // Omega Ratio = sum of returns above threshold / |sum of returns below threshold|
         // With threshold = 0
         let sum_positive: f64 = valid_returns.iter().filter(|&&r| r > 0.0).sum();
-        let sum_negative: f64 = valid_returns
-            .iter()
-            .filter(|&&r| r < 0.0)
-            .map(|r| r.abs())
-            .sum();
+        let sum_negative: f64 = valid_returns.iter().filter(|&&r| r < 0.0).map(|r| r.abs()).sum();
 
         let omega_ratio = if sum_negative > 0.0 {
             sum_positive / sum_negative

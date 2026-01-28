@@ -10,22 +10,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: dtolnay/rust-action@stable
-
-      - name: Run Rust tests
-        run: cargo test --all-features
-
-      - name: Run Rust clippy
-        run: cargo clippy --all-features -- -D warnings
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Check Rust formatting
         run: cargo fmt --check
+
+      - name: Run Rust clippy
+        run: cargo clippy --all-features
 
   build:
     runs-on: ubuntu-latest

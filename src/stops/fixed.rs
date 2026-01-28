@@ -13,9 +13,7 @@ pub struct FixedStop {
 impl FixedStop {
     /// Create a new fixed stop with given percentage.
     pub fn new(percent: f64) -> Self {
-        Self {
-            percent: percent.abs(),
-        }
+        Self { percent: percent.abs() }
     }
 
     /// Create a 1% stop.
@@ -66,9 +64,7 @@ pub struct FixedTarget {
 impl FixedTarget {
     /// Create a new fixed target with given percentage.
     pub fn new(percent: f64) -> Self {
-        Self {
-            percent: percent.abs(),
-        }
+        Self { percent: percent.abs() }
     }
 }
 

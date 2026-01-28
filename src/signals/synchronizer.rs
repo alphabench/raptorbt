@@ -34,28 +34,19 @@ pub struct SignalSynchronizer {
 
 impl Default for SignalSynchronizer {
     fn default() -> Self {
-        Self {
-            mode: SyncMode::All,
-            min_signals: None,
-        }
+        Self { mode: SyncMode::All, min_signals: None }
     }
 }
 
 impl SignalSynchronizer {
     /// Create a new signal synchronizer with the given mode.
     pub fn new(mode: SyncMode) -> Self {
-        Self {
-            mode,
-            min_signals: None,
-        }
+        Self { mode, min_signals: None }
     }
 
     /// Create a synchronizer with a custom minimum signal threshold.
     pub fn with_min_signals(min: usize) -> Self {
-        Self {
-            mode: SyncMode::Majority,
-            min_signals: Some(min),
-        }
+        Self { mode: SyncMode::Majority, min_signals: Some(min) }
     }
 
     /// Synchronize entry signals from multiple instruments.
@@ -155,15 +146,10 @@ impl SignalSynchronizer {
             return (vec![], vec![]);
         }
 
-        let entries: Vec<&[bool]> = compiled_signals
-            .iter()
-            .map(|cs| cs.entries.as_slice())
-            .collect();
+        let entries: Vec<&[bool]> =
+            compiled_signals.iter().map(|cs| cs.entries.as_slice()).collect();
 
-        let exits: Vec<&[bool]> = compiled_signals
-            .iter()
-            .map(|cs| cs.exits.as_slice())
-            .collect();
+        let exits: Vec<&[bool]> = compiled_signals.iter().map(|cs| cs.exits.as_slice()).collect();
 
         let synced_entries = self.sync_entries(&entries);
         let synced_exits = self.sync_exits(&exits);

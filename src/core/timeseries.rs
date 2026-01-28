@@ -77,20 +77,14 @@ impl<T: Clone + Default> TimeSeries<T> {
     /// Create with default values.
     pub fn with_default(timestamps: Vec<Timestamp>) -> Self {
         let len = timestamps.len();
-        Self {
-            timestamps,
-            values: vec![T::default(); len],
-        }
+        Self { timestamps, values: vec![T::default(); len] }
     }
 }
 
 impl TimeSeries<f64> {
     /// Create a series filled with NaN.
     pub fn with_nan(len: usize) -> Self {
-        Self {
-            timestamps: (0..len as i64).collect(),
-            values: vec![f64::NAN; len],
-        }
+        Self { timestamps: (0..len as i64).collect(), values: vec![f64::NAN; len] }
     }
 
     /// Calculate sum of all values.
@@ -124,20 +118,12 @@ impl TimeSeries<f64> {
 
     /// Get minimum value.
     pub fn min(&self) -> f64 {
-        self.values
-            .iter()
-            .filter(|v| !v.is_nan())
-            .copied()
-            .fold(f64::INFINITY, f64::min)
+        self.values.iter().filter(|v| !v.is_nan()).copied().fold(f64::INFINITY, f64::min)
     }
 
     /// Get maximum value.
     pub fn max(&self) -> f64 {
-        self.values
-            .iter()
-            .filter(|v| !v.is_nan())
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max)
+        self.values.iter().filter(|v| !v.is_nan()).copied().fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Shift values by n positions (positive = shift forward, fill with NaN).
@@ -161,10 +147,7 @@ impl TimeSeries<f64> {
             }
         }
 
-        Self {
-            timestamps: self.timestamps.clone(),
-            values: result,
-        }
+        Self { timestamps: self.timestamps.clone(), values: result }
     }
 
     /// Calculate difference from previous value.
@@ -175,10 +158,7 @@ impl TimeSeries<f64> {
                 result[i] = self.values[i] - self.values[i - 1];
             }
         }
-        Self {
-            timestamps: self.timestamps.clone(),
-            values: result,
-        }
+        Self { timestamps: self.timestamps.clone(), values: result }
     }
 
     /// Calculate percentage change from previous value.
@@ -190,10 +170,7 @@ impl TimeSeries<f64> {
                 result[i] = (self.values[i] - self.values[i - 1]) / self.values[i - 1];
             }
         }
-        Self {
-            timestamps: self.timestamps.clone(),
-            values: result,
-        }
+        Self { timestamps: self.timestamps.clone(), values: result }
     }
 
     /// Apply rolling window function.
@@ -203,10 +180,7 @@ impl TimeSeries<f64> {
     {
         let mut result = vec![f64::NAN; self.values.len()];
         if window == 0 || window > self.values.len() {
-            return Self {
-                timestamps: self.timestamps.clone(),
-                values: result,
-            };
+            return Self { timestamps: self.timestamps.clone(), values: result };
         }
 
         for i in (window - 1)..self.values.len() {
@@ -214,10 +188,7 @@ impl TimeSeries<f64> {
             result[i] = f(slice);
         }
 
-        Self {
-            timestamps: self.timestamps.clone(),
-            values: result,
-        }
+        Self { timestamps: self.timestamps.clone(), values: result }
     }
 
     /// Calculate rolling sum.
@@ -227,9 +198,7 @@ impl TimeSeries<f64> {
 
     /// Calculate rolling mean.
     pub fn rolling_mean(&self, window: usize) -> Self {
-        self.rolling(window, |slice| {
-            slice.iter().sum::<f64>() / slice.len() as f64
-        })
+        self.rolling(window, |slice| slice.iter().sum::<f64>() / slice.len() as f64)
     }
 
     /// Calculate rolling standard deviation.
@@ -244,16 +213,12 @@ impl TimeSeries<f64> {
 
     /// Calculate rolling maximum.
     pub fn rolling_max(&self, window: usize) -> Self {
-        self.rolling(window, |slice| {
-            slice.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-        })
+        self.rolling(window, |slice| slice.iter().copied().fold(f64::NEG_INFINITY, f64::max))
     }
 
     /// Calculate rolling minimum.
     pub fn rolling_min(&self, window: usize) -> Self {
-        self.rolling(window, |slice| {
-            slice.iter().copied().fold(f64::INFINITY, f64::min)
-        })
+        self.rolling(window, |slice| slice.iter().copied().fold(f64::INFINITY, f64::min))
     }
 }
 
@@ -277,12 +242,7 @@ impl TimeSeries<bool> {
         debug_assert_eq!(self.len(), other.len());
         Self {
             timestamps: self.timestamps.clone(),
-            values: self
-                .values
-                .iter()
-                .zip(other.values.iter())
-                .map(|(&a, &b)| a && b)
-                .collect(),
+            values: self.values.iter().zip(other.values.iter()).map(|(&a, &b)| a && b).collect(),
         }
     }
 
@@ -291,12 +251,7 @@ impl TimeSeries<bool> {
         debug_assert_eq!(self.len(), other.len());
         Self {
             timestamps: self.timestamps.clone(),
-            values: self
-                .values
-                .iter()
-                .zip(other.values.iter())
-                .map(|(&a, &b)| a || b)
-                .collect(),
+            values: self.values.iter().zip(other.values.iter()).map(|(&a, &b)| a || b).collect(),
         }
     }
 

@@ -152,11 +152,7 @@ pub fn directional_movement(
     let mut adx_values = vec![f64::NAN; n];
 
     if 2 * period > n {
-        return Ok(DirectionalIndexResult {
-            plus_di,
-            minus_di,
-            adx: adx_values,
-        });
+        return Ok(DirectionalIndexResult { plus_di, minus_di, adx: adx_values });
     }
 
     // Calculate directional movement
@@ -217,11 +213,7 @@ pub fn directional_movement(
         }
     }
 
-    Ok(DirectionalIndexResult {
-        plus_di,
-        minus_di,
-        adx: adx_values,
-    })
+    Ok(DirectionalIndexResult { plus_di, minus_di, adx: adx_values })
 }
 
 #[cfg(test)]

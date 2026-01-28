@@ -66,10 +66,7 @@ pub struct MultiStrategyBacktest {
 impl MultiStrategyBacktest {
     /// Create a new multi-strategy backtest.
     pub fn new(config: MultiStrategyConfig) -> Self {
-        Self {
-            fee_model: FeeModel::percentage(config.base.fees),
-            config,
-        }
+        Self { fee_model: FeeModel::percentage(config.base.fees), config }
     }
 
     /// Run multi-strategy backtest.
@@ -87,11 +84,7 @@ impl MultiStrategyBacktest {
 
         let n = ohlcv.len();
         for signals in strategies {
-            assert_eq!(
-                signals.len(),
-                n,
-                "All strategies must have same length as OHLCV"
-            );
+            assert_eq!(signals.len(), n, "All strategies must have same length as OHLCV");
         }
 
         match self.config.combine_mode {
@@ -113,10 +106,8 @@ impl MultiStrategyBacktest {
         let mut strategy_equities: Vec<Vec<f64>> = Vec::new();
 
         for (strat_idx, signals) in strategies.iter().enumerate() {
-            let single_config = BacktestConfig {
-                initial_capital: capital_per,
-                ..self.config.base.clone()
-            };
+            let single_config =
+                BacktestConfig { initial_capital: capital_per, ..self.config.base.clone() };
             let single = crate::strategies::single::SingleBacktest::new(single_config);
             let result = single.run(ohlcv, signals);
 
@@ -168,13 +159,7 @@ impl MultiStrategyBacktest {
             self.config.base.initial_capital,
         );
 
-        BacktestResult::new(
-            metrics,
-            combined_equity,
-            drawdown_curve,
-            all_trades,
-            returns,
-        )
+        BacktestResult::new(metrics, combined_equity, drawdown_curve, all_trades, returns)
     }
 
     /// Run strategies with combined signals.
@@ -200,19 +185,11 @@ impl MultiStrategyBacktest {
                         .enumerate()
                         .filter(|(_, s)| s.entries[i])
                         .map(|(idx, _)| {
-                            self.config
-                                .strategy_weights
-                                .get(idx)
-                                .copied()
-                                .unwrap_or(1.0)
+                            self.config.strategy_weights.get(idx).copied().unwrap_or(1.0)
                         })
                         .sum();
-                    let total_weight: f64 = self
-                        .config
-                        .strategy_weights
-                        .iter()
-                        .sum::<f64>()
-                        .max(n_strategies as f64);
+                    let total_weight: f64 =
+                        self.config.strategy_weights.iter().sum::<f64>().max(n_strategies as f64);
                     weighted_sum / total_weight > 0.5
                 }
                 CombineMode::Independent => unreachable!(),
@@ -266,11 +243,7 @@ impl MultiStrategyBacktest {
         };
 
         let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades
-            .iter()
-            .filter(|t| t.pnl < 0.0)
-            .map(|t| t.pnl.abs())
-            .sum();
+        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
         let profit_factor = if gross_loss > 0.0 {
             gross_profit / gross_loss
         } else if gross_profit > 0.0 {
@@ -319,6 +292,7 @@ impl MultiStrategyBacktest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Direction;
 
     fn sample_strategies() -> (OhlcvData, Vec<CompiledSignals>) {
         let n = 20;
@@ -367,10 +341,7 @@ mod tests {
 
     #[test]
     fn test_multi_any_mode() {
-        let config = MultiStrategyConfig {
-            combine_mode: CombineMode::Any,
-            ..Default::default()
-        };
+        let config = MultiStrategyConfig { combine_mode: CombineMode::Any, ..Default::default() };
         let backtest = MultiStrategyBacktest::new(config);
         let (ohlcv, strategies) = sample_strategies();
 
@@ -382,10 +353,7 @@ mod tests {
 
     #[test]
     fn test_multi_all_mode() {
-        let config = MultiStrategyConfig {
-            combine_mode: CombineMode::All,
-            ..Default::default()
-        };
+        let config = MultiStrategyConfig { combine_mode: CombineMode::All, ..Default::default() };
         let backtest = MultiStrategyBacktest::new(config);
         let (ohlcv, strategies) = sample_strategies();
 
@@ -397,10 +365,8 @@ mod tests {
 
     #[test]
     fn test_multi_independent_mode() {
-        let config = MultiStrategyConfig {
-            combine_mode: CombineMode::Independent,
-            ..Default::default()
-        };
+        let config =
+            MultiStrategyConfig { combine_mode: CombineMode::Independent, ..Default::default() };
         let backtest = MultiStrategyBacktest::new(config);
         let (ohlcv, strategies) = sample_strategies();
 

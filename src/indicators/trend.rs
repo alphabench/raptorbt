@@ -131,19 +131,14 @@ pub fn supertrend(
         return Err(RaptorError::length_mismatch(n, high.len()));
     }
     if period == 0 {
-        return Err(RaptorError::invalid_parameter(
-            "Supertrend period must be > 0",
-        ));
+        return Err(RaptorError::invalid_parameter("Supertrend period must be > 0"));
     }
 
     let mut supertrend = vec![f64::NAN; n];
     let mut direction = vec![0i8; n];
 
     if period >= n {
-        return Ok(SupertrendResult {
-            supertrend,
-            direction,
-        });
+        return Ok(SupertrendResult { supertrend, direction });
     }
 
     // Calculate ATR
@@ -238,10 +233,7 @@ pub fn supertrend(
         }
     }
 
-    Ok(SupertrendResult {
-        supertrend,
-        direction,
-    })
+    Ok(SupertrendResult { supertrend, direction })
 }
 
 #[cfg(test)]
