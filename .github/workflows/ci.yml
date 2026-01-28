@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Run Rust tests
+        run: cargo test --all-features
+
+      - name: Run Rust clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist
+
+      - name: Install and test import
+        run: |
+          pip install dist/*.whl
+          python -c "import raptorbt; print(raptorbt.__version__)"

@@ -5,16 +5,44 @@ build-backend = "maturin"
 [project]
 name = "raptorbt"
 version = "0.1.0"
-description = "High-performance Rust backtesting engine for Quant5"
+description = "High-performance Rust backtesting engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Quant5 team"}
+]
+keywords = [
+    "backtesting",
+    "trading",
+    "quantitative-finance",
+    "algorithmic-trading",
+    "rust",
+    "high-performance",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/alphabench/raptorbt"
+Repository = "https://github.com/alphabench/raptorbt"
+Documentation = "https://github.com/alphabench/raptorbt#readme"
+"Bug Tracker" = "https://github.com/alphabench/raptorbt/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
