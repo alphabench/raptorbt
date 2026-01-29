@@ -686,12 +686,6 @@ maturin build --release
 pip install target/wheels/raptorbt-*.whl
 ```
 
-### Using the Build Script
-
-```bash
-./scripts/build-engine.sh --install
-```
-
 ---
 
 ## Testing
