@@ -1,6 +1,50 @@
 # RaptorBT
 
-**RaptorBT** is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It serves as a drop-in replacement for VectorBT, providing significant performance improvements while maintaining full metric parity.
+[![PyPI version](https://img.shields.io/pypi/v/raptorbt.svg)](https://pypi.org/project/raptorbt/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+
+**Blazing-fast backtesting for the modern quant.**
+
+RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It serves as a drop-in replacement for VectorBT — delivering **HFT-grade compute efficiency** with full metric parity.
+
+<p align="center">
+  <strong>5,800x faster</strong> · <strong>45x smaller</strong> · <strong>100% deterministic</strong>
+</p>
+
+---
+
+### Quick Install
+
+```bash
+pip install raptorbt
+```
+
+### 30-Second Example
+
+```python
+import numpy as np
+import raptorbt
+
+# Configure
+config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
+
+# Run backtest
+result = raptorbt.run_single_backtest(
+    timestamps=timestamps, open=open, high=high, low=low, close=close,
+    volume=volume, entries=entries, exits=exits,
+    direction=1, weight=1.0, symbol="AAPL", config=config,
+)
+
+# Results
+print(f"Return: {result.metrics.total_return_pct:.2f}%")
+print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
+```
+
+---
+
+Developed and maintained by the [Alphabench](https://alphabench.in) team.
 
 ## Table of Contents
 
@@ -13,8 +57,7 @@
 - [Metrics](#metrics)
 - [Indicators](#indicators)
 - [Stop-Loss & Take-Profit](#stop-loss--take-profit)
-- [Python Integration](#python-integration)
-- [VectorBT Drop-in Replacement](#vectorbt-drop-in-replacement)
+- [VectorBT Comparison](#vectorbt-comparison)
 - [API Reference](#api-reference)
 - [Building from Source](#building-from-source)
 - [Testing](#testing)
@@ -23,7 +66,7 @@
 
 ## Overview
 
-RaptorBT was built to address the performance limitations of VectorBT in production environments:
+RaptorBT was built to address the performance limitations of VectorBT. Benchmarked by the Alphabench team:
 
 | Metric                        | VectorBT            | RaptorBT     | Improvement               |
 | ----------------------------- | ------------------- | ------------ | ------------------------- |
@@ -473,93 +516,75 @@ config.set_risk_reward_target(ratio=2.0)  # 2:1 risk-reward ratio
 
 ---
 
-## Python Integration
+## VectorBT Comparison
 
-RaptorBT integrates seamlessly with the Quant5 golf runner through `rpbt.py`.
+RaptorBT is designed as a drop-in replacement for VectorBT. Here's a side-by-side comparison:
 
-### Enable RaptorBT
-
-```bash
-export USE_RAPTORBT=1
-```
-
-Or in Python:
+### VectorBT (before)
 
 ```python
-import os
-os.environ["USE_RAPTORBT"] = "1"
-```
+import vectorbt as vbt
+import pandas as pd
 
-### Integration Functions
-
-```python
-from app.engine.golf.rpbt import (
-    is_raptorbt_enabled,
-    RaptorBTConfig,
-    RaptorBTPortfolioWrapper,
-    run_single_backtest_raptorbt,
-    run_basket_backtest_raptorbt,
-    run_pairs_backtest_raptorbt,
-    run_options_backtest_raptorbt,
-    run_multi_backtest_raptorbt,
+# Run backtest
+pf = vbt.Portfolio.from_signals(
+    close=close_series,
+    entries=entries,
+    exits=exits,
+    init_cash=100000,
+    fees=0.001,
 )
 
-# Check if RaptorBT is enabled
-if is_raptorbt_enabled():
-    print("Using RaptorBT backend")
+# Get metrics
+print(pf.stats()["Total Return [%]"])
+print(pf.stats()["Sharpe Ratio"])
+print(pf.stats()["Max Drawdown [%]"])
 ```
 
----
-
-## VectorBT Drop-in Replacement
-
-RaptorBT provides a `RaptorBTPortfolioWrapper` that mimics the VectorBT Portfolio interface:
+### RaptorBT (after)
 
 ```python
-from app.engine.golf.rpbt import (
-    RaptorBTPortfolioWrapper,
-    run_single_backtest_raptorbt,
-    RaptorBTConfig,
+import raptorbt
+import numpy as np
+
+# Configure backtest
+config = raptorbt.PyBacktestConfig(
+    initial_capital=100000,
+    fees=0.001,
 )
 
 # Run backtest
-result = run_single_backtest_raptorbt(compiled, ohlcv_df, config, symbol)
+result = raptorbt.run_single_backtest(
+    timestamps=timestamps,
+    open=open_prices, high=high_prices,
+    low=low_prices, close=close_prices,
+    volume=volume,
+    entries=entries, exits=exits,
+    direction=1, weight=1.0,
+    symbol="SYMBOL",
+    config=config,
+)
 
-# Wrap result for VectorBT compatibility
-portfolio = RaptorBTPortfolioWrapper(result)
-
-# Use like VectorBT Portfolio
-stats = portfolio.stats()           # Returns pd.Series with VectorBT-format keys
-equity = portfolio.value()          # Returns equity curve as pd.Series
-dd = portfolio.drawdown()           # Returns drawdown curve as pd.Series
-trades_df = portfolio.trades()      # Returns trades as pd.DataFrame
-
-# Access properties
-print(portfolio.total_return)       # Total return percentage
-print(portfolio.sharpe_ratio)       # Sharpe ratio
-print(portfolio.max_drawdown)       # Max drawdown percentage
-print(portfolio.win_rate)           # Win rate percentage
-print(portfolio.profit_factor)      # Profit factor
-print(portfolio.sqn)                # System Quality Number
-print(portfolio.expectancy)         # Expected value per trade
-print(portfolio.omega_ratio)        # Omega ratio
+# Get metrics
+print(f"Total Return: {result.metrics.total_return_pct}%")
+print(f"Sharpe Ratio: {result.metrics.sharpe_ratio}")
+print(f"Max Drawdown: {result.metrics.max_drawdown_pct}%")
 ```
 
-### Stats Format
+### Metric Mapping
 
-The `stats()` method returns a pandas Series with VectorBT-compatible keys:
-
-```python
-stats = portfolio.stats()
-print(stats["Total Return [%]"])
-print(stats["Sharpe Ratio"])
-print(stats["Max Drawdown [%]"])
-print(stats["Win Rate [%]"])
-print(stats["Profit Factor"])
-print(stats["SQN"])
-print(stats["Omega Ratio"])
-# ... and 20+ more metrics
-```
+| VectorBT Key           | RaptorBT Attribute             |
+| ---------------------- | ------------------------------ |
+| `Total Return [%]`     | `metrics.total_return_pct`     |
+| `Sharpe Ratio`         | `metrics.sharpe_ratio`         |
+| `Sortino Ratio`        | `metrics.sortino_ratio`        |
+| `Max Drawdown [%]`     | `metrics.max_drawdown_pct`     |
+| `Win Rate [%]`         | `metrics.win_rate_pct`         |
+| `Profit Factor`        | `metrics.profit_factor`        |
+| `SQN`                  | `metrics.sqn`                  |
+| `Omega Ratio`          | `metrics.omega_ratio`          |
+| `Total Trades`         | `metrics.total_trades`         |
+| `Expectancy`           | `metrics.expectancy`           |
 
 ---
 
@@ -686,12 +711,6 @@ maturin build --release
 pip install target/wheels/raptorbt-*.whl
 ```
 
-### Using the Build Script
-
-```bash
-./scripts/build-engine.sh --install
-```
-
 ---
 
 ## Testing
@@ -705,9 +724,7 @@ cargo test
 
 ### Python Integration Tests
 
-```bash
-# Test basic functionality
-uv run python -c "
+```python
 import raptorbt
 import numpy as np
 
@@ -728,13 +745,11 @@ result = raptorbt.run_single_backtest(
 )
 print(f'Total Return: {result.metrics.total_return_pct:.2f}%')
 print('RaptorBT is working correctly!')
-"
 ```
 
 ### Comparison Test (VectorBT vs RaptorBT)
 
-```bash
-USE_RAPTORBT=1 uv run python << 'EOF'
+```python
 import numpy as np
 import pandas as pd
 import vectorbt as vbt
@@ -769,26 +784,25 @@ result = raptorbt.run_single_backtest(
 
 print(f"VectorBT: {pf.stats()['Total Return [%]']:.4f}%")
 print(f"RaptorBT: {result.metrics.total_return_pct:.4f}%")
-print(f"Match: {abs(pf.stats()['Total Return [%]'] - result.metrics.total_return_pct) < 0.01}")
-EOF
+# Results should match within 0.01%
 ```
 
 ---
 
 ## License
 
-RaptorBT is proprietary software developed for the Quant5 platform.
+MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
 ## Changelog
 
-### v0.1.0 (2024-01)
+### v0.1.0
 
 - Initial release
 - 5 strategy types: single, basket, pairs, options, multi
-- 30+ performance metrics
-- 10 technical indicators
-- Fixed, ATR, and trailing stops
-- PyO3 Python bindings
-- VectorBT-compatible wrapper
+- 30+ performance metrics with full VectorBT parity
+- 10 technical indicators (SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend)
+- Stop-loss management: fixed, ATR-based, and trailing stops
+- Take-profit management: fixed, ATR-based, and risk-reward targets
+- PyO3 Python bindings for seamless Python integration

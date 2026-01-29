@@ -2,9 +2,14 @@
 name = "raptorbt"
 version = "0.1.0"
 edition = "2021"
-description = "High-performance Rust backtesting engine for Quant5"
-authors = ["Quant5 team"]
+description = "High-performance Rust backtesting engine with Python bindings. Drop-in VectorBT replacement with up insanely faster performance at fractional memory footprint."
+authors = ["Alphabench <contact@alphabench.in>"]
 license = "MIT"
+repository = "https://github.com/alphabench/raptorbt"
+homepage = "https://github.com/alphabench/raptorbt"
+readme = "README.md"
+keywords = ["backtesting", "trading", "quantitative-finance", "rust", "python"]
+categories = ["finance", "simulation"]
 
 [lib]
 name = "raptorbt"
