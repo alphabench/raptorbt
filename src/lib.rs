@@ -1,7 +1,7 @@
 // Suppress warning from PyO3 macro expansion (fixed in newer PyO3 versions)
 #![allow(non_local_definitions)]
 
-//! RaptorBT - High-performance Rust backtesting engine for Quant5.
+//! RaptorBT - High-performance Rust backtesting engine.
 //!
 //! This crate provides a complete backtesting solution with:
 //! - Technical indicators (SMA, EMA, RSI, MACD, etc.)

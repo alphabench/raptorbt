@@ -5,12 +5,12 @@ build-backend = "maturin"
 [project]
 name = "raptorbt"
 version = "0.1.0"
-description = "High-performance Rust backtesting engine with Python bindings"
+description = "High-performance Rust backtesting engine with Python bindings. Drop-in VectorBT replacement with up insanely faster performance at fractional memory footprint."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Quant5 team"}
+    {name = "Alphabench", email = "contact@alphabench.in"}
 ]
 keywords = [
     "backtesting",
