@@ -41,6 +41,7 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::run_options_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_pairs_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_multi_backtest, m)?)?;
+    m.add_function(wrap_pyfunction!(python::bindings::run_spread_backtest, m)?)?;
 
     // Register indicator functions
     m.add_function(wrap_pyfunction!(python::bindings::sma, m)?)?;

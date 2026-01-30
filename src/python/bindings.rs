@@ -13,6 +13,9 @@ use crate::strategies::multi::{CombineMode, MultiStrategyBacktest, MultiStrategy
 use crate::strategies::options::{
     OptionType, OptionsBacktest, OptionsConfig, SizeType, StrikeSelection,
 };
+use crate::strategies::spreads::{
+    LegConfig, SpreadBacktest, SpreadConfig, SpreadType, OptionType as SpreadOptionType,
+};
 use crate::strategies::pairs::{PairsBacktest, PairsConfig};
 use crate::strategies::single::SingleBacktest;
 
@@ -669,6 +672,67 @@ pub fn run_pairs_backtest<'py>(
 
     let backtest = PairsBacktest::new(pairs_config);
     let result = backtest.run(&leg1_ohlcv, &leg2_ohlcv, &signals);
+
+    Ok(convert_result(result))
+}
+
+/// Run spread backtest (multi-leg options).
+#[pyfunction]
+#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None))]
+pub fn run_spread_backtest<'py>(
+    _py: Python<'py>,
+    timestamps: PyReadonlyArray1<i64>,
+    underlying_close: PyReadonlyArray1<f64>,
+    legs_premiums: Vec<PyReadonlyArray1<f64>>,
+    leg_configs: Vec<(String, f64, i32, usize)>,  // (option_type, strike, quantity, lot_size)
+    entries: PyReadonlyArray1<bool>,
+    exits: PyReadonlyArray1<bool>,
+    config: Option<&PyBacktestConfig>,
+    spread_type: &str,
+    max_loss: Option<f64>,
+    target_profit: Option<f64>,
+) -> PyResult<PyBacktestResult> {
+    let ts = numpy_to_vec_i64(timestamps);
+    let underlying = numpy_to_vec_f64(underlying_close);
+    let premiums: Vec<Vec<f64>> = legs_premiums.into_iter().map(numpy_to_vec_f64).collect();
+    let entry_signals = numpy_to_vec_bool(entries);
+    let exit_signals = numpy_to_vec_bool(exits);
+
+    // Convert leg configs
+    let rust_leg_configs: Vec<LegConfig> = leg_configs
+        .into_iter()
+        .map(|(opt_type, strike, quantity, lot_size)| {
+            let option_type = SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
+            LegConfig::new(option_type, strike, quantity, lot_size)
+        })
+        .collect();
+
+    // Parse spread type
+    let spread_type_enum = match spread_type.to_lowercase().as_str() {
+        "straddle" => SpreadType::Straddle,
+        "strangle" => SpreadType::Strangle,
+        "vertical_call" | "verticalcall" => SpreadType::VerticalCall,
+        "vertical_put" | "verticalput" => SpreadType::VerticalPut,
+        "iron_condor" | "ironcondor" => SpreadType::IronCondor,
+        "iron_butterfly" | "ironbutterfly" => SpreadType::IronButterfly,
+        "butterfly_call" | "butterflycall" => SpreadType::ButterflyCall,
+        "butterfly_put" | "butterflyput" => SpreadType::ButterflyPut,
+        "calendar" => SpreadType::Calendar,
+        "diagonal" => SpreadType::Diagonal,
+        _ => SpreadType::Custom,
+    };
+
+    let spread_config = SpreadConfig {
+        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        spread_type: spread_type_enum,
+        leg_configs: rust_leg_configs,
+        max_loss,
+        target_profit,
+        close_at_eod: false,
+    };
+
+    let backtest = SpreadBacktest::new(spread_config);
+    let result = backtest.run(&ts, &underlying, &premiums, &entry_signals, &exit_signals);
 
     Ok(convert_result(result))
 }
