@@ -1,6 +1,6 @@
 [package]
 name = "raptorbt"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "High-performance Rust backtesting engine with Python bindings. Drop-in VectorBT replacement with up insanely faster performance at fractional memory footprint."
 authors = ["Alphabench <contact@alphabench.in>"]

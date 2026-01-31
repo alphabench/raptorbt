@@ -54,6 +54,8 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::adx, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::vwap, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::supertrend, m)?)?;
+    m.add_function(wrap_pyfunction!(python::bindings::rolling_min, m)?)?;
+    m.add_function(wrap_pyfunction!(python::bindings::rolling_max, m)?)?;
 
     Ok(())
 }

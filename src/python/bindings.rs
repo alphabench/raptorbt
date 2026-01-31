@@ -967,6 +967,32 @@ pub fn supertrend<'py>(
     Ok((vec_to_numpy_f64(py, result.supertrend), direction_array))
 }
 
+/// Rolling minimum (Lowest Low Value).
+#[pyfunction]
+pub fn rolling_min<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<&'py PyArray1<f64>> {
+    let vec = numpy_to_vec_f64(data);
+    let result = indicators::rolling::rolling_min(&vec, period)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(vec_to_numpy_f64(py, result))
+}
+
+/// Rolling maximum (Highest High Value).
+#[pyfunction]
+pub fn rolling_max<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<&'py PyArray1<f64>> {
+    let vec = numpy_to_vec_f64(data);
+    let result = indicators::rolling::rolling_max(&vec, period)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(vec_to_numpy_f64(py, result))
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
