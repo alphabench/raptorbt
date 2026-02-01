@@ -477,8 +477,8 @@ impl StreamingMetrics {
         // SQN (System Quality Number)
         let sqn = if self.trade_count > 1 {
             let mean_return = self.sum_trade_returns / self.trade_count as f64;
-            let variance = (self.sum_trade_returns_sq / self.trade_count as f64)
-                - (mean_return * mean_return);
+            let variance =
+                (self.sum_trade_returns_sq / self.trade_count as f64) - (mean_return * mean_return);
             let std_dev = variance.max(0.0).sqrt();
             if std_dev > 0.0 {
                 (mean_return / std_dev) * (self.trade_count as f64).sqrt()
@@ -508,16 +508,10 @@ impl StreamingMetrics {
         let omega_ratio = return_metrics.omega_ratio();
 
         // Best/worst trade handling (handle edge cases)
-        let best_trade_pct = if self.best_trade_pct == f64::NEG_INFINITY {
-            0.0
-        } else {
-            self.best_trade_pct
-        };
-        let worst_trade_pct = if self.worst_trade_pct == f64::INFINITY {
-            0.0
-        } else {
-            self.worst_trade_pct
-        };
+        let best_trade_pct =
+            if self.best_trade_pct == f64::NEG_INFINITY { 0.0 } else { self.best_trade_pct };
+        let worst_trade_pct =
+            if self.worst_trade_pct == f64::INFINITY { 0.0 } else { self.worst_trade_pct };
 
         BacktestMetrics {
             total_return_pct,

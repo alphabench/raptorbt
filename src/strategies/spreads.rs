@@ -126,12 +126,7 @@ struct LegPosition {
 
 impl LegPosition {
     fn new(config: LegConfig, entry_premium: f64, entry_idx: usize) -> Self {
-        Self {
-            entry_premium,
-            entry_idx,
-            current_premium: entry_premium,
-            config,
-        }
+        Self { entry_premium, entry_idx, current_premium: entry_premium, config }
     }
 
     /// Calculate unrealized P&L for this leg.
@@ -167,13 +162,7 @@ impl SpreadPosition {
             .map(|leg| leg.entry_premium * leg.config.quantity as f64 * leg.config.lot_size as f64)
             .sum();
 
-        Self {
-            legs,
-            entry_idx,
-            entry_net_premium,
-            entry_time,
-            is_open: true,
-        }
+        Self { legs, entry_idx, entry_net_premium, entry_time, is_open: true }
     }
 
     /// Calculate total unrealized P&L across all legs.
@@ -314,7 +303,11 @@ impl SpreadBacktest {
                         exit_reason,
                     });
 
-                    metrics.record_trade(net_pnl, net_pnl / entry_premium.abs() * 100.0, i - pos.entry_idx);
+                    metrics.record_trade(
+                        net_pnl,
+                        net_pnl / entry_premium.abs() * 100.0,
+                        i - pos.entry_idx,
+                    );
                 }
             }
 
@@ -341,11 +334,8 @@ impl SpreadBacktest {
             let equity = cash + position.as_ref().map(|p| p.total_unrealized_pnl()).unwrap_or(0.0);
             equity_curve.push(equity);
 
-            let daily_return = if prev_equity > 0.0 {
-                (equity - prev_equity) / prev_equity
-            } else {
-                0.0
-            };
+            let daily_return =
+                if prev_equity > 0.0 { (equity - prev_equity) / prev_equity } else { 0.0 };
             returns.push(daily_return);
             prev_equity = equity;
 
@@ -362,19 +352,9 @@ impl SpreadBacktest {
         }
 
         // Finalize metrics
-        let final_metrics = metrics.finalize(
-            self.config.base.initial_capital,
-            cash,
-            &returns,
-        );
+        let final_metrics = metrics.finalize(self.config.base.initial_capital, cash, &returns);
 
-        BacktestResult {
-            metrics: final_metrics,
-            equity_curve,
-            drawdown_curve,
-            trades,
-            returns,
-        }
+        BacktestResult { metrics: final_metrics, equity_curve, drawdown_curve, trades, returns }
     }
 
     /// Check if max loss threshold is hit.
@@ -532,12 +512,12 @@ mod tests {
         let legs_premiums = vec![call_premiums, put_premiums];
 
         let entries = vec![
-            false, true, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false, false, false, false, false,
+            false, true, false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false,
         ];
         let exits = vec![
-            false, false, false, false, false, false, false, false, false, true,
-            false, false, false, false, false, false, false, false, false, false,
+            false, false, false, false, false, false, false, false, false, true, false, false,
+            false, false, false, false, false, false, false, false,
         ];
 
         (timestamps, underlying, legs_premiums, entries, exits)

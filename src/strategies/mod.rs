@@ -12,4 +12,6 @@ pub use multi::MultiStrategyBacktest;
 pub use options::OptionsBacktest;
 pub use pairs::PairsBacktest;
 pub use single::SingleBacktest;
-pub use spreads::{SpreadBacktest, SpreadConfig, SpreadType, LegConfig, OptionType as SpreadOptionType};
+pub use spreads::{
+    LegConfig, OptionType as SpreadOptionType, SpreadBacktest, SpreadConfig, SpreadType,
+};

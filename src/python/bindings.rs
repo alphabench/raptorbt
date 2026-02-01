@@ -13,11 +13,11 @@ use crate::strategies::multi::{CombineMode, MultiStrategyBacktest, MultiStrategy
 use crate::strategies::options::{
     OptionType, OptionsBacktest, OptionsConfig, SizeType, StrikeSelection,
 };
-use crate::strategies::spreads::{
-    LegConfig, SpreadBacktest, SpreadConfig, SpreadType, OptionType as SpreadOptionType,
-};
 use crate::strategies::pairs::{PairsBacktest, PairsConfig};
 use crate::strategies::single::SingleBacktest;
+use crate::strategies::spreads::{
+    LegConfig, OptionType as SpreadOptionType, SpreadBacktest, SpreadConfig, SpreadType,
+};
 
 use super::numpy_bridge::*;
 
@@ -684,7 +684,7 @@ pub fn run_spread_backtest<'py>(
     timestamps: PyReadonlyArray1<i64>,
     underlying_close: PyReadonlyArray1<f64>,
     legs_premiums: Vec<PyReadonlyArray1<f64>>,
-    leg_configs: Vec<(String, f64, i32, usize)>,  // (option_type, strike, quantity, lot_size)
+    leg_configs: Vec<(String, f64, i32, usize)>, // (option_type, strike, quantity, lot_size)
     entries: PyReadonlyArray1<bool>,
     exits: PyReadonlyArray1<bool>,
     config: Option<&PyBacktestConfig>,
@@ -702,7 +702,8 @@ pub fn run_spread_backtest<'py>(
     let rust_leg_configs: Vec<LegConfig> = leg_configs
         .into_iter()
         .map(|(opt_type, strike, quantity, lot_size)| {
-            let option_type = SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
+            let option_type =
+                SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
             LegConfig::new(option_type, strike, quantity, lot_size)
         })
         .collect();

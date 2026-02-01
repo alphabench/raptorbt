@@ -25,14 +25,11 @@ pub fn rolling_min(data: &[f64], period: usize) -> Result<Vec<f64>, RaptorError>
 
     for i in (period - 1)..n {
         let start = i + 1 - period;
-        let min_val = data[start..=i]
-            .iter()
-            .fold(f64::INFINITY, |a, &b| if b.is_nan() { a } else { a.min(b) });
-        result[i] = if min_val == f64::INFINITY {
-            f64::NAN
-        } else {
-            min_val
-        };
+        let min_val =
+            data[start..=i]
+                .iter()
+                .fold(f64::INFINITY, |a, &b| if b.is_nan() { a } else { a.min(b) });
+        result[i] = if min_val == f64::INFINITY { f64::NAN } else { min_val };
     }
 
     Ok(result)
@@ -58,14 +55,11 @@ pub fn rolling_max(data: &[f64], period: usize) -> Result<Vec<f64>, RaptorError>
 
     for i in (period - 1)..n {
         let start = i + 1 - period;
-        let max_val = data[start..=i]
-            .iter()
-            .fold(f64::NEG_INFINITY, |a, &b| if b.is_nan() { a } else { a.max(b) });
-        result[i] = if max_val == f64::NEG_INFINITY {
-            f64::NAN
-        } else {
-            max_val
-        };
+        let max_val =
+            data[start..=i]
+                .iter()
+                .fold(f64::NEG_INFINITY, |a, &b| if b.is_nan() { a } else { a.max(b) });
+        result[i] = if max_val == f64::NEG_INFINITY { f64::NAN } else { max_val };
     }
 
     Ok(result)

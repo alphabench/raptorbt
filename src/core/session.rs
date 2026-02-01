@@ -266,12 +266,13 @@ impl SessionTracker {
         }
 
         // Check squareoff time
-        let is_squareoff = if time_minutes >= self.config.squareoff_minutes() && !self.squareoff_triggered {
-            self.squareoff_triggered = true;
-            self.in_session
-        } else {
-            false
-        };
+        let is_squareoff =
+            if time_minutes >= self.config.squareoff_minutes() && !self.squareoff_triggered {
+                self.squareoff_triggered = true;
+                self.in_session
+            } else {
+                false
+            };
 
         // Check session end
         let is_session_end = self.is_session_end(timestamp_ns, next_timestamp_ns);
