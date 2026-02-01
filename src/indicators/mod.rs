@@ -4,12 +4,14 @@
 //! and return Vec outputs. NaN values are used for the warmup period.
 
 pub mod momentum;
+pub mod rolling;
 pub mod strength;
 pub mod trend;
 pub mod volatility;
 pub mod volume;
 
 pub use momentum::{macd, rsi, stochastic, MacdResult, StochasticResult};
+pub use rolling::{rolling_max, rolling_min};
 pub use strength::adx;
 pub use trend::{ema, sma, supertrend, SupertrendResult};
 pub use volatility::{atr, bollinger_bands, BollingerBandsResult};

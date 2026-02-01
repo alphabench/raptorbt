@@ -15,6 +15,9 @@ use crate::strategies::options::{
 };
 use crate::strategies::pairs::{PairsBacktest, PairsConfig};
 use crate::strategies::single::SingleBacktest;
+use crate::strategies::spreads::{
+    LegConfig, OptionType as SpreadOptionType, SpreadBacktest, SpreadConfig, SpreadType,
+};
 
 use super::numpy_bridge::*;
 
@@ -673,6 +676,68 @@ pub fn run_pairs_backtest<'py>(
     Ok(convert_result(result))
 }
 
+/// Run spread backtest (multi-leg options).
+#[pyfunction]
+#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None))]
+pub fn run_spread_backtest<'py>(
+    _py: Python<'py>,
+    timestamps: PyReadonlyArray1<i64>,
+    underlying_close: PyReadonlyArray1<f64>,
+    legs_premiums: Vec<PyReadonlyArray1<f64>>,
+    leg_configs: Vec<(String, f64, i32, usize)>, // (option_type, strike, quantity, lot_size)
+    entries: PyReadonlyArray1<bool>,
+    exits: PyReadonlyArray1<bool>,
+    config: Option<&PyBacktestConfig>,
+    spread_type: &str,
+    max_loss: Option<f64>,
+    target_profit: Option<f64>,
+) -> PyResult<PyBacktestResult> {
+    let ts = numpy_to_vec_i64(timestamps);
+    let underlying = numpy_to_vec_f64(underlying_close);
+    let premiums: Vec<Vec<f64>> = legs_premiums.into_iter().map(numpy_to_vec_f64).collect();
+    let entry_signals = numpy_to_vec_bool(entries);
+    let exit_signals = numpy_to_vec_bool(exits);
+
+    // Convert leg configs
+    let rust_leg_configs: Vec<LegConfig> = leg_configs
+        .into_iter()
+        .map(|(opt_type, strike, quantity, lot_size)| {
+            let option_type =
+                SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
+            LegConfig::new(option_type, strike, quantity, lot_size)
+        })
+        .collect();
+
+    // Parse spread type
+    let spread_type_enum = match spread_type.to_lowercase().as_str() {
+        "straddle" => SpreadType::Straddle,
+        "strangle" => SpreadType::Strangle,
+        "vertical_call" | "verticalcall" => SpreadType::VerticalCall,
+        "vertical_put" | "verticalput" => SpreadType::VerticalPut,
+        "iron_condor" | "ironcondor" => SpreadType::IronCondor,
+        "iron_butterfly" | "ironbutterfly" => SpreadType::IronButterfly,
+        "butterfly_call" | "butterflycall" => SpreadType::ButterflyCall,
+        "butterfly_put" | "butterflyput" => SpreadType::ButterflyPut,
+        "calendar" => SpreadType::Calendar,
+        "diagonal" => SpreadType::Diagonal,
+        _ => SpreadType::Custom,
+    };
+
+    let spread_config = SpreadConfig {
+        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        spread_type: spread_type_enum,
+        leg_configs: rust_leg_configs,
+        max_loss,
+        target_profit,
+        close_at_eod: false,
+    };
+
+    let backtest = SpreadBacktest::new(spread_config);
+    let result = backtest.run(&ts, &underlying, &premiums, &entry_signals, &exit_signals);
+
+    Ok(convert_result(result))
+}
+
 /// Run multi-strategy backtest.
 #[pyfunction]
 #[pyo3(signature = (timestamps, open, high, low, close, volume, strategies, config=None, combine_mode="any"))]
@@ -901,6 +966,32 @@ pub fn supertrend<'py>(
 
     let direction_array = PyArray1::from_vec(py, result.direction);
     Ok((vec_to_numpy_f64(py, result.supertrend), direction_array))
+}
+
+/// Rolling minimum (Lowest Low Value).
+#[pyfunction]
+pub fn rolling_min<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<&'py PyArray1<f64>> {
+    let vec = numpy_to_vec_f64(data);
+    let result = indicators::rolling::rolling_min(&vec, period)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(vec_to_numpy_f64(py, result))
+}
+
+/// Rolling maximum (Highest High Value).
+#[pyfunction]
+pub fn rolling_max<'py>(
+    py: Python<'py>,
+    data: PyReadonlyArray1<f64>,
+    period: usize,
+) -> PyResult<&'py PyArray1<f64>> {
+    let vec = numpy_to_vec_f64(data);
+    let result = indicators::rolling::rolling_max(&vec, period)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(vec_to_numpy_f64(py, result))
 }
 
 // ============================================================================

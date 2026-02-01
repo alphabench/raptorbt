@@ -2,9 +2,12 @@
 //!
 //! Enables single-pass calculation of mean, variance, Sharpe ratio, and Sortino ratio.
 
+use crate::core::types::BacktestMetrics;
+
 /// Streaming metrics calculator using Welford's algorithm.
 ///
 /// Allows incremental calculation of statistics without storing all values.
+/// Also tracks equity and drawdown for backtesting.
 #[derive(Debug, Clone)]
 pub struct StreamingMetrics {
     /// Number of observations.
@@ -27,6 +30,59 @@ pub struct StreamingMetrics {
     count_positive: usize,
     /// Count of negative returns.
     count_negative: usize,
+
+    // === Equity and drawdown tracking ===
+    /// Initial capital.
+    #[allow(dead_code)]
+    initial_capital: f64,
+    /// Peak equity value (for drawdown calculation).
+    peak_equity: f64,
+    /// Current equity value.
+    current_equity: f64,
+    /// Maximum drawdown percentage.
+    max_drawdown_pct: f64,
+    /// Current drawdown percentage.
+    current_drawdown: f64,
+    /// Bars since peak (for max drawdown duration).
+    bars_since_peak: usize,
+    /// Maximum drawdown duration in bars.
+    max_drawdown_duration: usize,
+
+    // === Trade tracking ===
+    /// Number of trades.
+    trade_count: usize,
+    /// Number of winning trades.
+    winning_trades: usize,
+    /// Number of losing trades.
+    losing_trades: usize,
+    /// Sum of winning trade P&L.
+    sum_wins: f64,
+    /// Sum of losing trade P&L.
+    sum_losses: f64,
+    /// Sum of trade return percentages.
+    sum_trade_returns: f64,
+    /// Sum of squared trade return percentages (for SQN).
+    sum_trade_returns_sq: f64,
+    /// Best trade return percentage.
+    best_trade_pct: f64,
+    /// Worst trade return percentage.
+    worst_trade_pct: f64,
+    /// Sum of winning trade durations.
+    sum_winning_duration: usize,
+    /// Sum of losing trade durations.
+    sum_losing_duration: usize,
+    /// Current consecutive wins.
+    current_consecutive_wins: usize,
+    /// Current consecutive losses.
+    current_consecutive_losses: usize,
+    /// Maximum consecutive wins.
+    max_consecutive_wins: usize,
+    /// Maximum consecutive losses.
+    max_consecutive_losses: usize,
+    /// Total holding period (bars).
+    total_holding_period: usize,
+    /// Total fees paid.
+    total_fees: f64,
 }
 
 impl Default for StreamingMetrics {
@@ -38,6 +94,11 @@ impl Default for StreamingMetrics {
 impl StreamingMetrics {
     /// Create a new streaming metrics calculator.
     pub fn new() -> Self {
+        Self::with_initial_capital(0.0)
+    }
+
+    /// Create a new streaming metrics calculator with initial capital.
+    pub fn with_initial_capital(initial_capital: f64) -> Self {
         Self {
             count: 0,
             mean: 0.0,
@@ -49,6 +110,32 @@ impl StreamingMetrics {
             sum_negative: 0.0,
             count_positive: 0,
             count_negative: 0,
+            // Equity tracking
+            initial_capital,
+            peak_equity: initial_capital,
+            current_equity: initial_capital,
+            max_drawdown_pct: 0.0,
+            current_drawdown: 0.0,
+            bars_since_peak: 0,
+            max_drawdown_duration: 0,
+            // Trade tracking
+            trade_count: 0,
+            winning_trades: 0,
+            losing_trades: 0,
+            sum_wins: 0.0,
+            sum_losses: 0.0,
+            sum_trade_returns: 0.0,
+            sum_trade_returns_sq: 0.0,
+            best_trade_pct: f64::NEG_INFINITY,
+            worst_trade_pct: f64::INFINITY,
+            sum_winning_duration: 0,
+            sum_losing_duration: 0,
+            current_consecutive_wins: 0,
+            current_consecutive_losses: 0,
+            max_consecutive_wins: 0,
+            max_consecutive_losses: 0,
+            total_holding_period: 0,
+            total_fees: 0.0,
         }
     }
 
@@ -216,6 +303,249 @@ impl StreamingMetrics {
     /// With threshold = 0, this equals profit_factor.
     pub fn omega_ratio(&self) -> f64 {
         self.profit_factor()
+    }
+
+    // === Equity tracking methods ===
+
+    /// Update equity and calculate drawdown.
+    pub fn update_equity(&mut self, equity: f64) {
+        self.current_equity = equity;
+
+        if equity > self.peak_equity {
+            self.peak_equity = equity;
+            self.bars_since_peak = 0;
+        } else {
+            self.bars_since_peak += 1;
+            if self.bars_since_peak > self.max_drawdown_duration {
+                self.max_drawdown_duration = self.bars_since_peak;
+            }
+        }
+
+        // Calculate current drawdown percentage
+        if self.peak_equity > 0.0 {
+            self.current_drawdown = (self.peak_equity - equity) / self.peak_equity * 100.0;
+            if self.current_drawdown > self.max_drawdown_pct {
+                self.max_drawdown_pct = self.current_drawdown;
+            }
+        }
+    }
+
+    /// Get current drawdown percentage.
+    #[inline]
+    pub fn current_drawdown_pct(&self) -> f64 {
+        self.current_drawdown
+    }
+
+    /// Get maximum drawdown percentage.
+    #[inline]
+    pub fn max_drawdown_pct(&self) -> f64 {
+        self.max_drawdown_pct
+    }
+
+    // === Trade tracking methods ===
+
+    /// Record a completed trade.
+    ///
+    /// # Arguments
+    /// * `pnl` - Trade profit/loss
+    /// * `return_pct` - Trade return percentage
+    /// * `duration` - Trade duration in bars
+    pub fn record_trade(&mut self, pnl: f64, return_pct: f64, duration: usize) {
+        self.trade_count += 1;
+        self.sum_trade_returns += return_pct;
+        self.sum_trade_returns_sq += return_pct * return_pct;
+        self.total_holding_period += duration;
+
+        // Track best/worst trades
+        if return_pct > self.best_trade_pct {
+            self.best_trade_pct = return_pct;
+        }
+        if return_pct < self.worst_trade_pct {
+            self.worst_trade_pct = return_pct;
+        }
+
+        if pnl > 0.0 {
+            self.winning_trades += 1;
+            self.sum_wins += pnl;
+            self.sum_winning_duration += duration;
+            self.current_consecutive_wins += 1;
+            self.current_consecutive_losses = 0;
+            if self.current_consecutive_wins > self.max_consecutive_wins {
+                self.max_consecutive_wins = self.current_consecutive_wins;
+            }
+        } else if pnl < 0.0 {
+            self.losing_trades += 1;
+            self.sum_losses += pnl.abs();
+            self.sum_losing_duration += duration;
+            self.current_consecutive_losses += 1;
+            self.current_consecutive_wins = 0;
+            if self.current_consecutive_losses > self.max_consecutive_losses {
+                self.max_consecutive_losses = self.current_consecutive_losses;
+            }
+        }
+    }
+
+    /// Record fees paid.
+    pub fn record_fees(&mut self, fees: f64) {
+        self.total_fees += fees;
+    }
+
+    /// Finalize metrics and produce BacktestMetrics.
+    ///
+    /// # Arguments
+    /// * `initial_capital` - Starting capital
+    /// * `final_value` - Ending portfolio value
+    /// * `returns` - Array of period returns for ratio calculations
+    pub fn finalize(
+        &self,
+        initial_capital: f64,
+        final_value: f64,
+        returns: &[f64],
+    ) -> BacktestMetrics {
+        // Calculate return metrics from the returns array
+        let mut return_metrics = StreamingMetrics::new();
+        for &r in returns {
+            if !r.is_nan() {
+                return_metrics.update(r);
+            }
+        }
+
+        let total_return_pct = if initial_capital > 0.0 {
+            (final_value - initial_capital) / initial_capital * 100.0
+        } else {
+            0.0
+        };
+
+        // Calculate trade-based metrics
+        let win_rate_pct = if self.trade_count > 0 {
+            self.winning_trades as f64 / self.trade_count as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        let profit_factor = if self.sum_losses > 0.0 {
+            self.sum_wins / self.sum_losses
+        } else if self.sum_wins > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
+        let avg_trade_return_pct = if self.trade_count > 0 {
+            self.sum_trade_returns / self.trade_count as f64
+        } else {
+            0.0
+        };
+
+        let avg_win_pct = if self.winning_trades > 0 {
+            self.sum_wins / self.winning_trades as f64 / initial_capital * 100.0
+        } else {
+            0.0
+        };
+
+        let avg_loss_pct = if self.losing_trades > 0 {
+            -(self.sum_losses / self.losing_trades as f64 / initial_capital * 100.0)
+        } else {
+            0.0
+        };
+
+        let avg_winning_duration = if self.winning_trades > 0 {
+            self.sum_winning_duration as f64 / self.winning_trades as f64
+        } else {
+            0.0
+        };
+
+        let avg_losing_duration = if self.losing_trades > 0 {
+            self.sum_losing_duration as f64 / self.losing_trades as f64
+        } else {
+            0.0
+        };
+
+        let avg_holding_period = if self.trade_count > 0 {
+            self.total_holding_period as f64 / self.trade_count as f64
+        } else {
+            0.0
+        };
+
+        // Expectancy: average profit per trade
+        let expectancy = if self.trade_count > 0 {
+            (self.sum_wins - self.sum_losses) / self.trade_count as f64
+        } else {
+            0.0
+        };
+
+        // SQN (System Quality Number)
+        let sqn = if self.trade_count > 1 {
+            let mean_return = self.sum_trade_returns / self.trade_count as f64;
+            let variance =
+                (self.sum_trade_returns_sq / self.trade_count as f64) - (mean_return * mean_return);
+            let std_dev = variance.max(0.0).sqrt();
+            if std_dev > 0.0 {
+                (mean_return / std_dev) * (self.trade_count as f64).sqrt()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        // Sharpe ratio (annualized, assuming 252 trading days)
+        let sharpe_ratio = return_metrics.sharpe_ratio(252.0);
+
+        // Sortino ratio (annualized)
+        let sortino_ratio = return_metrics.sortino_ratio(252.0);
+
+        // Calmar ratio (annualized return / max drawdown)
+        let calmar_ratio = if self.max_drawdown_pct > 0.0 {
+            total_return_pct / self.max_drawdown_pct
+        } else if total_return_pct > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
+        // Omega ratio
+        let omega_ratio = return_metrics.omega_ratio();
+
+        // Best/worst trade handling (handle edge cases)
+        let best_trade_pct =
+            if self.best_trade_pct == f64::NEG_INFINITY { 0.0 } else { self.best_trade_pct };
+        let worst_trade_pct =
+            if self.worst_trade_pct == f64::INFINITY { 0.0 } else { self.worst_trade_pct };
+
+        BacktestMetrics {
+            total_return_pct,
+            sharpe_ratio,
+            sortino_ratio,
+            calmar_ratio,
+            omega_ratio,
+            max_drawdown_pct: self.max_drawdown_pct,
+            max_drawdown_duration: self.max_drawdown_duration,
+            win_rate_pct,
+            profit_factor,
+            expectancy,
+            sqn,
+            total_trades: self.trade_count,
+            total_closed_trades: self.trade_count,
+            total_open_trades: 0,
+            open_trade_pnl: 0.0,
+            winning_trades: self.winning_trades,
+            losing_trades: self.losing_trades,
+            start_value: initial_capital,
+            end_value: final_value,
+            total_fees_paid: self.total_fees,
+            best_trade_pct,
+            worst_trade_pct,
+            avg_trade_return_pct,
+            avg_win_pct,
+            avg_loss_pct,
+            avg_winning_duration,
+            avg_losing_duration,
+            max_consecutive_wins: self.max_consecutive_wins,
+            max_consecutive_losses: self.max_consecutive_losses,
+            avg_holding_period,
+            exposure_pct: 0.0, // TODO: calculate based on time in market
+        }
     }
 
     /// Reset all metrics.
