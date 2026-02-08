@@ -1,9 +1,10 @@
 # RaptorBT
 
-[![PyPI version](https://img.shields.io/pypi/v/raptorbt.svg)](https://pypi.org/project/raptorbt/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://img.shields.io/pypi/v/raptorbt.svg)](https://pypi.org/project/raptorbt/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/raptorbt?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=ORANGE&left_text=downloads)](https://pepy.tech/projects/raptorbt)
 
 **Blazing-fast backtesting for the modern quant.**
 
@@ -573,18 +574,18 @@ print(f"Max Drawdown: {result.metrics.max_drawdown_pct}%")
 
 ### Metric Mapping
 
-| VectorBT Key           | RaptorBT Attribute             |
-| ---------------------- | ------------------------------ |
-| `Total Return [%]`     | `metrics.total_return_pct`     |
-| `Sharpe Ratio`         | `metrics.sharpe_ratio`         |
-| `Sortino Ratio`        | `metrics.sortino_ratio`        |
-| `Max Drawdown [%]`     | `metrics.max_drawdown_pct`     |
-| `Win Rate [%]`         | `metrics.win_rate_pct`         |
-| `Profit Factor`        | `metrics.profit_factor`        |
-| `SQN`                  | `metrics.sqn`                  |
-| `Omega Ratio`          | `metrics.omega_ratio`          |
-| `Total Trades`         | `metrics.total_trades`         |
-| `Expectancy`           | `metrics.expectancy`           |
+| VectorBT Key       | RaptorBT Attribute         |
+| ------------------ | -------------------------- |
+| `Total Return [%]` | `metrics.total_return_pct` |
+| `Sharpe Ratio`     | `metrics.sharpe_ratio`     |
+| `Sortino Ratio`    | `metrics.sortino_ratio`    |
+| `Max Drawdown [%]` | `metrics.max_drawdown_pct` |
+| `Win Rate [%]`     | `metrics.win_rate_pct`     |
+| `Profit Factor`    | `metrics.profit_factor`    |
+| `SQN`              | `metrics.sqn`              |
+| `Omega Ratio`      | `metrics.omega_ratio`      |
+| `Total Trades`     | `metrics.total_trades`     |
+| `Expectancy`       | `metrics.expectancy`       |
 
 ---
 

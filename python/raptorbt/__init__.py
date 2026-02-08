@@ -24,6 +24,7 @@ from raptorbt._raptorbt import (
     run_options_backtest,
     run_pairs_backtest,
     run_multi_backtest,
+    run_spread_backtest,
     # Indicator functions
     sma,
     ema,
@@ -35,9 +36,11 @@ from raptorbt._raptorbt import (
     adx,
     vwap,
     supertrend,
+    rolling_min,
+    rolling_max,
 )
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     # Config classes
@@ -54,6 +57,7 @@ __all__ = [
     "run_options_backtest",
     "run_pairs_backtest",
     "run_multi_backtest",
+    "run_spread_backtest",
     # Indicator functions
     "sma",
     "ema",
@@ -65,4 +69,6 @@ __all__ = [
     "adx",
     "vwap",
     "supertrend",
+    "rolling_min",
+    "rolling_max",
 ]

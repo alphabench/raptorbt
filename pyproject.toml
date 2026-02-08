@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "raptorbt"
-version = "0.2.1"
+version = "0.2.2"
 description = "High-performance Rust backtesting engine with Python bindings. Drop-in VectorBT replacement with up insanely faster performance at fractional memory footprint."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,9 +39,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alphabench/raptorbt"
+Homepage = "https://www.alphabench.in/raptorbt"
 Repository = "https://github.com/alphabench/raptorbt"
-Documentation = "https://github.com/alphabench/raptorbt#readme"
+Documentation = "https://www.alphabench.in/raptorbt"
 "Bug Tracker" = "https://github.com/alphabench/raptorbt/issues"
 
 [tool.maturin]
