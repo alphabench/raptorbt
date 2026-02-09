@@ -2,8 +2,11 @@
 //!
 //! Supports multiple instruments with synchronized signals.
 
+use std::collections::HashMap;
+
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, OhlcvData, Trade,
+    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, InstrumentConfig,
+    OhlcvData, Trade,
 };
 use crate::execution::FeeModel;
 use crate::metrics::streaming::StreamingMetrics;
@@ -74,6 +77,22 @@ impl BasketBacktest {
     /// # Returns
     /// Combined backtest result
     pub fn run(&self, instruments: &[(OhlcvData, CompiledSignals)]) -> BacktestResult {
+        self.run_with_instrument_configs(instruments, None)
+    }
+
+    /// Run basket backtest with optional per-instrument configurations.
+    ///
+    /// # Arguments
+    /// * `instruments` - Vector of (OhlcvData, CompiledSignals) pairs for each instrument
+    /// * `instrument_configs` - Optional map of symbol -> InstrumentConfig
+    ///
+    /// # Returns
+    /// Combined backtest result
+    pub fn run_with_instrument_configs(
+        &self,
+        instruments: &[(OhlcvData, CompiledSignals)],
+        instrument_configs: Option<&HashMap<String, InstrumentConfig>>,
+    ) -> BacktestResult {
         if instruments.is_empty() {
             return self.empty_result();
         }
@@ -168,7 +187,15 @@ impl BasketBacktest {
                 // Calculate position sizes
                 let prices: Vec<f64> = instruments.iter().map(|(o, _)| o.close[i]).collect();
                 let weights: Vec<f64> = instruments.iter().map(|(_, s)| s.weight).collect();
-                let sizes = self.calculate_sizes(&prices, &weights, cash);
+                let symbols: Vec<&str> =
+                    instruments.iter().map(|(_, s)| s.symbol.as_str()).collect();
+                let sizes = self.calculate_sizes_with_configs(
+                    &prices,
+                    &weights,
+                    cash,
+                    &symbols,
+                    instrument_configs,
+                );
 
                 // Enter positions
                 for (inst_idx, (ohlcv, signals)) in instruments.iter().enumerate() {
@@ -249,7 +276,21 @@ impl BasketBacktest {
     }
 
     /// Calculate position sizes for each instrument.
+    #[allow(dead_code)]
     fn calculate_sizes(&self, prices: &[f64], weights: &[f64], available_capital: f64) -> Vec<f64> {
+        let symbols: Vec<&str> = vec![""; prices.len()];
+        self.calculate_sizes_with_configs(prices, weights, available_capital, &symbols, None)
+    }
+
+    /// Calculate position sizes with optional per-instrument config (lot_size rounding, capital caps).
+    fn calculate_sizes_with_configs(
+        &self,
+        prices: &[f64],
+        weights: &[f64],
+        available_capital: f64,
+        symbols: &[&str],
+        instrument_configs: Option<&HashMap<String, InstrumentConfig>>,
+    ) -> Vec<f64> {
         let n = prices.len();
         let total_weight: f64 = weights.iter().sum();
 
@@ -260,12 +301,26 @@ impl BasketBacktest {
         prices
             .iter()
             .zip(weights.iter())
-            .map(|(&price, &weight)| {
+            .enumerate()
+            .map(|(idx, (&price, &weight))| {
                 if price <= 0.0 {
                     return 0.0;
                 }
-                let allocation = available_capital * (weight / total_weight);
-                allocation / price
+                let default_allocation = available_capital * (weight / total_weight);
+
+                // Use per-instrument alloted_capital if set, capped at default allocation
+                let inst_config = instrument_configs
+                    .and_then(|configs| symbols.get(idx).and_then(|sym| configs.get(*sym)));
+
+                let allocation = inst_config
+                    .and_then(|ic| ic.alloted_capital)
+                    .map(|cap| cap.min(default_allocation))
+                    .unwrap_or(default_allocation);
+
+                let raw_size = allocation / price;
+
+                // Round to lot_size
+                inst_config.map(|ic| ic.round_to_lot(raw_size)).unwrap_or(raw_size)
             })
             .collect()
     }

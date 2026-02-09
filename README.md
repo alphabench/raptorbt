@@ -265,6 +265,9 @@ trades = result.trades()  # Returns list of PyTrade objects
 Basic long or short strategy on a single instrument.
 
 ```python
+# Optional: Instrument-specific configuration
+inst_config = raptorbt.PyInstrumentConfig(lot_size=1.0)
+
 result = raptorbt.run_single_backtest(
     timestamps=timestamps,
     open=open_prices, high=high_prices, low=low_prices,
@@ -274,6 +277,7 @@ result = raptorbt.run_single_backtest(
     weight=1.0,
     symbol="SYMBOL",
     config=config,
+    instrument_config=inst_config,  # Optional: lot_size rounding, capital caps
 )
 ```
 
@@ -288,10 +292,18 @@ instruments = [
     (timestamps, open3, high3, low3, close3, volume3, entries3, exits3, 1, 0.34, "MSFT"),
 ]
 
+# Optional: Per-instrument configs for lot_size and capital allocation
+instrument_configs = {
+    "AAPL": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=33000),
+    "GOOGL": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=33000),
+    "MSFT": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=34000),
+}
+
 result = raptorbt.run_basket_backtest(
     instruments=instruments,
     config=config,
     sync_mode="all",  # "all", "any", "majority", "master"
+    instrument_configs=instrument_configs,  # Optional
 )
 ```
 
@@ -612,6 +624,29 @@ config.set_atr_target(multiplier: float, period: int)
 config.set_risk_reward_target(ratio: float)
 ```
 
+### PyInstrumentConfig
+
+Per-instrument configuration for position sizing and risk management.
+
+```python
+inst_config = raptorbt.PyInstrumentConfig(
+    lot_size=1.0,              # Min tradeable quantity (1 for equity, 50 for NIFTY F&O)
+    alloted_capital=50000.0,   # Capital allocated to this instrument (optional)
+    existing_qty=None,         # Existing position quantity (future use)
+    avg_price=None,            # Existing position avg price (future use)
+)
+
+# Optional: per-instrument stop/target overrides
+inst_config.set_fixed_stop(0.02)
+inst_config.set_trailing_stop(0.03)
+inst_config.set_fixed_target(0.05)
+```
+
+**Fields:**
+- `lot_size` - Minimum tradeable quantity. Position sizes are rounded down to nearest lot_size multiple. Use `1.0` for equities, `50.0` for NIFTY F&O, `0.01` for forex.
+- `alloted_capital` - Per-instrument capital cap (capped at available cash).
+- `existing_qty` / `avg_price` - Reserved for future live-to-backtest transitions.
+
 ### PyBacktestResult
 
 ```python
@@ -797,6 +832,32 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v0.3.0
+
+- Per-instrument configuration via `PyInstrumentConfig` (lot_size, alloted_capital, stop/target overrides)
+- Position sizes now correctly rounded to lot_size multiples
+- Support for per-instrument capital allocation in basket backtests
+- Future-ready fields: existing_qty, avg_price for live-to-backtest transitions
+
+### v0.2.2
+
+- Export `run_spread_backtest` Python binding for multi-leg options spread strategies
+- Export `rolling_min` and `rolling_max` indicator functions to Python
+
+### v0.2.1
+
+- Add `rolling_min` and `rolling_max` indicators for LLV (Lowest Low Value) and HHV (Highest High Value) support
+- NaN handling for warmup period
+
+### v0.2.0
+
+- Add multi-leg spread backtesting (`run_spread_backtest`) supporting straddles, strangles, vertical spreads, iron condors, iron butterflies, butterfly spreads, calendar spreads, and diagonal spreads
+- Coordinated entry/exit across all legs with net premium P&L calculation
+- Max loss and target profit exit thresholds for spreads
+- Add `SessionTracker` for intraday session management: market hours detection, squareoff time enforcement, session high/low/open tracking
+- Pre-built session configs for NSE equity (9:15-15:30), MCX commodity (9:00-23:30), and CDS currency (9:00-17:00)
+- Extend `StreamingMetrics` with equity/drawdown tracking, trade recording, and `finalize()` method
 
 ### v0.1.0
 

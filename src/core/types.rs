@@ -244,6 +244,47 @@ impl Default for BacktestConfig {
     }
 }
 
+/// Per-instrument configuration for position sizing and risk management.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentConfig {
+    /// Minimum tradeable quantity (1.0 for NSE EQ, 50.0 for NIFTY F&O, 0.01 for forex).
+    pub lot_size: Option<f64>,
+    /// Per-instrument capital cap.
+    pub alloted_capital: Option<f64>,
+    /// Per-instrument stop override.
+    pub stop: Option<StopConfig>,
+    /// Per-instrument target override.
+    pub target: Option<TargetConfig>,
+    /// Existing position quantity (future use).
+    pub existing_qty: Option<f64>,
+    /// Existing position average price (future use).
+    pub avg_price: Option<f64>,
+}
+
+impl InstrumentConfig {
+    /// Round a raw position size down to the nearest lot_size multiple.
+    /// Returns raw_size unchanged if lot_size is None or <= 0.
+    pub fn round_to_lot(&self, raw_size: f64) -> f64 {
+        match self.lot_size {
+            Some(lot) if lot > 0.0 => (raw_size / lot).floor() * lot,
+            _ => raw_size,
+        }
+    }
+}
+
+impl Default for InstrumentConfig {
+    fn default() -> Self {
+        Self {
+            lot_size: None,
+            alloted_capital: None,
+            stop: None,
+            target: None,
+            existing_qty: None,
+            avg_price: None,
+        }
+    }
+}
+
 /// Stop-loss configuration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum StopConfig {
@@ -458,5 +499,51 @@ impl Position {
 impl Default for Position {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_round_to_lot_whole_shares() {
+        let config = InstrumentConfig { lot_size: Some(1.0), ..Default::default() };
+        assert_eq!(config.round_to_lot(242.47), 242.0);
+        assert_eq!(config.round_to_lot(1.0), 1.0);
+        assert_eq!(config.round_to_lot(0.5), 0.0);
+    }
+
+    #[test]
+    fn test_round_to_lot_nifty_fo() {
+        let config = InstrumentConfig { lot_size: Some(50.0), ..Default::default() };
+        assert_eq!(config.round_to_lot(242.0), 200.0);
+        assert_eq!(config.round_to_lot(50.0), 50.0);
+        assert_eq!(config.round_to_lot(49.0), 0.0);
+        assert_eq!(config.round_to_lot(150.0), 150.0);
+    }
+
+    #[test]
+    fn test_round_to_lot_fractional() {
+        let config = InstrumentConfig { lot_size: Some(0.01), ..Default::default() };
+        assert!((config.round_to_lot(1.234) - 1.23).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_round_to_lot_none() {
+        let config = InstrumentConfig::default();
+        assert_eq!(config.round_to_lot(242.47), 242.47);
+    }
+
+    #[test]
+    fn test_round_to_lot_zero() {
+        let config = InstrumentConfig { lot_size: Some(0.0), ..Default::default() };
+        assert_eq!(config.round_to_lot(242.47), 242.47);
+    }
+
+    #[test]
+    fn test_round_to_lot_negative() {
+        let config = InstrumentConfig { lot_size: Some(-1.0), ..Default::default() };
+        assert_eq!(config.round_to_lot(242.47), 242.47);
     }
 }
