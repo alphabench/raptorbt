@@ -3,8 +3,11 @@
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
+use std::collections::HashMap;
+
 use crate::core::types::{
-    BacktestConfig, CompiledSignals, Direction, OhlcvData, StopConfig, TargetConfig,
+    BacktestConfig, CompiledSignals, Direction, InstrumentConfig, OhlcvData, StopConfig,
+    TargetConfig,
 };
 use crate::indicators;
 use crate::signals::synchronizer::SyncMode;
@@ -96,6 +99,93 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             stop: py_config.stop_config,
             target: py_config.target_config,
             upon_bar_close: py_config.upon_bar_close,
+        }
+    }
+}
+
+/// Python-exposed per-instrument configuration.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyInstrumentConfig {
+    #[pyo3(get, set)]
+    pub lot_size: Option<f64>,
+    #[pyo3(get, set)]
+    pub alloted_capital: Option<f64>,
+    #[pyo3(get, set)]
+    pub existing_qty: Option<f64>,
+    #[pyo3(get, set)]
+    pub avg_price: Option<f64>,
+    stop_config: Option<StopConfig>,
+    target_config: Option<TargetConfig>,
+}
+
+#[pymethods]
+impl PyInstrumentConfig {
+    #[new]
+    #[pyo3(signature = (lot_size=None, alloted_capital=None, existing_qty=None, avg_price=None))]
+    fn new(
+        lot_size: Option<f64>,
+        alloted_capital: Option<f64>,
+        existing_qty: Option<f64>,
+        avg_price: Option<f64>,
+    ) -> Self {
+        Self {
+            lot_size,
+            alloted_capital,
+            existing_qty,
+            avg_price,
+            stop_config: None,
+            target_config: None,
+        }
+    }
+
+    /// Set fixed percentage stop-loss override.
+    fn set_fixed_stop(&mut self, percent: f64) {
+        self.stop_config = Some(StopConfig::Fixed { percent });
+    }
+
+    /// Set ATR-based stop-loss override.
+    fn set_atr_stop(&mut self, multiplier: f64, period: usize) {
+        self.stop_config = Some(StopConfig::Atr { multiplier, period });
+    }
+
+    /// Set trailing stop-loss override.
+    fn set_trailing_stop(&mut self, percent: f64) {
+        self.stop_config = Some(StopConfig::Trailing { percent });
+    }
+
+    /// Set fixed percentage take-profit override.
+    fn set_fixed_target(&mut self, percent: f64) {
+        self.target_config = Some(TargetConfig::Fixed { percent });
+    }
+
+    /// Set ATR-based take-profit override.
+    fn set_atr_target(&mut self, multiplier: f64, period: usize) {
+        self.target_config = Some(TargetConfig::Atr { multiplier, period });
+    }
+
+    /// Set risk-reward based take-profit override.
+    fn set_risk_reward_target(&mut self, ratio: f64) {
+        self.target_config = Some(TargetConfig::RiskReward { ratio });
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "InstrumentConfig(lot_size={:?}, alloted_capital={:?})",
+            self.lot_size, self.alloted_capital
+        )
+    }
+}
+
+impl From<&PyInstrumentConfig> for InstrumentConfig {
+    fn from(py_config: &PyInstrumentConfig) -> Self {
+        InstrumentConfig {
+            lot_size: py_config.lot_size,
+            alloted_capital: py_config.alloted_capital,
+            stop: py_config.stop_config,
+            target: py_config.target_config,
+            existing_qty: py_config.existing_qty,
+            avg_price: py_config.avg_price,
         }
     }
 }
@@ -419,7 +509,7 @@ impl PyBacktestResult {
 
 /// Run single instrument backtest.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None, instrument_config=None))]
 pub fn run_single_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -435,6 +525,7 @@ pub fn run_single_backtest<'py>(
     symbol: &str,
     config: Option<&PyBacktestConfig>,
     position_sizes: Option<PyReadonlyArray1<f64>>,
+    instrument_config: Option<&PyInstrumentConfig>,
 ) -> PyResult<PyBacktestResult> {
     let ohlcv = OhlcvData {
         timestamps: numpy_to_vec_i64(timestamps),
@@ -457,16 +548,17 @@ pub fn run_single_backtest<'py>(
     };
 
     let rust_config = config.map(|c| BacktestConfig::from(c)).unwrap_or_default();
+    let inst_config = instrument_config.map(InstrumentConfig::from);
 
     let backtest = SingleBacktest::new(rust_config);
-    let result = backtest.run(&ohlcv, &signals);
+    let result = backtest.run_with_instrument_config(&ohlcv, &signals, inst_config.as_ref());
 
     Ok(convert_result(result))
 }
 
 /// Run basket/collective backtest.
 #[pyfunction]
-#[pyo3(signature = (instruments, config=None, sync_mode="all"))]
+#[pyo3(signature = (instruments, config=None, sync_mode="all", instrument_configs=None))]
 pub fn run_basket_backtest<'py>(
     _py: Python<'py>,
     instruments: Vec<(
@@ -484,6 +576,7 @@ pub fn run_basket_backtest<'py>(
     )>,
     config: Option<&PyBacktestConfig>,
     sync_mode: &str,
+    instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
 ) -> PyResult<PyBacktestResult> {
     let rust_instruments: Vec<(OhlcvData, CompiledSignals)> = instruments
         .into_iter()
@@ -521,8 +614,15 @@ pub fn run_basket_backtest<'py>(
         ..Default::default()
     };
 
+    // Convert PyInstrumentConfig map to InstrumentConfig map
+    let rust_inst_configs: Option<HashMap<String, InstrumentConfig>> =
+        instrument_configs.map(|configs| {
+            configs.iter().map(|(k, v)| (k.clone(), InstrumentConfig::from(v))).collect()
+        });
+
     let backtest = BasketBacktest::new(basket_config);
-    let result = backtest.run(&rust_instruments);
+    let result =
+        backtest.run_with_instrument_configs(&rust_instruments, rust_inst_configs.as_ref());
 
     Ok(convert_result(result))
 }

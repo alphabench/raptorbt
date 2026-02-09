@@ -1,6 +1,8 @@
 //! Single instrument backtest implementation.
 
-use crate::core::types::{BacktestConfig, BacktestResult, CompiledSignals, OhlcvData};
+use crate::core::types::{
+    BacktestConfig, BacktestResult, CompiledSignals, InstrumentConfig, OhlcvData,
+};
 use crate::portfolio::engine::PortfolioEngine;
 
 /// Single instrument backtest runner.
@@ -26,6 +28,24 @@ impl SingleBacktest {
     /// Backtest result with metrics, trades, and equity curve
     pub fn run(&self, ohlcv: &OhlcvData, signals: &CompiledSignals) -> BacktestResult {
         self.engine.run_single(ohlcv, signals)
+    }
+
+    /// Run the backtest with per-instrument configuration.
+    ///
+    /// # Arguments
+    /// * `ohlcv` - OHLCV price data
+    /// * `signals` - Compiled trading signals
+    /// * `inst_config` - Optional per-instrument config (lot_size, capital cap, stop/target overrides)
+    ///
+    /// # Returns
+    /// Backtest result with metrics, trades, and equity curve
+    pub fn run_with_instrument_config(
+        &self,
+        ohlcv: &OhlcvData,
+        signals: &CompiledSignals,
+        inst_config: Option<&InstrumentConfig>,
+    ) -> BacktestResult {
+        self.engine.run_single_with_instrument_config(ohlcv, signals, inst_config)
     }
 
     /// Run backtest from raw arrays.

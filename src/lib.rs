@@ -27,6 +27,7 @@ pub mod strategies;
 fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     // Register config classes
     m.add_class::<python::bindings::PyBacktestConfig>()?;
+    m.add_class::<python::bindings::PyInstrumentConfig>()?;
     m.add_class::<python::bindings::PyStopConfig>()?;
     m.add_class::<python::bindings::PyTargetConfig>()?;
 

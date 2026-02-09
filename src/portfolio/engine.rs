@@ -2,7 +2,7 @@
 
 use crate::core::types::{
     BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, Direction, ExitReason,
-    OhlcvData, Price, StopConfig, TargetConfig, Trade,
+    InstrumentConfig, OhlcvData, Price, StopConfig, TargetConfig, Trade,
 };
 use crate::execution::{FeeModel, FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
@@ -69,6 +69,24 @@ impl PortfolioEngine {
     /// # Returns
     /// Backtest result
     pub fn run_single(&self, ohlcv: &OhlcvData, signals: &CompiledSignals) -> BacktestResult {
+        self.run_single_with_instrument_config(ohlcv, signals, None)
+    }
+
+    /// Run backtest on single instrument with optional per-instrument configuration.
+    ///
+    /// # Arguments
+    /// * `ohlcv` - OHLCV data
+    /// * `signals` - Compiled trading signals
+    /// * `inst_config` - Optional per-instrument config (lot_size, capital cap, stop/target overrides)
+    ///
+    /// # Returns
+    /// Backtest result
+    pub fn run_single_with_instrument_config(
+        &self,
+        ohlcv: &OhlcvData,
+        signals: &CompiledSignals,
+        inst_config: Option<&InstrumentConfig>,
+    ) -> BacktestResult {
         let n = ohlcv.len();
         assert_eq!(n, signals.len(), "OHLCV and signals must have same length");
 
@@ -86,14 +104,20 @@ impl PortfolioEngine {
         let mut streaming = StreamingMetrics::new();
         let mut peak_equity = cash;
 
+        // Determine effective stop/target configs (per-instrument overrides take precedence)
+        let effective_stop =
+            inst_config.and_then(|ic| ic.stop.as_ref()).unwrap_or(&self.config.stop);
+        let effective_target =
+            inst_config.and_then(|ic| ic.target.as_ref()).unwrap_or(&self.config.target);
+
         // Pre-calculate ATR for ATR-based stops
-        let atr_values = if matches!(self.config.stop, StopConfig::Atr { .. })
-            || matches!(self.config.target, TargetConfig::Atr { .. })
+        let atr_values = if matches!(effective_stop, StopConfig::Atr { .. })
+            || matches!(effective_target, TargetConfig::Atr { .. })
         {
-            let period = match self.config.stop {
-                StopConfig::Atr { period, .. } => period,
-                _ => match self.config.target {
-                    TargetConfig::Atr { period, .. } => period,
+            let period = match effective_stop {
+                StopConfig::Atr { period, .. } => *period,
+                _ => match effective_target {
+                    TargetConfig::Atr { period, .. } => *period,
                     _ => 14,
                 },
             };
@@ -188,8 +212,8 @@ impl PortfolioEngine {
 
                 // Update trailing stop if position still open
                 if position.is_in_position() {
-                    if let StopConfig::Trailing { percent } = self.config.stop {
-                        position.update_trailing_stop(percent);
+                    if let StopConfig::Trailing { percent } = effective_stop {
+                        position.update_trailing_stop(*percent);
                     }
                 }
             }
@@ -207,14 +231,23 @@ impl PortfolioEngine {
                 );
 
                 // Calculate position size
+                // Use per-instrument capital if set, capped at available cash
+                let available = inst_config
+                    .and_then(|ic| ic.alloted_capital)
+                    .map(|cap| cap.min(cash))
+                    .unwrap_or(cash);
+
                 // VectorBT formula: size = cash / (price * (1 + fees))
                 // This ensures the position value plus entry fee equals available cash
                 let fee_rate = self.config.fees;
-                let size = if let Some(ref sizes) = signals.position_sizes {
-                    sizes[i] * cash / (adjusted_price * (1.0 + fee_rate))
+                let raw_size = if let Some(ref sizes) = signals.position_sizes {
+                    sizes[i] * available / (adjusted_price * (1.0 + fee_rate))
                 } else {
-                    cash / (adjusted_price * (1.0 + fee_rate))
+                    available / (adjusted_price * (1.0 + fee_rate))
                 };
+
+                // Round to lot_size
+                let size = inst_config.map(|ic| ic.round_to_lot(raw_size)).unwrap_or(raw_size);
 
                 if size > 0.0 {
                     // Calculate entry fees
@@ -222,11 +255,13 @@ impl PortfolioEngine {
                         self.fee_model.calculate(adjusted_price, size, signals.direction);
 
                     // Calculate stop and target prices
-                    let (stop_price, target_price) = self.calculate_stop_target(
+                    let (stop_price, target_price) = self.calculate_stop_target_with_config(
                         adjusted_price,
                         signals.direction,
                         &atr_values,
                         i,
+                        effective_stop,
+                        effective_target,
                     );
 
                     // Open position (passing entry_fees for trade PnL tracking)
@@ -310,7 +345,8 @@ impl PortfolioEngine {
         )
     }
 
-    /// Calculate stop and target prices.
+    /// Calculate stop and target prices using the global config.
+    #[allow(dead_code)]
     fn calculate_stop_target(
         &self,
         entry_price: Price,
@@ -318,10 +354,30 @@ impl PortfolioEngine {
         atr_values: &[f64],
         idx: usize,
     ) -> (Option<Price>, Option<Price>) {
+        self.calculate_stop_target_with_config(
+            entry_price,
+            direction,
+            atr_values,
+            idx,
+            &self.config.stop,
+            &self.config.target,
+        )
+    }
+
+    /// Calculate stop and target prices with explicit stop/target configs.
+    fn calculate_stop_target_with_config(
+        &self,
+        entry_price: Price,
+        direction: Direction,
+        atr_values: &[f64],
+        idx: usize,
+        stop_config: &StopConfig,
+        target_config: &TargetConfig,
+    ) -> (Option<Price>, Option<Price>) {
         let multiplier = direction.multiplier();
 
         // Calculate stop price
-        let stop_price = match self.config.stop {
+        let stop_price = match stop_config {
             StopConfig::None => None,
             StopConfig::Fixed { percent } => Some(entry_price * (1.0 - multiplier * percent)),
             StopConfig::Atr { multiplier: m, .. } => {
@@ -336,7 +392,7 @@ impl PortfolioEngine {
         };
 
         // Calculate target price
-        let target_price = match self.config.target {
+        let target_price = match target_config {
             TargetConfig::None => None,
             TargetConfig::Fixed { percent } => Some(entry_price * (1.0 + multiplier * percent)),
             TargetConfig::Atr { multiplier: m, .. } => {
