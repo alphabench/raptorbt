@@ -1098,6 +1098,77 @@ pub fn rolling_max<'py>(
 // Helper Functions
 // ============================================================================
 
+// ============================================================================
+// Monte Carlo Forward Simulation
+// ============================================================================
+
+/// Run Monte Carlo forward simulation for a portfolio.
+///
+/// Uses Geometric Brownian Motion with Cholesky-decomposed correlated random
+/// draws, parallelized via Rayon.
+///
+/// # Arguments
+/// * `returns` - List of per-strategy return arrays (N strategies)
+/// * `weights` - Portfolio weight vector (length N, sums to 1)
+/// * `correlation_matrix` - N x N correlation matrix (flattened row-major as 2D list)
+/// * `initial_value` - Starting portfolio value
+/// * `n_simulations` - Number of simulation paths (default: 10000)
+/// * `horizon_days` - Forward simulation horizon in trading days (default: 252)
+/// * `seed` - Random seed for reproducibility (default: 42)
+#[pyfunction]
+#[pyo3(signature = (returns, weights, correlation_matrix, initial_value, n_simulations=10000, horizon_days=252, seed=42))]
+pub fn simulate_portfolio_mc(
+    py: Python<'_>,
+    returns: Vec<PyReadonlyArray1<'_, f64>>,
+    weights: PyReadonlyArray1<'_, f64>,
+    correlation_matrix: Vec<PyReadonlyArray1<'_, f64>>,
+    initial_value: f64,
+    n_simulations: usize,
+    horizon_days: usize,
+    seed: u64,
+) -> PyResult<PyObject> {
+    use crate::portfolio::monte_carlo::{simulate_portfolio_forward, MonteCarloConfig};
+
+    // Convert numpy arrays to Rust vecs
+    let rust_returns: Vec<Vec<f64>> =
+        returns.iter().map(|arr| arr.as_slice().unwrap().to_vec()).collect();
+
+    let rust_weights: Vec<f64> = weights.as_slice().unwrap().to_vec();
+
+    let rust_corr: Vec<Vec<f64>> =
+        correlation_matrix.iter().map(|arr| arr.as_slice().unwrap().to_vec()).collect();
+
+    let config = MonteCarloConfig { n_simulations, horizon_days, seed };
+
+    // Run simulation (releases GIL for Rayon parallelism)
+    let result = py.allow_threads(|| {
+        simulate_portfolio_forward(&rust_returns, &rust_weights, &rust_corr, initial_value, &config)
+    });
+
+    // Build Python dict result
+    let dict = pyo3::types::PyDict::new(py);
+
+    // percentile_paths: list of (percentile, list[float])
+    let paths_list = pyo3::types::PyList::empty(py);
+    for (pct, path) in &result.percentile_paths {
+        let path_list = pyo3::types::PyList::new(py, path);
+        let tuple = pyo3::types::PyTuple::new(py, &[pct.to_object(py), path_list.to_object(py)]);
+        paths_list.append(tuple)?;
+    }
+    dict.set_item("percentile_paths", paths_list)?;
+
+    // final_values as numpy array for efficiency
+    let final_arr = PyArray1::from_vec(py, result.final_values);
+    dict.set_item("final_values", final_arr)?;
+
+    dict.set_item("expected_return", result.expected_return)?;
+    dict.set_item("probability_of_loss", result.probability_of_loss)?;
+    dict.set_item("var_95", result.var_95)?;
+    dict.set_item("cvar_95", result.cvar_95)?;
+
+    Ok(dict.into())
+}
+
 /// Convert Rust BacktestResult to Python PyBacktestResult.
 fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
     let metrics = PyBacktestMetrics {

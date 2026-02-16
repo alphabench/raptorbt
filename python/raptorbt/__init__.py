@@ -26,6 +26,8 @@ from raptorbt._raptorbt import (
     run_pairs_backtest,
     run_multi_backtest,
     run_spread_backtest,
+    # Monte Carlo simulation
+    simulate_portfolio_mc,
     # Indicator functions
     sma,
     ema,
@@ -41,7 +43,7 @@ from raptorbt._raptorbt import (
     rolling_max,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     # Config classes
@@ -60,6 +62,8 @@ __all__ = [
     "run_pairs_backtest",
     "run_multi_backtest",
     "run_spread_backtest",
+    # Monte Carlo simulation
+    "simulate_portfolio_mc",
     # Indicator functions
     "sma",
     "ema",
