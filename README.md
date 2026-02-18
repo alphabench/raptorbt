@@ -6,8 +6,6 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/raptorbt?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=ORANGE&left_text=downloads)](https://pepy.tech/projects/raptorbt)
 
-<iframe src="https://clickhouse-analytics.metabaseapp.com/public/dashboard/daa27bf9-c01e-43fe-9260-c69b679cfe83?project_name=raptorbt#&theme=night" frameborder="0" width="100%" height="600"></iframe>
-
 **Blazing-fast backtesting for the modern quant.**
 
 RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It serves as a drop-in replacement for VectorBT — delivering **HFT-grade compute efficiency** with full metric parity.
