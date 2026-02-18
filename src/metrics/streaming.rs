@@ -513,6 +513,30 @@ impl StreamingMetrics {
         let worst_trade_pct =
             if self.worst_trade_pct == f64::INFINITY { 0.0 } else { self.worst_trade_pct };
 
+        // Payoff ratio: average win / average loss (absolute value)
+        let payoff_ratio = if avg_loss_pct.abs() > 0.0 {
+            avg_win_pct / avg_loss_pct.abs()
+        } else if avg_win_pct > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
+        // Recovery factor: net profit / max drawdown (absolute value)
+        let net_profit = final_value - initial_capital;
+        let recovery_factor = if self.max_drawdown_pct > 0.0 && initial_capital > 0.0 {
+            let max_dd_absolute = self.max_drawdown_pct / 100.0 * initial_capital;
+            if max_dd_absolute > 0.0 {
+                net_profit / max_dd_absolute
+            } else {
+                0.0
+            }
+        } else if net_profit > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
         BacktestMetrics {
             total_return_pct,
             sharpe_ratio,
@@ -545,6 +569,8 @@ impl StreamingMetrics {
             max_consecutive_losses: self.max_consecutive_losses,
             avg_holding_period,
             exposure_pct: 0.0, // TODO: calculate based on time in market
+            payoff_ratio,
+            recovery_factor,
         }
     }
 

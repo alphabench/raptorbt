@@ -6,6 +6,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org/)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/raptorbt?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=ORANGE&left_text=downloads)](https://pepy.tech/projects/raptorbt)
 
+<iframe src="https://clickhouse-analytics.metabaseapp.com/public/dashboard/daa27bf9-c01e-43fe-9260-c69b679cfe83?project_name=raptorbt#&theme=night" frameborder="0" width="100%" height="600"></iframe>
+
 **Blazing-fast backtesting for the modern quant.**
 
 RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It serves as a drop-in replacement for VectorBT — delivering **HFT-grade compute efficiency** with full metric parity.
@@ -79,9 +81,10 @@ RaptorBT was built to address the performance limitations of VectorBT. Benchmark
 
 ### Key Features
 
-- **5 Strategy Types**: Single instrument, basket/collective, pairs trading, options, and multi-strategy
-- **30+ Metrics**: Full parity with VectorBT including Sharpe, Sortino, Calmar, Omega, SQN, and more
-- **10 Technical Indicators**: SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend
+- **6 Strategy Types**: Single instrument, basket/collective, pairs trading, options, spreads, and multi-strategy
+- **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
+- **33 Metrics**: Full parity with VectorBT including Sharpe, Sortino, Calmar, Omega, SQN, Payoff Ratio, Recovery Factor, and more
+- **12 Technical Indicators**: SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend, Rolling Min, Rolling Max
 - **Stop/Target Management**: Fixed, ATR-based, and trailing stops with risk-reward targets
 - **100% Deterministic**: No JIT compilation variance between runs
 - **Native Parallelism**: Rayon-based parallel processing with explicit SIMD optimizations
@@ -127,6 +130,7 @@ raptorbt/
 │   ├── core/              # Core types and error handling
 │   │   ├── types.rs       # BacktestConfig, BacktestResult, Trade, Metrics
 │   │   ├── error.rs       # RaptorError enum
+│   │   ├── session.rs     # SessionTracker, SessionConfig (intraday sessions)
 │   │   └── timeseries.rs  # Time series utilities
 │   │
 │   ├── strategies/        # Strategy implementations
@@ -134,6 +138,7 @@ raptorbt/
 │   │   ├── basket.rs      # Basket/collective strategies
 │   │   ├── pairs.rs       # Pairs trading
 │   │   ├── options.rs     # Options strategies
+│   │   ├── spreads.rs     # Multi-leg spread strategies
 │   │   └── multi.rs       # Multi-strategy combining
 │   │
 │   ├── indicators/        # Technical indicators
@@ -141,7 +146,8 @@ raptorbt/
 │   │   ├── momentum.rs    # RSI, MACD, Stochastic
 │   │   ├── volatility.rs  # ATR, Bollinger Bands
 │   │   ├── strength.rs    # ADX
-│   │   └── volume.rs      # VWAP
+│   │   ├── volume.rs      # VWAP
+│   │   └── rolling.rs     # Rolling Min/Max (LLV/HHV)
 │   │
 │   ├── metrics/           # Performance metrics
 │   │   ├── streaming.rs   # Streaming metric calculations
@@ -157,6 +163,12 @@ raptorbt/
 │   │   ├── fixed.rs       # Fixed percentage stops
 │   │   ├── atr.rs         # ATR-based stops
 │   │   └── trailing.rs    # Trailing stops
+│   │
+│   ├── portfolio/         # Portfolio-level analysis
+│   │   ├── monte_carlo.rs # Monte Carlo forward simulation (GBM + Cholesky)
+│   │   ├── allocation.rs  # Capital allocation
+│   │   ├── engine.rs      # Portfolio engine
+│   │   └── position.rs    # Position management
 │   │
 │   ├── python/            # PyO3 bindings
 │   │   ├── bindings.rs    # Python function exports
@@ -529,6 +541,68 @@ config.set_risk_reward_target(ratio=2.0)  # 2:1 risk-reward ratio
 
 ---
 
+## Monte Carlo Portfolio Simulation
+
+RaptorBT includes a high-performance Monte Carlo forward simulation engine for portfolio risk analysis. It uses Geometric Brownian Motion (GBM) with Cholesky decomposition for correlated multi-asset simulation, parallelized via Rayon.
+
+```python
+import numpy as np
+import raptorbt
+
+# Historical daily returns per strategy/asset (numpy arrays)
+returns = [
+    np.array([0.001, -0.002, 0.003, ...]),  # Strategy 1 returns
+    np.array([0.002, 0.001, -0.001, ...]),   # Strategy 2 returns
+]
+
+# Portfolio weights (must sum to 1.0)
+weights = np.array([0.6, 0.4])
+
+# Correlation matrix (N x N)
+correlation_matrix = [
+    np.array([1.0, 0.3]),
+    np.array([0.3, 1.0]),
+]
+
+# Run simulation
+result = raptorbt.simulate_portfolio_mc(
+    returns=returns,
+    weights=weights,
+    correlation_matrix=correlation_matrix,
+    initial_value=100000.0,
+    n_simulations=10000,   # Number of Monte Carlo paths (default: 10,000)
+    horizon_days=252,      # Forward projection horizon (default: 252)
+    seed=42,               # Random seed for reproducibility (default: 42)
+)
+
+# Results
+print(f"Expected Return: {result['expected_return']:.2f}%")
+print(f"Probability of Loss: {result['probability_of_loss']:.2%}")
+print(f"VaR (95%): {result['var_95']:.2f}%")
+print(f"CVaR (95%): {result['cvar_95']:.2f}%")
+
+# Percentile paths: list of (percentile, path_values)
+# Percentiles: 5th, 25th, 50th, 75th, 95th
+for pct, path in result['percentile_paths']:
+    print(f"  P{pct:.0f} final value: {path[-1]:.2f}")
+
+# Final values: numpy array of terminal values for all simulations
+final_values = result['final_values']  # numpy array, length = n_simulations
+```
+
+### Result Fields
+
+| Field                 | Type                       | Description                                                |
+| --------------------- | -------------------------- | ---------------------------------------------------------- |
+| `expected_return`     | `float`                    | Expected return as percentage over the horizon             |
+| `probability_of_loss` | `float`                    | Probability that final value < initial value (0.0 to 1.0)  |
+| `var_95`              | `float`                    | Value at Risk at 95% confidence (percentage)               |
+| `cvar_95`             | `float`                    | Conditional VaR at 95% confidence (percentage)             |
+| `percentile_paths`    | `List[Tuple[float, List]]` | Portfolio paths at 5th, 25th, 50th, 75th, 95th percentiles |
+| `final_values`        | `numpy.ndarray`            | Terminal portfolio values for all simulations              |
+
+---
+
 ## VectorBT Comparison
 
 RaptorBT is designed as a drop-in replacement for VectorBT. Here's a side-by-side comparison:
@@ -643,9 +717,26 @@ inst_config.set_fixed_target(0.05)
 ```
 
 **Fields:**
+
 - `lot_size` - Minimum tradeable quantity. Position sizes are rounded down to nearest lot_size multiple. Use `1.0` for equities, `50.0` for NIFTY F&O, `0.01` for forex.
 - `alloted_capital` - Per-instrument capital cap (capped at available cash).
 - `existing_qty` / `avg_price` - Reserved for future live-to-backtest transitions.
+
+### simulate_portfolio_mc
+
+```python
+result = raptorbt.simulate_portfolio_mc(
+    returns: List[np.ndarray],               # Per-asset daily returns (N arrays)
+    weights: np.ndarray,                     # Portfolio weights (length N, sum to 1)
+    correlation_matrix: List[np.ndarray],    # N x N correlation matrix
+    initial_value: float,                    # Starting portfolio value
+    n_simulations: int = 10000,              # Number of Monte Carlo paths
+    horizon_days: int = 252,                 # Forward projection horizon in days
+    seed: int = 42,                          # Random seed for reproducibility
+) -> dict
+```
+
+Returns a dictionary with keys: `expected_return`, `probability_of_loss`, `var_95`, `cvar_95`, `percentile_paths`, `final_values`.
 
 ### PyBacktestResult
 
@@ -699,6 +790,8 @@ metrics.max_consecutive_wins
 metrics.max_consecutive_losses
 metrics.exposure_pct
 metrics.open_trade_pnl
+metrics.payoff_ratio            # avg win / avg loss (risk/reward per trade)
+metrics.recovery_factor         # net profit / max drawdown (resilience)
 
 # Convert to dictionary (VectorBT format)
 stats_dict = metrics.to_dict()
@@ -832,6 +925,22 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### v0.3.2
+
+- Add `payoff_ratio` metric to `BacktestMetrics` — average winning trade return divided by average losing trade return (absolute), measures risk/reward per trade
+- Add `recovery_factor` metric to `BacktestMetrics` — net profit divided by maximum drawdown in absolute terms, measures how many times over the strategy recovered from its worst drawdown
+- Both metrics computed in `StreamingMetrics::finalize()` (single-instrument backtest) and `PortfolioEngine` (multi-strategy aggregation)
+- Both metrics exposed via PyO3 as `#[pyo3(get)]` attributes on `PyBacktestMetrics`
+- Handles edge cases: returns `f64::INFINITY` when denominator is zero with positive numerator, `0.0` otherwise
+
+### v0.3.1
+
+- Add Monte Carlo portfolio simulation (`simulate_portfolio_mc`) for forward risk projection
+- Geometric Brownian Motion (GBM) with Cholesky decomposition for correlated multi-asset simulation
+- Rayon-parallelized simulation paths with deterministic seeding (xoshiro256\*\*)
+- Returns percentile paths (P5/P25/P50/P75/P95), VaR, CVaR, expected return, and probability of loss
+- GIL released during simulation for maximum Python concurrency
 
 ### v0.3.0
 
