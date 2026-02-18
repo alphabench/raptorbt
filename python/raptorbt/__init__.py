@@ -43,7 +43,7 @@ from raptorbt._raptorbt import (
     rolling_max,
 )
 
-__version__ = "0.3.2"
+__version__ = "0.3.2.post1"
 
 __all__ = [
     # Config classes
