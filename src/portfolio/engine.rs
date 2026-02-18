@@ -591,6 +591,30 @@ impl PortfolioEngine {
             0.0
         };
 
+        // Payoff ratio: average win / average loss (absolute value)
+        let payoff_ratio = if avg_loss_pct.abs() > 0.0 {
+            avg_win_pct / avg_loss_pct.abs()
+        } else if avg_win_pct > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
+        // Recovery factor: net profit / max drawdown (absolute value)
+        let net_profit = end_value - start_value;
+        let recovery_factor = if max_drawdown_pct > 0.0 && start_value > 0.0 {
+            let max_dd_absolute = max_drawdown_pct / 100.0 * start_value;
+            if max_dd_absolute > 0.0 {
+                net_profit / max_dd_absolute
+            } else {
+                0.0
+            }
+        } else if net_profit > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+
         BacktestMetrics {
             total_return_pct,
             sharpe_ratio,
@@ -623,6 +647,8 @@ impl PortfolioEngine {
             max_consecutive_losses,
             avg_holding_period,
             exposure_pct,
+            payoff_ratio,
+            recovery_factor,
         }
     }
 

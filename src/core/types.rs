@@ -376,6 +376,10 @@ pub struct BacktestMetrics {
     pub avg_holding_period: f64,
     /// Exposure time percentage (time in market).
     pub exposure_pct: f64,
+    /// Payoff ratio (avg win / avg loss).
+    pub payoff_ratio: f64,
+    /// Recovery factor (net profit / max drawdown).
+    pub recovery_factor: f64,
 }
 
 /// Complete backtest result.

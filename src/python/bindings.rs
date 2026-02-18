@@ -419,6 +419,10 @@ pub struct PyBacktestMetrics {
     pub avg_holding_period: f64,
     #[pyo3(get)]
     pub exposure_pct: f64,
+    #[pyo3(get)]
+    pub payoff_ratio: f64,
+    #[pyo3(get)]
+    pub recovery_factor: f64,
 }
 
 #[pymethods]
@@ -1203,6 +1207,8 @@ fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResul
         max_consecutive_losses: result.metrics.max_consecutive_losses,
         avg_holding_period: result.metrics.avg_holding_period,
         exposure_pct: result.metrics.exposure_pct,
+        payoff_ratio: result.metrics.payoff_ratio,
+        recovery_factor: result.metrics.recovery_factor,
     };
 
     let trades: Vec<PyTrade> = result
