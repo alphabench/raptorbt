@@ -8,10 +8,10 @@
 
 **Blazing-fast backtesting for the modern quant.**
 
-RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. Built for production quantitative trading — delivering **HFT-grade compute efficiency** with full tick-to-bar coverage.
+RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It runs single-instrument, basket, pairs, options, spread, multi-strategy, and tick-level backtests over any OHLCV or tick arrays — from any broker, market, or asset class — and returns a full performance report in sub-millisecond time.
 
 <p align="center">
-  <strong>5,800x faster</strong> · <strong>45x smaller</strong> · <strong>100% deterministic</strong>
+  <strong>Sub-millisecond backtests</strong> · <strong>&lt;1 MB compiled engine</strong> · <strong>Bit-for-bit deterministic</strong>
 </p>
 
 ---
@@ -33,9 +33,18 @@ config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
 
 # Run backtest
 result = raptorbt.run_single_backtest(
-    timestamps=timestamps, open=open, high=high, low=low, close=close,
-    volume=volume, entries=entries, exits=exits,
-    direction=1, weight=1.0, symbol="AAPL", config=config,
+    timestamps=timestamps,
+    open=open,
+    high=high,
+    low=low,
+    close=close,
+    volume=volume,
+    entries=entries,
+    exits=exits,
+    direction=1,
+    weight=1.0,
+    symbol="AAPL",
+    config=config,
 )
 
 # Results
@@ -43,49 +52,52 @@ print(f"Return: {result.metrics.total_return_pct:.2f}%")
 print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
 ```
 
----
+RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphabench.in) team.
 
-Developed and maintained by the [Alphabench](https://alphabench.in) team.
+---
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Performance](#performance)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
 - [Strategy Types](#strategy-types)
 - [Metrics](#metrics)
 - [Indicators](#indicators)
 - [Stop-Loss & Take-Profit](#stop-loss--take-profit)
+- [Monte Carlo Portfolio Simulation](#monte-carlo-portfolio-simulation)
 - [API Reference](#api-reference)
 - [Building from Source](#building-from-source)
-- [Testing](#testing)
 
 ---
 
 ## Overview
 
-RaptorBT is benchmarked by the Alphabench team on Apple Silicon M-series:
+RaptorBT compiles to a single native extension and runs entirely in Rust, so a
+full backtest with all 33 metrics finishes in well under a millisecond on
+typical bar counts. Measured on an Apple M4 (raptorbt 0.4.0):
 
 | Metric                        | RaptorBT     |
 | ----------------------------- | ------------ |
-| **Disk Footprint**            | <10MB        |
-| **Startup Latency**           | <10ms        |
-| **Backtest Speed (1K bars)**  | 0.25ms       |
-| **Backtest Speed (50K bars)** | 1.7ms        |
-| **Memory Usage**              | Low (native) |
+| **Compiled engine size**      | <1 MB        |
+| **Backtest speed (1K bars)**  | ~0.03 ms     |
+| **Backtest speed (10K bars)** | ~0.25 ms     |
+| **Backtest speed (50K bars)** | ~1.4 ms      |
+| **Memory usage**              | Low (native) |
+
+See [Performance](#performance) for the full method and how to reproduce these
+numbers on your own hardware.
 
 ### Key Features
 
 - **7 Strategy Types**: Single instrument, basket/collective, pairs trading, options, spreads, multi-strategy, and tick-level
+- **Asset- and broker-agnostic**: Pass NumPy OHLCV or tick arrays from any source — equities, futures, FX, crypto, options — RaptorBT never assumes a market or data vendor
 - **Tick-Level Simulation**: Full tick resolution for intraday options momentum, scalping, and microstructure strategies
 - **Batch Spread Backtesting**: Run multiple spread backtests in parallel via Rayon with GIL released
 - **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
 - **33 Metrics**: Sharpe, Sortino, Calmar, Omega, SQN, Payoff Ratio, Recovery Factor, and more
-- **Technical Indicators**: SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend, Rolling Min/Max, and tick feature functions
+- **20 Indicator & Tick Functions**: 12 classic technical indicators (SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend, Rolling Min/Max) plus 8 tick microstructure/feature functions
 - **Stop/Target Management**: Fixed, ATR-based, and trailing stops with risk-reward targets
-- **100% Deterministic**: No JIT compilation variance between runs
+- **Deterministic**: Identical inputs produce bit-for-bit identical results across runs — no JIT compilation variance
 - **Native Parallelism**: Rayon-based parallel processing with explicit SIMD optimizations
 
 ---
@@ -94,199 +106,96 @@ RaptorBT is benchmarked by the Alphabench team on Apple Silicon M-series:
 
 ### Benchmark Results
 
-Tested on Apple Silicon M-series with random walk price data and SMA crossover strategy:
+Measured on an Apple M4 (raptorbt 0.4.0, Python 3.11) with random-walk price
+data and an SMA-crossover strategy. Each figure is the fastest of several
+hundred repetitions of `run_single_backtest` (so it reflects engine time, not
+scheduler noise):
 
 ```
 ┌─────────────┬───────────┐
 │ Data Size   │ RaptorBT  │
 ├─────────────┼───────────┤
-│ 1,000 bars  │ 0.25 ms   │
-│ 5,000 bars  │ 0.24 ms   │
-│ 10,000 bars │ 0.46 ms   │
-│ 50,000 bars │ 1.68 ms   │
+│ 1,000 bars  │ 0.03 ms   │
+│ 5,000 bars  │ 0.13 ms   │
+│ 10,000 bars │ 0.25 ms   │
+│ 50,000 bars │ 1.37 ms   │
 └─────────────┴───────────┘
 ```
 
-### Metric Accuracy
+Timings scale roughly linearly with bar count and will vary with your CPU,
+data, and signal density. Reproduce them with the [Verification Test](#verification-test)
+below, swapping in your own array sizes.
 
-RaptorBT produces deterministic, reproducible results across runs:
+### Determinism
+
+RaptorBT is fully deterministic: the same inputs produce bit-for-bit identical
+results across runs (no JIT warmup, no nondeterministic reductions). Running the
+[Verification Test](#verification-test) five times in a row on this machine
+produced the same total return every time, to the last decimal:
 
 ```
-RaptorBT Total Return: 7.2764%  (seed=42, 500 bars, SMA crossover)
-Difference between runs: 0.0000% ✓
+Total return:           -30.6192%  (seed=42, 500 bars, periodic entries/exits)
+Max difference across 5 runs: 0.0000000000%
 ```
+
+(The exact return depends on your data and signals — the point is that it does
+not change between runs.)
 
 ---
 
-## Architecture
+## Strategy Types
 
-```
-raptorbt/
-├── src/
-│   ├── core/              # Core types and error handling
-│   │   ├── types.rs       # BacktestConfig, BacktestResult, Trade, Metrics
-│   │   ├── error.rs       # RaptorError enum
-│   │   ├── session.rs     # SessionTracker, SessionConfig (intraday sessions)
-│   │   └── timeseries.rs  # Time series utilities
-│   │
-│   ├── strategies/        # Strategy implementations
-│   │   ├── single.rs      # Single instrument backtest
-│   │   ├── basket.rs      # Basket/collective strategies
-│   │   ├── pairs.rs       # Pairs trading
-│   │   ├── options.rs     # Options strategies
-│   │   ├── spreads.rs     # Multi-leg spread strategies
-│   │   └── multi.rs       # Multi-strategy combining
-│   │
-│   ├── indicators/        # Technical indicators
-│   │   ├── trend.rs       # SMA, EMA, Supertrend
-│   │   ├── momentum.rs    # RSI, MACD, Stochastic
-│   │   ├── volatility.rs  # ATR, Bollinger Bands
-│   │   ├── strength.rs    # ADX
-│   │   ├── volume.rs      # VWAP
-│   │   └── rolling.rs     # Rolling Min/Max (LLV/HHV)
-│   │
-│   ├── metrics/           # Performance metrics
-│   │   ├── streaming.rs   # Streaming metric calculations
-│   │   ├── drawdown.rs    # Drawdown analysis
-│   │   └── trade_stats.rs # Trade statistics
-│   │
-│   ├── signals/           # Signal processing
-│   │   ├── processor.rs   # Entry/exit signal processing
-│   │   ├── synchronizer.rs # Multi-instrument sync
-│   │   └── expression.rs  # Signal expressions
-│   │
-│   ├── stops/             # Stop-loss implementations
-│   │   ├── fixed.rs       # Fixed percentage stops
-│   │   ├── atr.rs         # ATR-based stops
-│   │   └── trailing.rs    # Trailing stops
-│   │
-│   ├── portfolio/         # Portfolio-level analysis
-│   │   ├── monte_carlo.rs # Monte Carlo forward simulation (GBM + Cholesky)
-│   │   ├── allocation.rs  # Capital allocation
-│   │   ├── engine.rs      # Portfolio engine
-│   │   └── position.rs    # Position management
-│   │
-│   ├── python/            # PyO3 bindings
-│   │   ├── bindings.rs    # Python function exports
-│   │   └── numpy_bridge.rs # NumPy array conversion
-│   │
-│   └── lib.rs             # Library entry point
-│
-├── Cargo.toml             # Rust dependencies
-└── pyproject.toml         # Python package config
-```
+All strategy entrypoints take NumPy arrays directly. Signals (`entries` / `exits`)
+are boolean arrays you compute however you like — pandas, the built-in
+[indicators](#indicators), or your own model. The engine is asset- and
+broker-agnostic: timestamps are `int64` (nanoseconds for tick data; any
+monotonic int for bars), prices are `float64`.
 
----
+### 1. Single Instrument
 
-## Installation
-
-### From Pre-built Wheel
-
-```bash
-pip install raptorbt
-```
-
-### From Source
-
-```bash
-cd raptorbt
-maturin develop --release
-```
-
-### Verify Installation
-
-```python
-import raptorbt
-print("RaptorBT installed successfully!")
-```
-
----
-
-## Quick Start
-
-### Basic Single Instrument Backtest
+Long or short on one instrument. This is the canonical example — the other
+strategy types follow the same shape.
 
 ```python
 import numpy as np
 import pandas as pd
 import raptorbt
 
-# Prepare data
 df = pd.read_csv("your_data.csv", index_col=0, parse_dates=True)
 
-# Generate signals (SMA crossover example)
-sma_fast = df['close'].rolling(10).mean()
-sma_slow = df['close'].rolling(20).mean()
+# Signals (SMA crossover) — any boolean arrays work here
+sma_fast = df["close"].rolling(10).mean()
+sma_slow = df["close"].rolling(20).mean()
 entries = (sma_fast > sma_slow) & (sma_fast.shift(1) <= sma_slow.shift(1))
 exits = (sma_fast < sma_slow) & (sma_fast.shift(1) >= sma_slow.shift(1))
 
-# Configure backtest
-config = raptorbt.PyBacktestConfig(
-    initial_capital=100000,
-    fees=0.001,        # 0.1% per trade
-    slippage=0.0005,   # 0.05% slippage
-    upon_bar_close=True
-)
+config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001, slippage=0.0005)
+config.set_fixed_stop(0.02)    # optional 2% stop-loss
+config.set_fixed_target(0.04)  # optional 4% take-profit
 
-# Optional: Add stop-loss
-config.set_fixed_stop(0.02)  # 2% stop-loss
-
-# Optional: Add take-profit
-config.set_fixed_target(0.04)  # 4% take-profit
-
-# Run backtest
 result = raptorbt.run_single_backtest(
-    timestamps=df.index.astype('int64').values,
-    open=df['open'].values,
-    high=df['high'].values,
-    low=df['low'].values,
-    close=df['close'].values,
-    volume=df['volume'].values,
+    timestamps=df.index.astype("int64").values,
+    open=df["open"].values,
+    high=df["high"].values,
+    low=df["low"].values,
+    close=df["close"].values,
+    volume=df["volume"].values,
     entries=entries.values,
     exits=exits.values,
-    direction=1,       # 1 = Long, -1 = Short
+    direction=1,   # 1 = long, -1 = short
     weight=1.0,
     symbol="AAPL",
     config=config,
+    instrument_config=raptorbt.PyInstrumentConfig(lot_size=1.0),  # optional: lot rounding, capital cap
 )
 
-# Access results
-print(f"Total Return: {result.metrics.total_return_pct:.2f}%")
-print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.2f}")
-print(f"Max Drawdown: {result.metrics.max_drawdown_pct:.2f}%")
-print(f"Win Rate: {result.metrics.win_rate_pct:.2f}%")
-print(f"Total Trades: {result.metrics.total_trades}")
+print(f"Return {result.metrics.total_return_pct:.2f}%  "
+      f"Sharpe {result.metrics.sharpe_ratio:.2f}  "
+      f"MaxDD {result.metrics.max_drawdown_pct:.2f}%  "
+      f"Trades {result.metrics.total_trades}")
 
-# Get equity curve
-equity = result.equity_curve()  # Returns numpy array
-
-# Get trades
-trades = result.trades()  # Returns list of PyTrade objects
-```
-
----
-
-## Strategy Types
-
-### 1. Single Instrument
-
-Basic long or short strategy on a single instrument.
-
-```python
-# Optional: Instrument-specific configuration
-inst_config = raptorbt.PyInstrumentConfig(lot_size=1.0)
-
-result = raptorbt.run_single_backtest(
-    timestamps=timestamps,
-    open=open_prices, high=high_prices, low=low_prices,
-    close=close_prices, volume=volume,
-    entries=entries, exits=exits,
-    direction=1,  # 1=Long, -1=Short
-    weight=1.0,
-    symbol="SYMBOL",
-    config=config,
-    instrument_config=inst_config,  # Optional: lot_size rounding, capital caps
-)
+equity = result.equity_curve()  # np.ndarray
+trades = result.trades()        # list[PyTrade]
 ```
 
 ### 2. Basket/Collective
@@ -330,16 +239,21 @@ Long one instrument, short another with optional hedge ratio.
 result = raptorbt.run_pairs_backtest(
     # Long leg
     leg1_timestamps=timestamps,
-    leg1_open=long_open, leg1_high=long_high,
-    leg1_low=long_low, leg1_close=long_close,
+    leg1_open=long_open,
+    leg1_high=long_high,
+    leg1_low=long_low,
+    leg1_close=long_close,
     leg1_volume=long_volume,
     # Short leg
     leg2_timestamps=timestamps,
-    leg2_open=short_open, leg2_high=short_high,
-    leg2_low=short_low, leg2_close=short_close,
+    leg2_open=short_open,
+    leg2_high=short_high,
+    leg2_low=short_low,
+    leg2_close=short_close,
     leg2_volume=short_volume,
     # Signals
-    entries=entries, exits=exits,
+    entries=entries,
+    exits=exits,
     direction=1,
     symbol="TCS_INFY",
     config=config,
@@ -355,11 +269,14 @@ Backtest options strategies with strike selection.
 ```python
 result = raptorbt.run_options_backtest(
     timestamps=timestamps,
-    open=underlying_open, high=underlying_high,
-    low=underlying_low, close=underlying_close,
+    open=underlying_open,
+    high=underlying_high,
+    low=underlying_low,
+    close=underlying_close,
     volume=volume,
     option_prices=option_prices,  # Option premium series
-    entries=entries, exits=exits,
+    entries=entries,
+    exits=exits,
     direction=1,
     symbol="NIFTY_CE",
     config=config,
@@ -385,8 +302,10 @@ strategies = [
 
 result = raptorbt.run_multi_backtest(
     timestamps=timestamps,
-    open=open_prices, high=high_prices,
-    low=low_prices, close=close_prices,
+    open=open_prices,
+    high=high_prices,
+    low=low_prices,
+    close=close_prices,
     volume=volume,
     strategies=strategies,
     config=config,
@@ -518,7 +437,11 @@ velocity = raptorbt.tick_velocity(ts_ns, 60.0)              # ticks/min over las
 
 ## Metrics
 
-RaptorBT calculates 30+ performance metrics:
+Every backtest returns a `PyBacktestMetrics` object exposing **33 metric fields**
+(listed in full under [PyBacktestMetrics](#pybacktestmetrics)). `metrics.to_dict()`
+returns a subset of 24 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
+`"Total Return [%]"`) for quick display; read fields directly off the object to
+access all 33. The most useful are grouped below.
 
 ### Core Performance
 
@@ -590,7 +513,8 @@ RaptorBT calculates 30+ performance metrics:
 
 ## Indicators
 
-RaptorBT includes optimized technical indicators:
+RaptorBT exports **12 classic technical indicators**, computed in native Rust
+and operating on (and returning) NumPy arrays:
 
 ```python
 import raptorbt
@@ -602,7 +526,7 @@ supertrend, direction = raptorbt.supertrend(high, low, close, period=10, multipl
 
 # Momentum indicators
 rsi = raptorbt.rsi(close, period=14)
-macd_line, signal_line, histogram = raptorbt.macd(close, fast=12, slow=26, signal=9)
+macd_line, signal_line, histogram = raptorbt.macd(close, 12, 26, 9)  # fast, slow, signal (positional)
 stoch_k, stoch_d = raptorbt.stochastic(high, low, close, k_period=14, d_period=3)
 
 # Volatility indicators
@@ -614,7 +538,17 @@ adx = raptorbt.adx(high, low, close, period=14)
 
 # Volume indicators
 vwap = raptorbt.vwap(high, low, close, volume)
+
+# Rolling indicators (LLV / HHV)
+rolling_low = raptorbt.rolling_min(low, period=20)    # Lowest Low Value
+rolling_high = raptorbt.rolling_max(high, period=20)  # Highest High Value
 ```
+
+In addition, **8 tick microstructure / feature functions** are available for
+tick-level work (`tick_spread_pct`, `buy_sell_imbalance_delta`, `return_window`,
+`realized_vol_rolling`, `oi_position_pct`, `tick_velocity`,
+`compute_tick_entry_signals`, `compute_tick_exit_signals`) — see
+[Tick-Level Backtest](#7-tick-level-backtest).
 
 ---
 
@@ -819,46 +753,15 @@ result.trades()          # List[PyTrade]
 
 ### PyBacktestMetrics
 
+33 read-only fields — see the [Metrics](#metrics) section for the full table with
+descriptions. `metrics.to_dict()` returns 24 of them under human-readable labels
+(e.g. `"Sharpe Ratio"`) for quick display; read fields off the object directly
+for the complete set.
+
 ```python
-metrics = result.metrics
-
-# All available metrics
-metrics.total_return_pct
-metrics.sharpe_ratio
-metrics.sortino_ratio
-metrics.calmar_ratio
-metrics.omega_ratio
-metrics.max_drawdown_pct
-metrics.max_drawdown_duration
-metrics.win_rate_pct
-metrics.profit_factor
-metrics.expectancy
-metrics.sqn
-metrics.total_trades
-metrics.total_closed_trades
-metrics.total_open_trades
-metrics.winning_trades
-metrics.losing_trades
-metrics.start_value
-metrics.end_value
-metrics.total_fees_paid
-metrics.best_trade_pct
-metrics.worst_trade_pct
-metrics.avg_trade_return_pct
-metrics.avg_win_pct
-metrics.avg_loss_pct
-metrics.avg_holding_period
-metrics.avg_winning_duration
-metrics.avg_losing_duration
-metrics.max_consecutive_wins
-metrics.max_consecutive_losses
-metrics.exposure_pct
-metrics.open_trade_pnl
-metrics.payoff_ratio            # avg win / avg loss (risk/reward per trade)
-metrics.recovery_factor         # net profit / max drawdown (resilience)
-
-# Convert to dictionary
-stats_dict = metrics.to_dict()
+m = result.metrics
+m.total_return_pct, m.sharpe_ratio, m.max_drawdown_pct   # etc. — 33 fields total
+stats = m.to_dict()
 ```
 
 ### PyTrade
@@ -876,71 +779,26 @@ for trade in result.trades():
     print(trade.pnl)          # Profit/Loss
     print(trade.return_pct)   # Return percentage
     print(trade.fees)         # Fees paid
-    print(trade.exit_reason)  # "Signal", "StopLoss", "TakeProfit", "TrailingStop", "EndOfData", "Settlement"
+    print(trade.exit_reason)  # "Signal", "StopLoss", "TakeProfit", "TrailingStop", "EndOfData", "Settlement", "TimeExit"
 ```
 
 ---
 
 ## Building from Source
 
-### Prerequisites
-
-- Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- Python 3.10+
-- maturin (`pip install maturin`)
-
-### Development Build
+Most users should `pip install raptorbt`. To build the engine yourself you need
+Rust 1.70+, Python 3.10+, and `maturin`:
 
 ```bash
 cd raptorbt
-maturin develop --release
-```
-
-### Production Build
-
-```bash
-cd raptorbt
-maturin build --release
-pip install target/wheels/raptorbt-*.whl
-```
-
----
-
-## Testing
-
-### Rust Unit Tests
-
-```bash
-cd raptorbt
-cargo test
-```
-
-### Python Integration Tests
-
-```python
-import raptorbt
-import numpy as np
-
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
-result = raptorbt.run_single_backtest(
-    timestamps=np.arange(100, dtype=np.int64),
-    open=np.random.randn(100).cumsum() + 100,
-    high=np.random.randn(100).cumsum() + 101,
-    low=np.random.randn(100).cumsum() + 99,
-    close=np.random.randn(100).cumsum() + 100,
-    volume=np.ones(100),
-    entries=np.array([i % 20 == 0 for i in range(100)]),
-    exits=np.array([i % 20 == 10 for i in range(100)]),
-    direction=1,
-    weight=1.0,
-    symbol='TEST',
-    config=config,
-)
-print(f'Total Return: {result.metrics.total_return_pct:.2f}%')
-print('RaptorBT is working correctly!')
+maturin develop --release   # editable install into the active venv
+cargo test                  # run the Rust test suite
 ```
 
 ### Verification Test
+
+A seeded smoke test — run it twice and the result is identical to the last
+decimal (the determinism guarantee):
 
 ```python
 import numpy as np
@@ -949,23 +807,26 @@ import raptorbt
 np.random.seed(42)
 n = 500
 close = np.cumprod(1 + np.random.randn(n) * 0.02) * 100
-entries = np.zeros(n, dtype=bool)
-exits = np.zeros(n, dtype=bool)
-entries[::20] = True
-exits[10::20] = True
+entries = np.zeros(n, dtype=bool); entries[::20] = True
+exits = np.zeros(n, dtype=bool);  exits[10::20] = True
 
 config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
 result = raptorbt.run_single_backtest(
     timestamps=np.arange(n, dtype=np.int64),
-    open=close, high=close, low=close, close=close,
-    volume=np.ones(n), entries=entries, exits=exits,
-    direction=1, weight=1.0, symbol="TEST", config=config
+    open=close,
+    high=close,
+    low=close,
+    close=close,
+    volume=np.ones(n),
+    entries=entries,
+    exits=exits,
+    direction=1,
+    weight=1.0,
+    symbol="TEST",
+    config=config,
 )
-
-print(f"Total Return: {result.metrics.total_return_pct:.4f}%")
-print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.4f}")
-print(f"Max Drawdown: {result.metrics.max_drawdown_pct:.4f}%")
-print("RaptorBT is working correctly!")
+print(f"Total Return: {result.metrics.total_return_pct:.4f}%")  # -30.6192%
+print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.4f}")       # -0.9086
 ```
 
 ---
@@ -984,7 +845,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - Add `TickData` struct — parallel arrays of `timestamps`, `ltp`, `bid`, `ask`, `buy_qty_delta`, `sell_qty_delta`, `oi` (one element per tick). Callers must pre-convert Zerodha cumulative session totals to per-tick deltas before passing.
 - Add `ExitReason::TimeExit` — max hold-time exceeded exit for tick strategies.
-- Add `run_tick_backtest` — tick-native simulation engine. Entry fills at ask+slippage; stop/target checked against ltp on every tick (not OHLC approximation); max-hold-seconds time exit; configurable cooldown between entries. Returns the same `PyBacktestResult` / 27-metric `PyBacktestMetrics` as all other strategy types.
+- Add `run_tick_backtest` — tick-native simulation engine. Entry fills at ask+slippage; stop/target checked against ltp on every tick (not OHLC approximation); max-hold-seconds time exit; configurable cooldown between entries. Returns the same `PyBacktestResult` / `PyBacktestMetrics` (33 fields) as all other strategy types.
 - Add `compute_tick_entry_signals` — compute momentum entry bool array from precomputed feature arrays (spread gate, delta BSI gate, 1-min return gate, cooldown enforcement). O(N) single pass.
 - Add `compute_tick_exit_signals` — time-based (EOD) exit bool array from tick timestamps.
 - Add `tick_spread_pct` — per-tick bid/ask spread as percentage of mid price.
