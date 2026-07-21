@@ -12,9 +12,12 @@
 
 use pyo3::prelude::*;
 
+pub mod accounts;
 pub mod core;
+pub mod data;
 pub mod execution;
 pub mod indicators;
+pub mod instruments;
 pub mod metrics;
 pub mod portfolio;
 pub mod python;
@@ -32,6 +35,9 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add("SESSION_MCX", 870.0)?; // 09:00-23:30 commodity
     m.add("SESSION_CDS", 480.0)?; // 09:00-17:00 currency
     m.add("SESSION_CONTINUOUS", 0.0)?; // 24x7, annualize on calendar time
+
+    // Timezone offset (ns) for session-aligned day/week/month/year bars.
+    m.add("IST_OFFSET_NS", crate::data::IST_OFFSET_NS)?;
 
     // Register config classes
     m.add_class::<python::bindings::PyBacktestConfig>()?;
@@ -56,8 +62,20 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::run_spread_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_tick_backtest, m)?)?;
 
+    // Register instrument market definitions
+    m.add_class::<python::instrument_bindings::PyInstrumentSpec>()?;
+
+    // Register streaming indicators
+    m.add_class::<python::indicator_bindings::PyIndicator>()?;
+
+    // Register bar aggregation
+    m.add_class::<python::data_bindings::PyBarAggregator>()?;
+    m.add_function(wrap_pyfunction!(python::data_bindings::aggregate_bars, m)?)?;
+    m.add_function(wrap_pyfunction!(python::data_bindings::bars_from_ticks, m)?)?;
+
     // Register the per-bar strategy session (class-based strategy contract)
     m.add_class::<python::strategy_bindings::PyKernelSession>()?;
+    m.add_class::<python::session_bindings::PyPortfolioSession>()?;
     m.add_class::<python::strategy_bindings::PyEngineEvent>()?;
     m.add_class::<python::strategy_bindings::PyPositionSnapshot>()?;
     m.add_function(wrap_pyfunction!(python::strategy_bindings::resolve_atr_period, m)?)?;

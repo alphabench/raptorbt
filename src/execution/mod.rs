@@ -3,6 +3,7 @@
 pub mod fees;
 pub mod fill;
 pub mod indian_costs;
+pub mod orders;
 pub mod slippage;
 
 pub use fees::FeeModel;

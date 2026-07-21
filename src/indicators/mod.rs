@@ -5,6 +5,7 @@
 
 pub mod momentum;
 pub mod rolling;
+pub mod streaming;
 pub mod strength;
 pub mod tick_features;
 pub mod trend;

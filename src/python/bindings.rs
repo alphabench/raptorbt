@@ -71,6 +71,19 @@ pub struct PyBacktestConfig {
     /// Reproduce pre-0.5.0 annualization constants.
     #[pyo3(get, set)]
     pub legacy_annualization: bool,
+    /// Probability a marketable resting limit order fills (1.0 = always).
+    #[pyo3(get, set)]
+    pub fill_prob_limit: f64,
+    /// Probability a stop/market fill slips one tick against the trader.
+    #[pyo3(get, set)]
+    pub fill_prob_slippage: f64,
+    /// Seed for the stochastic-fill RNG.
+    #[pyo3(get, set)]
+    pub fill_seed: u64,
+    /// Infer intra-bar high/low order from candle geometry on stop/target
+    /// conflicts; false keeps the legacy stop-first assumption.
+    #[pyo3(get, set)]
+    pub bar_path_adaptive: bool,
     stop_config: StopConfig,
     target_config: TargetConfig,
 }
@@ -92,6 +105,10 @@ impl PyBacktestConfig {
         max_positions=None,
         max_drawdown_pct=None,
         legacy_annualization=false,
+        fill_prob_limit=1.0,
+        fill_prob_slippage=0.0,
+        fill_seed=0,
+        bar_path_adaptive=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -107,6 +124,10 @@ impl PyBacktestConfig {
         max_positions: Option<usize>,
         max_drawdown_pct: Option<f64>,
         legacy_annualization: bool,
+        fill_prob_limit: f64,
+        fill_prob_slippage: f64,
+        fill_seed: u64,
+        bar_path_adaptive: bool,
     ) -> Self {
         Self {
             initial_capital,
@@ -121,6 +142,10 @@ impl PyBacktestConfig {
             max_positions,
             max_drawdown_pct,
             legacy_annualization,
+            fill_prob_limit,
+            fill_prob_slippage,
+            fill_seed,
+            bar_path_adaptive,
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
         }
@@ -174,6 +199,10 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             max_positions: py_config.max_positions,
             max_drawdown_pct: py_config.max_drawdown_pct,
             legacy_annualization: py_config.legacy_annualization,
+            fill_prob_limit: py_config.fill_prob_limit,
+            fill_prob_slippage: py_config.fill_prob_slippage,
+            fill_seed: py_config.fill_seed,
+            bar_path_adaptive: py_config.bar_path_adaptive,
         }
     }
 }

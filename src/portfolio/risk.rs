@@ -16,6 +16,14 @@ pub enum RejectReason {
     /// Requested size rounded/computed to zero units (e.g. size fraction too
     /// small for the lot size, or insufficient capital at this price).
     ZeroSize,
+    /// The instrument has expired; no further entries are possible.
+    Expired,
+    /// The instrument is not yet active at this bar's timestamp.
+    Inactive,
+    /// An explicit-size order costs more than the available capital.
+    InsufficientCapital,
+    /// The margin-call kill-switch has tripped; no further entries.
+    MarginCall,
 }
 
 impl RejectReason {
@@ -25,6 +33,10 @@ impl RejectReason {
             RejectReason::MaxPositions => "max_positions",
             RejectReason::DrawdownHalt => "drawdown_halt",
             RejectReason::ZeroSize => "zero_size",
+            RejectReason::Expired => "expired",
+            RejectReason::Inactive => "inactive",
+            RejectReason::InsufficientCapital => "insufficient_capital",
+            RejectReason::MarginCall => "margin_call",
         }
     }
 }

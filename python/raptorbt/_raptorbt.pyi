@@ -19,6 +19,7 @@ SESSION_NSE: float
 SESSION_MCX: float
 SESSION_CDS: float
 SESSION_CONTINUOUS: float
+IST_OFFSET_NS: int
 
 # An instrument for the basket/portfolio runners:
 # (timestamps, open, high, low, close, volume, entries, exits, direction, weight, symbol)
@@ -36,6 +37,10 @@ class PyBacktestConfig:
     fee_segment: str | None
     max_positions: int | None
     max_drawdown_pct: float | None
+    fill_prob_limit: float
+    fill_prob_slippage: float
+    fill_seed: int
+    bar_path_adaptive: bool
     legacy_annualization: bool
 
     def __init__(
@@ -52,6 +57,10 @@ class PyBacktestConfig:
         max_positions: int | None = ...,
         max_drawdown_pct: float | None = ...,
         legacy_annualization: bool = ...,
+        fill_prob_limit: float = ...,
+        fill_prob_slippage: float = ...,
+        fill_seed: int = ...,
+        bar_path_adaptive: bool = ...,
     ) -> None: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...
@@ -257,6 +266,181 @@ def realized_vol_rolling(
 def oi_position_pct(oi: _F64) -> _F64: ...
 def tick_velocity(timestamps_ns: _I64, window_seconds: float = ...) -> _F64: ...
 
+# --- Instrument market definitions ------------------------------------------
+
+class InstrumentSpec:
+    symbol: str
+    kind: str
+    price_increment: float
+    size_increment: float
+    lot_size: float
+    multiplier: float
+    margin_init: float
+    margin_maint: float
+    maker_fee: float
+    taker_fee: float
+    activation_ns: int | None
+    expiration_ns: int | None
+    strike: float | None
+    right: str | None
+    underlying: str | None
+    tradable: bool
+    @staticmethod
+    def equity(
+        symbol: str,
+        price_increment: float = ...,
+        lot_size: float = ...,
+        size_increment: float = ...,
+        margin_init: float = ...,
+        margin_maint: float = ...,
+        maker_fee: float = ...,
+        taker_fee: float = ...,
+    ) -> InstrumentSpec: ...
+    @staticmethod
+    def futures_contract(
+        symbol: str,
+        expiration_ns: int,
+        lot_size: float,
+        multiplier: float = ...,
+        price_increment: float = ...,
+        underlying: str | None = ...,
+        activation_ns: int | None = ...,
+        margin_init: float = ...,
+        margin_maint: float = ...,
+        maker_fee: float = ...,
+        taker_fee: float = ...,
+    ) -> InstrumentSpec: ...
+    @staticmethod
+    def perpetual(
+        symbol: str,
+        lot_size: float = ...,
+        multiplier: float = ...,
+        price_increment: float = ...,
+        size_increment: float = ...,
+        underlying: str | None = ...,
+        margin_init: float = ...,
+        margin_maint: float = ...,
+        maker_fee: float = ...,
+        taker_fee: float = ...,
+    ) -> InstrumentSpec: ...
+    @staticmethod
+    def option(
+        symbol: str,
+        strike: float,
+        right: str,
+        expiration_ns: int,
+        lot_size: float,
+        multiplier: float = ...,
+        price_increment: float = ...,
+        underlying: str | None = ...,
+        binary: bool = ...,
+        activation_ns: int | None = ...,
+        margin_init: float = ...,
+        margin_maint: float = ...,
+        maker_fee: float = ...,
+        taker_fee: float = ...,
+    ) -> InstrumentSpec: ...
+    @staticmethod
+    def currency_pair(
+        symbol: str,
+        price_increment: float = ...,
+        size_increment: float = ...,
+        lot_size: float = ...,
+        margin_init: float = ...,
+        margin_maint: float = ...,
+        maker_fee: float = ...,
+        taker_fee: float = ...,
+    ) -> InstrumentSpec: ...
+    @staticmethod
+    def index(symbol: str, price_increment: float = ...) -> InstrumentSpec: ...
+
+# --- Streaming indicators ----------------------------------------------------
+
+class Indicator:
+    kind: str
+    value: Any | None
+    initialized: bool
+    @staticmethod
+    def sma(period: int) -> Indicator: ...
+    @staticmethod
+    def ema(period: int) -> Indicator: ...
+    @staticmethod
+    def wilder_ma(period: int) -> Indicator: ...
+    @staticmethod
+    def wma(period: int) -> Indicator: ...
+    @staticmethod
+    def roc(period: int) -> Indicator: ...
+    @staticmethod
+    def stddev(period: int) -> Indicator: ...
+    @staticmethod
+    def rsi(period: int) -> Indicator: ...
+    @staticmethod
+    def atr(period: int) -> Indicator: ...
+    @staticmethod
+    def donchian(period: int) -> Indicator: ...
+    @staticmethod
+    def bollinger(period: int, k: float = ...) -> Indicator: ...
+    @staticmethod
+    def macd(fast: int = ..., slow: int = ..., signal: int = ...) -> Indicator: ...
+    def update_bar(self, open: float, high: float, low: float, close: float) -> Any | None: ...
+    def reset(self) -> None: ...
+
+# --- Bar aggregation ---------------------------------------------------------
+
+_BarArrays = tuple[_I64, _F64, _F64, _F64, _F64, _F64]
+
+class BarAggregator:
+    step: int
+    unit: str
+    def __init__(self, step: int, unit: str) -> None: ...
+    def push_bar(
+        self, timestamp: int, open: float, high: float, low: float,
+        close: float, volume: float,
+    ) -> tuple[int, float, float, float, float, float] | None: ...
+    def push_trade(
+        self, timestamp: int, price: float, size: float
+    ) -> tuple[int, float, float, float, float, float] | None: ...
+    def flush(self) -> tuple[int, float, float, float, float, float] | None: ...
+
+def aggregate_bars(
+    timestamps: _I64, open: _F64, high: _F64, low: _F64, close: _F64,
+    volume: _F64, step: int, unit: str, tz_offset_ns: int = ...,
+) -> _BarArrays: ...
+def bars_from_ticks(
+    timestamps: _I64, ltp: _F64, buy_qty_delta: _F64, sell_qty_delta: _F64,
+    step: int, unit: str, tz_offset_ns: int = ...,
+) -> _BarArrays: ...
+
+class PyPortfolioSession:
+    def __init__(self, config: PyBacktestConfig | None = ...) -> None: ...
+    def add_instrument(
+        self, symbol: str, direction: int = ...,
+        instrument_config: PyInstrumentConfig | None = ...,
+        instrument: InstrumentSpec | None = ..., oms_type: str = ...,
+    ) -> int: ...
+    def set_bars(
+        self, instrument: int, timestamps: _I64, open: _F64, high: _F64,
+        low: _F64, close: _F64, volume: _F64,
+    ) -> None: ...
+    def seal(self) -> None: ...
+    def __len__(self) -> int: ...
+    def current(self) -> tuple[int, int, int, float, float, float, float, float] | None: ...
+    def apply_current(
+        self, entry: bool = ..., exit: bool = ..., atr: float = ...,
+        size_mult: float | None = ..., stop_price: float | None = ...,
+        target_price: float | None = ...,
+    ) -> list[PyEngineEvent]: ...
+    def submit_order(self, instrument: int, *args: Any, **kwargs: Any) -> int: ...
+    def cancel_order(self, instrument: int, idx: int, order_id: int) -> bool: ...
+    def cancel_all_orders(self, instrument: int, idx: int) -> list[int]: ...
+    def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
+    def request_close(self, instrument: int, position_id: int) -> None: ...
+    def positions(self, instrument: int) -> list[PyPositionSnapshot]: ...
+    def position(self, instrument: int) -> PyPositionSnapshot | None: ...
+    def equity(self) -> float: ...
+    def cash(self) -> float: ...
+    def finish(self) -> PyPortfolioResult: ...
+
 # --- Per-bar strategy session (class-based strategy contract) ---------------
 
 class PyEngineEvent:
@@ -267,8 +451,11 @@ class PyEngineEvent:
     direction: int | None
     trade: PyTrade | None
     reject_reason: str | None
+    order_id: int | None
+    client_order_id: str | None
 
 class PyPositionSnapshot:
+    position_id: int
     entry_idx: int
     entry_price: float
     size: float
@@ -283,6 +470,10 @@ class PyKernelSession:
         direction: int = ...,
         config: PyBacktestConfig | None = ...,
         instrument_config: PyInstrumentConfig | None = ...,
+        instrument: InstrumentSpec | None = ...,
+        oms_type: str = ...,
+        account_type: str = ...,
+        leverage: float = ...,
     ) -> None: ...
     def step(
         self,
@@ -300,8 +491,45 @@ class PyKernelSession:
         stop_price: float | None = ...,
         target_price: float | None = ...,
     ) -> list[PyEngineEvent]: ...
-    def set_stop_price(self, price: float | None) -> None: ...
-    def set_target_price(self, price: float | None) -> None: ...
+    def submit_order(
+        self,
+        side: str,
+        kind: str,
+        submitted_idx: int,
+        submitted_ts: int,
+        client_id: str,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
+        trigger_price: float | None = ...,
+        tif: str = ...,
+        expire_ns: int | None = ...,
+        stop_price: float | None = ...,
+        target_price: float | None = ...,
+        offset: float | None = ...,
+        offset_kind: str = ...,
+        limit_offset: float = ...,
+        post_only: bool = ...,
+        reduce_only: bool = ...,
+        parent_id: int | None = ...,
+    ) -> int: ...
+    def link_oco(self, order_ids: list[int]) -> None: ...
+    def cancel_order(self, idx: int, order_id: int) -> bool: ...
+    def cancel_all_orders(self, idx: int) -> list[int]: ...
+    def modify_order(
+        self,
+        order_id: int,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
+        trigger_price: float | None = ...,
+    ) -> bool: ...
+    def open_order_ids(self) -> list[int]: ...
+    def positions(self) -> list[PyPositionSnapshot]: ...
+    def request_close(self, position_id: int) -> None: ...
+    def free_capital(self) -> float: ...
+    def set_stop_price(self, price: float | None, position_id: int | None = ...) -> None: ...
+    def set_target_price(self, price: float | None, position_id: int | None = ...) -> None: ...
     def equity(self) -> float: ...
     def cash(self) -> float: ...
     def is_in_position(self) -> bool: ...

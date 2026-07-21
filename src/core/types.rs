@@ -42,7 +42,7 @@ impl Default for Direction {
 }
 
 /// OHLCV data for a single bar.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OhlcvBar {
     pub timestamp: Timestamp,
     pub open: Price,
@@ -262,6 +262,8 @@ pub enum ExitReason {
     TrailingStop,
     /// End of data.
     EndOfData,
+    /// Closed by an explicit order (class-based order API).
+    Order,
     /// Option expiry settlement.
     Settlement,
     /// Max hold time exceeded (tick backtest).
@@ -334,6 +336,30 @@ pub struct BacktestConfig {
     /// bar count over 365.25 rather than elapsed time. Setting this to `true`
     /// restores those constants.
     pub legacy_annualization: bool,
+
+    /// Probability a marketable resting limit order actually fills on a bar
+    /// it touches. `1.0` (default) is deterministic legacy behavior.
+    #[serde(default = "default_one")]
+    pub fill_prob_limit: f64,
+
+    /// Probability a stop/market fill slips one tick against the trader.
+    /// `0.0` (default) disables. Requires an instrument `price_increment`.
+    #[serde(default)]
+    pub fill_prob_slippage: f64,
+
+    /// Seed for the stochastic-fill RNG; same seed, same fills.
+    #[serde(default)]
+    pub fill_seed: u64,
+
+    /// Infer intra-bar high/low ordering from candle geometry when a stop
+    /// and target are both touched in one bar (up-candle: open→low→high→
+    /// close). `false` (default) keeps the legacy stop-first assumption.
+    #[serde(default)]
+    pub bar_path_adaptive: bool,
+}
+
+fn default_one() -> f64 {
+    1.0
 }
 
 impl Default for BacktestConfig {
@@ -353,6 +379,10 @@ impl Default for BacktestConfig {
             max_positions: None,
             max_drawdown_pct: None,
             legacy_annualization: false,
+            fill_prob_limit: 1.0,
+            fill_prob_slippage: 0.0,
+            fill_seed: 0,
+            bar_path_adaptive: false,
         }
     }
 }

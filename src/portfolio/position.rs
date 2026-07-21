@@ -34,12 +34,21 @@ pub struct PositionManager {
     trade_counter: u64,
     /// Symbol being traded.
     pub symbol: String,
+    /// Contract point value: notional = price * size * multiplier.
+    ///
+    /// `1.0` for cash instruments, the contract multiplier for derivatives.
+    contract_multiplier: f64,
 }
 
 impl PositionManager {
     /// Create a new position manager.
     pub fn new(symbol: String) -> Self {
-        Self { position: Position::new(), trade_counter: 0, symbol }
+        Self { position: Position::new(), trade_counter: 0, symbol, contract_multiplier: 1.0 }
+    }
+
+    /// Set the contract point value used for PnL and notional calculations.
+    pub fn set_contract_multiplier(&mut self, multiplier: f64) {
+        self.contract_multiplier = if multiplier > 0.0 { multiplier } else { 1.0 };
     }
 
     /// Check if currently in a position.
@@ -118,7 +127,7 @@ impl PositionManager {
         } = exit;
 
         let pos = &self.position;
-        let multiplier = pos.direction.multiplier();
+        let multiplier = pos.direction.multiplier() * self.contract_multiplier;
 
         // Calculate P&L: gross - entry_fees - exit_fees
         let gross_pnl = (exit_price - pos.entry_price) * pos.size * multiplier;
@@ -126,7 +135,7 @@ impl PositionManager {
         let pnl = gross_pnl - total_fees;
 
         // Calculate return percentage
-        let cost_basis = pos.entry_price * pos.size;
+        let cost_basis = pos.entry_price * pos.size * self.contract_multiplier;
         let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
         Trade {
@@ -161,7 +170,7 @@ impl PositionManager {
 
     /// Calculate unrealized P&L at current price.
     pub fn unrealized_pnl(&self, current_price: Price) -> f64 {
-        self.position.unrealized_pnl(current_price)
+        self.position.unrealized_pnl(current_price) * self.contract_multiplier
     }
 
     /// Get current position value (market value of position).
@@ -169,7 +178,7 @@ impl PositionManager {
         if !self.position.is_open {
             return 0.0;
         }
-        current_price * self.position.size
+        current_price * self.position.size * self.contract_multiplier
     }
 
     /// Calculate position exposure (notional value as fraction of given capital).

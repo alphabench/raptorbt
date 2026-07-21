@@ -9,6 +9,7 @@
 
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
 use crate::execution::{FeeModel, FillPrice, SlippageModel};
+use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::{compute_backtest_metrics_with_config, PortfolioEngine};
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
@@ -91,6 +92,27 @@ impl SingleRunner {
         )
     }
 
+    /// Attach an instrument market definition; see [`EngineKernel::with_instrument`].
+    pub fn with_instrument(mut self, spec: InstrumentSpec) -> Self {
+        self.kernel.set_instrument(spec);
+        self
+    }
+
+    /// Set the position policy; see [`EngineKernel::with_position_policy`].
+    pub fn with_position_policy(
+        mut self,
+        policy: crate::portfolio::ledger::PositionPolicy,
+    ) -> Self {
+        self.kernel.set_position_policy(policy);
+        self
+    }
+
+    /// Set the account mode; see [`EngineKernel::with_account_mode`].
+    pub fn with_account_mode(mut self, account: crate::accounts::AccountMode) -> Self {
+        self.kernel.set_account_mode(account);
+        self
+    }
+
     /// Advance one bar: delegate to the kernel, then account for the outcome.
     ///
     /// The returned events are the same ones the kernel produced; completed
@@ -133,7 +155,7 @@ impl SingleRunner {
     pub fn finish(mut self) -> BacktestResult {
         if self.kernel.is_in_position() {
             if let Some((idx, bar)) = self.last_bar {
-                if let Some(trade) = self.kernel.finalize(idx, &bar) {
+                for trade in self.kernel.finalize_all(idx, &bar) {
                     self.streaming.update(trade.return_pct / 100.0);
                     self.trades.push(trade);
                 }

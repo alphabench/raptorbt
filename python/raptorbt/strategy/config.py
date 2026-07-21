@@ -23,3 +23,6 @@ class StrategyConfig:
     """
 
     params: dict[str, Any] = field(default_factory=dict)
+
+    #: Prefix for auto-generated client order ids (``"{tag}-{seq}"``).
+    order_id_tag: str = "O"

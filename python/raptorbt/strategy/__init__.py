@@ -11,16 +11,20 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.config import StrategyConfig
-from raptorbt.strategy.context import Bar, StrategyContext
+from raptorbt.strategy.context import Bar, CompositeBar, StrategyContext
 from raptorbt.strategy.orders import ClosePosition, MarketOrder
+from raptorbt.strategy.portfolio_runner import PortfolioContext, run_portfolio_strategy
 from raptorbt.strategy.runner import run_strategy_backtest
 
 __all__ = [
     "Bar",
     "ClosePosition",
+    "CompositeBar",
     "MarketOrder",
     "Strategy",
     "StrategyConfig",
+    "PortfolioContext",
     "StrategyContext",
+    "run_portfolio_strategy",
     "run_strategy_backtest",
 ]

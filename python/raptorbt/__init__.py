@@ -16,6 +16,7 @@ from raptorbt._raptorbt import (
     SESSION_MCX,
     SESSION_CDS,
     SESSION_CONTINUOUS,
+    IST_OFFSET_NS,
     # Config classes
     PyBacktestConfig,
     PyInstrumentConfig,
@@ -64,6 +65,14 @@ from raptorbt._raptorbt import (
     supertrend,
     rolling_min,
     rolling_max,
+    # Instrument market definitions
+    InstrumentSpec,
+    # Streaming indicators
+    Indicator,
+    # Bar aggregation
+    BarAggregator,
+    aggregate_bars,
+    bars_from_ticks,
     # Per-bar strategy session (class-based strategy contract)
     PyKernelSession,
     PyEngineEvent,
@@ -72,6 +81,8 @@ from raptorbt._raptorbt import (
 )
 from raptorbt.strategy import (
     Bar,
+    PortfolioContext,
+    run_portfolio_strategy,
     ClosePosition,
     MarketOrder,
     Strategy,
@@ -93,6 +104,7 @@ __all__ = [
     "SESSION_MCX",
     "SESSION_CDS",
     "SESSION_CONTINUOUS",
+    "IST_OFFSET_NS",
     # Config classes
     "PyBacktestConfig",
     "PyInstrumentConfig",
@@ -142,6 +154,11 @@ __all__ = [
     "rolling_min",
     "rolling_max",
     # Per-bar strategy session (class-based strategy contract)
+    "InstrumentSpec",
+    "Indicator",
+    "BarAggregator",
+    "aggregate_bars",
+    "bars_from_ticks",
     "PyKernelSession",
     "PyEngineEvent",
     "PyPositionSnapshot",
@@ -153,5 +170,7 @@ __all__ = [
     "Strategy",
     "StrategyConfig",
     "StrategyContext",
+    "PortfolioContext",
+    "run_portfolio_strategy",
     "run_strategy_backtest",
 ]

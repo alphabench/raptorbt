@@ -108,6 +108,29 @@ impl FillPrice {
     }
 }
 
+/// Deterministic SplitMix64 stream for stochastic fills.
+///
+/// Hand-rolled (like the Monte Carlo module's generator) to avoid an RNG
+/// dependency; the same seed always produces the same fill sequence.
+#[derive(Debug, Clone)]
+pub struct FillRng(u64);
+
+impl FillRng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    /// Next uniform draw in [0, 1).
+    pub fn next_f64(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
 /// Fill model combining price model with execution rules.
 #[derive(Debug, Clone)]
 pub struct FillModel {

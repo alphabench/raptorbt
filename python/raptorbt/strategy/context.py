@@ -95,6 +95,33 @@ class StrategyContext:
         return self._session.position()
 
     @property
+    def positions(self):
+        """All open positions, in opening order (hedging holds several)."""
+        return self._session.positions()
+
+    @property
+    def free_capital(self) -> float:
+        """Cash not locked as margin (margin accounts); all cash otherwise."""
+        return self._session.free_capital()
+
+    @property
+    def net_position(self) -> float:
+        """Signed unit total across open positions (hedging nets out)."""
+        return sum(p.size * p.direction for p in self._session.positions())
+
+    @property
+    def is_net_long(self) -> bool:
+        return self.net_position > 0.0
+
+    @property
+    def is_net_short(self) -> bool:
+        return self.net_position < 0.0
+
+    @property
+    def is_flat(self) -> bool:
+        return not self._session.positions()
+
+    @property
     def equity(self) -> float:
         """Mark-to-market equity after the most recent completed bar."""
         return self._session.equity()
@@ -121,3 +148,22 @@ class StrategyContext:
         checked against the current bar's range.
         """
         self._session.set_target_price(price)
+
+
+class CompositeBar(NamedTuple):
+    """A completed higher-timeframe bar built from the primary stream.
+
+    ``timestamp`` is the window-end for time aggregations — the bar contains
+    only data strictly before it, never the bar that completed it.
+    ``stream_id`` is the handle returned by ``Strategy.subscribe_bars``.
+    """
+
+    stream_id: int
+    step: int
+    unit: str
+    timestamp: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
