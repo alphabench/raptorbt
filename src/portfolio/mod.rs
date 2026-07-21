@@ -3,6 +3,7 @@
 pub mod allocation;
 pub mod engine;
 pub mod kernel;
+mod kernel_orders;
 pub mod ledger;
 pub mod monte_carlo;
 pub mod position;

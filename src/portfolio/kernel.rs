@@ -134,30 +134,30 @@ pub struct PositionSnapshot {
 /// original loop kept as locals lives here.
 #[derive(Debug)]
 pub struct EngineKernel {
-    config: BacktestConfig,
-    fee_model: FeeModel,
+    pub(crate) config: BacktestConfig,
+    pub(crate) fee_model: FeeModel,
     slippage_model: SlippageModel,
     fill_price: FillPrice,
     /// Limit/stop fill semantics, including gap-through handling.
-    fill_model: FillModel,
+    pub(crate) fill_model: FillModel,
 
     /// Open positions. Net policy holds at most one, reproducing the
     /// original single-position behavior; Independent allows hedging.
-    ledger: PositionLedger,
+    pub(crate) ledger: PositionLedger,
     cash: f64,
     /// Trading direction for new signal-path entries.
-    direction: Direction,
+    pub(crate) direction: Direction,
     /// Position ids the strategy asked to close, applied on the next step.
-    pending_closes: Vec<u64>,
+    pub(crate) pending_closes: Vec<u64>,
     /// Cash (default, historical) vs leveraged margin funding.
     account: AccountMode,
     /// Per-position locked margin, used only in margin mode.
-    margin: MarginBook,
+    pub(crate) margin: MarginBook,
     /// Seeded stream for stochastic fills (prob < 1.0 configs only).
-    fill_rng: FillRng,
+    pub(crate) fill_rng: FillRng,
 
     /// Pre-trade constraints, checked before an entry opens.
-    risk: RiskGate,
+    pub(crate) risk: RiskGate,
     /// Open-position count the risk gate should see, when a portfolio owns
     /// it. `None` (the default) means count this kernel's own ledger.
     external_open_count: Option<usize>,
@@ -171,14 +171,14 @@ pub struct EngineKernel {
     ///
     /// `None` reproduces pre-spec behavior exactly (multiplier 1.0, no
     /// quantization, no expiry).
-    spec: Option<InstrumentSpec>,
+    pub(crate) spec: Option<InstrumentSpec>,
 
     /// Resting-order book for the class-based order API. Empty (and
     /// costless) for the signal-array path.
-    orders: OrderEngine,
+    pub(crate) orders: OrderEngine,
     /// Events produced between steps (order accepted/canceled), delivered
     /// at the front of the next step's event list.
-    pending_events: Vec<EngineEvent>,
+    pub(crate) pending_events: Vec<EngineEvent>,
 }
 
 impl EngineKernel {
@@ -319,7 +319,7 @@ impl EngineKernel {
 
     /// Contract point value; `1.0` without a spec.
     #[inline]
-    fn multiplier(&self) -> f64 {
+    pub(crate) fn multiplier(&self) -> f64 {
         match &self.spec {
             Some(spec) if spec.multiplier > 0.0 => spec.multiplier,
             _ => 1.0,
@@ -411,157 +411,6 @@ impl EngineKernel {
         self.pending_closes.push(position_id);
     }
 
-    /// Submit an order from the class-based order API.
-    ///
-    /// `submitted_idx` is the bar the strategy was observing when it placed
-    /// the order: market orders fill on that bar's step (matching the
-    /// signal-entry contract), resting orders begin matching on the next
-    /// bar. Returns the engine order id; acknowledgment events are
-    /// delivered at the front of the next step's event list.
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit_order(
-        &mut self,
-        side: OrderSide,
-        qty: QtySpec,
-        kind: OrderKind,
-        tif: TimeInForce,
-        submitted_idx: usize,
-        submitted_ts: i64,
-        client_id: String,
-        stop_price: Option<Price>,
-        target_price: Option<Price>,
-    ) -> u64 {
-        self.submit_order_full(
-            side,
-            qty,
-            kind,
-            tif,
-            submitted_idx,
-            submitted_ts,
-            client_id,
-            stop_price,
-            target_price,
-            false,
-            false,
-            None,
-        )
-    }
-
-    /// [`EngineKernel::submit_order`] with flags and one-triggers-other
-    /// linkage. `parent_id` holds the order (unmatched, no expiry clock)
-    /// until the parent fills; a dead parent cancels it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit_order_full(
-        &mut self,
-        side: OrderSide,
-        qty: QtySpec,
-        kind: OrderKind,
-        tif: TimeInForce,
-        submitted_idx: usize,
-        submitted_ts: i64,
-        client_id: String,
-        stop_price: Option<Price>,
-        target_price: Option<Price>,
-        post_only: bool,
-        reduce_only: bool,
-        parent_id: Option<u64>,
-    ) -> u64 {
-        let mut order = Order::plain(side, qty, kind, tif);
-        order.client_id = client_id.clone();
-        order.submitted_idx = submitted_idx;
-        order.submitted_ts = submitted_ts;
-        order.stop_price = stop_price;
-        order.target_price = target_price;
-        order.post_only = post_only;
-        order.reduce_only = reduce_only;
-        order.parent_id = parent_id;
-        let id = self.orders.submit(order);
-
-        // Resting kinds start working immediately (held children stay
-        // Submitted until their parent fills); plain market kinds are
-        // acknowledged when their fill is processed in the step.
-        let rests = !matches!(kind, OrderKind::Market)
-            || matches!(tif, TimeInForce::AtOpen | TimeInForce::AtClose);
-        if rests && parent_id.is_none() {
-            if let Some(order) = self.orders.get_mut(id) {
-                let _ = order.transition(OrderStatus::Accepted);
-            }
-            self.pending_events.push(EngineEvent::OrderAccepted {
-                idx: submitted_idx,
-                order_id: id,
-                client_id,
-            });
-        }
-        id
-    }
-
-    /// Put a set of working orders in one one-cancels-other group: the first
-    /// fill among them cancels the rest. One-updates-other reduces to this
-    /// while fills are all-or-nothing.
-    pub fn link_oco(&mut self, ids: &[u64]) {
-        let group = ids.iter().copied().min().unwrap_or(0);
-        for id in ids {
-            if let Some(order) = self.orders.get_mut(*id) {
-                order.oco_group = Some(group);
-            }
-        }
-    }
-
-    /// Cancel a working order. Returns `false` for unknown/finished ids.
-    pub fn cancel_order(&mut self, idx: usize, id: u64) -> bool {
-        let client_id = match self.orders.get(id) {
-            Some(order) => order.client_id.clone(),
-            None => return false,
-        };
-        if self.orders.cancel(id) {
-            self.pending_events.push(EngineEvent::OrderCanceled { idx, order_id: id, client_id });
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Cancel every working order.
-    pub fn cancel_all_orders(&mut self, idx: usize) -> Vec<u64> {
-        let ids = self.orders.cancel_all();
-        for id in &ids {
-            let client_id =
-                self.orders.get(*id).map(|o| o.client_id.clone()).unwrap_or_default();
-            self.pending_events.push(EngineEvent::OrderCanceled {
-                idx,
-                order_id: *id,
-                client_id,
-            });
-        }
-        ids
-    }
-
-    /// Replace a working order's prices/quantity. Returns `false` when the
-    /// order is unknown, finished, or the modification is not applicable.
-    pub fn modify_order(
-        &mut self,
-        id: u64,
-        qty: Option<QtySpec>,
-        limit_price: Option<Price>,
-        trigger_price: Option<Price>,
-    ) -> bool {
-        self.orders.modify(id, qty, limit_price, trigger_price)
-    }
-
-    /// Shared view of an order by engine id.
-    pub fn order(&self, id: u64) -> Option<&Order> {
-        self.orders.get(id)
-    }
-
-    /// Instrument tick size; `0.0` without a spec.
-    pub fn price_increment(&self) -> f64 {
-        self.spec.as_ref().map(|s| s.price_increment).unwrap_or(0.0)
-    }
-
-    /// All non-terminal orders, in submission order.
-    pub fn open_orders(&self) -> Vec<&Order> {
-        self.orders.working().collect()
-    }
 
     /// Read-only view of the earliest open position, or `None` when flat.
     pub fn position_snapshot(&self) -> Option<PositionSnapshot> {
@@ -636,7 +485,7 @@ impl EngineKernel {
 
     /// The open-position count the risk gate is checked against.
     #[inline]
-    fn gating_open_count(&self) -> usize {
+    pub(crate) fn gating_open_count(&self) -> usize {
         self.external_open_count.unwrap_or_else(|| self.ledger.open_count())
     }
 
@@ -832,246 +681,6 @@ impl EngineKernel {
 
     /// Apply one matching outcome to position/cash state.
     ///
-    /// A `Fill` outcome is a *marketable* order, not a done deal: position
-    /// state may still refuse it (opening while a position is open, closing
-    /// while flat), in which case the order rejects. A NaN fill price marks
-    /// a market order, priced here by the fill-price model.
-    fn apply_match_outcome(
-        &mut self,
-        idx: usize,
-        bar: &KernelBar,
-        outcome: MatchOutcome,
-        events: &mut Vec<EngineEvent>,
-    ) {
-        let (id, matched_price) = match outcome {
-            MatchOutcome::Trigger { order_id } => {
-                let client_id =
-                    self.orders.get(order_id).map(|o| o.client_id.clone()).unwrap_or_default();
-                events.push(EngineEvent::OrderTriggered { idx, order_id, client_id });
-                return;
-            }
-            MatchOutcome::Expire { order_id } => {
-                let client_id =
-                    self.orders.get(order_id).map(|o| o.client_id.clone()).unwrap_or_default();
-                events.push(EngineEvent::OrderExpired { idx, order_id, client_id });
-                return;
-            }
-            MatchOutcome::Cancel { order_id } => {
-                let client_id =
-                    self.orders.get(order_id).map(|o| o.client_id.clone()).unwrap_or_default();
-                events.push(EngineEvent::OrderCanceled { idx, order_id, client_id });
-                return;
-            }
-            MatchOutcome::Reject { order_id, reason } => {
-                let client_id =
-                    self.orders.get(order_id).map(|o| o.client_id.clone()).unwrap_or_default();
-                events.push(EngineEvent::OrderRejected { idx, order_id, client_id, reason });
-                return;
-            }
-            MatchOutcome::Fill { order_id, price } => (order_id, price),
-        };
-
-        let Some(order) = self.orders.get(id) else { return };
-        let side = order.side;
-        let qty = order.qty;
-        let kind = order.kind;
-        let status = order.status;
-        let client_id = order.client_id.clone();
-        let stop_attach = order.stop_price;
-        let target_attach = order.target_price;
-        let reduce_only = order.reduce_only;
-
-        // Stochastic fills: a marketable resting limit may be passed over
-        // (queue position, exhausted liquidity); it stays working. Stop and
-        // market fills may instead slip one tick against the trader.
-        let is_limit_fill = matches!(kind, OrderKind::Limit { .. })
-            || (matches!(kind, OrderKind::StopLimit { .. }) && status == OrderStatus::Triggered);
-        if is_limit_fill && self.config.fill_prob_limit < 1.0 {
-            if self.fill_rng.next_f64() >= self.config.fill_prob_limit {
-                return; // untouched: still Accepted/Triggered, retries next bar
-            }
-        }
-        let matched_price = if !is_limit_fill
-            && !matched_price.is_nan()
-            && self.config.fill_prob_slippage > 0.0
-            && self.fill_rng.next_f64() < self.config.fill_prob_slippage
-        {
-            match &self.spec {
-                Some(spec) if spec.price_increment > 0.0 => match side {
-                    OrderSide::Buy => matched_price + spec.price_increment,
-                    OrderSide::Sell => matched_price - spec.price_increment,
-                },
-                _ => matched_price,
-            }
-        } else {
-            matched_price
-        };
-
-        let mut reject = |orders: &mut OrderEngine, events: &mut Vec<EngineEvent>, reason| {
-            if let Some(order) = orders.get_mut(id) {
-                let _ = order.transition(OrderStatus::Rejected);
-            }
-            events.push(EngineEvent::OrderRejected {
-                idx,
-                order_id: id,
-                client_id: client_id.clone(),
-                reason,
-            });
-        };
-
-        // Net policy: buy opens for a long-direction kernel and closes a
-        // short one; sell is the mirror. Independent (hedging) policy:
-        // every order opens in its own side's direction — closes are
-        // explicit (`request_close`) or via protective levels.
-        let hedging = self.ledger.policy() == PositionPolicy::Independent;
-        let (opens, open_direction) = if hedging {
-            let dir = match side {
-                OrderSide::Buy => Direction::Long,
-                OrderSide::Sell => Direction::Short,
-            };
-            (true, dir)
-        } else {
-            let opens = match (self.direction, side) {
-                (Direction::Long, OrderSide::Buy) | (Direction::Short, OrderSide::Sell) => true,
-                (Direction::Long, OrderSide::Sell) | (Direction::Short, OrderSide::Buy) => false,
-            };
-            (opens, self.direction)
-        };
-
-        if opens {
-            if reduce_only {
-                // A reduce-only order must never increase exposure.
-                reject(&mut self.orders, events, "reduce_only");
-                return;
-            }
-            if !hedging && self.ledger.is_in_position() {
-                reject(&mut self.orders, events, "position_open");
-                return;
-            }
-            if self.margin.is_halted() {
-                self.risk.record_rejection();
-                reject(&mut self.orders, events, "margin_call");
-                return;
-            }
-            if let Err(reason) = self.risk.check_entry(self.gating_open_count()) {
-                self.risk.record_rejection();
-                reject(&mut self.orders, events, reason.as_str());
-                return;
-            }
-            let raw_price = if matched_price.is_nan() {
-                self.fill_price_for(bar, open_direction, true)
-            } else {
-                matched_price
-            };
-            let (size_mult, explicit_units) = match qty {
-                QtySpec::Units(u) => (None, Some(u)),
-                QtySpec::CapitalFrac(f) => (Some(f), None),
-                QtySpec::FullPosition => {
-                    reject(&mut self.orders, events, "invalid_qty");
-                    return;
-                }
-            };
-            match self.open_at(
-                idx,
-                bar,
-                open_direction,
-                raw_price,
-                size_mult,
-                explicit_units,
-                0.0,
-                stop_attach,
-                target_attach,
-            ) {
-                Some(EngineEvent::Entered { price, size, direction, .. }) => {
-                    if let Some(order) = self.orders.get_mut(id) {
-                        let _ = order.transition(OrderStatus::Filled);
-                    }
-                    events.push(EngineEvent::OrderFilled {
-                        idx,
-                        order_id: id,
-                        client_id,
-                        price,
-                        size,
-                    });
-                    events.push(EngineEvent::Entered { idx, price, size, direction });
-                    self.after_fill(idx, id, events);
-                }
-                Some(EngineEvent::EntryRejected { reason, .. }) => {
-                    reject(&mut self.orders, events, reason.as_str());
-                }
-                _ => reject(&mut self.orders, events, "unfillable"),
-            }
-        } else {
-            let Some(first) = self.ledger.first() else {
-                reject(&mut self.orders, events, "no_position");
-                return;
-            };
-            let position_id = first.id;
-            let direction = first.position.direction;
-            let raw_price = if matched_price.is_nan() {
-                self.fill_price_for(bar, direction, false)
-            } else {
-                matched_price
-            };
-            match self.close_at(idx, bar, position_id, raw_price, ExitReason::Order) {
-                Some(EngineEvent::Exited { trade, .. }) => {
-                    if let Some(order) = self.orders.get_mut(id) {
-                        let _ = order.transition(OrderStatus::Filled);
-                    }
-                    events.push(EngineEvent::OrderFilled {
-                        idx,
-                        order_id: id,
-                        client_id,
-                        price: trade.exit_price,
-                        size: trade.size,
-                    });
-                    events.push(EngineEvent::Exited { idx, trade });
-                    self.after_fill(idx, id, events);
-                }
-                _ => reject(&mut self.orders, events, "unfillable"),
-            }
-        }
-    }
-
-    /// Contingency consequences of a fill: activate held one-triggers-other
-    /// children, then cancel one-cancels-other siblings.
-    fn after_fill(&mut self, idx: usize, filled_id: u64, events: &mut Vec<EngineEvent>) {
-        let children: Vec<(u64, String)> = self
-            .orders
-            .all()
-            .iter()
-            .filter(|o| o.parent_id == Some(filled_id) && o.status == OrderStatus::Submitted)
-            .map(|o| (o.id, o.client_id.clone()))
-            .collect();
-        for (child_id, client_id) in children {
-            if let Some(order) = self.orders.get_mut(child_id) {
-                let _ = order.transition(OrderStatus::Accepted);
-            }
-            events.push(EngineEvent::OrderAccepted { idx, order_id: child_id, client_id });
-        }
-
-        let group = self.orders.get(filled_id).and_then(|o| o.oco_group);
-        if let Some(group) = group {
-            let siblings: Vec<(u64, String)> = self
-                .orders
-                .all()
-                .iter()
-                .filter(|o| {
-                    o.oco_group == Some(group) && o.id != filled_id && !o.status.is_terminal()
-                })
-                .map(|o| (o.id, o.client_id.clone()))
-                .collect();
-            for (sibling_id, client_id) in siblings {
-                if self.orders.cancel(sibling_id) {
-                    events.push(EngineEvent::OrderCanceled {
-                        idx,
-                        order_id: sibling_id,
-                        client_id,
-                    });
-                }
-            }
-        }
-    }
 
     /// Exit path for one position: stop-loss, then take-profit, then signal.
     fn try_exit_position(
@@ -1151,7 +760,7 @@ impl EngineKernel {
     /// Apply a close at a determined raw price: slippage, fees, position
     /// close, cash credit. Shared by the signal path ([`Self::try_exit`])
     /// and order-driven closes, so both produce identical arithmetic.
-    fn close_at(
+    pub(crate) fn close_at(
         &mut self,
         idx: usize,
         bar: &KernelBar,
@@ -1267,7 +876,7 @@ impl EngineKernel {
     }
 
     /// Entry path: size against available capital, round to lot, open.
-    fn try_enter(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Option<EngineEvent> {
+    pub(crate) fn try_enter(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Option<EngineEvent> {
         let entry_price = self.fill_price_for(bar, self.direction, true);
         self.open_at(
             idx,
@@ -1288,7 +897,7 @@ impl EngineKernel {
     /// identical arithmetic. `explicit_units` bypasses capital-fraction
     /// sizing (order API); lot/size-increment rounding still applies.
     #[allow(clippy::too_many_arguments)]
-    fn open_at(
+    pub(crate) fn open_at(
         &mut self,
         idx: usize,
         bar: &KernelBar,
@@ -1441,7 +1050,7 @@ impl EngineKernel {
     /// Delegates to [`FillPrice::get_price_from_arrays`] rather than matching
     /// inline: the `Worst`/`Best` variants are direction- and entry-dependent,
     /// and duplicating that table invites drift.
-    fn fill_price_for(&self, bar: &KernelBar, direction: Direction, is_entry: bool) -> Price {
+    pub(crate) fn fill_price_for(&self, bar: &KernelBar, direction: Direction, is_entry: bool) -> Price {
         self.fill_price
             .get_price_from_arrays(bar.open, bar.high, bar.low, bar.close, direction, is_entry)
     }
