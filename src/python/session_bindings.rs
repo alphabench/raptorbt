@@ -4,7 +4,7 @@ use numpy::PyReadonlyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::core::types::{BacktestConfig, Direction, InstrumentConfig};
+use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{EventSession, ScheduleData};
@@ -136,6 +136,56 @@ impl PyPortfolioSession {
             })
             .collect();
         self.session_mut()?.set_bars(instrument, bars);
+        Ok(())
+    }
+
+    /// Attach an instrument's tick arrays (ascending timestamps).
+    ///
+    /// A row with `ltp > 0` yields a trade print; a row with both `bid > 0`
+    /// and `ask > 0` yields a quote. The trade precedes the quote of the
+    /// same row, since the print is what that book state followed.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (instrument, timestamps, ltp, bid=None, ask=None, buy_qty_delta=None, sell_qty_delta=None))]
+    fn set_ticks(
+        &mut self,
+        instrument: usize,
+        timestamps: PyReadonlyArray1<i64>,
+        ltp: PyReadonlyArray1<f64>,
+        bid: Option<PyReadonlyArray1<f64>>,
+        ask: Option<PyReadonlyArray1<f64>>,
+        buy_qty_delta: Option<PyReadonlyArray1<f64>>,
+        sell_qty_delta: Option<PyReadonlyArray1<f64>>,
+    ) -> PyResult<()> {
+        let ts = numpy_to_vec_i64(timestamps);
+        let ltp = numpy_to_vec_f64(ltp);
+        let n = ts.len();
+        let optional = |arr: Option<PyReadonlyArray1<f64>>| -> PyResult<Vec<f64>> {
+            match arr {
+                Some(a) => {
+                    let v = numpy_to_vec_f64(a);
+                    if v.len() != n {
+                        return Err(PyValueError::new_err(
+                            "all tick arrays must share one length",
+                        ));
+                    }
+                    Ok(v)
+                }
+                None => Ok(vec![0.0; n]),
+            }
+        };
+        if ltp.len() != n {
+            return Err(PyValueError::new_err("all tick arrays must share one length"));
+        }
+        let ticks = TickData {
+            timestamps: ts,
+            ltp,
+            bid: optional(bid)?,
+            ask: optional(ask)?,
+            buy_qty_delta: optional(buy_qty_delta)?,
+            sell_qty_delta: optional(sell_qty_delta)?,
+            oi: vec![0.0; n],
+        };
+        self.session_mut()?.set_ticks(instrument, ticks);
         Ok(())
     }
 

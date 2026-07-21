@@ -427,9 +427,20 @@ class PyPortfolioSession:
         self, instrument: int, timestamps: _I64, open: _F64, high: _F64,
         low: _F64, close: _F64, volume: _F64,
     ) -> None: ...
+    def set_ticks(
+        self, instrument: int, timestamps: _I64, ltp: _F64,
+        bid: _F64 | None = ..., ask: _F64 | None = ...,
+        buy_qty_delta: _F64 | None = ..., sell_qty_delta: _F64 | None = ...,
+    ) -> None: ...
     def seal(self) -> None: ...
     def __len__(self) -> int: ...
+    # Bar sessions only; returns None on a tick event.
     def current(self) -> tuple[int, int, int, float, float, float, float, float] | None: ...
+    # (kind, instrument, local_idx, ts, a, b, c, d, e); kind is
+    # "bar" (o/h/l/c/v), "trade" (price, size, ...) or "quote" (bid, ask, ...).
+    def current_event(
+        self,
+    ) -> tuple[str, int, int, int, float, float, float, float, float] | None: ...
     def apply_current(
         self, entry: bool = ..., exit: bool = ..., atr: float = ...,
         size_mult: float | None = ..., stop_price: float | None = ...,

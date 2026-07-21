@@ -68,6 +68,25 @@ class StreamState:
         """Whether any indicator was registered without a symbol."""
         return self._unrouted
 
+    def primary_indicators(self, symbol: str | None = None):
+        """Indicators listening on a symbol's primary stream."""
+        return self._primary.get(symbol, ())
+
+    def push_trade(self, strategy, ctx, ts, price, size, symbol: str | None = None) -> None:
+        """Feed one trade print into the symbol's composite aggregators.
+
+        The trade-driven twin of :meth:`push`. Primary-stream indicators are
+        *not* updated here — in a tick run they are fed by the runner's
+        primary bar aggregator, not by every print.
+        """
+        for stream_id, step, unit, aggregator in self._aggregators[symbol]:
+            completed = aggregator.push_trade(ts, price, size)
+            if completed is not None:
+                bar = CompositeBar(stream_id, step, unit, *completed, symbol=symbol)
+                for indicator in self._composite.get((symbol, stream_id), ()):
+                    indicator.update_bar(bar.open, bar.high, bar.low, bar.close)
+                strategy.on_composite_bar(ctx, bar)
+
     def push(self, strategy, ctx, ts, o, h, l, c, v, symbol: str | None = None) -> None:
         """Feed one primary bar: aggregate, dispatch, update indicators.
 

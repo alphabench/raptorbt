@@ -59,6 +59,23 @@ class Strategy:
         """Called for each due clock alert/timer, *before* the bar's data
         handlers — the scheduled time precedes the bar that revealed it."""
 
+    def on_trade_tick(self, ctx: StrategyContext, tick) -> None:
+        """A trade printed. Only fires in tick runs.
+
+        ``ctx.best_bid`` / ``ctx.best_ask`` hold the last book observed
+        *before* this print — the quote from the same feed row arrives in
+        the following :meth:`on_quote`, so acting on it here would be
+        reading a book this very print already moved.
+        """
+
+    def on_quote(self, ctx: StrategyContext, quote) -> None:
+        """The top of book changed. Only fires in tick runs.
+
+        Quotes do not fill orders. An order submitted here rests and matches
+        against the next print, which is the first evidence of a trade at
+        that price.
+        """
+
     def on_composite_bar(self, ctx: StrategyContext, bar) -> None:
         """Called when a subscribed higher-timeframe bar completes.
 

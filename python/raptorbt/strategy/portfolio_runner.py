@@ -122,6 +122,120 @@ def _as_arrays(arrays: dict) -> dict[str, np.ndarray]:
     return out
 
 
+def drain_intents(strategy, symbol: str, idx: int) -> dict:
+    """Fold a strategy's queued intents into `apply_current` kwargs.
+
+    Shared by the bar and tick runners so both refuse duplicate intents the
+    same way.
+    """
+    entry = False
+    exit_ = False
+    size_mult = None
+    stop_override = None
+    target_override = None
+    for intent in strategy.drain_orders():
+        if isinstance(intent, MarketOrder):
+            if entry:
+                raise ValueError(f"duplicate entry intents on {symbol} event {idx}")
+            entry = True
+            size_mult = intent.size_frac
+            stop_override = intent.stop_price
+            target_override = intent.target_price
+        elif isinstance(intent, ClosePosition):
+            if exit_:
+                raise ValueError(f"duplicate close intents on {symbol} event {idx}")
+            exit_ = True
+        else:
+            raise ValueError(f"unknown order intent: {intent!r}")
+    return {
+        "entry": entry,
+        "exit": exit_,
+        "atr": 0.0,
+        "size_mult": size_mult,
+        "stop_price": stop_override,
+        "target_price": target_override,
+    }
+
+
+
+def apply_commands_on(strategy, session, ctx, symbols, id_map):
+    """Build the command applier shared by the bar and tick runners.
+
+    Returns a callable ``(instrument, local_idx, ts)`` that drains the
+    strategy's queued commands and routes each to its instrument.
+    """
+
+    def apply_commands(current_instrument: int, local_idx: int, ts: int) -> None:
+        for command in strategy.drain_commands():
+            if command[0] == "submit":
+                _, client_id, order, parent, symbol = command
+                instrument = (
+                    ctx._instrument_index(symbol) if symbol else current_instrument
+                )
+                parent_engine_id = None
+                if parent:
+                    mapped = id_map.get(parent)
+                    if mapped is None:
+                        raise ValueError(f"unknown parent order {parent!r}")
+                    if mapped[0] != instrument:
+                        raise ValueError("parent order belongs to a different symbol")
+                    parent_engine_id = mapped[1]
+                engine_id = session.submit_order(
+                    instrument,
+                    side=order.side,
+                    kind=order.kind,
+                    submitted_idx=local_idx,
+                    submitted_ts=ts,
+                    client_id=client_id,
+                    units=order.units,
+                    size_frac=order.size_frac,
+                    limit_price=getattr(order, "price", None),
+                    trigger_price=getattr(order, "trigger", None),
+                    tif=order.tif,
+                    expire_ns=order.expire_ns,
+                    stop_price=order.stop_price,
+                    target_price=order.target_price,
+                    offset=getattr(order, "offset", None),
+                    offset_kind=getattr(order, "offset_kind", "price"),
+                    limit_offset=getattr(order, "limit_offset", 0.0),
+                    post_only=getattr(order, "post_only", False),
+                    reduce_only=order.reduce_only,
+                    parent_id=parent_engine_id,
+                )
+                id_map[client_id] = (instrument, engine_id)
+            elif command[0] == "cancel":
+                mapped = id_map.get(command[1])
+                if mapped is not None:
+                    session.cancel_order(mapped[0], local_idx, mapped[1])
+            elif command[0] == "cancel_all":
+                for i in range(len(symbols)):
+                    session.cancel_all_orders(i, local_idx)
+            elif command[0] == "link_oco":
+                mapped = [id_map[c] for c in command[1] if c in id_map]
+                if len(mapped) >= 2:
+                    instruments_involved = {m[0] for m in mapped}
+                    if len(instruments_involved) != 1:
+                        raise ValueError("one-cancels-other links cannot span symbols")
+                    session.link_oco(mapped[0][0], [m[1] for m in mapped])
+            elif command[0] == "close":
+                _, position_id, symbol = command
+                session.request_close(
+                    ctx._instrument_index(symbol) if symbol else current_instrument,
+                    position_id,
+                )
+            elif command[0] == "close_all_for":
+                instrument = ctx._instrument_index(command[1])
+                for snapshot in session.positions(instrument):
+                    session.request_close(instrument, snapshot.position_id)
+            elif command[0] == "modify":
+                # The id map carries the owning instrument, so a modify
+                # routes without the caller naming a symbol.
+                mapped = id_map.get(command[1])
+                if mapped is not None:
+                    session.modify_order(mapped[0], mapped[1], **command[2])
+
+    return apply_commands
+
 def run_portfolio_strategy(
     strategy: Strategy | type[Strategy],
     data: dict[str, dict],
@@ -208,74 +322,7 @@ def run_portfolio_strategy(
     # client order id -> (instrument index, engine order id).
     id_map: dict[str, tuple[int, int]] = {}
 
-    def apply_commands(current_instrument: int, local_idx: int, ts: int) -> None:
-        for command in strategy.drain_commands():
-            if command[0] == "submit":
-                _, client_id, order, parent, symbol = command
-                instrument = (
-                    ctx._instrument_index(symbol) if symbol else current_instrument
-                )
-                parent_engine_id = None
-                if parent:
-                    mapped = id_map.get(parent)
-                    if mapped is None:
-                        raise ValueError(f"unknown parent order {parent!r}")
-                    if mapped[0] != instrument:
-                        raise ValueError("parent order belongs to a different symbol")
-                    parent_engine_id = mapped[1]
-                engine_id = session.submit_order(
-                    instrument,
-                    side=order.side,
-                    kind=order.kind,
-                    submitted_idx=local_idx,
-                    submitted_ts=ts,
-                    client_id=client_id,
-                    units=order.units,
-                    size_frac=order.size_frac,
-                    limit_price=getattr(order, "price", None),
-                    trigger_price=getattr(order, "trigger", None),
-                    tif=order.tif,
-                    expire_ns=order.expire_ns,
-                    stop_price=order.stop_price,
-                    target_price=order.target_price,
-                    offset=getattr(order, "offset", None),
-                    offset_kind=getattr(order, "offset_kind", "price"),
-                    limit_offset=getattr(order, "limit_offset", 0.0),
-                    post_only=getattr(order, "post_only", False),
-                    reduce_only=order.reduce_only,
-                    parent_id=parent_engine_id,
-                )
-                id_map[client_id] = (instrument, engine_id)
-            elif command[0] == "cancel":
-                mapped = id_map.get(command[1])
-                if mapped is not None:
-                    session.cancel_order(mapped[0], local_idx, mapped[1])
-            elif command[0] == "cancel_all":
-                for i in range(len(symbols)):
-                    session.cancel_all_orders(i, local_idx)
-            elif command[0] == "link_oco":
-                mapped = [id_map[c] for c in command[1] if c in id_map]
-                if len(mapped) >= 2:
-                    instruments_involved = {m[0] for m in mapped}
-                    if len(instruments_involved) != 1:
-                        raise ValueError("one-cancels-other links cannot span symbols")
-                    session.link_oco(mapped[0][0], [m[1] for m in mapped])
-            elif command[0] == "close":
-                _, position_id, symbol = command
-                session.request_close(
-                    ctx._instrument_index(symbol) if symbol else current_instrument,
-                    position_id,
-                )
-            elif command[0] == "close_all_for":
-                instrument = ctx._instrument_index(command[1])
-                for snapshot in session.positions(instrument):
-                    session.request_close(instrument, snapshot.position_id)
-            elif command[0] == "modify":
-                # The id map carries the owning instrument, so a modify
-                # routes without the caller naming a symbol.
-                mapped = id_map.get(command[1])
-                if mapped is not None:
-                    session.modify_order(mapped[0], mapped[1], **command[2])
+    apply_commands = apply_commands_on(strategy, session, ctx, symbols, id_map)
 
     while True:
         current = session.current()
@@ -297,33 +344,8 @@ def run_portfolio_strategy(
         strategy.on_bar(ctx)
         apply_commands(instrument, local_idx, ts)
 
-        entry = False
-        exit_ = False
-        size_mult = None
-        stop_override = None
-        target_override = None
-        for intent in strategy.drain_orders():
-            if isinstance(intent, MarketOrder):
-                if entry:
-                    raise ValueError(f"duplicate entry intents on {ctx.symbol} bar {local_idx}")
-                entry = True
-                size_mult = intent.size_frac
-                stop_override = intent.stop_price
-                target_override = intent.target_price
-            elif isinstance(intent, ClosePosition):
-                if exit_:
-                    raise ValueError(f"duplicate close intents on {ctx.symbol} bar {local_idx}")
-                exit_ = True
-            else:
-                raise ValueError(f"unknown order intent: {intent!r}")
-
         events = session.apply_current(
-            entry=entry,
-            exit=exit_,
-            atr=0.0,
-            size_mult=size_mult,
-            stop_price=stop_override,
-            target_price=target_override,
+            **drain_intents(strategy, ctx.symbol, local_idx)
         )
         dispatch_events(strategy, ctx, events)
 

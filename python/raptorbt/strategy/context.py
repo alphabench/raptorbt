@@ -170,3 +170,36 @@ class CompositeBar(NamedTuple):
     close: float
     volume: float
     symbol: str | None = None
+
+
+class TradeTick(NamedTuple):
+    """One trade print.
+
+    ``symbol`` names the instrument in portfolio/tick runs.
+    """
+
+    timestamp: int
+    price: float
+    size: float
+    symbol: str | None = None
+
+
+class QuoteTick(NamedTuple):
+    """One top-of-book quote.
+
+    Quotes are observation only: they do not fill orders, move trailing
+    stops, or mark equity. The next trade print does all three.
+    """
+
+    timestamp: int
+    bid: float
+    ask: float
+    symbol: str | None = None
+
+    @property
+    def mid(self) -> float:
+        return (self.bid + self.ask) / 2.0
+
+    @property
+    def spread(self) -> float:
+        return self.ask - self.bid

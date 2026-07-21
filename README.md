@@ -774,6 +774,53 @@ print(f"profit_factor: {result.metrics.profit_factor:.2f}")
 print(f"win_rate: {result.metrics.win_rate_pct:.1f}%")
 ```
 
+#### Class-Contract Tick Strategies
+
+`run_tick_backtest` above is the array runner: precomputed signal arrays, one
+long-only position at a time. For the full class contract — typed orders,
+multiple positions, margin accounts, portfolio risk gates — drive the event
+session from ticks instead:
+
+```python
+class Scalper(raptorbt.Strategy):
+    def on_quote(self, ctx, quote):
+        # Quotes are observation only: nothing fills here.
+        self.wide = quote.spread > 0.05
+
+    def on_trade_tick(self, ctx, tick):
+        # ctx.best_bid / ctx.best_ask are the book observed BEFORE this
+        # print — the quote from the same feed row arrives next.
+        if not self.wide and ctx.is_flat() and ctx.best_bid is not None:
+            self.submit_order(orders.Limit(side="buy", price=ctx.best_bid, units=10))
+
+    def on_bar(self, ctx):
+        # Only fires when primary_bars is set. A view, not a venue.
+        ...
+
+result = raptorbt.run_tick_strategy(
+    Scalper,
+    ticks={"NIFTY24600PE": dict(timestamps=ts, ltp=ltp, bid=bid, ask=ask)},
+    primary_bars=(1, "m"),     # aggregate prints into 1m bars for on_bar
+    account_type="margin", leverage=5.0,
+)
+```
+
+Three semantics to know:
+
+- **Quotes do not fill orders**, move trailing stops, or mark equity.
+  Filling against a quote asserts a counterparty the engine has no evidence
+  for; the print that follows is that evidence. Orders submitted from
+  `on_quote` rest and match on the next print. Quotes also do not sample the
+  equity curve, so metrics do not shift with how chatty the feed is.
+- **`primary_bars` builds bars from prints as a view.** They fire `on_bar`
+  and feed indicators registered without a `stream_id`; `subscribe_bars`
+  composites work too. Order matching still happens against ticks only.
+- **`AT_OPEN`/`AT_CLOSE` market orders keep resting** on a print — a print
+  has no bar phase to queue against. Trailing stops ratchet off every print,
+  so they resolve at tick resolution; a tick run and a bar run over the same
+  data legitimately differ there, since a bar can trigger a stop against a
+  low that preceded the high which set the watermark.
+
 #### Tick Signal & Feature Helpers
 
 Precompute entry/exit signal arrays and tick microstructure features before calling `run_tick_backtest`:

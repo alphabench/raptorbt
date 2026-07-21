@@ -83,6 +83,7 @@ from raptorbt.strategy import (
     Bar,
     PortfolioContext,
     run_portfolio_strategy,
+    run_tick_strategy,
     ClosePosition,
     MarketOrder,
     Strategy,
@@ -172,5 +173,6 @@ __all__ = [
     "StrategyContext",
     "PortfolioContext",
     "run_portfolio_strategy",
+    "run_tick_strategy",
     "run_strategy_backtest",
 ]

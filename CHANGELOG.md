@@ -94,6 +94,34 @@ migrate.
 
 ### Added
 
+- **Tick-driven class contract** — `run_tick_strategy(strategy, ticks, ...)`
+  drives the same event session from trade prints and quotes, so orders,
+  positions, risk gates and the shared account behave as they do on bars;
+  only the resolution changes. New `on_trade_tick(ctx, tick)` and
+  `on_quote(ctx, quote)` hooks, `TradeTick`/`QuoteTick` payloads, and
+  `ctx.best_bid`/`ctx.best_ask`/`ctx.last_price`.
+
+  Three semantics worth knowing before using it:
+
+  - **Quotes are observation only.** They do not fill orders, move trailing
+    stops, or mark equity. Filling against a quote would assert a
+    counterparty the engine has no evidence for; the print that follows is
+    that evidence. An order submitted from `on_quote` rests and matches on
+    the next print.
+  - **`ctx.best_bid`/`ctx.best_ask` inside `on_trade_tick` are the book
+    observed *before* that print** — the quote from the same feed row
+    arrives in the following `on_quote`. Reading it earlier would be a
+    lookahead onto a book the print itself moved.
+  - **`primary_bars=(step, unit)` builds bars from prints as a view**: they
+    fire `on_bar` and feed indicators, but nothing executes on them. Orders
+    match against ticks only.
+
+  `AT_OPEN`/`AT_CLOSE` market orders keep resting on a print, since a print
+  has no bar phase to queue against. Trailing stops ratchet off every print,
+  so a tick run and a bar run over the same data legitimately differ there —
+  a bar can trigger a stop against a low that preceded the high which set
+  the watermark, and prints cannot.
+
 - **Per-symbol indicators and composite bars in portfolio runs.**
   `register_indicator(indicator, stream_id=None, symbol=None)` gains
   `symbol=` to route an indicator to one instrument, and
