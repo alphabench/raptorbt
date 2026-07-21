@@ -1,14 +1,16 @@
 """Multi-instrument driver for class-based strategies.
 
-One strategy instance trades N instruments against a single shared cash
-pool. Bars from all instruments are merged into one deterministic schedule
+One strategy instance trades N instruments against a single shared account.
+Bars from all instruments are merged into one deterministic schedule
 (by timestamp, then registration order); ``on_bar`` fires once per event
 with ``ctx.symbol`` naming the instrument whose bar just closed. Orders and
 closes route to the current symbol by default, or explicitly via
 ``symbol=``.
 
-Cash accounts only; composite-bar subscriptions are not yet available in
-portfolio runs.
+With ``account_type="margin"`` the instruments also share one pool of locked
+initial margin, so leverage applies portfolio-wide and a margin call halts
+every instrument at once. Composite-bar subscriptions are not yet available
+in portfolio runs.
 """
 
 from __future__ import annotations
@@ -119,6 +121,8 @@ def run_portfolio_strategy(
     instruments: dict | None = None,
     instrument_configs: dict[str, PyInstrumentConfig] | None = None,
     oms_type: str = "netting",
+    account_type: str = "cash",
+    leverage: float = 1.0,
 ) -> PyPortfolioResult:
     """Run one strategy over N instruments sharing a capital pool.
 
@@ -126,6 +130,13 @@ def run_portfolio_strategy(
     ``high``/``low``/``close``/``volume``). ``instruments`` optionally maps
     symbol -> :class:`InstrumentSpec`. Returns a ``PyPortfolioResult``:
     portfolio-level curves/metrics plus per-instrument summaries.
+
+    ``account_type`` is ``"cash"`` (fully funded, the default) or
+    ``"margin"``, which locks initial margin per position instead of the
+    full notional and marks equity with direction-aware unrealized PnL.
+    Under margin the account is shared: ``leverage`` applies across all
+    instruments, and a margin call halts every one of them, surfacing as
+    ``on_margin_call`` plus ``halted``/``halted_at`` on the result.
     """
     if isinstance(strategy, type):
         strategy = strategy()
@@ -139,7 +150,9 @@ def run_portfolio_strategy(
     symbols = list(data.keys())
     arrays = {symbol: _as_arrays(data[symbol]) for symbol in symbols}
 
-    session = PyPortfolioSession(config=config)
+    session = PyPortfolioSession(
+        config=config, account_type=account_type, leverage=leverage
+    )
     for symbol in symbols:
         session.add_instrument(
             symbol,

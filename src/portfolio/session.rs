@@ -7,11 +7,16 @@
 //! the pool before stepping and drained back after, so capital committed to
 //! one instrument is unavailable to the others.
 //!
-//! Portfolio equity is sampled once per schedule event: pool plus every
-//! instrument's position value at its last known close. Cash accounts only
-//! for now — a margin account shared across kernels needs the account
-//! handle planned for a later 0.5.x release.
+//! Portfolio equity is sampled once per schedule event: the account balance
+//! plus every instrument's mark at its last known close — position value in
+//! cash mode, direction-aware unrealized PnL under margin.
+//!
+//! Capital lives in one [`SharedAccount`]. Cash mode reproduces the original
+//! single-pool arithmetic exactly. Margin mode additionally tracks locked
+//! initial margin as an aggregate, so leverage is shared across instruments
+//! and one margin call halts them all.
 
+use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
 use crate::data::{EventFeed, EventPayload, MarketEvent};
 use crate::instruments::InstrumentSpec;
@@ -38,6 +43,21 @@ pub struct InstrumentOutcome {
     pub rejected_entries: usize,
 }
 
+/// Everything a finished session reports.
+#[derive(Debug)]
+pub struct SessionOutcome {
+    pub result: BacktestResult,
+    pub instruments: Vec<InstrumentOutcome>,
+    /// Entries refused across all instruments, summed over their risk gates.
+    pub rejected_entries: usize,
+    /// Whether a margin call or a drawdown kill-switch latched.
+    pub halted: bool,
+    /// Where the halt latched, as a **schedule-event ordinal** — the session
+    /// interleaves N streams, so this is not a bar index (the array runner's
+    /// `halted_at` is).
+    pub halted_at: Option<usize>,
+}
+
 /// Multi-instrument session over merged bar streams.
 pub struct EventSession {
     config: BacktestConfig,
@@ -46,7 +66,7 @@ pub struct EventSession {
     bars: Vec<Vec<KernelBar>>,
     schedule: Vec<ScheduleEntry>,
     cursor: usize,
-    pool: f64,
+    account: SharedAccount,
     last_close: Vec<Option<f64>>,
     last_seen: Vec<Option<(usize, KernelBar)>>,
     equity_curve: Vec<f64>,
@@ -56,11 +76,22 @@ pub struct EventSession {
     trades: Vec<Trade>,
     streaming: StreamingMetrics,
     peak_equity: f64,
+    /// Where the drawdown kill-switch latched; the margin call records its
+    /// own index on the account.
+    risk_halted_at: Option<usize>,
     sealed: bool,
 }
 
 impl EventSession {
     pub fn new(config: BacktestConfig) -> Self {
+        Self::with_account(config, AccountMode::Cash)
+    }
+
+    /// Session funded by an account of the given mode.
+    ///
+    /// The mode applies to every instrument: they share one balance and, in
+    /// margin mode, one pool of locked initial margin.
+    pub fn with_account(config: BacktestConfig, mode: AccountMode) -> Self {
         let pool = config.initial_capital;
         Self {
             config,
@@ -69,7 +100,7 @@ impl EventSession {
             bars: Vec::new(),
             schedule: Vec::new(),
             cursor: 0,
-            pool,
+            account: SharedAccount::new(mode, pool),
             last_close: Vec::new(),
             last_seen: Vec::new(),
             equity_curve: Vec::new(),
@@ -79,6 +110,7 @@ impl EventSession {
             trades: Vec::new(),
             streaming: StreamingMetrics::new(),
             peak_equity: pool,
+            risk_halted_at: None,
             sealed: false,
         }
     }
@@ -103,11 +135,12 @@ impl EventSession {
             inst_config,
         )
         .with_risk_gate(self.config.risk_gate())
-        .with_position_policy(policy);
+        .with_position_policy(policy)
+        .with_account_mode(self.account.mode());
         if let Some(spec) = spec {
             kernel.set_instrument(spec);
         }
-        // The pool owns all capital; kernels borrow it per step.
+        // The account owns all capital; kernels borrow it per step.
         kernel.set_cash(0.0);
         self.kernels.push(kernel);
         self.symbols.push(symbol);
@@ -192,36 +225,88 @@ impl EventSession {
         &self.kernels[instrument]
     }
 
-    /// Portfolio equity: pool plus each instrument's positions marked at
+    /// Portfolio equity: the account balance plus each instrument's mark at
     /// its last known close.
+    ///
+    /// Cash mode marks positions at full value (historical model, pinned by
+    /// the golden fixtures); margin mode marks direction-aware unrealized
+    /// PnL, which prices winning shorts upward. The balance already includes
+    /// notionally-locked margin — locks do not debit cash — so the margin arm
+    /// does not double-count.
     pub fn equity(&self) -> f64 {
-        let positions: f64 = self
-            .kernels
-            .iter()
-            .zip(&self.last_close)
-            .map(|(k, close)| close.map(|c| k.position_value(c)).unwrap_or(0.0))
-            .sum();
-        self.pool + positions
+        match self.account.mode() {
+            AccountMode::Cash => {
+                let positions: f64 = self
+                    .kernels
+                    .iter()
+                    .zip(&self.last_close)
+                    .map(|(k, close)| close.map(|c| k.position_value(c)).unwrap_or(0.0))
+                    .sum();
+                self.account.balance() + positions
+            }
+            AccountMode::Margin { .. } => {
+                let unrealized: f64 = self
+                    .kernels
+                    .iter()
+                    .zip(&self.last_close)
+                    .map(|(k, close)| close.map(|c| k.unrealized_value(c)).unwrap_or(0.0))
+                    .sum();
+                self.account.balance() + unrealized
+            }
+        }
     }
 
-    /// Uncommitted shared cash.
+    /// Shared cash balance. In margin mode this includes locked initial
+    /// margin; see [`EventSession::free_capital`] for what can fund a new
+    /// position.
     pub fn cash(&self) -> f64 {
-        self.pool
+        self.account.balance()
+    }
+
+    /// Capital available to open new positions across all instruments.
+    pub fn free_capital(&self) -> f64 {
+        self.account.free()
+    }
+
+    /// Whether a margin call or drawdown kill-switch has latched.
+    pub fn is_halted(&self) -> bool {
+        self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted())
     }
 
     /// Step the current schedule entry through its kernel and advance.
     ///
-    /// The pool dance mirrors the array portfolio runner: the kernel gets
-    /// the whole pool, steps, and returns what it did not commit.
+    /// The kernel is re-pointed at the portfolio's capital, stepped, then
+    /// drained: cash and locked-margin movements are folded back into the
+    /// shared account. Cash mode is exactly the historical lend/drain of the
+    /// whole pool.
     pub fn apply_current(&mut self, input: StepInput) -> Vec<EngineEvent> {
         let Some(entry) = self.current() else { return Vec::new() };
         let instrument = entry.instrument;
 
+        // In margin mode the kernel computes free capital as its own cash
+        // minus its own locked margin, so hand it the balance less every
+        // *other* kernel's locks — then its arithmetic sees the portfolio's
+        // free capital.
         let kernel = &mut self.kernels[instrument];
-        kernel.set_cash(self.pool);
-        let events = kernel.step(entry.local_idx, &entry.bar, input);
-        self.pool = kernel.cash();
+        let locked_before = kernel.locked_margin();
+        let injected = match self.account.mode() {
+            AccountMode::Cash => self.account.balance(),
+            AccountMode::Margin { .. } => {
+                self.account.balance() - (self.account.locked() - locked_before)
+            }
+        };
+        kernel.set_cash(injected);
+        let mut events = kernel.step(entry.local_idx, &entry.bar, input);
+        let delta_cash = kernel.cash() - injected;
+        let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
+        self.account.reconcile(delta_cash, delta_locked);
+
+        // A kernel-local call sees only its own slice of the portfolio, but
+        // the account is shared: escalate it so every instrument halts.
+        if events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })) {
+            self.halt_all(self.cursor);
+        }
 
         for event in &events {
             if let EngineEvent::Exited { trade, .. } = event {
@@ -248,34 +333,80 @@ impl EventSession {
         };
         self.returns.push(ret);
         self.timestamps.push(entry.bar.timestamp);
+
+        // Portfolio maintenance: the requirement is the sum of every
+        // instrument's own requirement, so per-instrument `margin_maint`
+        // rates apply. No single kernel can see this.
+        if matches!(self.account.mode(), AccountMode::Margin { .. }) && !self.account.is_halted() {
+            let required: f64 = self
+                .kernels
+                .iter()
+                .zip(&self.last_close)
+                .map(|(k, close)| close.map(|c| k.maintenance_requirement(c)).unwrap_or(0.0))
+                .sum();
+            if required > 0.0 && equity < required {
+                self.halt_all(self.cursor);
+                events.push(EngineEvent::MarginCall { idx: entry.local_idx, equity, required });
+            }
+        }
+
+        // Kernels all see the same portfolio equity, so their drawdown gates
+        // latch in lockstep; record the rising edge once.
         let peak = self.peak_equity;
+        let risk_halted_before = self.kernels.iter().any(|k| k.risk_halted());
         for kernel in &mut self.kernels {
             kernel.observe_equity(equity, peak);
+        }
+        if !risk_halted_before
+            && self.risk_halted_at.is_none()
+            && self.kernels.iter().any(|k| k.risk_halted())
+        {
+            self.risk_halted_at = Some(self.cursor);
         }
 
         self.cursor += 1;
         events
     }
 
+    /// Latch the shared margin call and block entries on every instrument.
+    ///
+    /// Each kernel's existing kill-switch does the blocking, so a halted
+    /// portfolio rejects entries with `RejectReason::MarginCall` everywhere.
+    fn halt_all(&mut self, idx: usize) {
+        self.account.halt(idx);
+        for kernel in &mut self.kernels {
+            kernel.halt_margin();
+        }
+    }
+
     /// Force-close every instrument at its last seen bar and compute
     /// portfolio metrics.
-    pub fn finish(mut self) -> (BacktestResult, Vec<InstrumentOutcome>) {
+    pub fn finish(mut self) -> SessionOutcome {
         for i in 0..self.kernels.len() {
             if let Some((idx, bar)) = self.last_seen[i] {
                 let kernel = &mut self.kernels[i];
-                kernel.set_cash(self.pool);
+                let locked_before = kernel.locked_margin();
+                let injected = match self.account.mode() {
+                    AccountMode::Cash => self.account.balance(),
+                    AccountMode::Margin { .. } => {
+                        self.account.balance() - (self.account.locked() - locked_before)
+                    }
+                };
+                kernel.set_cash(injected);
                 for trade in kernel.finalize_all(idx, &bar) {
                     self.streaming.update(trade.return_pct / 100.0);
                     self.trades.push(trade);
                 }
-                self.pool = kernel.cash();
+                let delta_cash = kernel.cash() - injected;
+                let delta_locked = kernel.locked_margin() - locked_before;
                 kernel.set_cash(0.0);
+                self.account.reconcile(delta_cash, delta_locked);
                 self.last_close[i] = None;
             }
         }
-        // Positions are flat; the final mark is the pool itself.
+        // Positions are flat; the final mark is the balance itself.
         if let Some(last) = self.equity_curve.last_mut() {
-            *last = self.pool;
+            *last = self.account.balance();
         }
 
         let metrics = compute_backtest_metrics_with_config(
@@ -298,6 +429,10 @@ impl EventSession {
             })
             .collect();
 
+        let rejected_entries: usize = self.kernels.iter().map(|k| k.rejected_entries()).sum();
+        let halted = self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted());
+        let halted_at = self.account.halted_at().or(self.risk_halted_at);
+
         let result = BacktestResult::new(
             metrics,
             self.equity_curve,
@@ -305,7 +440,7 @@ impl EventSession {
             self.trades,
             self.returns,
         );
-        (result, outcomes)
+        SessionOutcome { result, instruments: outcomes, rejected_entries, halted, halted_at }
     }
 }
 
@@ -404,11 +539,299 @@ mod tests {
         let equity = session.equity();
         assert!(equity > 100_000.0, "both positions gained, equity {equity}");
 
-        let (result, outcomes) = session.finish();
-        assert_eq!(result.trades.len(), 2); // both force-closed at end
-        assert_eq!(outcomes.len(), 2);
-        assert!(outcomes.iter().all(|o| o.trades == 1));
-        let total_pnl: f64 = outcomes.iter().map(|o| o.pnl).sum();
+        let outcome = session.finish();
+        assert_eq!(outcome.result.trades.len(), 2); // both force-closed at end
+        assert_eq!(outcome.instruments.len(), 2);
+        assert!(outcome.instruments.iter().all(|o| o.trades == 1));
+        let total_pnl: f64 = outcome.instruments.iter().map(|o| o.pnl).sum();
         assert!(total_pnl > 0.0);
+    }
+
+    /// Margin-mode twin of [`session_two_instruments`].
+    fn session_two_instruments_margin(leverage: f64, short_second: bool) -> EventSession {
+        let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+        let mut session = EventSession::with_account(config, AccountMode::Margin { leverage });
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let second_dir = if short_second { Direction::Short } else { Direction::Long };
+        let b = session.add_instrument("BBB".into(), second_dir, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
+        session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
+        session.seal();
+        session
+    }
+
+    #[test]
+    fn cash_mode_arithmetic_unchanged() {
+        // Drift tripwire: the cash path must be bit-identical to the
+        // single-pool implementation this replaced.
+        let mut session = session_two_instruments();
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.5),
+            ..StepInput::default()
+        });
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        // Exact equality, not approximate: these feed the golden metrics.
+        assert_eq!(session.cash(), session.free_capital());
+        let curve = session.equity_curve.clone();
+        assert_eq!(curve.len(), 6);
+        // Marked at full position value throughout, as the cash model does.
+        assert_eq!(curve[0], 100_000.0);
+        assert!(curve.iter().all(|v| v.is_finite()));
+        // Both legs gain; the curve ends above where it started.
+        assert!(curve[5] > curve[0], "curve {curve:?}");
+    }
+
+    #[test]
+    fn margin_pool_shared_across_kernels() {
+        // The headline: under leverage the second instrument still has room,
+        // where `shared_pool_constrains_second_instrument` shows it does not.
+        // Size AAA at a quarter of capital. In cash mode that buys 250
+        // units and leaves 75k; under 5x it buys 1250 units for the same
+        // 25k of locked margin — and BBB still draws on the shared balance.
+        let mut session = session_two_instruments_margin(5.0, false);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(session.kernel(0).is_in_position());
+        assert_eq!(session.kernel(0).position_snapshots()[0].size, 1_250.0);
+        // Locks reserve capital without debiting cash.
+        assert_eq!(session.cash(), 100_000.0);
+        assert_eq!(session.free_capital(), 75_000.0);
+
+        let events = session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(
+            !events.iter().any(|e| matches!(e, EngineEvent::EntryRejected { .. })),
+            "the shared balance should still fund the second instrument"
+        );
+        assert!(session.kernel(1).is_in_position());
+        // BBB's sizing saw the portfolio's free capital, not the raw balance:
+        // 25% of 75k at 50.0 under 5x margin.
+        assert_eq!(session.kernel(1).position_snapshots()[0].size, 1_875.0);
+        assert_eq!(session.free_capital(), 56_250.0);
+    }
+
+    #[test]
+    fn margin_mode_sizes_larger_than_cash() {
+        let mut cash = session_two_instruments();
+        cash.apply_current(StepInput { entry: true, ..StepInput::default() });
+        let cash_size = cash.kernel(0).position_snapshots()[0].size;
+
+        let mut margin = session_two_instruments_margin(5.0, false);
+        margin.apply_current(StepInput { entry: true, ..StepInput::default() });
+        let margin_size = margin.kernel(0).position_snapshots()[0].size;
+
+        let ratio = margin_size / cash_size;
+        assert!((ratio - 5.0).abs() < 0.01, "5x leverage should size ~5x, got {ratio}");
+    }
+
+    #[test]
+    fn margin_equity_is_direction_aware() {
+        // AAA long and BBB short, both drifting up: the short loses, but
+        // cash-mode marking would price the short's `position_value` as a
+        // gain. Only direction-aware marking nets them correctly.
+        let mut session = session_two_instruments_margin(2.0, true);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(session.kernel(0).is_in_position());
+        assert!(session.kernel(1).is_in_position());
+
+        // Run out the schedule so both legs are marked at their last close.
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        let short_pnl = session.kernel(1).unrealized_value(52.0);
+        assert!(short_pnl < 0.0, "a short into a rising market must be a loss");
+        // Cash-mode marking would add the short's *position value*, which
+        // grows as the price rises — reporting a loss as a gain.
+        let cash_style = session.cash()
+            + session.kernel(0).position_value(102.0)
+            + session.kernel(1).position_value(52.0);
+        let equity = session.equity();
+        assert!(
+            equity < cash_style,
+            "direction-aware marking must price the losing short below the \
+             cash model: equity {equity} vs cash-style {cash_style}"
+        );
+    }
+
+    #[test]
+    fn portfolio_margin_call_halts_all_kernels() {
+        let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+        let mut session =
+            EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let b =
+            session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+        // AAA collapses after entry; BBB is untouched and never enters.
+        session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
+        session.set_bars(b, bars(5, &[50.0, 50.0, 50.0]));
+        session.seal();
+
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        assert!(session.kernel(0).is_in_position());
+
+        let mut calls = 0;
+        while session.current().is_some() {
+            let events = session.apply_current(StepInput::default());
+            calls += events.iter().filter(|e| matches!(e, EngineEvent::MarginCall { .. })).count();
+        }
+        assert_eq!(calls, 1, "the call latches, so it fires exactly once");
+        assert!(session.is_halted());
+
+        // The untouched instrument is halted too — one shared account.
+        assert!(session.kernel(1).is_margin_halted());
+    }
+
+    #[test]
+    fn maintenance_requirement_sums_per_instrument_rates() {
+        // Each instrument contributes its own spec rate; a blended rate
+        // would misprice the portfolio requirement.
+        let mut session = session_two_instruments_margin(4.0, false);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        let required: f64 = [
+            session.kernel(0).maintenance_requirement(102.0),
+            session.kernel(1).maintenance_requirement(52.0),
+        ]
+        .iter()
+        .sum();
+        assert!(required > 0.0);
+        // Default maint rate is half of init (1/4), i.e. 12.5% of notional.
+        let notional = session.kernel(0).position_value(102.0).abs()
+            + session.kernel(1).position_value(52.0).abs();
+        assert!((required / notional - 0.125).abs() < 1e-9, "got {}", required / notional);
+    }
+
+    #[test]
+    fn finish_reports_rejected_entries_and_halt() {
+        // A margin call halts both instruments; every later entry attempt is
+        // a counted constraint refusal, on the untouched instrument too.
+        // (Zero-size sizing is deliberately *not* counted — see the kernel.)
+        let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+        let mut session =
+            EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let b =
+            session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
+        session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+        session.seal();
+
+        // AAA enters, then collapses into a call; both then keep signaling.
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        while session.current().is_some() {
+            session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        }
+        assert!(session.is_halted());
+
+        let outcome = session.finish();
+        assert!(
+            outcome.rejected_entries > 0,
+            "rejections must be reported, not hardcoded to zero"
+        );
+        let per_instrument: usize = outcome.instruments.iter().map(|o| o.rejected_entries).sum();
+        assert_eq!(outcome.rejected_entries, per_instrument);
+        // The instrument that never traded was halted by the shared account.
+        assert!(outcome.instruments[1].rejected_entries > 0);
+        assert!(outcome.halted);
+        assert!(outcome.halted_at.is_some());
+    }
+
+    #[test]
+    fn finish_reports_no_halt_on_a_clean_run() {
+        let mut session = session_two_instruments();
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.5),
+            ..StepInput::default()
+        });
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        let outcome = session.finish();
+        assert!(!outcome.halted);
+        assert_eq!(outcome.halted_at, None);
+        assert_eq!(outcome.rejected_entries, 0);
+    }
+
+    #[test]
+    fn finish_reports_margin_halt() {
+        let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+        let mut session =
+            EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
+        session.seal();
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        let outcome = session.finish();
+        assert!(outcome.halted);
+        assert!(outcome.halted_at.is_some());
+    }
+
+    #[test]
+    fn locked_margin_released_on_close() {
+        let mut session = session_two_instruments_margin(5.0, false);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(session.free_capital() < session.cash());
+
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        let outcome = session.finish();
+        assert_eq!(outcome.result.trades.len(), 2);
+        // Every lock is released, so the closing balance is exactly the
+        // starting capital plus realized PnL (fees are zero in this config).
+        let total_pnl: f64 = outcome.instruments.iter().map(|o| o.pnl).sum();
+        let final_balance = *outcome
+            .result
+            .equity_curve
+            .last()
+            .expect("the schedule produced equity samples");
+        assert!(
+            (final_balance - (100_000.0 + total_pnl)).abs() < 1e-6,
+            "balance {final_balance} should reconcile to 100000 + {total_pnl}"
+        );
     }
 }

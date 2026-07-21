@@ -14,12 +14,17 @@ use super::bindings::{
 };
 use super::instrument_bindings::PyInstrumentSpec;
 use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64};
-use super::strategy_bindings::{submit_order_on, PyEngineEvent, PyPositionSnapshot};
+use super::strategy_bindings::{
+    parse_account_mode, submit_order_on, PyEngineEvent, PyPositionSnapshot,
+};
 
 /// Multi-instrument session over deterministically merged bar streams.
 ///
-/// One shared cash pool across instruments (cash accounts only). Protocol:
-/// `add_instrument` + `set_bars` per symbol, `seal()`, then loop
+/// One shared account funds every instrument. With `account_type="margin"`
+/// they also share one pool of locked initial margin, so leverage applies
+/// portfolio-wide and a margin call halts all instruments at once.
+///
+/// Protocol: `add_instrument` + `set_bars` per symbol, `seal()`, then loop
 /// `current()` / `apply_current(...)` to completion and `finish()`.
 #[pyclass]
 pub struct PyPortfolioSession {
@@ -43,10 +48,15 @@ impl PyPortfolioSession {
 #[pymethods]
 impl PyPortfolioSession {
     #[new]
-    #[pyo3(signature = (config=None))]
-    fn new(config: Option<&PyBacktestConfig>) -> Self {
+    #[pyo3(signature = (config=None, account_type="cash", leverage=1.0))]
+    fn new(
+        config: Option<&PyBacktestConfig>,
+        account_type: &str,
+        leverage: f64,
+    ) -> PyResult<Self> {
         let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
-        Self { session: Some(EventSession::new(rust_config)) }
+        let account = parse_account_mode(account_type, leverage)?;
+        Ok(Self { session: Some(EventSession::with_account(rust_config, account)) })
     }
 
     /// Register an instrument; returns its index for routing.
@@ -283,9 +293,22 @@ impl PyPortfolioSession {
         Ok(self.session_ref()?.equity())
     }
 
-    /// Uncommitted shared cash.
+    /// Shared cash balance. In margin mode this includes locked initial
+    /// margin; see `free_capital()` for what can fund a new position.
     fn cash(&self) -> PyResult<f64> {
         Ok(self.session_ref()?.cash())
+    }
+
+    /// Capital available to open new positions across all instruments.
+    ///
+    /// Equals `cash()` in cash mode; net of locked initial margin otherwise.
+    fn free_capital(&self) -> PyResult<f64> {
+        Ok(self.session_ref()?.free_capital())
+    }
+
+    /// Whether a margin call or drawdown kill-switch has latched.
+    fn is_halted(&self) -> PyResult<bool> {
+        Ok(self.session_ref()?.is_halted())
     }
 
     /// Force-close all instruments and compute portfolio metrics.
@@ -294,10 +317,11 @@ impl PyPortfolioSession {
             .session
             .take()
             .ok_or_else(|| PyValueError::new_err("session is already finished"))?;
-        let (result, outcomes) = session.finish();
+        let outcome = session.finish();
         Ok(PyPortfolioResult {
-            result: convert_result(result),
-            per_instrument: outcomes
+            result: convert_result(outcome.result),
+            per_instrument: outcome
+                .instruments
                 .into_iter()
                 .map(|o| PyInstrumentSummary {
                     symbol: o.symbol,
@@ -306,9 +330,9 @@ impl PyPortfolioSession {
                     rejected_entries: o.rejected_entries,
                 })
                 .collect(),
-            rejected_entries: 0,
-            halted: false,
-            halted_at: None,
+            rejected_entries: outcome.rejected_entries,
+            halted: outcome.halted,
+            halted_at: outcome.halted_at,
         })
     }
 }

@@ -604,6 +604,58 @@ impl EngineKernel {
         }
     }
 
+    /// Initial margin locked by this kernel's open positions.
+    ///
+    /// The portfolio session sums these across kernels to keep its shared
+    /// account's aggregate in step.
+    #[inline]
+    pub fn locked_margin(&self) -> f64 {
+        self.margin.total_locked()
+    }
+
+    /// Direction-aware unrealized PnL of open positions, or 0.0 when flat.
+    ///
+    /// The margin-mode marking counterpart of [`EngineKernel::position_value`].
+    #[inline]
+    pub fn unrealized_value(&self, close: Price) -> f64 {
+        self.ledger.unrealized_total(close)
+    }
+
+    /// Maintenance margin required by this kernel's open positions; 0.0 in
+    /// cash mode or when flat.
+    ///
+    /// Lives here rather than in the session so each instrument's own
+    /// `margin_maint` applies: a portfolio requirement is the sum of these,
+    /// which a single blended rate would get wrong.
+    #[inline]
+    pub fn maintenance_requirement(&self, close: Price) -> f64 {
+        match self.maint_rate() {
+            Some(rate) => self.ledger.notional_total(close) * rate,
+            None => 0.0,
+        }
+    }
+
+    /// Trip this kernel's margin-call kill-switch, blocking further entries.
+    ///
+    /// The portfolio session calls this on every kernel so one shared
+    /// account's margin call halts all of its instruments.
+    #[inline]
+    pub fn halt_margin(&mut self) {
+        self.margin.halt();
+    }
+
+    /// Whether the drawdown kill-switch on the risk gate has tripped.
+    #[inline]
+    pub fn risk_halted(&self) -> bool {
+        self.risk.is_halted()
+    }
+
+    /// Whether this kernel's margin-call kill-switch has tripped.
+    #[inline]
+    pub fn is_margin_halted(&self) -> bool {
+        self.margin.is_halted()
+    }
+
     /// Advance the simulation by one bar.
     ///
     /// Order of operations is load-bearing and mirrors the original loop:
@@ -666,9 +718,9 @@ impl EngineKernel {
 
         // Margin maintenance: mark against this bar's close; a breach halts
         // new entries (latching) but does not force-liquidate.
-        if let Some(maint) = self.maint_rate() {
-            if self.ledger.is_in_position() && !self.margin.is_halted() {
-                let required = self.ledger.notional_total(bar.close) * maint;
+        if self.ledger.is_in_position() && !self.margin.is_halted() {
+            let required = self.maintenance_requirement(bar.close);
+            if required > 0.0 {
                 let equity = self.equity(bar.close);
                 if equity < required {
                     self.margin.halt();

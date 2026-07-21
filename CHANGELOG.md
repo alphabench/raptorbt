@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-07-21
 
-This release fixes four defects where the engine silently returned wrong
+This release fixes five defects where the engine silently returned wrong
 numbers, adds a shared-capital portfolio runner, and introduces the
 class-based strategy contract — an event-driven alternative to precomputed
 signal arrays.
@@ -18,6 +18,15 @@ value. Setting `apply_slippage=False, legacy_annualization=True` reproduces
 migrate.
 
 ### Fixed
+
+- **Portfolio session results reported stubbed halt/rejection fields.**
+  `PyPortfolioSession::finish` hardcoded `rejected_entries: 0`,
+  `halted: false`, and `halted_at: None`, so a `run_portfolio_strategy` run
+  could refuse entries or trip its drawdown kill-switch and still report a
+  clean, unhalted result. All three now carry real values:
+  `rejected_entries` sums the per-instrument counters (already reported
+  correctly on `per_instrument`), and `halted`/`halted_at` cover both the
+  drawdown kill-switch and the new portfolio margin call.
 
 - **Configured slippage was ignored.** `PyBacktestConfig` accepted `slippage`
   and `BacktestConfig` carried it, but `PortfolioEngine::new` hardcoded
@@ -61,6 +70,23 @@ migrate.
   ubuntu/macos × Python 3.10–3.12.
 
 ### Added
+
+- **Shared margin accounts in portfolio runs** — `run_portfolio_strategy`
+  accepts `account_type="margin"` and `leverage`, previously available only
+  to single-instrument runs. One account funds every instrument: leverage
+  applies portfolio-wide, sizing draws on the portfolio's free capital
+  (balance less all locked margin), and equity marks the balance plus
+  direction-aware unrealized PnL, so a winning short raises portfolio equity
+  instead of lowering it. The maintenance requirement is the sum of each
+  instrument's own requirement, so per-symbol `margin_maint` rates apply
+  rather than one blended rate; a breach fires `on_margin_call` once and
+  halts new entries on every instrument, including symbols that never
+  traded. `PyPortfolioSession` gains `free_capital()` and `is_halted()`.
+  Cash-account runs are unchanged and remain pinned by the golden fixtures.
+
+  Note: in portfolio runs `halted_at` is a **schedule-event ordinal**, since
+  the session interleaves N instrument streams; the array runners'
+  `halted_at` remains a bar index.
 
 - **`run_portfolio_backtest`** — simulates N instruments against **one** cash
   pool, with `max_positions` and a drawdown kill-switch gating each entry

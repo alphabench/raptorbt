@@ -19,6 +19,26 @@ use super::bindings::{
 };
 use super::instrument_bindings::PyInstrumentSpec;
 
+/// Parse the `account_type` / `leverage` kwargs shared by the single-symbol
+/// and portfolio session constructors.
+pub(crate) fn parse_account_mode(
+    account_type: &str,
+    leverage: f64,
+) -> PyResult<crate::accounts::AccountMode> {
+    match account_type {
+        "cash" => Ok(crate::accounts::AccountMode::Cash),
+        "margin" => {
+            if leverage <= 0.0 {
+                return Err(PyValueError::new_err("leverage must be > 0"));
+            }
+            Ok(crate::accounts::AccountMode::Margin { leverage })
+        }
+        other => Err(PyValueError::new_err(format!(
+            "account_type must be 'cash' or 'margin', got {other:?}"
+        ))),
+    }
+}
+
 /// One observable outcome of a session step.
 ///
 /// `kind` is `"entered"`, `"exited"`, `"entry_rejected"`, or one of the
@@ -239,20 +259,7 @@ impl PyKernelSession {
                 )))
             }
         };
-        let account = match account_type {
-            "cash" => crate::accounts::AccountMode::Cash,
-            "margin" => {
-                if leverage <= 0.0 {
-                    return Err(PyValueError::new_err("leverage must be > 0"));
-                }
-                crate::accounts::AccountMode::Margin { leverage }
-            }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "account_type must be 'cash' or 'margin', got {other:?}"
-                )))
-            }
-        };
+        let account = parse_account_mode(account_type, leverage)?;
 
         let mut runner =
             SingleRunner::from_config(rust_config, symbol.to_string(), direction, inst.as_ref());

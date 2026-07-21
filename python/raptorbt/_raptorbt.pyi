@@ -171,6 +171,8 @@ class PyPortfolioResult:
     per_instrument: list[PyInstrumentSummary]
     rejected_entries: int
     halted: bool
+    # Bar index in array runs; a schedule-event ordinal in session runs
+    # (``run_portfolio_strategy``), which interleaves N instrument streams.
     halted_at: int | None
     metrics: PyBacktestMetrics
 
@@ -412,7 +414,10 @@ def bars_from_ticks(
 ) -> _BarArrays: ...
 
 class PyPortfolioSession:
-    def __init__(self, config: PyBacktestConfig | None = ...) -> None: ...
+    def __init__(
+        self, config: PyBacktestConfig | None = ...,
+        account_type: str = ..., leverage: float = ...,
+    ) -> None: ...
     def add_instrument(
         self, symbol: str, direction: int = ...,
         instrument_config: PyInstrumentConfig | None = ...,
@@ -439,6 +444,8 @@ class PyPortfolioSession:
     def position(self, instrument: int) -> PyPositionSnapshot | None: ...
     def equity(self) -> float: ...
     def cash(self) -> float: ...
+    def free_capital(self) -> float: ...
+    def is_halted(self) -> bool: ...
     def finish(self) -> PyPortfolioResult: ...
 
 # --- Per-bar strategy session (class-based strategy contract) ---------------

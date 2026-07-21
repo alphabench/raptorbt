@@ -424,6 +424,8 @@ result = raptorbt.run_portfolio_strategy(
                     volume=...) for sym in symbols},
     instruments={...},        # optional per-symbol InstrumentSpec
     oms_type="netting",       # or "hedging", per instrument
+    account_type="cash",      # or "margin", shared across all instruments
+    leverage=1.0,             # portfolio-wide under account_type="margin"
 )
 result.result.equity_curve()  # portfolio curve, sampled per merged event
 result.per_instrument         # per-symbol trades / pnl / rejections
@@ -432,10 +434,22 @@ result.per_instrument         # per-symbol trades / pnl / rejections
 `ctx` in portfolio runs is a `PortfolioContext`: `ctx.bar` / `ctx.symbol` /
 `ctx.idx` (local to the symbol), `ctx.series(symbol)` for full arrays,
 `ctx.position(symbol)` / `ctx.positions(symbol)`, and portfolio-level
-`ctx.equity` / `ctx.cash`. Cash accounts only for now (a margin account
-shared across instruments arrives with the account handle in a later
-0.5.x); composite-bar subscriptions are single-instrument for now.
-One-cancels-other links cannot span symbols.
+`ctx.equity` / `ctx.cash`. Composite-bar subscriptions are single-instrument
+for now, and one-cancels-other links cannot span symbols.
+
+With `account_type="margin"` the instruments share one account: `leverage`
+applies portfolio-wide, sizing draws on the portfolio's free capital
+(balance less every instrument's locked margin), and equity marks the
+balance plus direction-aware unrealized PnL so winning shorts price upward.
+The maintenance requirement is the **sum of each instrument's own**
+requirement, so per-symbol `margin_maint` rates apply rather than one
+blended rate. A breach fires `on_margin_call` once and halts new entries on
+*every* instrument — subsequent entries are rejected with `MarginCall`,
+including on symbols that never traded. Results carry `halted` and
+`halted_at`; in portfolio runs `halted_at` is a **schedule-event ordinal**
+(the session interleaves N streams), not the bar index the array runners
+report. `result.rejected_entries` is the sum across instruments, whereas the
+array portfolio runner reports its single shared risk gate's counter.
 
 ### Position Policies, Margin Accounts, and Fill Realism
 
