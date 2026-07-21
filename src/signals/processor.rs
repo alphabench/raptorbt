@@ -237,6 +237,11 @@ impl SignalProcessor {
 }
 
 /// Shift signals forward by n bars (delays execution).
+///
+/// Note: boolean-array signal combinators serve the legacy array-based
+/// strategy path; strategies written against the class-based strategy
+/// contract express this logic directly in code. Kept for backward
+/// compatibility.
 pub fn shift_signals(signals: &[bool], n: usize) -> Vec<bool> {
     let len = signals.len();
     let mut result = vec![false; len];

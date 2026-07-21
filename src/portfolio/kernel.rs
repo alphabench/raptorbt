@@ -62,6 +62,10 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StepInput {
     /// Entry signal for this bar (post signal-cleaning).
+    ///
+    /// Note: boolean entry/exit signals will be superseded by order intents
+    /// from the class-based strategy contract; they remain supported for the
+    /// array-based runners.
     pub entry: bool,
     /// Exit signal for this bar (post signal-cleaning).
     pub exit: bool,
@@ -69,6 +73,33 @@ pub struct StepInput {
     pub atr: f64,
     /// Optional position-size multiplier from `CompiledSignals::position_sizes`.
     pub size_mult: Option<f64>,
+    /// Explicit stop price for an entry opened on this bar.
+    ///
+    /// Takes precedence over the configured stop model. Ignored when no entry
+    /// opens on this bar.
+    pub stop_price_override: Option<Price>,
+    /// Explicit target price for an entry opened on this bar.
+    ///
+    /// Takes precedence over the configured target model. Ignored when no
+    /// entry opens on this bar.
+    pub target_price_override: Option<Price>,
+}
+
+/// Read-only view of the currently open position.
+#[derive(Debug, Clone, Copy)]
+pub struct PositionSnapshot {
+    /// Entry bar index.
+    pub entry_idx: usize,
+    /// Entry fill price (slippage-adjusted).
+    pub entry_price: Price,
+    /// Position size in units.
+    pub size: f64,
+    /// Trading direction.
+    pub direction: Direction,
+    /// Active stop price, if any.
+    pub stop_price: Option<Price>,
+    /// Active target price, if any.
+    pub target_price: Option<Price>,
 }
 
 /// Stateful simulation core.
@@ -192,6 +223,42 @@ impl EngineKernel {
     #[inline]
     pub fn is_in_position(&self) -> bool {
         self.position.is_in_position()
+    }
+
+    /// Overwrite the open position's stop price; no-op when flat.
+    ///
+    /// `None` removes the stop. The new price is checked on the next
+    /// [`EngineKernel::step`] call.
+    pub fn set_stop_price(&mut self, price: Option<Price>) {
+        if self.position.is_in_position() {
+            self.position.position.stop_price = price;
+        }
+    }
+
+    /// Overwrite the open position's target price; no-op when flat.
+    ///
+    /// `None` removes the target. The new price is checked on the next
+    /// [`EngineKernel::step`] call.
+    pub fn set_target_price(&mut self, price: Option<Price>) {
+        if self.position.is_in_position() {
+            self.position.position.target_price = price;
+        }
+    }
+
+    /// Read-only view of the open position, or `None` when flat.
+    pub fn position_snapshot(&self) -> Option<PositionSnapshot> {
+        if !self.position.is_in_position() {
+            return None;
+        }
+        let p = &self.position.position;
+        Some(PositionSnapshot {
+            entry_idx: p.entry_idx,
+            entry_price: p.entry_price,
+            size: p.size,
+            direction: p.direction,
+            stop_price: p.stop_price,
+            target_price: p.target_price,
+        })
     }
 
     /// Mark-to-market equity at the given price.
@@ -361,7 +428,13 @@ impl EngineKernel {
         };
 
         if size <= 0.0 {
-            return None;
+            // Surface the discarded entry instead of silently skipping it —
+            // strategies (and their authors) need to learn that the sizing
+            // produced zero units, e.g. a size fraction too small for the
+            // instrument's lot size. Deliberately does not touch the risk
+            // gate's rejection counter: that metric describes constraint
+            // refusals, not sizing arithmetic.
+            return Some(EngineEvent::EntryRejected { idx, reason: RejectReason::ZeroSize });
         }
 
         let entry_breakdown = self.fee_model.breakdown(adjusted_price, size, direction, true);
@@ -369,7 +442,10 @@ impl EngineKernel {
             Some(b) => b.total(),
             None => self.fee_model.calculate(adjusted_price, size, direction),
         };
-        let (stop_price, target_price) = self.stop_and_target(adjusted_price, direction, input.atr);
+        let (config_stop, config_target) =
+            self.stop_and_target(adjusted_price, direction, input.atr);
+        let stop_price = input.stop_price_override.or(config_stop);
+        let target_price = input.target_price_override.or(config_target);
 
         self.position.open_position(
             idx,
@@ -425,7 +501,7 @@ impl EngineKernel {
             .get_price_from_arrays(bar.open, bar.high, bar.low, bar.close, direction, is_entry)
     }
 
-    /// Compute stop and target prices for a new position.
+    /// Compute stop and target prices for a new position from configuration.
     fn stop_and_target(
         &self,
         entry_price: Price,
@@ -466,5 +542,183 @@ impl EngineKernel {
         };
 
         (stop_price, target_price)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_kernel() -> EngineKernel {
+        let config = BacktestConfig::default();
+        let fee_model = config.fee_model();
+        EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        )
+    }
+
+    fn bar(idx: i64, price: Price) -> KernelBar {
+        KernelBar {
+            timestamp: idx,
+            open: price,
+            high: price + 1.0,
+            low: price - 1.0,
+            close: price,
+            volume: 1000.0,
+        }
+    }
+
+    fn enter(kernel: &mut EngineKernel, idx: usize, price: Price) {
+        let events = kernel.step(
+            idx,
+            &bar(idx as i64, price),
+            StepInput { entry: true, ..StepInput::default() },
+        );
+        assert!(
+            matches!(events.as_slice(), [EngineEvent::Entered { .. }]),
+            "expected entry, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn set_stop_price_is_noop_when_flat() {
+        let mut kernel = make_kernel();
+        kernel.set_stop_price(Some(90.0));
+        assert!(kernel.position_snapshot().is_none());
+    }
+
+    #[test]
+    fn set_stop_and_target_update_open_position() {
+        let mut kernel = make_kernel();
+        enter(&mut kernel, 0, 100.0);
+
+        kernel.set_stop_price(Some(95.0));
+        kernel.set_target_price(Some(110.0));
+
+        let snap = kernel.position_snapshot().unwrap();
+        assert_eq!(snap.stop_price, Some(95.0));
+        assert_eq!(snap.target_price, Some(110.0));
+
+        kernel.set_stop_price(None);
+        assert_eq!(kernel.position_snapshot().unwrap().stop_price, None);
+    }
+
+    #[test]
+    fn programmatic_stop_triggers_exit() {
+        let mut kernel = make_kernel();
+        enter(&mut kernel, 0, 100.0);
+        kernel.set_stop_price(Some(98.5));
+
+        // Bar trades down through the stop.
+        let events = kernel.step(1, &bar(1, 98.0), StepInput::default());
+        match events.as_slice() {
+            [EngineEvent::Exited { trade, .. }] => {
+                assert_eq!(trade.exit_reason, ExitReason::StopLoss);
+            }
+            other => panic!("expected stop exit, got {other:?}"),
+        }
+        assert!(!kernel.is_in_position());
+    }
+
+    #[test]
+    fn entry_stop_override_beats_config() {
+        let config = BacktestConfig {
+            stop: StopConfig::Fixed { percent: 0.05 },
+            target: TargetConfig::Fixed { percent: 0.10 },
+            ..BacktestConfig::default()
+        };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+
+        let events = kernel.step(
+            0,
+            &bar(0, 100.0),
+            StepInput {
+                entry: true,
+                stop_price_override: Some(97.0),
+                target_price_override: Some(104.0),
+                ..StepInput::default()
+            },
+        );
+        assert!(matches!(events.as_slice(), [EngineEvent::Entered { .. }]));
+
+        let snap = kernel.position_snapshot().unwrap();
+        assert_eq!(snap.stop_price, Some(97.0));
+        assert_eq!(snap.target_price, Some(104.0));
+    }
+
+    #[test]
+    fn zero_size_entry_emits_rejection() {
+        let config = BacktestConfig::default();
+        let fee_model = config.fee_model();
+        // Lot of 10,000 units at price 100 with 100k capital -> raw size
+        // ~999 units floors to zero lots.
+        let inst = InstrumentConfig {
+            lot_size: Some(10_000.0),
+            alloted_capital: None,
+            stop: None,
+            target: None,
+            existing_qty: None,
+            avg_price: None,
+        };
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            Some(&inst),
+        );
+
+        let events =
+            kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
+        match events.as_slice() {
+            [EngineEvent::EntryRejected { reason, .. }] => {
+                assert_eq!(reason.as_str(), "zero_size");
+            }
+            other => panic!("expected zero-size rejection, got {other:?}"),
+        }
+        assert!(!kernel.is_in_position());
+    }
+
+    #[test]
+    fn entry_without_override_uses_config_stop() {
+        let config = BacktestConfig {
+            stop: StopConfig::Fixed { percent: 0.05 },
+            ..BacktestConfig::default()
+        };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+
+        let events = kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
+        assert!(matches!(events.as_slice(), [EngineEvent::Entered { .. }]));
+
+        let snap = kernel.position_snapshot().unwrap();
+        assert_eq!(snap.stop_price, Some(95.0));
+        assert_eq!(snap.direction, Direction::Long);
+        assert_eq!(snap.entry_idx, 0);
     }
 }

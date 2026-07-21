@@ -64,6 +64,20 @@ from raptorbt._raptorbt import (
     supertrend,
     rolling_min,
     rolling_max,
+    # Per-bar strategy session (class-based strategy contract)
+    PyKernelSession,
+    PyEngineEvent,
+    PyPositionSnapshot,
+    resolve_atr_period,
+)
+from raptorbt.strategy import (
+    Bar,
+    ClosePosition,
+    MarketOrder,
+    Strategy,
+    StrategyConfig,
+    StrategyContext,
+    run_strategy_backtest,
 )
 
 try:  # Python 3.8+
@@ -127,4 +141,17 @@ __all__ = [
     "supertrend",
     "rolling_min",
     "rolling_max",
+    # Per-bar strategy session (class-based strategy contract)
+    "PyKernelSession",
+    "PyEngineEvent",
+    "PyPositionSnapshot",
+    "resolve_atr_period",
+    # Class-based strategy contract
+    "Bar",
+    "ClosePosition",
+    "MarketOrder",
+    "Strategy",
+    "StrategyConfig",
+    "StrategyContext",
+    "run_strategy_backtest",
 ]

@@ -175,6 +175,7 @@ impl PortfolioBacktest {
                     exit: cleaned[idx].1[i],
                     atr: atr_series[idx].get(i).copied().unwrap_or(0.0),
                     size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
+                    ..StepInput::default()
                 };
 
                 kernel.set_cash(0.0);
@@ -216,6 +217,7 @@ impl PortfolioBacktest {
                     exit: false,
                     atr: atr_series[idx].get(i).copied().unwrap_or(0.0),
                     size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
+                    ..StepInput::default()
                 };
 
                 // Lend the kernel its slice of the pool; it spends what it needs

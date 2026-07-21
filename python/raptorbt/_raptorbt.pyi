@@ -256,3 +256,59 @@ def realized_vol_rolling(
 ) -> _F64: ...
 def oi_position_pct(oi: _F64) -> _F64: ...
 def tick_velocity(timestamps_ns: _I64, window_seconds: float = ...) -> _F64: ...
+
+# --- Per-bar strategy session (class-based strategy contract) ---------------
+
+class PyEngineEvent:
+    kind: str
+    idx: int
+    price: float | None
+    size: float | None
+    direction: int | None
+    trade: PyTrade | None
+    reject_reason: str | None
+
+class PyPositionSnapshot:
+    entry_idx: int
+    entry_price: float
+    size: float
+    direction: int
+    stop_price: float | None
+    target_price: float | None
+
+class PyKernelSession:
+    def __init__(
+        self,
+        symbol: str = ...,
+        direction: int = ...,
+        config: PyBacktestConfig | None = ...,
+        instrument_config: PyInstrumentConfig | None = ...,
+    ) -> None: ...
+    def step(
+        self,
+        idx: int,
+        timestamp: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        entry: bool = ...,
+        exit: bool = ...,
+        atr: float = ...,
+        size_mult: float | None = ...,
+        stop_price: float | None = ...,
+        target_price: float | None = ...,
+    ) -> list[PyEngineEvent]: ...
+    def set_stop_price(self, price: float | None) -> None: ...
+    def set_target_price(self, price: float | None) -> None: ...
+    def equity(self) -> float: ...
+    def cash(self) -> float: ...
+    def is_in_position(self) -> bool: ...
+    def position(self) -> PyPositionSnapshot | None: ...
+    def finish(self) -> PyBacktestResult: ...
+
+def resolve_atr_period(
+    config: PyBacktestConfig | None = ...,
+    instrument_config: PyInstrumentConfig | None = ...,
+) -> int | None: ...

@@ -143,6 +143,12 @@ impl TickData {
 }
 
 /// Compiled trading signals from strategy.
+///
+/// Note: precompiled boolean signal arrays are the legacy strategy
+/// representation. The class-based strategy contract (`Strategy` +
+/// `run_strategy_backtest` on the Python side) supersedes them for new
+/// strategies; array-based runners remain supported for backward
+/// compatibility and will be deprecated in a future release.
 #[derive(Debug, Clone)]
 pub struct CompiledSignals {
     /// Symbol identifier.

@@ -8,7 +8,8 @@ use crate::execution::{FeeModel, FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
 use crate::metrics::annualization;
 use crate::metrics::streaming::StreamingMetrics;
-use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
+use crate::portfolio::kernel::{KernelBar, StepInput};
+use crate::portfolio::runner::SingleRunner;
 use crate::signals::processor::SignalProcessor;
 
 /// Portfolio simulation engine.
@@ -110,7 +111,7 @@ impl PortfolioEngine {
             self.signal_processor.clean_signals(&signals.entries, &signals.exits);
 
         // Initialize state
-        let mut kernel = EngineKernel::new(
+        let mut runner = SingleRunner::new(
             self.config.clone(),
             self.fee_model.clone(),
             self.slippage_model.clone(),
@@ -118,15 +119,7 @@ impl PortfolioEngine {
             signals.symbol.clone(),
             signals.direction,
             inst_config,
-        )
-        .with_risk_gate(self.config.risk_gate());
-        let initial_capital = self.config.initial_capital;
-        let mut equity_curve = vec![initial_capital; n];
-        let mut drawdown_curve = vec![0.0; n];
-        let mut returns = vec![0.0; n];
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut streaming = StreamingMetrics::new();
-        let mut peak_equity = initial_capital;
+        );
 
         // Determine effective stop/target configs (per-instrument overrides take precedence)
         let effective_stop =
@@ -151,7 +144,8 @@ impl PortfolioEngine {
         };
 
         // Main simulation loop — the per-bar body lives in EngineKernel::step
-        // so that a live feed can drive identical execution semantics.
+        // (via SingleRunner, which owns the curve accounting) so that a live
+        // feed can drive identical execution semantics.
         for i in 0..n {
             let bar = KernelBar {
                 timestamp: ohlcv.timestamps[i],
@@ -167,64 +161,13 @@ impl PortfolioEngine {
                 exit: exits[i],
                 atr: atr_values.get(i).copied().unwrap_or(0.0),
                 size_mult: signals.position_sizes.as_ref().map(|sizes| sizes[i]),
+                ..StepInput::default()
             };
 
-            for event in kernel.step(i, &bar, input) {
-                if let EngineEvent::Exited { trade, .. } = event {
-                    streaming.update(trade.return_pct / 100.0);
-                    trades.push(trade);
-                }
-            }
-
-            // Calculate equity
-            let equity = kernel.equity(bar.close);
-            equity_curve[i] = equity;
-
-            // Calculate drawdown
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            drawdown_curve[i] = (peak_equity - equity) / peak_equity * 100.0;
-
-            // Feed the kill-switch after this bar is marked to market, so the
-            // halt takes effect from the next bar's entry check onward.
-            kernel.observe_equity(equity, peak_equity);
-
-            // Calculate return
-            if i > 0 {
-                returns[i] = (equity - equity_curve[i - 1]) / equity_curve[i - 1];
-            }
+            runner.step(i, &bar, input);
         }
 
-        // Mark any open position at end of data — marked-to-market, no exit fees
-        if kernel.is_in_position() {
-            let last_idx = n - 1;
-            let last_bar = KernelBar {
-                timestamp: ohlcv.timestamps[last_idx],
-                open: ohlcv.open[last_idx],
-                high: ohlcv.high[last_idx],
-                low: ohlcv.low[last_idx],
-                close: ohlcv.close[last_idx],
-                volume: ohlcv.volume[last_idx],
-            };
-
-            if let Some(trade) = kernel.finalize(last_idx, &last_bar) {
-                streaming.update(trade.return_pct / 100.0);
-                trades.push(trade);
-            }
-        }
-
-        // Calculate final metrics
-        let metrics = self.calculate_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &trades,
-            &ohlcv.timestamps,
-            &streaming,
-        );
-
-        BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
+        runner.finish()
     }
 
     /// Calculate backtest metrics.

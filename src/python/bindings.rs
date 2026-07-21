@@ -593,6 +593,12 @@ impl PyBacktestResult {
 // ============================================================================
 
 /// Run single instrument backtest.
+///
+/// Note: the array-based runners (precomputed boolean entry/exit signals)
+/// are the legacy strategy path. For new strategies prefer the class-based
+/// strategy contract (`raptorbt.Strategy` + `run_strategy_backtest`), which
+/// shares the same execution core and result types. Array runners remain
+/// supported and will only be deprecated in a future major release.
 #[pyfunction]
 #[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None, instrument_config=None))]
 pub fn run_single_backtest<'py>(
@@ -1876,8 +1882,39 @@ fn finite(value: f64) -> Option<f64> {
     }
 }
 
+/// Convert a Rust trade to its Python counterpart.
+pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
+    PyTrade {
+        id: t.id,
+        symbol: t.symbol,
+        entry_idx: t.entry_idx,
+        exit_idx: t.exit_idx,
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        size: t.size,
+        direction: t.direction as i32,
+        pnl: t.pnl,
+        return_pct: t.return_pct,
+        entry_time: t.entry_time,
+        exit_time: t.exit_time,
+        fees: t.fees,
+        fee_breakdown: t.fee_breakdown.map(|b| {
+            HashMap::from([
+                ("brokerage".to_string(), b.brokerage),
+                ("stt".to_string(), b.stt),
+                ("exchange_txn".to_string(), b.exchange_txn),
+                ("sebi_fee".to_string(), b.sebi_fee),
+                ("stamp_duty".to_string(), b.stamp_duty),
+                ("gst".to_string(), b.gst),
+                ("total".to_string(), b.total()),
+            ])
+        }),
+        exit_reason: format!("{:?}", t.exit_reason),
+    }
+}
+
 /// Convert Rust BacktestResult to Python PyBacktestResult.
-fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
+pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
     let metrics = PyBacktestMetrics {
         total_return_pct: result.metrics.total_return_pct,
         sharpe_ratio: result.metrics.sharpe_ratio,
@@ -1914,37 +1951,7 @@ fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResul
         recovery_factor: finite(result.metrics.recovery_factor),
     };
 
-    let trades: Vec<PyTrade> = result
-        .trades
-        .into_iter()
-        .map(|t| PyTrade {
-            id: t.id,
-            symbol: t.symbol,
-            entry_idx: t.entry_idx,
-            exit_idx: t.exit_idx,
-            entry_price: t.entry_price,
-            exit_price: t.exit_price,
-            size: t.size,
-            direction: t.direction as i32,
-            pnl: t.pnl,
-            return_pct: t.return_pct,
-            entry_time: t.entry_time,
-            exit_time: t.exit_time,
-            fees: t.fees,
-            fee_breakdown: t.fee_breakdown.map(|b| {
-                HashMap::from([
-                    ("brokerage".to_string(), b.brokerage),
-                    ("stt".to_string(), b.stt),
-                    ("exchange_txn".to_string(), b.exchange_txn),
-                    ("sebi_fee".to_string(), b.sebi_fee),
-                    ("stamp_duty".to_string(), b.stamp_duty),
-                    ("gst".to_string(), b.gst),
-                    ("total".to_string(), b.total()),
-                ])
-            }),
-            exit_reason: format!("{:?}", t.exit_reason),
-        })
-        .collect();
+    let trades: Vec<PyTrade> = result.trades.into_iter().map(convert_trade).collect();
 
     PyBacktestResult {
         metrics,

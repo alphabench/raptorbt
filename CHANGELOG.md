@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-07-21
 
 This release fixes four defects where the engine silently returned wrong
-numbers, and adds a shared-capital portfolio runner.
+numbers, adds a shared-capital portfolio runner, and introduces the
+class-based strategy contract — an event-driven alternative to precomputed
+signal arrays.
 
 **Read "Migrating from 0.4.x" before upgrading** — several metrics change
 value. Setting `apply_slippage=False, legacy_annualization=True` reproduces
@@ -104,6 +106,45 @@ migrate.
   core (`step(bar) -> Vec<EngineEvent>`). Batch backtests loop it; a live feed
   can drive the same code, which is the groundwork for backtest/live parity.
 
+- **Class-based strategy contract.** Strategies can now be written as Python
+  classes with lifecycle hooks instead of precomputed signal arrays:
+
+  ```python
+  class SmaCross(raptorbt.Strategy):
+      def on_start(self, ctx): ...   # precompute indicators on ctx.close etc.
+      def on_bar(self, ctx):
+          if crossed_up:   self.enter()
+          if crossed_down: self.close_position()
+  result = raptorbt.run_strategy_backtest(SmaCross(), timestamps, o, h, l, c, v)
+  ```
+
+  Hooks: `on_start`, `on_bar`, `on_stop`, `on_order_filled`,
+  `on_order_rejected`, `on_position_opened`, `on_position_closed`. Order
+  intents (`enter(size_frac=..., stop_price=..., target_price=...)`,
+  `close_position()`) are applied through the same execution core as the
+  array runners — `SingleRunner`, extracted from the batch engine loop — so
+  identical decisions produce bit-identical trades, curves, and metrics
+  (pinned by the equivalence tests in `tests/python/test_strategy.py`).
+  `ctx` exposes the OHLCV arrays, current index/bar, position snapshot,
+  equity/cash, and programmatic `set_stop_price`/`set_target_price`.
+
+  Entries whose computed size rounds to zero units (size fraction below one
+  lot, or insufficient capital at the fill price) now emit
+  `EntryRejected { reason: ZeroSize }` instead of being silently skipped;
+  class strategies receive it via `on_order_rejected` with
+  `reject_reason="ZeroSize"`. Array-runner results are unchanged — the batch
+  path ignores rejection events.
+
+  Rust/PyO3 surface: `PyKernelSession` (per-bar `step` driving the engine
+  with scalar inputs), `PyEngineEvent`, `PyPositionSnapshot`,
+  `resolve_atr_period`, kernel `set_stop_price`/`set_target_price`/
+  `position_snapshot`, and `StepInput.stop_price_override`/
+  `target_price_override` for per-entry explicit exit levels.
+
+  The array-based runners are unchanged and remain fully supported; they are
+  the fast path for vectorized workloads. New strategies should prefer the
+  class contract.
+
 - **Type stubs.** `_raptorbt.pyi` and a `py.typed` marker now ship in the
   wheel. The `Typing :: Typed` classifier was previously inaccurate.
 
@@ -116,14 +157,19 @@ migrate.
   `compute_backtest_metrics_with_config` was added for callers that have a full
   config.
 - `PositionManager::close_position` takes an `ExitDetails` struct.
+- `StepInput` gained `stop_price_override` and `target_price_override`
+  fields. Rust rlib consumers constructing it as a struct literal without
+  `..Default::default()` must add the new fields; the Python API is
+  unaffected.
 
 ### Removed
 
 - `signals::expression` (456 lines). It had no parser or AST despite its module
   documentation, was never re-exported, never bound to Python, and had zero
-  references anywhere in the crate. Its role is superseded by the strategy spec
-  planned for 0.6.0. This is a breaking change only for Rust consumers of the
-  rlib that referenced `raptorbt::signals::expression::` directly.
+  references anywhere in the crate. Its role is superseded by the class-based
+  strategy contract shipped in this release. This is a breaking change only for
+  Rust consumers of the rlib that referenced `raptorbt::signals::expression::`
+  directly.
 - The checked-in `_raptorbt.cpython-311-darwin.so` build artifact and
   `libraptorbt.dylib.dSYM/`. Compiled extensions are now gitignored.
 

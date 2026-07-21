@@ -56,6 +56,12 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::run_spread_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_tick_backtest, m)?)?;
 
+    // Register the per-bar strategy session (class-based strategy contract)
+    m.add_class::<python::strategy_bindings::PyKernelSession>()?;
+    m.add_class::<python::strategy_bindings::PyEngineEvent>()?;
+    m.add_class::<python::strategy_bindings::PyPositionSnapshot>()?;
+    m.add_function(wrap_pyfunction!(python::strategy_bindings::resolve_atr_period, m)?)?;
+
     // Register batch spread backtest
     m.add_class::<python::bindings::PyBatchSpreadItem>()?;
     m.add_function(wrap_pyfunction!(python::bindings::batch_spread_backtest, m)?)?;

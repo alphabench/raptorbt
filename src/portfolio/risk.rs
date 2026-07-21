@@ -13,6 +13,9 @@ pub enum RejectReason {
     MaxPositions,
     /// The drawdown kill-switch has tripped; no further entries this run.
     DrawdownHalt,
+    /// Requested size rounded/computed to zero units (e.g. size fraction too
+    /// small for the lot size, or insufficient capital at this price).
+    ZeroSize,
 }
 
 impl RejectReason {
@@ -21,6 +24,7 @@ impl RejectReason {
         match self {
             RejectReason::MaxPositions => "max_positions",
             RejectReason::DrawdownHalt => "drawdown_halt",
+            RejectReason::ZeroSize => "zero_size",
         }
     }
 }

@@ -60,6 +60,7 @@ RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphaben
 
 - [Overview](#overview)
 - [Performance](#performance)
+- [Class-Based Strategies](#class-based-strategies)
 - [Strategy Types](#strategy-types)
 - [Metrics](#metrics)
 - [Indicators](#indicators)
@@ -142,6 +143,66 @@ Max difference across 5 runs: 0.0000000000%
 not change between runs.)
 
 ---
+
+## Class-Based Strategies
+
+New in 0.5.0: strategies can be written as event-driven classes instead of
+precomputed signal arrays. Subclass `raptorbt.Strategy`, override lifecycle
+hooks, and emit order intents; the engine simulates fills and routes events
+back into your hooks. Both paths share one execution core, so identical
+decisions produce identical results — the class contract is the recommended
+way to write new strategies, while the array runners remain the fast path
+for vectorized workloads.
+
+```python
+import numpy as np
+import raptorbt
+
+
+class SmaCross(raptorbt.Strategy):
+    def on_start(self, ctx):
+        # Full OHLCV arrays are available for indicator precomputation.
+        self.fast = raptorbt.sma(ctx.close, 10)
+        self.slow = raptorbt.sma(ctx.close, 30)
+
+    def on_bar(self, ctx):
+        i = ctx.idx
+        if i == 0 or np.isnan(self.slow[i]) or np.isnan(self.slow[i - 1]):
+            return
+        crossed_up = self.fast[i] > self.slow[i] and self.fast[i - 1] <= self.slow[i - 1]
+        crossed_dn = self.fast[i] < self.slow[i] and self.fast[i - 1] >= self.slow[i - 1]
+        if crossed_up and ctx.position is None:
+            self.enter()                      # optional: size_frac=, stop_price=, target_price=
+        elif crossed_dn and ctx.position is not None:
+            self.close_position()
+
+    def on_position_closed(self, ctx, event):
+        self.log.info("closed: pnl=%.2f", event.trade.pnl)
+
+
+result = raptorbt.run_strategy_backtest(
+    SmaCross(), timestamps, open_, high, low, close, volume,
+    symbol="EXAMPLE", config=raptorbt.PyBacktestConfig(fees=0.001),
+)
+print(result.metrics.total_return_pct, len(result.trades()))
+```
+
+Hooks: `on_start`, `on_bar`, `on_stop`, `on_order_filled`,
+`on_order_rejected`, `on_position_opened`, `on_position_closed`. Inside
+`on_bar`, `ctx` provides the current `bar`, `position` snapshot, `equity`,
+`cash`, `history(n)`, and `set_stop_price()` / `set_target_price()` for
+programmatic exits. Decision logic must only read array values at `ctx.idx`
+or earlier — indexing past the current bar reads the future.
+
+Engine-level stop/target/sizing configuration (`PyBacktestConfig`,
+`PyInstrumentConfig`) applies to both paths. `run_strategy_backtest` returns
+the same `PyBacktestResult` as `run_single_backtest`. For advanced drivers
+(live feeds, custom loops), `PyKernelSession` exposes the per-bar engine
+step directly.
+
+Note: one Python hook call per bar makes the class path slower than the
+array path — fine for typical bar counts, but prefer arrays for large
+parameter sweeps.
 
 ## Strategy Types
 
