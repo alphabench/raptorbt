@@ -309,6 +309,10 @@ def run_portfolio_strategy(
     strategy.cache = Cache()
     strategy.on_start(ctx)
 
+    # One clock per symbol: a timer set in on_start belongs to every symbol,
+    # not to whichever one's event happens to cross the threshold first.
+    clocks = {symbol: strategy.clock.clone_schedule() for symbol in symbols}
+
     # Subscriptions and indicators are declared in on_start, so the per-symbol
     # aggregators and indicator routing are built once it returns.
     streams = StreamState(strategy, symbols)
@@ -333,6 +337,7 @@ def run_portfolio_strategy(
         ctx.idx = local_idx
         ctx._bar = Bar(ts, o, h, l, c, v)
 
+        strategy.clock = clocks[ctx.symbol]
         for time_event in strategy.clock._advance(ts):
             strategy.on_time_event(ctx, time_event)
 

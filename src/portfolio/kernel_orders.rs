@@ -350,13 +350,19 @@ impl EngineKernel {
         // market fills may instead slip one tick against the trader.
         let is_limit_fill = matches!(kind, OrderKind::Limit { .. })
             || (matches!(kind, OrderKind::StopLimit { .. }) && status == OrderStatus::Triggered);
+        let mut queue_granted = false;
         if is_limit_fill {
             // The queue model reads the tape; it consumes no randomness, so
             // enabling it must not shift the RNG stream for other orders.
             let verdict = self.queue_verdict(id, kind, status, side, bar);
             match verdict {
                 Some(QueueVerdict::Resting) => return,
-                Some(_) => {} // filled: through the level, or queue exhausted
+                Some(_) => {
+                    // The queue model earned this fill from volume observed
+                    // trading ahead of the order, so it genuinely held the
+                    // price: limit slippage would double-penalize it.
+                    queue_granted = true;
+                }
                 None => {
                     if self.config.fill_prob_limit < 1.0
                         && self.fill_rng.next_f64() >= self.config.fill_prob_limit
@@ -366,6 +372,11 @@ impl EngineKernel {
                 }
             }
         }
+        let matched_price = match (queue_granted, kind) {
+            (true, OrderKind::Limit { price }) => price,
+            (true, OrderKind::StopLimit { price, .. }) => price,
+            _ => matched_price,
+        };
         let matched_price = if !is_limit_fill
             && !matched_price.is_nan()
             && self.config.fill_prob_slippage > 0.0

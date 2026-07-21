@@ -1,5 +1,12 @@
 """Bar-driven simulation clock: one-shot alerts and recurring timers.
 
+In a multi-symbol run each symbol gets its own clock, so a timer set in
+``on_start`` fires once per symbol rather than once for whichever symbol's
+event happened to cross the threshold first. ``ctx.clock`` is the clock of
+``ctx.symbol``; alerts and timers set from a handler therefore belong to
+the symbol being handled.
+
+
 Time events fire when a bar's timestamp reaches the scheduled time — at bar
 granularity, which is why events carry both ``ts_scheduled`` and
 ``ts_fired`` (the bar timestamp that triggered them). Events dispatch to
@@ -61,6 +68,17 @@ class Clock:
 
     def timer_names(self) -> list[str]:
         return [*self._alerts, *self._timers]
+
+    def clone_schedule(self) -> "Clock":
+        """A new clock carrying the same alerts and timers.
+
+        Used to give each symbol its own copy of whatever was scheduled in
+        ``on_start``, before any of them has advanced.
+        """
+        copy = Clock()
+        copy._alerts = dict(self._alerts)
+        copy._timers = {name: list(state) for name, state in self._timers.items()}
+        return copy
 
     def _advance(self, ts: int) -> list[TimeEvent]:
         """Advance to a bar timestamp; return due events in scheduled order."""

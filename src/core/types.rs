@@ -266,6 +266,9 @@ pub enum ExitReason {
     Order,
     /// Option expiry settlement.
     Settlement,
+    /// Force-closed by a margin call. Unlike a settlement this is a real
+    /// trade-out and pays exit costs.
+    Liquidation,
     /// Max hold time exceeded (tick backtest).
     TimeExit,
 }
@@ -347,6 +350,25 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub fill_prob_slippage: f64,
 
+    /// Force-close open positions when a margin call fires, instead of only
+    /// halting new entries.
+    ///
+    /// `false` (default) keeps the latching-halt behavior: the position
+    /// rides on and the strategy decides what to do. `true` models a broker
+    /// that liquidates, closing everything at the breaching bar's fill
+    /// price and paying exit costs.
+    #[serde(default)]
+    pub liquidate_on_margin_call: bool,
+
+    /// Adverse price adjustment on limit fills, as a fraction of the limit
+    /// price. `0.0` (default) fills exactly at the limit, as before.
+    ///
+    /// Models adverse selection on a resting order. Suppressed when
+    /// `queue_fill_model` granted the fill: volume observed trading ahead
+    /// of you is evidence you held the price.
+    #[serde(default)]
+    pub limit_slippage: f64,
+
     /// Offset added to timestamps before deriving the trading date that
     /// `TimeInForce::Day` expires on.
     ///
@@ -406,6 +428,8 @@ impl Default for BacktestConfig {
             fill_prob_limit: 1.0,
             queue_fill_model: false,
             session_tz_offset_ns: 0,
+            limit_slippage: 0.0,
+            liquidate_on_margin_call: false,
             fill_prob_slippage: 0.0,
             fill_seed: 0,
             bar_path_adaptive: false,

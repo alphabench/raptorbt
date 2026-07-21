@@ -535,6 +535,36 @@ impl EventSession {
             if required > 0.0 && equity < required {
                 self.halt_all(self.cursor, HaltCause::MarginCall);
                 events.push(EngineEvent::MarginCall { idx: entry.local_idx, equity, required });
+                if self.config.liquidate_on_margin_call {
+                    // Every instrument liquidates at its own last mark, and
+                    // the cash it returns flows back through the shared
+                    // account like any other close.
+                    for i in 0..self.kernels.len() {
+                        let Some((last_idx, last_bar)) = self.last_seen[i] else { continue };
+                        let kernel = &mut self.kernels[i];
+                        let locked_before = kernel.locked_margin();
+                        let injected = match self.account.mode() {
+                            AccountMode::Cash => self.account.balance(),
+                            AccountMode::Margin { .. } => {
+                                self.account.balance()
+                                    - (self.account.locked() - locked_before)
+                            }
+                        };
+                        kernel.set_cash(injected);
+                        let closed = kernel.liquidate_all(last_idx, &last_bar);
+                        let delta_cash = kernel.cash() - injected;
+                        let delta_locked = kernel.locked_margin() - locked_before;
+                        kernel.set_cash(0.0);
+                        self.account.reconcile(delta_cash, delta_locked);
+                        for event in &closed {
+                            if let EngineEvent::Exited { trade, .. } = event {
+                                self.streaming.update(trade.return_pct / 100.0);
+                                self.trades.push(trade.clone());
+                            }
+                        }
+                        events.extend(closed);
+                    }
+                }
             }
         }
 

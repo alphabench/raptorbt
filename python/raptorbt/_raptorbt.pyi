@@ -41,6 +41,8 @@ class PyBacktestConfig:
     fill_prob_slippage: float
     queue_fill_model: bool
     session_tz_offset_ns: int
+    limit_slippage: float
+    liquidate_on_margin_call: bool
     fill_seed: int
     bar_path_adaptive: bool
     legacy_annualization: bool
@@ -273,6 +275,7 @@ def tick_velocity(timestamps_ns: _I64, window_seconds: float = ...) -> _F64: ...
 # --- Instrument market definitions ------------------------------------------
 
 class InstrumentSpec:
+    settlement_fee: float
     symbol: str
     kind: str
     price_increment: float

@@ -206,6 +206,9 @@ pub struct EngineKernel {
     pub(crate) queue: QueueTracker,
     /// Working execution schedules (TWAP). Empty unless one is submitted.
     pub(crate) algos: AlgoEngine,
+    /// Latest underlying price, for settling options to intrinsic value.
+    /// `None` settles at the contract's own close.
+    underlying_price: Option<Price>,
     /// Whether the current step is driven by a trade print. Only a print
     /// carries volume at a price, which is what the queue model consumes.
     pub(crate) stepping_trade: bool,
@@ -232,13 +235,18 @@ impl EngineKernel {
         let cash = config.initial_capital;
         let config_seed = config.fill_seed;
         let tz_offset_ns = config.session_tz_offset_ns;
+        let limit_slippage = config.limit_slippage;
 
         Self {
             config,
             fee_model,
             slippage_model,
             fill_price,
-            fill_model: FillModel { fill_price, ..FillModel::default() },
+            fill_model: FillModel {
+                fill_price,
+                limit_slippage,
+                ..FillModel::default()
+            },
             ledger: PositionLedger::new(symbol, PositionPolicy::Net),
             cash,
             direction,
@@ -258,6 +266,7 @@ impl EngineKernel {
             book: OrderBook::new(),
             queue: QueueTracker::new(),
             algos: AlgoEngine::new(),
+            underlying_price: None,
             stepping_trade: false,
         }
     }
@@ -633,6 +642,15 @@ impl EngineKernel {
         std::mem::take(&mut self.pending_events)
     }
 
+    /// Set the underlying price used to settle options at expiry.
+    ///
+    /// An option's own bars carry the option's price, so intrinsic value
+    /// needs the underlying from somewhere else — the strategy supplies it
+    /// rather than the engine guessing.
+    pub fn set_underlying_price(&mut self, price: Option<Price>) {
+        self.underlying_price = price;
+    }
+
     /// Best bid from the most recent quote, if any.
     #[inline]
     pub fn best_bid(&self) -> Option<Price> {
@@ -721,6 +739,9 @@ impl EngineKernel {
                 if equity < required {
                     self.margin.halt();
                     events.push(EngineEvent::MarginCall { idx, equity, required });
+                    if self.config.liquidate_on_margin_call {
+                        events.extend(self.liquidate_all(idx, bar));
+                    }
                 }
             }
         }
@@ -969,15 +990,20 @@ impl EngineKernel {
 
     /// Force-close the open position at contract expiry.
     ///
-    /// Options settle to intrinsic value when the spec can compute one (the
-    /// settlement bar's close is the fallback price); linear contracts settle
-    /// at the close. Settlement is an expiry event, not a trade-out, so no
-    /// exit fees are charged — consistent with [`EngineKernel::finalize`].
+    /// Options settle to intrinsic value against the underlying when one has
+    /// been supplied via [`EngineKernel::set_underlying_price`]; without it
+    /// they settle at the contract's own close, since an option's bars carry
+    /// the option's price and the engine has no second series to read.
+    /// Linear contracts always settle at the close.
+    ///
+    /// A settlement fee is charged when the spec declares one: exercise and
+    /// assignment are commonly priced differently from a trade-out.
     fn settle_expiry(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
         let settle_price = match &self.spec {
-            Some(spec) => spec.settlement_value(bar.close, None),
+            Some(spec) => spec.settlement_value(bar.close, self.underlying_price),
             None => bar.close,
         };
+        let fee_rate = self.spec.as_ref().map(|s| s.settlement_fee).unwrap_or(0.0);
 
         let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         let mut events = Vec::new();
@@ -985,6 +1011,11 @@ impl EngineKernel {
             let Some(managed) = self.ledger.get(position_id) else { continue };
             let entry_ts = managed.entry_timestamp;
             let entry_breakdown = managed.entry_breakdown;
+            let settle_fee = if fee_rate > 0.0 {
+                settle_price * managed.position.size * self.multiplier() * fee_rate
+            } else {
+                0.0
+            };
             if let Some(trade) = self.ledger.close_position(
                 position_id,
                 ExitDetails {
@@ -993,11 +1024,11 @@ impl EngineKernel {
                     price: settle_price,
                     entry_timestamp: entry_ts,
                     reason: ExitReason::Settlement,
-                    fees: 0.0,
+                    fees: settle_fee,
                     fee_breakdown: entry_breakdown,
                 },
             ) {
-                self.credit_close(position_id, &trade, 0.0, settle_price);
+                self.credit_close(position_id, &trade, settle_fee, settle_price);
                 events.push(EngineEvent::Exited { idx, trade });
             }
         }
@@ -1135,6 +1166,27 @@ impl EngineKernel {
         }
 
         Some(EngineEvent::Entered { idx, price: adjusted_price, size, direction })
+    }
+
+    /// Force-close every position on a margin call.
+    ///
+    /// Unlike end-of-data finalization or expiry settlement, this is a real
+    /// trade-out: it prices through the fill model and pays exit costs,
+    /// because a broker liquidating a position actually crosses the spread.
+    pub fn liquidate_all(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
+        let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+        let mut events = Vec::new();
+        for position_id in ids {
+            let Some(managed) = self.ledger.get(position_id) else { continue };
+            let direction = managed.position.direction;
+            let price = self.fill_price_for(bar, direction, false);
+            if let Some(event) =
+                self.close_at(idx, bar, position_id, price, ExitReason::Liquidation)
+            {
+                events.push(event);
+            }
+        }
+        events
     }
 
     /// Force-close any open position at end of data.

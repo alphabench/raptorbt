@@ -193,6 +193,10 @@ def run_tick_strategy(
     strategy.cache = Cache()
     strategy.on_start(ctx)
 
+    # One clock per symbol: a timer set in on_start belongs to every symbol,
+    # not to whichever one's event happens to cross the threshold first.
+    clocks = {symbol: strategy.clock.clone_schedule() for symbol in symbols}
+
     streams = StreamState(strategy, symbols)
     # One primary aggregator per symbol, feeding on_bar and the indicators
     # registered without a stream_id. Bars from ticks are a view only.
@@ -215,6 +219,7 @@ def run_tick_strategy(
         ctx.idx = local_idx
 
         # Clock first: scheduled times precede the data revealing them.
+        strategy.clock = clocks[symbol]
         for time_event in strategy.clock._advance(ts):
             strategy.on_time_event(ctx, time_event)
 

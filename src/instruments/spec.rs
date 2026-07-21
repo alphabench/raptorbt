@@ -83,6 +83,13 @@ pub struct InstrumentSpec {
     /// Expiry timestamp (ns); open positions settle at the first bar at or
     /// past it and later entries are rejected.
     pub expiration_ns: Option<Timestamp>,
+    /// Fee fraction charged on settlement at expiry, applied to the settled
+    /// notional. `0.0` (default) settles free, as before.
+    ///
+    /// Separate from `taker_fee` because exchanges commonly price exercise
+    /// and assignment differently from a trade-out — Indian STT on exercised
+    /// options is the standard example.
+    pub settlement_fee: f64,
 }
 
 impl InstrumentSpec {
@@ -101,6 +108,7 @@ impl InstrumentSpec {
             taker_fee: 0.0,
             activation_ns: None,
             expiration_ns: None,
+            settlement_fee: 0.0,
         }
     }
 

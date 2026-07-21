@@ -164,3 +164,157 @@ class TestDayExpiryTradingDate:
     def test_an_ist_session_keeps_the_order_alive(self):
         ist = (5 * 3600 + 30 * 60) * 1_000_000_000
         assert self._run(ist) == [], "the IST trading date did not roll"
+
+
+class TestPerSymbolClock:
+    def test_a_timer_fires_for_every_symbol(self):
+        """A single clock would fire once for whichever symbol's event
+        crossed the threshold first, silently skipping the rest."""
+
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_timer("beat", interval_ns=2, start_ns=2)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append((ctx.symbol, event.ts_fired))
+
+        bars = _flat_bars(6)
+        strategy = S()
+        raptorbt.run_portfolio_strategy(
+            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config()
+        )
+
+        symbols = {sym for sym, _ in strategy.fired}
+        assert symbols == {"AAA", "BBB"}, f"only fired for {symbols}"
+        assert len(strategy.fired) == 4, strategy.fired
+
+    def test_an_alert_fires_once_per_symbol(self):
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_time_alert("once", at_ns=3)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append(ctx.symbol)
+
+        bars = _flat_bars(6)
+        strategy = S()
+        raptorbt.run_portfolio_strategy(
+            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config()
+        )
+        assert sorted(strategy.fired) == ["AAA", "BBB"]
+
+    def test_a_single_symbol_run_is_unchanged(self):
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = 0
+
+            def on_start(self, ctx):
+                self.clock.set_timer("beat", interval_ns=2, start_ns=2)
+
+            def on_time_event(self, ctx, event):
+                self.fired += 1
+
+        strategy = S()
+        raptorbt.run_strategy_backtest(strategy, **_flat_bars(6), config=_config())
+        assert strategy.fired == 2
+
+
+class TestLimitSlippage:
+    def _fill_price(self, limit_slippage):
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.submit_order(
+                        orders.Limit(side="buy", price=99.0, units=10.0)
+                    )
+
+        config = _config()
+        config.limit_slippage = limit_slippage
+        bars = _flat_bars(3, price=98.0)
+        result = raptorbt.run_strategy_backtest(S(), **bars, config=config)
+        return result.trades()[0].entry_price
+
+    def test_limit_fills_at_the_limit_by_default(self):
+        assert self._fill_price(0.0) == pytest.approx(99.0)
+
+    def test_slippage_moves_the_fill_against_the_buyer(self):
+        # 1% adverse on a 99.0 limit.
+        assert self._fill_price(0.01) == pytest.approx(99.99)
+
+
+class TestSettlementFees:
+    def _run(self, settlement_fee):
+        spec = raptorbt.InstrumentSpec.futures_contract(
+            "FUT", expiration_ns=3, lot_size=1.0
+        )
+        spec.settlement_fee = settlement_fee
+
+        class S(raptorbt.Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter(size_frac=0.5)
+
+        result = raptorbt.run_strategy_backtest(
+            S(), **_flat_bars(5), config=_config(), instrument=spec
+        )
+        return result.trades()[0]
+
+    def test_settlement_is_free_by_default(self):
+        assert self._run(0.0).fees == pytest.approx(0.0)
+
+    def test_a_settlement_fee_is_charged(self):
+        assert self._run(0.01).fees > 0.0
+
+
+class TestForcedLiquidation:
+    def _run(self, liquidate):
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.calls = 0
+
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter(size_frac=1.0)
+
+            def on_margin_call(self, ctx, event):
+                self.calls += 1
+
+        config = _config()
+        config.liquidate_on_margin_call = liquidate
+        bars = {
+            "timestamps": np.arange(4, dtype=np.int64),
+            "open": np.array([100.0, 40.0, 40.0, 40.0]),
+            "high": np.array([100.0, 40.0, 40.0, 40.0]),
+            "low": np.array([100.0, 40.0, 40.0, 40.0]),
+            "close": np.array([100.0, 40.0, 40.0, 40.0]),
+            "volume": np.ones(4),
+        }
+        strategy = S()
+        result = raptorbt.run_strategy_backtest(
+            strategy, **bars, config=config, account_type="margin", leverage=50.0
+        )
+        return strategy, result
+
+    def test_a_margin_call_only_halts_by_default(self):
+        strategy, result = self._run(False)
+        assert strategy.calls >= 1
+        # The position survives to end-of-data.
+        assert result.trades()[0].exit_reason == "EndOfData"
+
+    def test_liquidation_closes_on_the_call(self):
+        strategy, result = self._run(True)
+        assert strategy.calls >= 1
+        assert result.trades()[0].exit_reason == "Liquidation"

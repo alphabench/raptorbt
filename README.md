@@ -518,6 +518,30 @@ including on symbols that never traded. Results carry `halted` and
 report. `result.rejected_entries` is the sum across instruments, whereas the
 array portfolio runner reports its single shared risk gate's counter.
 
+### Execution Realism Knobs
+
+Four opt-in settings, all off by default:
+
+```python
+config.limit_slippage = 0.0005          # adverse adjustment on limit fills
+config.liquidate_on_margin_call = True  # broker closes you out, vs only halting
+spec.settlement_fee = 0.001             # charged on the settled notional at expiry
+```
+
+`limit_slippage` models adverse selection on a resting order — you tend to
+be filled when the market is about to move through you. It is suppressed
+when `queue_fill_model` granted the fill, since volume observed trading
+ahead of your order is evidence you genuinely held that price.
+
+`liquidate_on_margin_call` turns a margin call from a latching halt into a
+forced close. Unlike expiry settlement or end-of-data finalization, which
+close free, a liquidation prices through the fill model and pays exit
+costs, reporting `exit_reason == "Liquidation"`.
+
+Options settle at their own last close unless you supply an underlying —
+an option's bars carry the option's price, so intrinsic value has to come
+from somewhere else.
+
 ### Execution Algorithms
 
 `orders.Twap` slices an order into equal parts released at a fixed

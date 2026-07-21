@@ -1036,3 +1036,227 @@ fn a_schedule_refuses_capital_fraction_sizing() {
     );
     assert!(result.is_err(), "each slice would size against a different account");
 }
+
+fn expiring_kernel(spec: crate::instruments::InstrumentSpec) -> EngineKernel {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "OPT".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_instrument(spec)
+}
+
+#[test]
+fn settlement_is_free_by_default() {
+    use crate::instruments::{InstrumentKind, InstrumentSpec};
+    let mut kernel = expiring_kernel(InstrumentSpec {
+        expiration_ns: Some(5),
+        ..InstrumentSpec::new("FUT", InstrumentKind::Contract { underlying: None })
+    });
+    enter(&mut kernel, 0, 100.0);
+    let events = kernel.step(5, &bar(5, 110.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::Exited { trade, .. }] => assert_eq!(trade.fees, 0.0),
+        other => panic!("expected settlement, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_settlement_fee_is_charged_on_the_settled_notional() {
+    use crate::instruments::{InstrumentKind, InstrumentSpec};
+    let mut kernel = expiring_kernel(InstrumentSpec {
+        expiration_ns: Some(5),
+        settlement_fee: 0.01,
+        ..InstrumentSpec::new("FUT", InstrumentKind::Contract { underlying: None })
+    });
+    enter(&mut kernel, 0, 100.0);
+    let events = kernel.step(5, &bar(5, 110.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::Exited { trade, .. }] => {
+            // 1% of the settled notional, not of the entry price.
+            let expected = 110.0 * trade.size * 0.01;
+            assert!(
+                (trade.fees - expected).abs() < 1e-9,
+                "fees {} should be {expected}",
+                trade.fees
+            );
+        }
+        other => panic!("expected settlement, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_option_settles_at_its_own_close_without_an_underlying() {
+    use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+    let mut kernel = expiring_kernel(InstrumentSpec {
+        expiration_ns: Some(5),
+        ..InstrumentSpec::new(
+            "CE",
+            InstrumentKind::Option {
+                underlying: None,
+                strike: 100.0,
+                right: OptionRight::Call,
+                binary: false,
+            },
+        )
+    });
+    enter(&mut kernel, 0, 7.0);
+    // No underlying supplied: the contract's own close is all we know.
+    let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::Exited { trade, .. }] => {
+            assert!((trade.exit_price - 9.0).abs() < 1e-9);
+        }
+        other => panic!("expected settlement, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_option_settles_to_intrinsic_against_a_supplied_underlying() {
+    use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+    let mut kernel = expiring_kernel(InstrumentSpec {
+        expiration_ns: Some(5),
+        ..InstrumentSpec::new(
+            "CE",
+            InstrumentKind::Option {
+                underlying: None,
+                strike: 100.0,
+                right: OptionRight::Call,
+                binary: false,
+            },
+        )
+    });
+    enter(&mut kernel, 0, 7.0);
+    // The underlying sits at 112, so a 100 call is worth 12 — regardless of
+    // where the option's own last print happened to be.
+    kernel.set_underlying_price(Some(112.0));
+    let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::Exited { trade, .. }] => {
+            assert!(
+                (trade.exit_price - 12.0).abs() < 1e-9,
+                "expected intrinsic 12.0, got {}",
+                trade.exit_price
+            );
+        }
+        other => panic!("expected settlement, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_out_of_the_money_option_settles_worthless() {
+    use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+    let mut kernel = expiring_kernel(InstrumentSpec {
+        expiration_ns: Some(5),
+        ..InstrumentSpec::new(
+            "CE",
+            InstrumentKind::Option {
+                underlying: None,
+                strike: 100.0,
+                right: OptionRight::Call,
+                binary: false,
+            },
+        )
+    });
+    enter(&mut kernel, 0, 7.0);
+    kernel.set_underlying_price(Some(95.0));
+    let events = kernel.step(5, &bar(5, 0.5), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::Exited { trade, .. }] => {
+            assert_eq!(trade.exit_price, 0.0, "a 100 call with spot at 95 expires worthless");
+        }
+        other => panic!("expected settlement, got {other:?}"),
+    }
+}
+
+fn margin_kernel(liquidate: bool) -> EngineKernel {
+    let config = BacktestConfig {
+        fees: 0.0,
+        liquidate_on_margin_call: liquidate,
+        ..BacktestConfig::default()
+    };
+    let fee_model = config.fee_model();
+    EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_account_mode(AccountMode::Margin { leverage: 50.0 })
+}
+
+#[test]
+fn a_margin_call_only_halts_by_default() {
+    let mut kernel = margin_kernel(false);
+    enter(&mut kernel, 0, 100.0);
+    let events = kernel.step(1, &bar(1, 40.0), StepInput::default());
+    assert!(events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })));
+    assert!(
+        kernel.is_in_position(),
+        "the position rides on; the strategy decides what to do"
+    );
+}
+
+#[test]
+fn liquidation_closes_positions_on_the_call() {
+    let mut kernel = margin_kernel(true);
+    enter(&mut kernel, 0, 100.0);
+    let events = kernel.step(1, &bar(1, 40.0), StepInput::default());
+    assert!(events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })));
+    match events.iter().find(|e| matches!(e, EngineEvent::Exited { .. })) {
+        Some(EngineEvent::Exited { trade, .. }) => {
+            assert_eq!(trade.exit_reason, ExitReason::Liquidation);
+        }
+        _ => panic!("expected a liquidation, got {events:?}"),
+    }
+    assert!(!kernel.is_in_position(), "the broker closed it");
+}
+
+#[test]
+fn liquidation_pays_exit_costs_unlike_settlement() {
+    // A forced close crosses the spread; settlement does not.
+    let config = BacktestConfig {
+        fees: 0.001,
+        liquidate_on_margin_call: true,
+        ..BacktestConfig::default()
+    };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_account_mode(AccountMode::Margin { leverage: 50.0 });
+
+    enter(&mut kernel, 0, 100.0);
+    let events = kernel.step(1, &bar(1, 40.0), StepInput::default());
+    match events.iter().find(|e| matches!(e, EngineEvent::Exited { .. })) {
+        Some(EngineEvent::Exited { trade, .. }) => {
+            assert!(trade.fees > 0.0, "a liquidation is a real trade-out");
+        }
+        _ => panic!("expected a liquidation, got {events:?}"),
+    }
+}
+
+#[test]
+fn liquidation_does_not_fire_without_a_margin_call() {
+    let mut kernel = margin_kernel(true);
+    enter(&mut kernel, 0, 100.0);
+    // A gentle move keeps equity above the requirement.
+    let events = kernel.step(1, &bar(1, 101.0), StepInput::default());
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })));
+    assert!(kernel.is_in_position());
+}

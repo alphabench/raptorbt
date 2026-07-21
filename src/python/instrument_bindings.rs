@@ -277,6 +277,22 @@ impl PyInstrumentSpec {
         }
     }
 
+    /// Fee fraction charged on settlement at expiry.
+    #[getter]
+    fn settlement_fee(&self) -> f64 {
+        self.inner.settlement_fee
+    }
+
+    #[setter]
+    fn set_settlement_fee(&mut self, fee: f64) {
+        self.inner.settlement_fee = fee;
+    }
+
+    #[setter]
+    fn set_expiration_ns(&mut self, ns: Option<i64>) {
+        self.inner.expiration_ns = ns;
+    }
+
     #[getter]
     fn price_increment(&self) -> f64 {
         self.inner.price_increment

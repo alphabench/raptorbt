@@ -83,6 +83,12 @@ pub struct PyBacktestConfig {
     /// Offset for the trading date DAY orders expire on (0 = UTC).
     #[pyo3(get, set)]
     pub session_tz_offset_ns: i64,
+    /// Adverse adjustment on limit fills, as a fraction of the limit price.
+    #[pyo3(get, set)]
+    pub limit_slippage: f64,
+    /// Force-close positions on a margin call instead of only halting entries.
+    #[pyo3(get, set)]
+    pub liquidate_on_margin_call: bool,
     /// Seed for the stochastic-fill RNG.
     #[pyo3(get, set)]
     pub fill_seed: u64,
@@ -117,6 +123,8 @@ impl PyBacktestConfig {
         bar_path_adaptive=false,
         queue_fill_model=false,
         session_tz_offset_ns=0,
+        limit_slippage=0.0,
+        liquidate_on_margin_call=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -138,6 +146,8 @@ impl PyBacktestConfig {
         bar_path_adaptive: bool,
         queue_fill_model: bool,
         session_tz_offset_ns: i64,
+        limit_slippage: f64,
+        liquidate_on_margin_call: bool,
     ) -> Self {
         Self {
             initial_capital,
@@ -155,6 +165,8 @@ impl PyBacktestConfig {
             fill_prob_limit,
             queue_fill_model,
             session_tz_offset_ns,
+            limit_slippage,
+            liquidate_on_margin_call,
             fill_prob_slippage,
             fill_seed,
             bar_path_adaptive,
@@ -214,6 +226,8 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             fill_prob_limit: py_config.fill_prob_limit,
             queue_fill_model: py_config.queue_fill_model,
             session_tz_offset_ns: py_config.session_tz_offset_ns,
+            limit_slippage: py_config.limit_slippage,
+            liquidate_on_margin_call: py_config.liquidate_on_margin_call,
             fill_prob_slippage: py_config.fill_prob_slippage,
             fill_seed: py_config.fill_seed,
             bar_path_adaptive: py_config.bar_path_adaptive,

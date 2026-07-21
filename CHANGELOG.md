@@ -19,6 +19,21 @@ migrate.
 
 ### Fixed
 
+- **Timers and alerts fired for only one symbol in multi-symbol runs.**
+  The clock was global, so a timer set in `on_start` fired once for
+  whichever symbol's event happened to cross the threshold first and never
+  for the rest — a two-symbol heartbeat delivered half its beats, silently.
+  Each symbol now has its own clock, carrying whatever `on_start`
+  scheduled. Single-symbol runs are unchanged.
+
+- **Options never settled to intrinsic value.** `settle_expiry` called
+  `settlement_value(close, None)`, and the `None` meant the option branch
+  could never match, so every option settled at its own last close no
+  matter how far from intrinsic that was. The strategy can now supply an
+  underlying via `set_underlying_price`; without one, contracts still
+  settle at their own close, since an option's bars carry the option's
+  price and the engine has no second series to read.
+
 - **`TimeInForce::Day` expired on the UTC date, not the trading date.**
   A session whose local hours cross UTC midnight would see DAY orders die
   while the trading date was still running. `session_tz_offset_ns` on
@@ -104,6 +119,28 @@ migrate.
   ubuntu/macos × Python 3.10–3.12.
 
 ### Added
+
+- **Four deferred execution knobs**, all default-off:
+
+  `limit_slippage` applies an adverse adjustment to limit fills, which
+  previously always printed exactly at the limit. It is suppressed when
+  `queue_fill_model` granted the fill: volume observed trading ahead of an
+  order is evidence it genuinely held that price, so slipping it too would
+  double-penalize.
+
+  `liquidate_on_margin_call` force-closes positions when a margin call
+  fires, instead of only latching a halt. Unlike expiry settlement or
+  end-of-data finalization — both of which close free — a liquidation is a
+  real trade-out: it prices through the fill model and pays exit costs, and
+  reports the new `ExitReason::Liquidation`.
+
+  `InstrumentSpec.settlement_fee` charges a fee on the settled notional at
+  expiry. It sits alongside `maker_fee`/`taker_fee` rather than on the
+  config because exercise and assignment are commonly priced differently
+  from a trade-out, and a portfolio run needs per-instrument rates.
+
+  `EngineKernel::set_underlying_price` lets options settle to intrinsic
+  value — see below.
 
 - **TWAP execution schedules.** `orders.Twap(side=..., units=..., slices=N,
   every=<ns>)` releases N equal slices at a fixed interval, each an ordinary
