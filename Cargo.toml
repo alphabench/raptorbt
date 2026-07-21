@@ -1,6 +1,6 @@
 [package]
 name = "raptorbt"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "High-performance Rust backtesting engine with Python bindings. Bar-level and tick-level simulation with sub-millisecond execution and a minimal footprint."
 authors = ["Alphabench <contact@alphabench.in>"]
@@ -15,8 +15,16 @@ categories = ["finance", "simulation"]
 name = "raptorbt"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# On by default so `maturin build` produces an extension module. Tests must run
+# with --no-default-features: `extension-module` leaves Python symbols to be
+# resolved by the host interpreter at import time, which a test binary has no
+# way to satisfy, so linking fails.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3 = { version = "0.20" }
 numpy = "0.20"
 rayon = "1.8"
 thiserror = "1.0"

@@ -72,7 +72,7 @@ impl TickBacktest {
         assert_eq!(n, exits.len(), "ticks and exits must have same length");
 
         let slippage_frac = self.config.base.slippage; // e.g. 0.0005 = 0.05%
-        let fee_frac = self.config.base.fees;          // e.g. 0.001 = 0.1%
+        let fee_frac = self.config.base.fees; // e.g. 0.001 = 0.1%
         let stop_frac = self.config.stop_loss_pct / 100.0;
         let target_frac = self.config.take_profit_pct / 100.0;
         let max_hold_ns: i64 = self.config.max_hold_seconds as i64 * 1_000_000_000;
@@ -145,6 +145,7 @@ impl TickBacktest {
                     entry_time,
                     exit_time: ts,
                     fees: entry_fees + exit_fees,
+                    fee_breakdown: None,
                     exit_reason: reason,
                 });
 
@@ -211,12 +212,26 @@ impl TickBacktest {
                 if e > peak {
                     peak = e;
                 }
-                if peak > 0.0 { (peak - e) / peak * 100.0 } else { 0.0 }
+                if peak > 0.0 {
+                    (peak - e) / peak * 100.0
+                } else {
+                    0.0
+                }
             })
             .collect();
 
-        let metrics =
-            compute_backtest_metrics(&equity_curve, &drawdown_curve, &returns, &trades, initial_capital);
+        // The equity curve here advances per *trade*, not per tick, so tick
+        // timestamps do not index it. Passing an empty slice falls back to the
+        // legacy annualization constant rather than inferring a wrong one;
+        // per-trade annualization is left for a later release.
+        let metrics = compute_backtest_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            &trades,
+            &[],
+            initial_capital,
+        );
 
         BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
     }
@@ -251,7 +266,12 @@ mod tests {
         let exits = vec![false; 100];
 
         let config = TickBacktestConfig {
-            base: BacktestConfig { initial_capital: 10_000.0, fees: 0.0, slippage: 0.0, ..Default::default() },
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
             stop_loss_pct: 5.0,
             take_profit_pct: 10.0,
             max_hold_seconds: 0, // no time limit
@@ -276,7 +296,12 @@ mod tests {
         let exits = vec![false; 100];
 
         let config = TickBacktestConfig {
-            base: BacktestConfig { initial_capital: 10_000.0, fees: 0.0, slippage: 0.0, ..Default::default() },
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
             stop_loss_pct: 5.0,
             take_profit_pct: 20.0,
             max_hold_seconds: 0,
@@ -301,8 +326,13 @@ mod tests {
         let exits = vec![false; 200];
 
         let config = TickBacktestConfig {
-            base: BacktestConfig { initial_capital: 10_000.0, fees: 0.0, slippage: 0.0, ..Default::default() },
-            stop_loss_pct: 50.0,  // very wide, won't hit
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
+            stop_loss_pct: 50.0, // very wide, won't hit
             take_profit_pct: 50.0,
             max_hold_seconds: 10, // 10 ticks at 1s each
             entry_cooldown_ticks: 5,
@@ -324,7 +354,12 @@ mod tests {
         let exits = vec![false; 200];
 
         let config = TickBacktestConfig {
-            base: BacktestConfig { initial_capital: 10_000.0, fees: 0.0, slippage: 0.0, ..Default::default() },
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
             stop_loss_pct: 5.0,
             take_profit_pct: 10.0,
             max_hold_seconds: 0,

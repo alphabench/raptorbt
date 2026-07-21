@@ -1,13 +1,14 @@
 //! Event-driven portfolio simulation engine.
 
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, Direction, ExitReason,
-    InstrumentConfig, OhlcvData, Price, StopConfig, TargetConfig, Trade,
+    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, InstrumentConfig,
+    OhlcvData, StopConfig, TargetConfig, Trade,
 };
 use crate::execution::{FeeModel, FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
+use crate::metrics::annualization;
 use crate::metrics::streaming::StreamingMetrics;
-use crate::portfolio::position::PositionManager;
+use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::signals::processor::SignalProcessor;
 
 /// Portfolio simulation engine.
@@ -36,15 +37,29 @@ impl Default for PortfolioEngine {
 impl PortfolioEngine {
     /// Create a new portfolio engine with the given configuration.
     pub fn new(config: BacktestConfig) -> Self {
-        let fee_model = FeeModel::percentage(config.fees);
+        let fee_model = config.fee_model();
         let fill_price = if config.upon_bar_close { FillPrice::Close } else { FillPrice::Open };
+        let slippage_model = Self::slippage_model_for(&config);
 
         Self {
             config,
             fee_model,
-            slippage_model: SlippageModel::None,
+            slippage_model,
             fill_price,
             signal_processor: SignalProcessor::new(),
+        }
+    }
+
+    /// Resolve the slippage model from config.
+    ///
+    /// Through 0.4.1 this was hardcoded to `None`, so `config.slippage` was
+    /// silently ignored on every backtest. `apply_slippage = false` restores
+    /// that behavior for reproducing pre-0.5.0 results.
+    fn slippage_model_for(config: &BacktestConfig) -> SlippageModel {
+        if config.apply_slippage && config.slippage > 0.0 {
+            SlippageModel::percentage(config.slippage)
+        } else {
+            SlippageModel::None
         }
     }
 
@@ -95,14 +110,23 @@ impl PortfolioEngine {
             self.signal_processor.clean_signals(&signals.entries, &signals.exits);
 
         // Initialize state
-        let mut position = PositionManager::new(signals.symbol.clone());
-        let mut cash = self.config.initial_capital;
-        let mut equity_curve = vec![cash; n];
+        let mut kernel = EngineKernel::new(
+            self.config.clone(),
+            self.fee_model.clone(),
+            self.slippage_model.clone(),
+            self.fill_price,
+            signals.symbol.clone(),
+            signals.direction,
+            inst_config,
+        )
+        .with_risk_gate(self.config.risk_gate());
+        let initial_capital = self.config.initial_capital;
+        let mut equity_curve = vec![initial_capital; n];
         let mut drawdown_curve = vec![0.0; n];
         let mut returns = vec![0.0; n];
         let mut trades: Vec<Trade> = Vec::new();
         let mut streaming = StreamingMetrics::new();
-        let mut peak_equity = cash;
+        let mut peak_equity = initial_capital;
 
         // Determine effective stop/target configs (per-instrument overrides take precedence)
         let effective_stop =
@@ -126,165 +150,34 @@ impl PortfolioEngine {
             vec![0.0; n]
         };
 
-        // Main simulation loop
+        // Main simulation loop — the per-bar body lives in EngineKernel::step
+        // so that a live feed can drive identical execution semantics.
         for i in 0..n {
-            let close = ohlcv.close[i];
-            let high = ohlcv.high[i];
-            let low = ohlcv.low[i];
-            let timestamp = ohlcv.timestamps[i];
+            let bar = KernelBar {
+                timestamp: ohlcv.timestamps[i],
+                open: ohlcv.open[i],
+                high: ohlcv.high[i],
+                low: ohlcv.low[i],
+                close: ohlcv.close[i],
+                volume: ohlcv.volume[i],
+            };
 
-            // Update position price tracking
-            position.update_price(high, low);
+            let input = StepInput {
+                entry: entries[i],
+                exit: exits[i],
+                atr: atr_values.get(i).copied().unwrap_or(0.0),
+                size_mult: signals.position_sizes.as_ref().map(|sizes| sizes[i]),
+            };
 
-            // Check for exits first (stops and signals)
-            if position.is_in_position() {
-                let mut exit_reason: Option<ExitReason> = None;
-                let mut exit_price = close;
-
-                // Check stop-loss
-                if position.is_stop_hit(low, high) {
-                    exit_reason = Some(ExitReason::StopLoss);
-                    exit_price = position.position.stop_price.unwrap();
-
-                    // Adjust for gap through stop
-                    match position.position.direction {
-                        Direction::Long => {
-                            if ohlcv.open[i] < exit_price {
-                                exit_price = ohlcv.open[i];
-                            }
-                        }
-                        Direction::Short => {
-                            if ohlcv.open[i] > exit_price {
-                                exit_price = ohlcv.open[i];
-                            }
-                        }
-                    }
-                }
-
-                // Check take-profit
-                if exit_reason.is_none() && position.is_target_hit(low, high) {
-                    exit_reason = Some(ExitReason::TakeProfit);
-                    exit_price = position.position.target_price.unwrap();
-                }
-
-                // Check exit signal
-                if exit_reason.is_none() && exits[i] {
-                    exit_reason = Some(ExitReason::Signal);
-                    exit_price = self.get_fill_price(ohlcv, i, signals.direction, false);
-                }
-
-                // Execute exit
-                if let Some(reason) = exit_reason {
-                    // Apply slippage
-                    exit_price = self.slippage_model.apply(
-                        exit_price,
-                        position.position.direction,
-                        false,
-                        Some(ohlcv.volume[i]),
-                    );
-
-                    // Calculate fees
-                    let fees = self.fee_model.calculate(
-                        exit_price,
-                        position.position.size,
-                        position.position.direction,
-                    );
-
-                    // Close position
-                    if let Some(trade) = position.close_position(
-                        i,
-                        timestamp,
-                        exit_price,
-                        ohlcv.timestamps[position.position.entry_idx],
-                        reason,
-                        fees,
-                    ) {
-                        // Update cash
-                        let exit_value = exit_price * trade.size;
-                        cash += exit_value - fees;
-
-                        // Track return for this trade
-                        streaming.update(trade.return_pct / 100.0);
-
-                        trades.push(trade);
-                    }
-                }
-
-                // Update trailing stop if position still open
-                if position.is_in_position() {
-                    if let StopConfig::Trailing { percent } = effective_stop {
-                        position.update_trailing_stop(*percent);
-                    }
-                }
-            }
-
-            // Check for entries
-            if !position.is_in_position() && entries[i] {
-                let entry_price = self.get_fill_price(ohlcv, i, signals.direction, true);
-
-                // Apply slippage
-                let adjusted_price = self.slippage_model.apply(
-                    entry_price,
-                    signals.direction,
-                    true,
-                    Some(ohlcv.volume[i]),
-                );
-
-                // Calculate position size
-                // Use per-instrument capital if set, capped at available cash
-                let available = inst_config
-                    .and_then(|ic| ic.alloted_capital)
-                    .map(|cap| cap.min(cash))
-                    .unwrap_or(cash);
-
-                // Position sizing: size = cash / (price * (1 + fees))
-                // Ensures position value plus entry fee equals available cash
-                let fee_rate = self.config.fees;
-                let raw_size = if let Some(ref sizes) = signals.position_sizes {
-                    sizes[i] * available / (adjusted_price * (1.0 + fee_rate))
-                } else {
-                    available / (adjusted_price * (1.0 + fee_rate))
-                };
-
-                // Round to lot_size
-                let size = inst_config.map(|ic| ic.round_to_lot(raw_size)).unwrap_or(raw_size);
-
-                if size > 0.0 {
-                    // Calculate entry fees
-                    let entry_fees =
-                        self.fee_model.calculate(adjusted_price, size, signals.direction);
-
-                    // Calculate stop and target prices
-                    let (stop_price, target_price) = self.calculate_stop_target_with_config(
-                        adjusted_price,
-                        signals.direction,
-                        &atr_values,
-                        i,
-                        effective_stop,
-                        effective_target,
-                    );
-
-                    // Open position (passing entry_fees for trade PnL tracking)
-                    position.open_position(
-                        i,
-                        timestamp,
-                        adjusted_price,
-                        size,
-                        signals.direction,
-                        stop_price,
-                        target_price,
-                        entry_fees,
-                    );
-
-                    // Deduct cost
-                    cash -= adjusted_price * size + entry_fees;
+            for event in kernel.step(i, &bar, input) {
+                if let EngineEvent::Exited { trade, .. } = event {
+                    streaming.update(trade.return_pct / 100.0);
+                    trades.push(trade);
                 }
             }
 
             // Calculate equity
-            let position_value =
-                if position.is_in_position() { close * position.position.size } else { 0.0 };
-            let equity = cash + position_value;
+            let equity = kernel.equity(bar.close);
             equity_curve[i] = equity;
 
             // Calculate drawdown
@@ -293,6 +186,10 @@ impl PortfolioEngine {
             }
             drawdown_curve[i] = (peak_equity - equity) / peak_equity * 100.0;
 
+            // Feed the kill-switch after this bar is marked to market, so the
+            // halt takes effect from the next bar's entry check onward.
+            kernel.observe_equity(equity, peak_equity);
+
             // Calculate return
             if i > 0 {
                 returns[i] = (equity - equity_curve[i - 1]) / equity_curve[i - 1];
@@ -300,128 +197,47 @@ impl PortfolioEngine {
         }
 
         // Mark any open position at end of data — marked-to-market, no exit fees
-        if position.is_in_position() {
+        if kernel.is_in_position() {
             let last_idx = n - 1;
-            let exit_price = ohlcv.close[last_idx];
-            // No exit fees for EndOfData: position is marked-to-market but not actually closed
-            let exit_fees = 0.0;
+            let last_bar = KernelBar {
+                timestamp: ohlcv.timestamps[last_idx],
+                open: ohlcv.open[last_idx],
+                high: ohlcv.high[last_idx],
+                low: ohlcv.low[last_idx],
+                close: ohlcv.close[last_idx],
+                volume: ohlcv.volume[last_idx],
+            };
 
-            if let Some(trade) = position.close_position(
-                last_idx,
-                ohlcv.timestamps[last_idx],
-                exit_price,
-                ohlcv.timestamps[position.position.entry_idx],
-                ExitReason::EndOfData,
-                exit_fees,
-            ) {
+            if let Some(trade) = kernel.finalize(last_idx, &last_bar) {
                 streaming.update(trade.return_pct / 100.0);
                 trades.push(trade);
             }
         }
 
         // Calculate final metrics
-        let metrics =
-            self.calculate_metrics(&equity_curve, &drawdown_curve, &returns, &trades, &streaming);
+        let metrics = self.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            &trades,
+            &ohlcv.timestamps,
+            &streaming,
+        );
 
         BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
     }
 
-    /// Get fill price based on model.
-    fn get_fill_price(
-        &self,
-        ohlcv: &OhlcvData,
-        idx: usize,
-        direction: Direction,
-        is_entry: bool,
-    ) -> Price {
-        self.fill_price.get_price_from_arrays(
-            ohlcv.open[idx],
-            ohlcv.high[idx],
-            ohlcv.low[idx],
-            ohlcv.close[idx],
-            direction,
-            is_entry,
-        )
-    }
-
-    /// Calculate stop and target prices using the global config.
-    #[allow(dead_code)]
-    fn calculate_stop_target(
-        &self,
-        entry_price: Price,
-        direction: Direction,
-        atr_values: &[f64],
-        idx: usize,
-    ) -> (Option<Price>, Option<Price>) {
-        self.calculate_stop_target_with_config(
-            entry_price,
-            direction,
-            atr_values,
-            idx,
-            &self.config.stop,
-            &self.config.target,
-        )
-    }
-
-    /// Calculate stop and target prices with explicit stop/target configs.
-    fn calculate_stop_target_with_config(
-        &self,
-        entry_price: Price,
-        direction: Direction,
-        atr_values: &[f64],
-        idx: usize,
-        stop_config: &StopConfig,
-        target_config: &TargetConfig,
-    ) -> (Option<Price>, Option<Price>) {
-        let multiplier = direction.multiplier();
-
-        // Calculate stop price
-        let stop_price = match stop_config {
-            StopConfig::None => None,
-            StopConfig::Fixed { percent } => Some(entry_price * (1.0 - multiplier * percent)),
-            StopConfig::Atr { multiplier: m, .. } => {
-                let atr = atr_values.get(idx).copied().unwrap_or(0.0);
-                if atr > 0.0 {
-                    Some(entry_price - multiplier * m * atr)
-                } else {
-                    None
-                }
-            }
-            StopConfig::Trailing { percent } => Some(entry_price * (1.0 - multiplier * percent)),
-        };
-
-        // Calculate target price
-        let target_price = match target_config {
-            TargetConfig::None => None,
-            TargetConfig::Fixed { percent } => Some(entry_price * (1.0 + multiplier * percent)),
-            TargetConfig::Atr { multiplier: m, .. } => {
-                let atr = atr_values.get(idx).copied().unwrap_or(0.0);
-                if atr > 0.0 {
-                    Some(entry_price + multiplier * m * atr)
-                } else {
-                    None
-                }
-            }
-            TargetConfig::RiskReward { ratio } => {
-                if let Some(stop) = stop_price {
-                    let risk = (entry_price - stop).abs();
-                    Some(entry_price + multiplier * risk * ratio)
-                } else {
-                    None
-                }
-            }
-        };
-
-        (stop_price, target_price)
-    }
-
     /// Calculate backtest metrics.
+    ///
+    /// `timestamps` drives annualization and elapsed-time CAGR; pass an empty
+    /// slice when unavailable and the legacy constants apply as a fallback.
     fn calculate_metrics(
         &self,
         equity_curve: &[f64],
         drawdown_curve: &[f64],
         returns: &[f64],
         trades: &[Trade],
+        timestamps: &[i64],
         _streaming: &StreamingMetrics,
     ) -> BacktestMetrics {
         let start_value = self.config.initial_capital;
@@ -571,11 +387,30 @@ impl PortfolioEngine {
         };
 
         // Risk-adjusted metrics (calculated from daily portfolio returns, not trade returns)
-        let (sharpe_ratio, sortino_ratio, omega_ratio) = self.calculate_risk_metrics(returns);
+        let periods_per_year = if self.config.legacy_annualization {
+            annualization::LEGACY_PERIODS_SINGLE
+        } else {
+            annualization::resolve_periods_per_year_with_session(
+                self.config.periods_per_year,
+                timestamps,
+                self.config.session_spec(),
+                annualization::LEGACY_PERIODS_SINGLE,
+            )
+        };
+        let (sharpe_ratio, sortino_ratio, omega_ratio) =
+            self.calculate_risk_metrics(returns, periods_per_year, self.config.risk_free_rate);
 
-        // Calmar ratio: CAGR / max drawdown
-        let num_periods = equity_curve.len().max(1) as f64;
-        let years = num_periods / 365.25; // Convert to years using 365.25 days
+        // Calmar ratio: CAGR / max drawdown.
+        //
+        // Years come from elapsed wall-clock time. Deriving them from bar count
+        // (the pre-0.5.0 behavior) made CAGR meaningless on intraday data --
+        // 11k one-minute bars read as ~31 "years".
+        let years = if self.config.legacy_annualization {
+            equity_curve.len().max(1) as f64 / annualization::LEGACY_CALMAR_DAYS
+        } else {
+            annualization::elapsed_years(timestamps)
+                .unwrap_or(equity_curve.len().max(1) as f64 / annualization::LEGACY_CALMAR_DAYS)
+        };
         let total_return_frac = total_return_pct / 100.0;
         // CAGR = (end/start)^(1/years) - 1 = (1 + total_return)^(1/years) - 1
         let cagr =
@@ -688,74 +523,96 @@ impl PortfolioEngine {
         (max_wins, max_losses)
     }
 
-    /// Calculate risk-adjusted metrics from daily portfolio returns.
-    /// Returns (sharpe_ratio, sortino_ratio, omega_ratio).
-    /// Uses 365 calendar days for annualization.
-    fn calculate_risk_metrics(&self, returns: &[f64]) -> (f64, f64, f64) {
-        if returns.len() < 2 {
-            return (0.0, 0.0, 1.0);
-        }
-
-        // 365 calendar days for annualization
-        let periods_per_year: f64 = 365.0;
-        let _n = returns.len() as f64;
-
-        // Filter out NaN values
-        let valid_returns: Vec<f64> = returns.iter().filter(|r| !r.is_nan()).copied().collect();
-
-        if valid_returns.len() < 2 {
-            return (0.0, 0.0, 1.0);
-        }
-
-        let n_valid = valid_returns.len() as f64;
-
-        // Calculate mean return
-        let mean = valid_returns.iter().sum::<f64>() / n_valid;
-
-        // Calculate standard deviation
-        let variance =
-            valid_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_valid - 1.0);
-        let std_dev = variance.sqrt();
-
-        // Sharpe Ratio = (mean * periods_per_year) / (std_dev * sqrt(periods_per_year))
-        // Simplified: Sharpe = mean / std_dev * sqrt(periods_per_year)
-        let sharpe_ratio =
-            if std_dev > 0.0 { (mean / std_dev) * periods_per_year.sqrt() } else { 0.0 };
-
-        // Sortino Ratio - uses downside deviation (only negative returns)
-        let downside_returns: Vec<f64> =
-            valid_returns.iter().filter(|&&r| r < 0.0).copied().collect();
-
-        let downside_variance = if !downside_returns.is_empty() {
-            downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n_valid // Divide by total count, not downside count
-        } else {
-            0.0
-        };
-        let downside_std = downside_variance.sqrt();
-
-        let sortino_ratio = if downside_std > 0.0 {
-            (mean / downside_std) * periods_per_year.sqrt()
-        } else if mean > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        // Omega Ratio = sum of returns above threshold / |sum of returns below threshold|
-        // With threshold = 0
-        let sum_positive: f64 = valid_returns.iter().filter(|&&r| r > 0.0).sum();
-        let sum_negative: f64 = valid_returns.iter().filter(|&&r| r < 0.0).map(|r| r.abs()).sum();
-
-        let omega_ratio = if sum_negative > 0.0 {
-            sum_positive / sum_negative
-        } else if sum_positive > 0.0 {
-            f64::INFINITY
-        } else {
-            1.0
-        };
-
-        (sharpe_ratio, sortino_ratio, omega_ratio)
+    /// Calculate risk-adjusted metrics from portfolio returns.
+    ///
+    /// Thin wrapper over [`risk_metrics`] so every runner shares one estimator.
+    fn calculate_risk_metrics(
+        &self,
+        returns: &[f64],
+        periods_per_year: f64,
+        risk_free_rate: f64,
+    ) -> (f64, f64, f64) {
+        risk_metrics(returns, periods_per_year, risk_free_rate)
     }
+}
+
+/// Risk-adjusted metrics from a series of **per-bar** portfolio returns.
+///
+/// Returns `(sharpe, sortino, omega)`.
+///
+/// All runners must feed this the per-bar return series, not per-trade returns.
+/// Through 0.4.1 the basket/pairs/options/multi paths annualized *trade*
+/// returns at a hardcoded 252, which assumes one trade per trading day and
+/// inflates Sharpe by roughly `sqrt(n_bars / n_trades)` — on the order of 7x
+/// for a 9-trade run over 500 bars. Those runners built a correct per-bar
+/// series and then discarded it for this purpose.
+pub fn risk_metrics(
+    returns: &[f64],
+    periods_per_year: f64,
+    risk_free_rate: f64,
+) -> (f64, f64, f64) {
+    if returns.len() < 2 {
+        return (0.0, 0.0, 1.0);
+    }
+
+    // Filter out NaN values
+    let valid_returns: Vec<f64> = returns.iter().filter(|r| !r.is_nan()).copied().collect();
+
+    if valid_returns.len() < 2 {
+        return (0.0, 0.0, 1.0);
+    }
+
+    let n_valid = valid_returns.len() as f64;
+
+    // Calculate mean return
+    let mean = valid_returns.iter().sum::<f64>() / n_valid;
+
+    // Calculate standard deviation
+    let variance = valid_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_valid - 1.0);
+    let std_dev = variance.sqrt();
+
+    // Excess return over the per-period risk-free rate.
+    let rf_per_period =
+        if periods_per_year > 0.0 { risk_free_rate / periods_per_year } else { 0.0 };
+    let excess_mean = mean - rf_per_period;
+
+    // Sharpe Ratio = (excess * periods_per_year) / (std_dev * sqrt(periods_per_year))
+    // Simplified: Sharpe = excess / std_dev * sqrt(periods_per_year)
+    let sharpe_ratio =
+        if std_dev > 0.0 { (excess_mean / std_dev) * periods_per_year.sqrt() } else { 0.0 };
+
+    // Sortino Ratio - uses downside deviation (only negative returns)
+    let downside_returns: Vec<f64> = valid_returns.iter().filter(|&&r| r < 0.0).copied().collect();
+
+    let downside_variance = if !downside_returns.is_empty() {
+        downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n_valid // Divide by total count, not downside count
+    } else {
+        0.0
+    };
+    let downside_std = downside_variance.sqrt();
+
+    let sortino_ratio = if downside_std > 0.0 {
+        (excess_mean / downside_std) * periods_per_year.sqrt()
+    } else if excess_mean > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+
+    // Omega Ratio = sum of returns above threshold / |sum of returns below threshold|
+    // With threshold = 0
+    let sum_positive: f64 = valid_returns.iter().filter(|&&r| r > 0.0).sum();
+    let sum_negative: f64 = valid_returns.iter().filter(|&&r| r < 0.0).map(|r| r.abs()).sum();
+
+    let omega_ratio = if sum_negative > 0.0 {
+        sum_positive / sum_negative
+    } else if sum_positive > 0.0 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+
+    (sharpe_ratio, sortino_ratio, omega_ratio)
 }
 
 /// Compute `BacktestMetrics` from pre-built curves and trade list.
@@ -767,19 +624,48 @@ pub fn compute_backtest_metrics(
     drawdown_curve: &[f64],
     returns: &[f64],
     trades: &[Trade],
+    timestamps: &[i64],
     initial_capital: f64,
 ) -> BacktestMetrics {
+    compute_backtest_metrics_with_config(
+        equity_curve,
+        drawdown_curve,
+        returns,
+        trades,
+        timestamps,
+        &BacktestConfig { initial_capital, ..Default::default() },
+    )
+}
+
+/// Compute `BacktestMetrics` honoring a full config.
+///
+/// Preferred over [`compute_backtest_metrics`] when the caller has a real
+/// config: annualization, risk-free rate and session length all come from it,
+/// and defaulting them would silently misreport intraday runs.
+pub fn compute_backtest_metrics_with_config(
+    equity_curve: &[f64],
+    drawdown_curve: &[f64],
+    returns: &[f64],
+    trades: &[Trade],
+    timestamps: &[i64],
+    config: &BacktestConfig,
+) -> BacktestMetrics {
     // Delegate to a throwaway engine instance — avoids duplicating the logic.
-    let engine = PortfolioEngine::new(BacktestConfig {
-        initial_capital,
-        ..Default::default()
-    });
-    engine.calculate_metrics(equity_curve, drawdown_curve, returns, trades, &StreamingMetrics::new())
+    let engine = PortfolioEngine::new(config.clone());
+    engine.calculate_metrics(
+        equity_curve,
+        drawdown_curve,
+        returns,
+        trades,
+        timestamps,
+        &StreamingMetrics::new(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::Direction;
 
     fn sample_ohlcv() -> OhlcvData {
         OhlcvData {
@@ -830,6 +716,7 @@ mod tests {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            ..Default::default()
         };
 
         let engine = PortfolioEngine::new(config);
@@ -860,6 +747,7 @@ mod tests {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            ..Default::default()
         };
 
         let engine = PortfolioEngine::new(config);
@@ -883,6 +771,7 @@ mod tests {
             stop: StopConfig::Fixed { percent: 0.02 }, // 2% stop
             target: TargetConfig::None,
             upon_bar_close: true,
+            ..Default::default()
         };
 
         let engine = PortfolioEngine::new(config);

@@ -176,6 +176,7 @@ mod tests {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            ..Default::default()
         };
 
         let backtest = SingleBacktest::new(config);

@@ -25,6 +25,14 @@ pub mod strategies;
 /// Python module entry point
 #[pymodule]
 fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    // Session lengths in minutes, for BacktestConfig(session_minutes=...).
+    // Intraday annualization scales with session length, so using the NSE
+    // default on MCX data understates Sharpe by ~1.5x.
+    m.add("SESSION_NSE", 375.0)?; // 09:15-15:30 equity / F&O
+    m.add("SESSION_MCX", 870.0)?; // 09:00-23:30 commodity
+    m.add("SESSION_CDS", 480.0)?; // 09:00-17:00 currency
+    m.add("SESSION_CONTINUOUS", 0.0)?; // 24x7, annualize on calendar time
+
     // Register config classes
     m.add_class::<python::bindings::PyBacktestConfig>()?;
     m.add_class::<python::bindings::PyInstrumentConfig>()?;
@@ -35,10 +43,13 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<python::bindings::PyBacktestResult>()?;
     m.add_class::<python::bindings::PyBacktestMetrics>()?;
     m.add_class::<python::bindings::PyTrade>()?;
+    m.add_class::<python::bindings::PyPortfolioResult>()?;
+    m.add_class::<python::bindings::PyInstrumentSummary>()?;
 
     // Register backtest functions
     m.add_function(wrap_pyfunction!(python::bindings::run_single_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_basket_backtest, m)?)?;
+    m.add_function(wrap_pyfunction!(python::bindings::run_portfolio_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_options_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_pairs_backtest, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::run_multi_backtest, m)?)?;

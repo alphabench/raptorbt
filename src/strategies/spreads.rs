@@ -317,6 +317,7 @@ impl SpreadBacktest {
                         entry_time: pos.entry_time,
                         exit_time: timestamps[i],
                         fees,
+                        fee_breakdown: None,
                         exit_reason,
                     });
 
@@ -553,6 +554,7 @@ mod tests {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            ..Default::default()
         };
 
         let config = create_straddle_config(base_config, 100.0, 50, true);

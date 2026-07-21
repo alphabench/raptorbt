@@ -1,6 +1,29 @@
 //! Position tracking for portfolio management.
 
 use crate::core::types::{Direction, ExitReason, Position, Price, Timestamp, Trade};
+use crate::execution::indian_costs::FeeBreakdown;
+
+/// How a position is being closed.
+///
+/// Groups the exit-specific details so `close_position` keeps a readable
+/// signature as the trade record grows.
+#[derive(Debug, Clone, Copy)]
+pub struct ExitDetails {
+    /// Bar index of the exit.
+    pub idx: usize,
+    /// Exit timestamp.
+    pub timestamp: Timestamp,
+    /// Fill price.
+    pub price: Price,
+    /// Entry timestamp, carried onto the trade record.
+    pub entry_timestamp: Timestamp,
+    /// Why the position closed.
+    pub reason: ExitReason,
+    /// Total fees for this side.
+    pub fees: f64,
+    /// Itemized round-trip costs, when an itemized fee model is in use.
+    pub fee_breakdown: Option<FeeBreakdown>,
+}
 
 /// Position manager for tracking open positions.
 #[derive(Debug, Clone)]
@@ -69,30 +92,13 @@ impl PositionManager {
 
     /// Close current position and generate a trade record.
     ///
-    /// # Arguments
-    /// * `idx` - Bar index
-    /// * `timestamp` - Exit timestamp
-    /// * `price` - Exit price
-    /// * `entry_timestamp` - Entry timestamp (for trade record)
-    /// * `exit_reason` - Reason for exit
-    /// * `fees` - Transaction fees
-    ///
-    /// # Returns
-    /// Trade record if position was closed, None if no position
-    pub fn close_position(
-        &mut self,
-        idx: usize,
-        timestamp: Timestamp,
-        price: Price,
-        entry_timestamp: Timestamp,
-        exit_reason: ExitReason,
-        fees: f64,
-    ) -> Option<Trade> {
+    /// Returns the trade, or `None` if no position was open.
+    pub fn close_position(&mut self, exit: ExitDetails) -> Option<Trade> {
         if !self.position.is_open {
             return None;
         }
 
-        let trade = self.create_trade(idx, timestamp, price, entry_timestamp, exit_reason, fees);
+        let trade = self.create_trade(exit);
         self.position.close();
         self.trade_counter += 1;
 
@@ -100,15 +106,17 @@ impl PositionManager {
     }
 
     /// Create a trade record from current position.
-    fn create_trade(
-        &self,
-        exit_idx: usize,
-        exit_timestamp: Timestamp,
-        exit_price: Price,
-        entry_timestamp: Timestamp,
-        exit_reason: ExitReason,
-        exit_fees: f64,
-    ) -> Trade {
+    fn create_trade(&self, exit: ExitDetails) -> Trade {
+        let ExitDetails {
+            idx: exit_idx,
+            timestamp: exit_timestamp,
+            price: exit_price,
+            entry_timestamp,
+            reason: exit_reason,
+            fees: exit_fees,
+            fee_breakdown,
+        } = exit;
+
         let pos = &self.position;
         let multiplier = pos.direction.multiplier();
 
@@ -135,6 +143,7 @@ impl PositionManager {
             entry_time: entry_timestamp,
             exit_time: exit_timestamp,
             fees: total_fees,
+            fee_breakdown,
             exit_reason,
         }
     }
@@ -261,7 +270,17 @@ mod tests {
         assert!(!pm.open_position(1, 1001, 101.0, 10.0, Direction::Long, None, None, 0.0));
 
         // Close position with profit
-        let trade = pm.close_position(5, 1005, 110.0, 1000, ExitReason::Signal, 2.0).unwrap();
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 5,
+                timestamp: 1005,
+                price: 110.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 2.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
 
         assert!(!pm.is_in_position());
         assert_eq!(trade.entry_idx, 0);
@@ -280,7 +299,17 @@ mod tests {
         pm.open_position(0, 1000, 100.0, 10.0, Direction::Short, None, None, 0.0);
 
         // Close with profit (price went down)
-        let trade = pm.close_position(5, 1005, 90.0, 1000, ExitReason::Signal, 2.0).unwrap();
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 5,
+                timestamp: 1005,
+                price: 90.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 2.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
 
         // P&L: (100 - 90) * 10 * -(-1) - 2 = 98
         // For short: (entry - exit) * size = (100 - 90) * 10 = 100 gross, minus 2 fees = 98

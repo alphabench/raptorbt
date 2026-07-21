@@ -219,6 +219,12 @@ pub struct Trade {
     pub exit_time: Timestamp,
     /// Fees paid.
     pub fees: f64,
+    /// Itemized regulatory costs, when an itemized fee model is configured.
+    ///
+    /// Entry and exit components are summed, so `fee_breakdown.total()` equals
+    /// `fees` -- the equity curve and the reported costs are the same money.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
     /// Exit reason.
     pub exit_reason: ExitReason,
 }
@@ -271,6 +277,57 @@ pub struct BacktestConfig {
     pub target: TargetConfig,
     /// Whether to execute on bar close.
     pub upon_bar_close: bool,
+
+    /// Whether `slippage` is actually applied to fills.
+    ///
+    /// Through 0.4.1 the engine hardcoded `SlippageModel::None` and never read
+    /// `slippage`, so configuring it had no effect. Setting this to `false`
+    /// restores that behavior for reproducing pre-0.5.0 results.
+    pub apply_slippage: bool,
+
+    /// Periods per year used to annualize Sharpe and Sortino.
+    ///
+    /// `None` derives it from the median spacing between bar timestamps, which
+    /// is correct across daily and intraday data alike. An explicit value
+    /// overrides that inference.
+    pub periods_per_year: Option<f64>,
+
+    /// Annual risk-free rate as a fraction, used for excess returns.
+    pub risk_free_rate: f64,
+
+    /// Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT".
+    ///
+    /// When set, the engine charges the real regulatory schedule (STT, stamp
+    /// duty, GST, SEBI, exchange) instead of the flat `fees` fraction, and
+    /// reports the breakdown. `None` keeps the flat `fees` rate.
+    pub fee_segment: Option<String>,
+
+    /// Maximum concurrent open positions. `None` is unlimited.
+    ///
+    /// Enforced inside the simulation loop, before an entry opens, so the
+    /// resulting metrics describe the constrained run.
+    pub max_positions: Option<usize>,
+
+    /// Peak-to-trough drawdown percent that halts new entries. `None` disables.
+    ///
+    /// Latching: once tripped it stays tripped for the rest of the run.
+    pub max_drawdown_pct: Option<f64>,
+
+    /// Trading minutes per session, used to annualize intraday returns.
+    ///
+    /// NSE equity is 375 (09:15-15:30); MCX commodity is 870 (09:00-23:30);
+    /// CDS is 480. Assuming NSE on MCX data understates Sharpe by ~1.5x.
+    /// `Some(0.0)` marks a continuously traded (24x7) market, which annualizes
+    /// on calendar time instead. `None` uses the NSE default.
+    pub session_minutes: Option<f64>,
+
+    /// Reproduce pre-0.5.0 annualization.
+    ///
+    /// Through 0.4.1 the single-instrument path annualized at 365 while the
+    /// basket/pairs/options/multi paths used 252, and Calmar derived years from
+    /// bar count over 365.25 rather than elapsed time. Setting this to `true`
+    /// restores those constants.
+    pub legacy_annualization: bool,
 }
 
 impl Default for BacktestConfig {
@@ -282,6 +339,60 @@ impl Default for BacktestConfig {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            apply_slippage: true,
+            periods_per_year: None,
+            risk_free_rate: 0.0,
+            session_minutes: None,
+            fee_segment: None,
+            max_positions: None,
+            max_drawdown_pct: None,
+            legacy_annualization: false,
+        }
+    }
+}
+
+impl BacktestConfig {
+    /// Fee model implied by this config.
+    ///
+    /// An unparseable `fee_segment` falls back to the flat rate rather than
+    /// erroring, matching how the rest of the config degrades.
+    pub fn fee_model(&self) -> crate::execution::FeeModel {
+        use crate::execution::{indian_costs::Segment, FeeModel};
+
+        let Some(spec) = self.fee_segment.as_deref() else {
+            return FeeModel::percentage(self.fees);
+        };
+
+        // "NFO-OPT" / "NSE-INTRADAY" / "MCX" all parse.
+        let (seg, ty) = match spec.split_once('-') {
+            Some((s, t)) => (s, Some(t)),
+            None => (spec, None),
+        };
+        let intraday = !matches!(ty.map(|t| t.to_ascii_uppercase()).as_deref(), Some("DELIVERY"));
+        let ty = match ty.map(|t| t.to_ascii_uppercase()) {
+            Some(t) if t == "DELIVERY" || t == "INTRADAY" => None,
+            other => other,
+        };
+
+        match Segment::parse(seg, ty.as_deref(), intraday) {
+            Some(segment) => FeeModel::indian(segment),
+            None => FeeModel::percentage(self.fees),
+        }
+    }
+
+    /// Pre-trade risk constraints declared by this config.
+    pub fn risk_gate(&self) -> crate::portfolio::risk::RiskGate {
+        crate::portfolio::risk::RiskGate::new(self.max_positions, self.max_drawdown_pct)
+    }
+
+    /// How intraday returns map onto trading time.
+    pub fn session_spec(&self) -> crate::metrics::annualization::SessionSpec {
+        use crate::metrics::annualization::SessionSpec;
+        match self.session_minutes {
+            // Explicit zero marks a continuously traded market.
+            Some(m) if m <= 0.0 => SessionSpec::Continuous,
+            Some(minutes) => SessionSpec::Session { minutes },
+            None => SessionSpec::default(),
         }
     }
 }

@@ -20,28 +20,65 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Check Rust formatting
         run: cargo fmt --check
 
+      # --no-default-features drops pyo3's extension-module, whose unresolved
+      # Python symbols would otherwise fail to link outside a wheel build.
       - name: Run Rust clippy
-        run: cargo clippy --all-features
+        run: cargo clippy --no-default-features --all-targets
+
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # extension-module leaves Python symbols to be resolved by the host
+      # interpreter at import time, which a test binary cannot satisfy -- so
+      # the suite links only with the feature off. Before 0.5.0 the feature was
+      # unconditional and `cargo test` could not link at all, which is why CI
+      # previously ran nothing but an import smoke test.
+      - name: Run tests
+        run: cargo test --no-default-features --all-targets
 
   build:
-    runs-on: ubuntu-latest
+    name: wheel (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist
+          args: --release --out dist --interpreter python${{ matrix.python-version }}
 
-      - name: Install and test import
+      - name: Install wheel and run behavioral tests
+        shell: bash
         run: |
+          python -m pip install --upgrade pip
           pip install dist/*.whl
-          python -c "import raptorbt; print(raptorbt.__version__)"
+          pip install pytest numpy
+          python -c "import raptorbt; print('version:', raptorbt.__version__)"
+          pytest tests/python -v

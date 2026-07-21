@@ -11,6 +11,11 @@ production quantitative trading:
 """
 
 from raptorbt._raptorbt import (
+    # Session lengths (minutes) for PyBacktestConfig(session_minutes=...)
+    SESSION_NSE,
+    SESSION_MCX,
+    SESSION_CDS,
+    SESSION_CONTINUOUS,
     # Config classes
     PyBacktestConfig,
     PyInstrumentConfig,
@@ -20,9 +25,12 @@ from raptorbt._raptorbt import (
     PyBacktestResult,
     PyBacktestMetrics,
     PyTrade,
+    PyPortfolioResult,
+    PyInstrumentSummary,
     # Backtest functions
     run_single_backtest,
     run_basket_backtest,
+    run_portfolio_backtest,
     run_options_backtest,
     run_pairs_backtest,
     run_multi_backtest,
@@ -58,21 +66,34 @@ from raptorbt._raptorbt import (
     rolling_max,
 )
 
-__version__ = "0.4.0"
+try:  # Python 3.8+
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("raptorbt")
+except Exception:  # pragma: no cover - source checkout without install metadata
+    __version__ = "unknown"
 
 __all__ = [
+    # Session lengths
+    "SESSION_NSE",
+    "SESSION_MCX",
+    "SESSION_CDS",
+    "SESSION_CONTINUOUS",
     # Config classes
     "PyBacktestConfig",
     "PyInstrumentConfig",
     "PyStopConfig",
     "PyTargetConfig",
     # Result classes
+    "PyPortfolioResult",
+    "PyInstrumentSummary",
     "PyBacktestResult",
     "PyBacktestMetrics",
     "PyTrade",
     # Backtest functions
     "run_single_backtest",
     "run_basket_backtest",
+    "run_portfolio_backtest",
     "run_options_backtest",
     "run_pairs_backtest",
     "run_multi_backtest",
