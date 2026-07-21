@@ -50,7 +50,7 @@ fn set_stop_price_is_noop_when_flat() {
 }
 
 fn trade(ts: i64, price: Price, size: f64) -> TradeTick {
-    TradeTick { timestamp: ts, price, size }
+    TradeTick { timestamp: ts, price, size, signed_size: 0.0 }
 }
 
 #[test]

@@ -15,7 +15,12 @@ pub struct QuoteTick {
 pub struct TradeTick {
     pub timestamp: Timestamp,
     pub price: Price,
+    /// Total traded size, unsigned.
     pub size: f64,
+    /// Buy-initiated minus sell-initiated size. `0.0` means the split is
+    /// unknown, not that flow was balanced — consumers that need a
+    /// direction fall back to the tick rule.
+    pub signed_size: f64,
 }
 
 /// One record of one stream.
@@ -92,11 +97,19 @@ pub fn tick_data_to_events(ticks: &TickData, instrument: u32, trade_stream: u32,
         let ts = ticks.timestamps[i];
         let ltp = ticks.ltp[i];
         if ltp > 0.0 {
+            // `size` stays the unsigned total, unchanged: every existing
+            // bar's volume depends on it. The signed split rides alongside.
             let size = ticks.buy_qty_delta[i].abs() + ticks.sell_qty_delta[i].abs();
+            let signed_size = ticks.buy_qty_delta[i].abs() - ticks.sell_qty_delta[i].abs();
             events.push(MarketEvent {
                 instrument,
                 stream: trade_stream,
-                payload: EventPayload::Trade(TradeTick { timestamp: ts, price: ltp, size }),
+                payload: EventPayload::Trade(TradeTick {
+                    timestamp: ts,
+                    price: ltp,
+                    size,
+                    signed_size,
+                }),
             });
         }
         let (bid, ask) = (ticks.bid[i], ticks.ask[i]);

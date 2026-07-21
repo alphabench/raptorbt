@@ -395,23 +395,29 @@ _BarArrays = tuple[_I64, _F64, _F64, _F64, _F64, _F64]
 class BarAggregator:
     step: int
     unit: str
-    def __init__(self, step: int, unit: str) -> None: ...
+    def __init__(
+        self, step: int, unit: str, tz_offset_ns: int = ...,
+        brick_size: float = ...,
+    ) -> None: ...
     def push_bar(
         self, timestamp: int, open: float, high: float, low: float,
         close: float, volume: float,
     ) -> tuple[int, float, float, float, float, float] | None: ...
     def push_trade(
-        self, timestamp: int, price: float, size: float
+        self, timestamp: int, price: float, size: float, signed_size: float = ...,
     ) -> tuple[int, float, float, float, float, float] | None: ...
+    # Renko completes several bricks at once; drain after every push.
+    def next_pending(self) -> tuple[int, float, float, float, float, float] | None: ...
     def flush(self) -> tuple[int, float, float, float, float, float] | None: ...
 
 def aggregate_bars(
     timestamps: _I64, open: _F64, high: _F64, low: _F64, close: _F64,
     volume: _F64, step: int, unit: str, tz_offset_ns: int = ...,
+    brick_size: float = ...,
 ) -> _BarArrays: ...
 def bars_from_ticks(
     timestamps: _I64, ltp: _F64, buy_qty_delta: _F64, sell_qty_delta: _F64,
-    step: int, unit: str, tz_offset_ns: int = ...,
+    step: int, unit: str, tz_offset_ns: int = ..., brick_size: float = ...,
 ) -> _BarArrays: ...
 
 class PyPortfolioSession:

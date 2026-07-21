@@ -325,13 +325,44 @@ coarser bars — time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
 `"volume"`, and `"value"` units. Time bars use left-open epoch-aligned
 windows and are stamped with the window-*end* timestamp, so a bar labeled
 `t` contains only data strictly before `t` — no look-ahead by construction.
-(Renko and imbalance/runs units are declared and reserved; constructing
-them raises until a later 0.5.x release.)
+Beyond time, tick, volume and value windows, two families sample on
+something other than the clock:
+
+**Renko** (`"renko"`) emits a brick per full brick-height price move and
+ignores time and volume entirely — a quiet hour produces nothing, a fast
+move produces several bricks at once. Set the height with `brick_size`;
+without it, `step` reads as whole price units. Because one record can
+complete several bricks, `push` returns only the first and the rest must be
+drained:
+
+```python
+agg = raptorbt.BarAggregator(1, "renko", brick_size=0.05)
+bar = agg.push_trade(ts, price, size)
+while bar is not None:
+    handle(bar)
+    bar = agg.next_pending()      # drain, or bricks are silently lost
+```
+
+Bricks carry no wicks, and a partial brick is discarded at end of data
+rather than flushed — an incomplete brick is not a brick.
+
+**Signed-flow bars** (`"{tick,volume,value}_imbalance"` and
+`"{tick,volume,value}_runs"`) sample by order-flow direction. *Imbalance*
+closes on net signed flow, so balanced two-sided trading never closes a bar
+however heavy it is; *runs* closes on the larger one-sided accumulation, so
+the same tape does close bars. `step` is the threshold — fixed, rather than
+the adaptive estimate in the literature, so runs stay reproducible.
+
+Direction comes from the buy/sell quantity deltas when you supply them
+(`bars_from_ticks`), and otherwise from the tick rule, which is what lets
+these units work over plain OHLC bars.
 
 ```python
 # Batch: 1-minute bars -> 5-minute bars (or ticks -> bars).
 ts5, o5, h5, l5, c5, v5 = raptorbt.aggregate_bars(ts, o, h, l, c, v, 5, "m")
 bts, bo, bh, bl, bc, bv = raptorbt.bars_from_ticks(ts, ltp, buys, sells, 1000, "volume")
+# Signed flow: close a bar every 10,000 shares of net buying or selling.
+its = raptorbt.bars_from_ticks(ts, ltp, buys, sells, 10_000, "volume_imbalance")
 
 # In a strategy: a 5-minute trend filter gating 1-minute entries.
 class TrendGated(raptorbt.Strategy):

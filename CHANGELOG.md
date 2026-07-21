@@ -94,6 +94,32 @@ migrate.
 
 ### Added
 
+- **Renko and signed-flow bar units.** Every variant declared in
+  `AggregationUnit` now builds; none returns `Unimplemented`.
+
+  `"renko"` emits a brick per full brick-height price move, ignoring time
+  and volume entirely. Height comes from a new `brick_size` argument
+  (`BarAggregator`, `aggregate_bars`, `bars_from_ticks`, `subscribe_bars`),
+  falling back to `step` read as whole price units. Because one move can
+  complete several bricks, `BarBuilder` gains `next_pending()` and its
+  Python mirror — **drain it after every push or those bricks are lost**.
+  Bricks carry no wicks and a partial brick is discarded, not flushed: an
+  incomplete brick is not a brick.
+
+  The six information-driven units — `{tick,volume,value}_imbalance` and
+  `{tick,volume,value}_runs` — sample by signed order flow. Imbalance closes
+  on net flow, so balanced two-sided trading never closes a bar however
+  heavy; runs closes on the larger one-sided accumulation, so it does. The
+  threshold is `step`, fixed rather than the literature's adaptive EWMA:
+  deterministic, reproducible, and consistent with how `step` already reads
+  for tick/volume/value bars.
+
+  Direction comes from the feed when known — `TradeTick` and `SourceRecord`
+  gain a signed field, populated from the buy/sell quantity deltas that
+  `tick_data_to_events` previously summed away. The unsigned `size` is
+  unchanged, so no existing bar moves. Without a split, direction falls back
+  to the tick rule, which is what lets these units work over plain bars.
+
 - **Order book state and queue-position limit fills.** `OrderBook` tracks
   the visible book from quotes (L1) or depth snapshots (L2, five levels),
   exposed to strategies through a new `on_order_book(ctx, book)` hook,

@@ -125,7 +125,12 @@ mod tests {
         MarketEvent {
             instrument: 0,
             stream,
-            payload: EventPayload::Trade(TradeTick { timestamp: ts, price: 1.0, size: 1.0 }),
+            payload: EventPayload::Trade(TradeTick {
+                timestamp: ts,
+                price: 1.0,
+                size: 1.0,
+                signed_size: 0.0,
+            }),
         }
     }
 

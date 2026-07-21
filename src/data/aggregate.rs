@@ -10,7 +10,7 @@
 //! only data strictly before `t` — no look-ahead by construction.
 
 use crate::core::types::{OhlcvBar, Price, Timestamp};
-use crate::data::bar_spec::{AggregationUnit, BarSpec, SpecError};
+use crate::data::bar_spec::{AggregationUnit, BarSpec, BuilderParams, SpecError};
 
 /// One source record: a trade, or a finer bar's worth of trading.
 #[derive(Debug, Clone, Copy)]
@@ -21,12 +21,28 @@ pub struct SourceRecord {
     pub low: Price,
     pub close: Price,
     pub volume: f64,
+    /// Buy-initiated minus sell-initiated volume. `0.0` means unknown; the
+    /// signed-flow builders then classify by the tick rule instead.
+    pub signed_volume: f64,
 }
 
 impl SourceRecord {
-    /// A single trade as a degenerate bar.
+    /// A single trade as a degenerate bar, with no known flow direction.
     pub fn trade(timestamp: Timestamp, price: Price, size: f64) -> Self {
-        Self { timestamp, open: price, high: price, low: price, close: price, volume: size }
+        Self::signed_trade(timestamp, price, size, 0.0)
+    }
+
+    /// A trade whose buy/sell split is known.
+    pub fn signed_trade(timestamp: Timestamp, price: Price, size: f64, signed: f64) -> Self {
+        Self {
+            timestamp,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: size,
+            signed_volume: signed,
+        }
     }
 
     pub fn from_bar(bar: &OhlcvBar) -> Self {
@@ -37,13 +53,14 @@ impl SourceRecord {
             low: bar.low,
             close: bar.close,
             volume: bar.volume,
+            signed_volume: 0.0,
         }
     }
 }
 
 /// In-progress accumulation.
 #[derive(Debug, Clone, Copy)]
-struct Partial {
+pub(crate) struct Partial {
     open: Price,
     high: Price,
     low: Price,
@@ -52,18 +69,18 @@ struct Partial {
 }
 
 impl Partial {
-    fn start(rec: &SourceRecord) -> Self {
+    pub(crate) fn start(rec: &SourceRecord) -> Self {
         Self { open: rec.open, high: rec.high, low: rec.low, close: rec.close, volume: rec.volume }
     }
 
-    fn absorb(&mut self, rec: &SourceRecord) {
+    pub(crate) fn absorb(&mut self, rec: &SourceRecord) {
         self.high = self.high.max(rec.high);
         self.low = self.low.min(rec.low);
         self.close = rec.close;
         self.volume += rec.volume;
     }
 
-    fn into_bar(self, timestamp: Timestamp) -> OhlcvBar {
+    pub(crate) fn into_bar(self, timestamp: Timestamp) -> OhlcvBar {
         OhlcvBar {
             timestamp,
             open: self.open,
@@ -84,6 +101,16 @@ pub trait BarBuilder: std::fmt::Debug {
 
     /// Emit any in-progress bar at end of data.
     fn flush(&mut self) -> Option<OhlcvBar>;
+
+    /// A bar already completed but held back because [`BarBuilder::push`]
+    /// can return only one.
+    ///
+    /// Only multi-emit builders override this: one large move completes
+    /// several Renko bricks at once. Callers must drain it after every
+    /// push, or those bars are silently lost.
+    fn next_pending(&mut self) -> Option<OhlcvBar> {
+        None
+    }
 }
 
 /// Build a streaming aggregator for a spec.
@@ -93,6 +120,15 @@ pub trait BarBuilder: std::fmt::Debug {
 /// month/year windows to that timezone's civil dates — an NSE day bar
 /// covers one IST trading date rather than a UTC one.
 pub fn builder_for(spec: BarSpec, align_offset_ns: i64) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
+    builder_for_with(spec, align_offset_ns, BuilderParams::default())
+}
+
+/// [`builder_for`] with the extra parameters some units need.
+pub fn builder_for_with(
+    spec: BarSpec,
+    align_offset_ns: i64,
+    params: BuilderParams,
+) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
     if let Some(unit_ns) = spec.unit.fixed_ns() {
         return Ok(Box::new(TimeBarBuilder::new(unit_ns * spec.step as i64, align_offset_ns)));
     }
@@ -109,13 +145,20 @@ pub fn builder_for(spec: BarSpec, align_offset_ns: i64) -> Result<Box<dyn BarBui
         AggregationUnit::Tick => Ok(Box::new(CountBarBuilder::ticks(spec.step as u64))),
         AggregationUnit::Volume => Ok(Box::new(CountBarBuilder::volume(spec.step as f64))),
         AggregationUnit::Value => Ok(Box::new(CountBarBuilder::value(spec.step as f64))),
-        AggregationUnit::Renko => Err(SpecError::Unimplemented("renko")),
+        AggregationUnit::Renko => {
+            Ok(Box::new(crate::data::renko::RenkoBarBuilder::new(params.resolved_brick(spec)?)))
+        }
         AggregationUnit::TickImbalance
         | AggregationUnit::TickRuns
         | AggregationUnit::VolumeImbalance
         | AggregationUnit::VolumeRuns
         | AggregationUnit::ValueImbalance
-        | AggregationUnit::ValueRuns => Err(SpecError::Unimplemented("imbalance/runs")),
+        | AggregationUnit::ValueRuns => {
+            let threshold = spec.step as f64;
+            crate::data::flow_bars::FlowBarBuilder::for_unit(spec.unit, threshold)
+                .map(|b| Box::new(b) as Box<dyn BarBuilder + Send>)
+                .ok_or(SpecError::Unimplemented("signed-flow unit"))
+        }
     }
 }
 
@@ -494,10 +537,28 @@ mod tests {
     }
 
     #[test]
-    fn builder_for_rejects_unimplemented() {
+    fn every_declared_unit_now_builds() {
+        // The enum was declared ahead of its implementations; nothing in it
+        // should still return Unimplemented.
+        use AggregationUnit::*;
+        for unit in [
+            Millisecond, Second, Minute, Hour, Day, Week, Month, Year, Tick, Volume, Value,
+            Renko, TickImbalance, TickRuns, VolumeImbalance, VolumeRuns, ValueImbalance,
+            ValueRuns,
+        ] {
+            let spec = BarSpec::new(1, unit).unwrap();
+            assert!(builder_for(spec, 0).is_ok(), "{unit:?} should build");
+        }
+    }
+
+    #[test]
+    fn builder_for_builds_renko() {
         let spec = BarSpec::new(1, AggregationUnit::Renko).unwrap();
-        assert!(matches!(builder_for(spec, 0), Err(SpecError::Unimplemented(_))));
-        let spec = BarSpec::new(5, AggregationUnit::Minute).unwrap();
-        assert!(builder_for(spec, 0).is_ok());
+        assert!(builder_for(spec, 0).is_ok(), "step becomes the brick height");
+        let params = BuilderParams { brick_size: 0.05 };
+        assert!(builder_for_with(spec, 0, params).is_ok());
+        let bad = BuilderParams { brick_size: -1.0 };
+        // A negative brick falls back to `step`, which is valid.
+        assert!(builder_for_with(spec, 0, bad).is_ok());
     }
 }

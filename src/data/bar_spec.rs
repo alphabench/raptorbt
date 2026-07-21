@@ -95,6 +95,29 @@ impl BarSpec {
     }
 }
 
+/// Numeric parameters some units need that `step: u32` cannot express.
+///
+/// Kept beside [`BarSpec`] rather than inside it: `BarSpec` derives `Eq` and
+/// `Hash`, which an `f64` field would forfeit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BuilderParams {
+    /// Renko brick height in price units. `0.0` means "derive from `step`",
+    /// which then reads as whole price units.
+    pub brick_size: f64,
+}
+
+impl BuilderParams {
+    /// Brick height for a spec, resolving the `step` fallback.
+    pub fn resolved_brick(&self, spec: BarSpec) -> Result<f64, SpecError> {
+        let brick =
+            if self.brick_size > 0.0 { self.brick_size } else { spec.step as f64 };
+        if !brick.is_finite() || brick <= 0.0 {
+            return Err(SpecError::InvalidParam("brick_size must be finite and > 0"));
+        }
+        Ok(brick)
+    }
+}
+
 /// Errors constructing or using a bar spec.
 #[derive(Debug, Error, PartialEq)]
 pub enum SpecError {
@@ -104,6 +127,8 @@ pub enum SpecError {
     ZeroStep,
     #[error("aggregation unit {0:?} is not implemented yet")]
     Unimplemented(&'static str),
+    #[error("invalid builder parameter: {0}")]
+    InvalidParam(&'static str),
 }
 
 #[cfg(test)]
@@ -116,6 +141,21 @@ mod tests {
         assert_eq!(AggregationUnit::parse("minute").unwrap(), AggregationUnit::Minute);
         assert_eq!(AggregationUnit::parse("volume").unwrap(), AggregationUnit::Volume);
         assert!(AggregationUnit::parse("fortnight").is_err());
+    }
+
+    #[test]
+    fn brick_size_falls_back_to_step() {
+        let spec = BarSpec::new(5, AggregationUnit::Renko).unwrap();
+        assert_eq!(BuilderParams::default().resolved_brick(spec), Ok(5.0));
+        let params = BuilderParams { brick_size: 0.05 };
+        assert_eq!(params.resolved_brick(spec), Ok(0.05));
+    }
+
+    #[test]
+    fn nonfinite_brick_size_refused() {
+        let spec = BarSpec::new(1, AggregationUnit::Renko).unwrap();
+        let params = BuilderParams { brick_size: f64::INFINITY };
+        assert!(matches!(params.resolved_brick(spec), Err(SpecError::InvalidParam(_))));
     }
 
     #[test]

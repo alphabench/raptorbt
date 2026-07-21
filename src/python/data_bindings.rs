@@ -9,7 +9,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::core::types::{OhlcvBar, TickData};
-use crate::data::{builder_for, AggregationUnit, BarBuilder, BarSpec, SourceRecord};
+use crate::data::{
+    builder_for, builder_for_with, AggregationUnit, BarBuilder, BarSpec, SourceRecord,
+};
 
 use super::numpy_bridge::{
     numpy_to_vec_f64, numpy_to_vec_i64, vec_to_numpy_f64, vec_to_numpy_i64,
@@ -21,7 +23,17 @@ fn parse_spec(step: u32, unit: &str) -> PyResult<BarSpec> {
 }
 
 fn make_builder(step: u32, unit: &str, tz_offset_ns: i64) -> PyResult<Box<dyn BarBuilder + Send>> {
-    builder_for(parse_spec(step, unit)?, tz_offset_ns)
+    make_builder_with(step, unit, tz_offset_ns, 0.0)
+}
+
+fn make_builder_with(
+    step: u32,
+    unit: &str,
+    tz_offset_ns: i64,
+    brick_size: f64,
+) -> PyResult<Box<dyn BarBuilder + Send>> {
+    let params = crate::data::BuilderParams { brick_size };
+    builder_for_with(parse_spec(step, unit)?, tz_offset_ns, params)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -49,8 +61,8 @@ fn to_tuple(bar: OhlcvBar) -> BarTuple {
 #[pymethods]
 impl PyBarAggregator {
     #[new]
-    #[pyo3(signature = (step, unit, tz_offset_ns=0))]
-    fn new(step: u32, unit: &str, tz_offset_ns: i64) -> PyResult<Self> {
+    #[pyo3(signature = (step, unit, tz_offset_ns=0, brick_size=0.0))]
+    fn new(step: u32, unit: &str, tz_offset_ns: i64, brick_size: f64) -> PyResult<Self> {
         Ok(Self { builder: make_builder(step, unit, tz_offset_ns)?, step, unit: unit.to_string() })
     }
 
@@ -65,13 +77,35 @@ impl PyBarAggregator {
         close: f64,
         volume: f64,
     ) -> Option<BarTuple> {
-        let rec = SourceRecord { timestamp, open, high, low, close, volume };
+        let rec = SourceRecord { timestamp, open, high, low, close, volume, signed_volume: 0.0 };
         self.builder.push(&rec).map(to_tuple)
     }
 
     /// Push one trade; returns the completed bar, if any.
-    fn push_trade(&mut self, timestamp: i64, price: f64, size: f64) -> Option<BarTuple> {
-        self.builder.push(&SourceRecord::trade(timestamp, price, size)).map(to_tuple)
+    ///
+    /// `signed_size` is buy-initiated minus sell-initiated volume, which the
+    /// signed-flow units consume. `0.0` means unknown, and those units then
+    /// classify direction by the tick rule.
+    #[pyo3(signature = (timestamp, price, size, signed_size=0.0))]
+    fn push_trade(
+        &mut self,
+        timestamp: i64,
+        price: f64,
+        size: f64,
+        signed_size: f64,
+    ) -> Option<BarTuple> {
+        self.builder
+            .push(&SourceRecord::signed_trade(timestamp, price, size, signed_size))
+            .map(to_tuple)
+    }
+
+    /// A bar completed alongside the last push but held back.
+    ///
+    /// One large move completes several Renko bricks at once, and `push`
+    /// returns only the first. Drain this after every push, or those bars
+    /// are lost.
+    fn next_pending(&mut self) -> Option<BarTuple> {
+        self.builder.next_pending().map(to_tuple)
     }
 
     /// Emit any in-progress bar at end of data.
@@ -124,7 +158,7 @@ fn bars_to_arrays(py: Python<'_>, bars: Vec<OhlcvBar>) -> BarArrays<'_> {
 /// units: time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
 /// `"volume"`, `"value"`.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, step, unit, tz_offset_ns=0))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, step, unit, tz_offset_ns=0, brick_size=0.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn aggregate_bars<'py>(
     py: Python<'py>,
@@ -137,6 +171,7 @@ pub fn aggregate_bars<'py>(
     step: u32,
     unit: &str,
     tz_offset_ns: i64,
+    brick_size: f64,
 ) -> PyResult<BarArrays<'py>> {
     let ts = numpy_to_vec_i64(timestamps);
     let o = numpy_to_vec_f64(open);
@@ -149,7 +184,7 @@ pub fn aggregate_bars<'py>(
         return Err(PyValueError::new_err("all input arrays must share one length"));
     }
 
-    let mut builder = make_builder(step, unit, tz_offset_ns)?;
+    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size)?;
     let mut out = Vec::new();
     for i in 0..n {
         let rec = SourceRecord {
@@ -159,8 +194,13 @@ pub fn aggregate_bars<'py>(
             low: l[i],
             close: c[i],
             volume: v[i],
+            signed_volume: 0.0,
         };
         if let Some(bar) = builder.push(&rec) {
+            out.push(bar);
+        }
+        // Renko can complete several bricks from one record.
+        while let Some(bar) = builder.next_pending() {
             out.push(bar);
         }
     }
@@ -175,7 +215,7 @@ pub fn aggregate_bars<'py>(
 /// Ticks with a zero last-traded price are skipped, matching the tick
 /// backtester's treatment of missing data.
 #[pyfunction]
-#[pyo3(signature = (timestamps, ltp, buy_qty_delta, sell_qty_delta, step, unit, tz_offset_ns=0))]
+#[pyo3(signature = (timestamps, ltp, buy_qty_delta, sell_qty_delta, step, unit, tz_offset_ns=0, brick_size=0.0))]
 #[allow(clippy::too_many_arguments)]
 pub fn bars_from_ticks<'py>(
     py: Python<'py>,
@@ -186,6 +226,7 @@ pub fn bars_from_ticks<'py>(
     step: u32,
     unit: &str,
     tz_offset_ns: i64,
+    brick_size: f64,
 ) -> PyResult<BarArrays<'py>> {
     let ts = numpy_to_vec_i64(timestamps);
     let prices = numpy_to_vec_f64(ltp);
@@ -209,12 +250,20 @@ pub fn bars_from_ticks<'py>(
     };
     let events = crate::data::tick_data_to_events(&ticks, 0, 0, 1);
 
-    let mut builder = make_builder(step, unit, tz_offset_ns)?;
+    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size)?;
     let mut out = Vec::new();
     for event in events {
         if let crate::data::EventPayload::Trade(trade) = event.payload {
-            let rec = SourceRecord::trade(trade.timestamp, trade.price, trade.size);
+            let rec = SourceRecord::signed_trade(
+                trade.timestamp,
+                trade.price,
+                trade.size,
+                trade.signed_size,
+            );
             if let Some(bar) = builder.push(&rec) {
+                out.push(bar);
+            }
+            while let Some(bar) = builder.next_pending() {
                 out.push(bar);
             }
         }

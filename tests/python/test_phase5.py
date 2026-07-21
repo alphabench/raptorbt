@@ -50,12 +50,12 @@ class TestAggregateBars:
         assert len(ts) == 3
         assert v[0] == pytest.approx(300.0)
 
-    def test_unimplemented_unit_raises(self):
+    def test_unknown_unit_raises(self):
         data = _minute_bars(4)
-        with pytest.raises(ValueError, match="not implemented"):
+        with pytest.raises(ValueError, match="unknown aggregation unit"):
             raptorbt.aggregate_bars(
                 data["timestamps"], data["open"], data["high"], data["low"],
-                data["close"], data["volume"], 1, "renko",
+                data["close"], data["volume"], 1, "fortnight",
             )
 
     def test_length_mismatch_raises(self):
@@ -190,3 +190,116 @@ class TestMultiTimeframeStrategy:
         ts, o, h, l, c, v = make_data()
         result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
         assert result_digest(result) == fixtures["class/sma_cross"]
+
+
+class TestRenkoBars:
+    def test_a_burst_emits_every_brick(self):
+        # A three-brick jump must not collapse into one bar.
+        ts = np.array([0, 1], dtype=np.int64)
+        px = np.array([100.0, 103.0])
+        out = raptorbt.aggregate_bars(
+            ts, px, px, px, px, np.ones(2), 1, "renko", brick_size=1.0
+        )
+        assert list(out[1]) == [100.0, 101.0, 102.0]
+        assert list(out[4]) == [101.0, 102.0, 103.0]
+
+    def test_bricks_have_no_wicks(self):
+        ts = np.array([0, 1], dtype=np.int64)
+        px = np.array([100.0, 102.0])
+        _, o, h, l, c, _ = raptorbt.aggregate_bars(
+            ts, px, px, px, px, np.ones(2), 1, "renko", brick_size=1.0
+        )
+        for i in range(len(o)):
+            assert h[i] == max(o[i], c[i])
+            assert l[i] == min(o[i], c[i])
+
+    def test_time_and_volume_never_close_a_brick(self):
+        # Hours pass with heavy volume but no price movement.
+        n = 20
+        ts = np.arange(n, dtype=np.int64) * 3_600_000_000_000
+        px = np.full(n, 100.0)
+        out = raptorbt.aggregate_bars(
+            ts, px, px, px, px, np.full(n, 1e6), 1, "renko", brick_size=1.0
+        )
+        assert len(out[0]) == 0
+
+    def test_streaming_drain_matches_batch(self):
+        ts = np.array([0, 1], dtype=np.int64)
+        px = np.array([100.0, 103.0])
+        batch = raptorbt.aggregate_bars(
+            ts, px, px, px, px, np.ones(2), 1, "renko", brick_size=1.0
+        )
+
+        agg = raptorbt.BarAggregator(1, "renko", brick_size=1.0)
+        agg.push_trade(0, 100.0, 1.0)
+        streamed = []
+        first = agg.push_trade(1, 103.0, 1.0)
+        while first is not None:
+            streamed.append(first)
+            first = agg.next_pending()
+
+        assert [b[4] for b in streamed] == list(batch[4])
+
+    def test_brick_size_defaults_to_step(self):
+        ts = np.array([0, 1], dtype=np.int64)
+        px = np.array([100.0, 105.0])
+        out = raptorbt.aggregate_bars(ts, px, px, px, px, np.ones(2), 5, "renko")
+        # step=5 means 5.00-point bricks: exactly one.
+        assert len(out[0]) == 1
+        assert out[4][0] == 105.0
+
+
+class TestSignedFlowBars:
+    def _ticks(self, buys, sells, price=100.0):
+        n = len(buys)
+        return (
+            np.arange(n, dtype=np.int64),
+            np.full(n, price),
+            np.asarray(buys, dtype=np.float64),
+            np.asarray(sells, dtype=np.float64),
+        )
+
+    def test_balanced_flow_never_closes_an_imbalance_bar(self):
+        # Alternating buys and sells cancel, however heavy. Only the
+        # end-of-data flush emits, so the whole tape is one bar.
+        ts, ltp, buy, sell = self._ticks([10.0, 0.0] * 10, [0.0, 10.0] * 10)
+        out = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 50, "volume_imbalance")
+        assert len(out[0]) == 1
+        assert out[0][0] == 19, "the flush of the trailing partial"
+
+    def test_balanced_flow_does_close_a_runs_bar(self):
+        # The same tape closes runs bars: one-sided accumulation still grows.
+        ts, ltp, buy, sell = self._ticks([10.0, 0.0] * 10, [0.0, 10.0] * 10)
+        out = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 50, "volume_runs")
+        assert len(out[0]) > 0
+
+    def test_one_sided_flow_closes_on_the_threshold(self):
+        ts, ltp, buy, sell = self._ticks([10.0] * 10, [0.0] * 10)
+        out = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 30, "volume_imbalance")
+        # 100 units of one-way flow at a threshold of 30: three closed
+        # bars of 30, plus the trailing 10 flushed at end of data.
+        assert len(out[0]) == 4
+        assert list(out[0]) == [2, 5, 8, 9]
+
+    def test_tick_imbalance_counts_trades_not_size(self):
+        ts, ltp, buy, sell = self._ticks([1.0] * 6, [0.0] * 6)
+        out = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 2, "tick_imbalance")
+        assert len(out[0]) == 3
+
+    def test_value_scales_by_price(self):
+        # The same size at a higher price reaches the threshold sooner.
+        ts, ltp, buy, sell = self._ticks([1.0] * 4, [0.0] * 4, price=100.0)
+        cheap = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 200, "value_imbalance")
+        ts, ltp, buy, sell = self._ticks([1.0] * 4, [0.0] * 4, price=1000.0)
+        rich = raptorbt.bars_from_ticks(ts, ltp, buy, sell, 200, "value_imbalance")
+        assert len(rich[0]) > len(cheap[0])
+
+    def test_unsigned_bars_fall_back_to_the_tick_rule(self):
+        # aggregate_bars carries no flow data; direction comes from price.
+        closes = np.array([100.0, 101.0, 102.0, 103.0])
+        ts = np.arange(4, dtype=np.int64)
+        out = raptorbt.aggregate_bars(
+            ts, closes, closes, closes, closes, np.ones(4), 2, "tick_imbalance"
+        )
+        # Four consecutive up-ticks at a threshold of 2.
+        assert len(out[0]) == 2

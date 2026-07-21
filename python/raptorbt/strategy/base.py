@@ -236,7 +236,7 @@ class Strategy:
         """
         return all(ind.initialized for ind, _, _ in self._indicators)
 
-    def subscribe_bars(self, step: int, unit: str) -> int:
+    def subscribe_bars(self, step: int, unit: str, *, brick_size: float = 0.0) -> int:
         """Subscribe to bars aggregated from the primary stream.
 
         Call from ``on_start``. Completed bars arrive via
@@ -250,7 +250,7 @@ class Strategy:
         """
         if step < 1:
             raise ValueError("step must be >= 1")
-        self._bar_subscriptions.append((step, unit))
+        self._bar_subscriptions.append((step, unit, brick_size))
         return len(self._bar_subscriptions) - 1
 
     def link_oco(self, *client_ids: str) -> None:
