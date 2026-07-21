@@ -437,6 +437,14 @@ result.per_instrument         # per-symbol trades / pnl / rejections
 `ctx.equity` / `ctx.cash`. Composite-bar subscriptions are single-instrument
 for now, and one-cancels-other links cannot span symbols.
 
+Risk limits on the config are portfolio-wide, matching
+`run_portfolio_backtest`: `max_positions` counts open positions across all
+symbols (including entries from resting orders), and `max_drawdown_pct`
+trips on portfolio equity and halts entries on every symbol. Capital
+*allocation* is the strategy's own — each entry is offered the full free
+balance, so size it with `size_frac`; there is no `EqualWeight` budget on
+this path yet.
+
 With `account_type="margin"` the instruments share one account: `leverage`
 applies portfolio-wide, sizing draws on the portfolio's free capital
 (balance less every instrument's locked margin), and equity marks the

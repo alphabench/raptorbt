@@ -19,6 +19,17 @@ migrate.
 
 ### Fixed
 
+- **`max_positions` was per-instrument in portfolio strategy runs.**
+  `EventSession` gave each instrument its own copy of the risk gate, and
+  `RiskGate` is `Copy`, so every kernel checked the limit against its own
+  ledger: `max_positions=1` across three symbols allowed three concurrent
+  positions. It is now counted across all instruments, as the array runner
+  (`run_portfolio_backtest`) has always done, and is enforced on the
+  resting-order path as well as on signal entries. Runs that set
+  `max_positions` on `run_portfolio_strategy` will open fewer positions than
+  before — the previous behavior did not match the documented meaning of the
+  setting or the sibling API.
+
 - **Portfolio session results reported stubbed halt/rejection fields.**
   `PyPortfolioSession::finish` hardcoded `rejected_entries: 0`,
   `halted: false`, and `halted_at: None`, so a `run_portfolio_strategy` run
@@ -87,6 +98,13 @@ migrate.
   Note: in portfolio runs `halted_at` is a **schedule-event ordinal**, since
   the session interleaves N instrument streams; the array runners'
   `halted_at` remains a bar index.
+
+- **Portfolio drawdown halts now record `halted_at` on the shared account**,
+  so margin-call and drawdown halts report identically. A drawdown halt
+  keeps its own reject reason (`DrawdownHalt`) rather than borrowing the
+  margin-call switch. One consequence: once any halt has latched, a later
+  margin-maintenance breach no longer emits a second `MarginCall` event —
+  halts are latch-once.
 
 - **`run_portfolio_backtest`** — simulates N instruments against **one** cash
   pool, with `max_positions` and a drawdown kill-switch gating each entry

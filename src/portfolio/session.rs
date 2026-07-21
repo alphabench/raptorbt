@@ -15,6 +15,14 @@
 //! single-pool arithmetic exactly. Margin mode additionally tracks locked
 //! initial margin as an aggregate, so leverage is shared across instruments
 //! and one margin call halts them all.
+//!
+//! Risk gating is portfolio-wide: `max_positions` counts open positions
+//! across every instrument (injected into each kernel's gate before it
+//! steps, so the resting-order path is covered too), and the drawdown
+//! kill-switch trips on portfolio equity and blocks entries everywhere.
+//! Capital *allocation* is not: each kernel is offered the whole free
+//! balance, so the strategy owns sizing via `size_frac`. The array runner's
+//! `EqualWeight` budget has no counterpart here yet.
 
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
@@ -24,6 +32,7 @@ use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
+use crate::portfolio::risk::RejectReason;
 use crate::core::types::OhlcvBar;
 
 /// One entry of the merged schedule.
@@ -58,6 +67,15 @@ pub struct SessionOutcome {
     pub halted_at: Option<usize>,
 }
 
+/// Why a portfolio-wide halt latched.
+#[derive(Debug, Clone, Copy)]
+enum HaltCause {
+    /// Equity fell below the summed maintenance requirement.
+    MarginCall,
+    /// The drawdown kill-switch tripped on portfolio equity.
+    Drawdown,
+}
+
 /// Multi-instrument session over merged bar streams.
 pub struct EventSession {
     config: BacktestConfig,
@@ -76,9 +94,6 @@ pub struct EventSession {
     trades: Vec<Trade>,
     streaming: StreamingMetrics,
     peak_equity: f64,
-    /// Where the drawdown kill-switch latched; the margin call records its
-    /// own index on the account.
-    risk_halted_at: Option<usize>,
     sealed: bool,
 }
 
@@ -110,7 +125,6 @@ impl EventSession {
             trades: Vec::new(),
             streaming: StreamingMetrics::new(),
             peak_equity: pool,
-            risk_halted_at: None,
             sealed: false,
         }
     }
@@ -279,9 +293,24 @@ impl EventSession {
     /// drained: cash and locked-margin movements are folded back into the
     /// shared account. Cash mode is exactly the historical lend/drain of the
     /// whole pool.
+    ///
+    /// `max_positions` is counted across every instrument, so the kernel's
+    /// gate refuses an entry once the *portfolio* is full — on the resting
+    /// order path too, which is why the count is injected rather than
+    /// pre-checked here. The count is snapshotted before the step, mirroring
+    /// the array runner: an instrument that exits and re-enters on the same
+    /// bar is still counted as holding its outgoing position.
     pub fn apply_current(&mut self, input: StepInput) -> Vec<EngineEvent> {
         let Some(entry) = self.current() else { return Vec::new() };
         let instrument = entry.instrument;
+
+        // Portfolio-wide open count, skipped entirely when no limit is set.
+        // Summing every kernel's ledger covers hedging policies, where one
+        // instrument can hold several positions at once.
+        let portfolio_open = self
+            .config
+            .max_positions
+            .map(|_| self.kernels.iter().map(|k| k.open_count()).sum::<usize>());
 
         // In margin mode the kernel computes free capital as its own cash
         // minus its own locked margin, so hand it the balance less every
@@ -296,16 +325,18 @@ impl EventSession {
             }
         };
         kernel.set_cash(injected);
+        kernel.set_external_open_count(portfolio_open);
         let mut events = kernel.step(entry.local_idx, &entry.bar, input);
         let delta_cash = kernel.cash() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
+        kernel.set_external_open_count(None);
         self.account.reconcile(delta_cash, delta_locked);
 
         // A kernel-local call sees only its own slice of the portfolio, but
         // the account is shared: escalate it so every instrument halts.
         if events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })) {
-            self.halt_all(self.cursor);
+            self.halt_all(self.cursor, HaltCause::MarginCall);
         }
 
         for event in &events {
@@ -345,7 +376,7 @@ impl EventSession {
                 .map(|(k, close)| close.map(|c| k.maintenance_requirement(c)).unwrap_or(0.0))
                 .sum();
             if required > 0.0 && equity < required {
-                self.halt_all(self.cursor);
+                self.halt_all(self.cursor, HaltCause::MarginCall);
                 events.push(EngineEvent::MarginCall { idx: entry.local_idx, equity, required });
             }
         }
@@ -357,25 +388,28 @@ impl EventSession {
         for kernel in &mut self.kernels {
             kernel.observe_equity(equity, peak);
         }
-        if !risk_halted_before
-            && self.risk_halted_at.is_none()
-            && self.kernels.iter().any(|k| k.risk_halted())
-        {
-            self.risk_halted_at = Some(self.cursor);
+        if !risk_halted_before && self.kernels.iter().any(|k| k.risk_halted()) {
+            self.halt_all(self.cursor, HaltCause::Drawdown);
         }
 
         self.cursor += 1;
         events
     }
 
-    /// Latch the shared margin call and block entries on every instrument.
+    /// Latch a portfolio-wide halt on the shared account.
     ///
-    /// Each kernel's existing kill-switch does the blocking, so a halted
-    /// portfolio rejects entries with `RejectReason::MarginCall` everywhere.
-    fn halt_all(&mut self, idx: usize) {
+    /// The cause decides what else is needed. A margin call must trip every
+    /// kernel's margin kill-switch so entries are refused with
+    /// `RejectReason::MarginCall`; a drawdown halt must *not*, because each
+    /// kernel's own risk gate has already latched from the portfolio equity
+    /// it was fed and reports `RejectReason::DrawdownHalt`. Tripping the
+    /// margin switch for a drawdown would mislabel the reason.
+    fn halt_all(&mut self, idx: usize, cause: HaltCause) {
         self.account.halt(idx);
-        for kernel in &mut self.kernels {
-            kernel.halt_margin();
+        if matches!(cause, HaltCause::MarginCall) {
+            for kernel in &mut self.kernels {
+                kernel.halt_margin();
+            }
         }
     }
 
@@ -431,7 +465,7 @@ impl EventSession {
 
         let rejected_entries: usize = self.kernels.iter().map(|k| k.rejected_entries()).sum();
         let halted = self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted());
-        let halted_at = self.account.halted_at().or(self.risk_halted_at);
+        let halted_at = self.account.halted_at();
 
         let result = BacktestResult::new(
             metrics,
@@ -545,6 +579,271 @@ mod tests {
         assert!(outcome.instruments.iter().all(|o| o.trades == 1));
         let total_pnl: f64 = outcome.instruments.iter().map(|o| o.pnl).sum();
         assert!(total_pnl > 0.0);
+    }
+
+    /// Risk-gated twin of [`session_two_instruments`].
+    fn session_two_instruments_gated(
+        max_positions: Option<usize>,
+        max_drawdown_pct: Option<f64>,
+    ) -> EventSession {
+        let config = BacktestConfig {
+            fees: 0.0,
+            max_positions,
+            max_drawdown_pct,
+            ..BacktestConfig::default()
+        };
+        let mut session = EventSession::new(config);
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let b =
+            session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
+        session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
+        session.seal();
+        session
+    }
+
+    #[test]
+    fn max_positions_caps_across_instruments() {
+        // Regression: each kernel used to check only its own ledger, so a
+        // limit of 1 allowed one position *per instrument*.
+        let mut session = session_two_instruments_gated(Some(1), None);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(session.kernel(0).is_in_position());
+
+        let events = session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EngineEvent::EntryRejected { reason: RejectReason::MaxPositions, .. }
+            )),
+            "the portfolio slot is taken, got {events:?}"
+        );
+        assert!(!session.kernel(1).is_in_position());
+
+        let open = (0..2).filter(|&i| session.kernel(i).is_in_position()).count();
+        assert_eq!(open, 1, "max_positions=1 must mean one position portfolio-wide");
+    }
+
+    #[test]
+    fn max_positions_frees_a_slot_on_exit() {
+        let mut session = session_two_instruments_gated(Some(1), None);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        // Close AAA, then let BBB take the freed slot.
+        let position_id = session.kernel(0).position_snapshots()[0].position_id;
+        session.kernel_mut(0).request_close(position_id);
+        session.apply_current(StepInput { entry: false, ..StepInput::default() });
+        while session.current().is_some() {
+            let events = session.apply_current(StepInput {
+                entry: true,
+                size_mult: Some(0.25),
+                ..StepInput::default()
+            });
+            if events.iter().any(|e| matches!(e, EngineEvent::Entered { .. })) {
+                break;
+            }
+        }
+        assert!(!session.kernel(0).is_in_position(), "AAA closed");
+        assert!(session.kernel(1).is_in_position(), "BBB took the freed slot");
+    }
+
+    #[test]
+    fn max_positions_gates_the_order_path() {
+        // Resting orders match *inside* `step()`, so a session-side
+        // pre-check could not see them. Injecting the count covers this
+        // path through the kernel's own gate.
+        use crate::execution::orders::{OrderKind, OrderSide, QtySpec, TimeInForce};
+
+        let mut session = session_two_instruments_gated(Some(1), None);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(session.kernel(0).is_in_position(), "AAA holds the only slot");
+
+        // BBB rests a marketable buy limit; it matches on its next bar.
+        session.kernel_mut(1).submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 60.0 },
+            TimeInForce::Gtc,
+            0,
+            5,
+            "probe".to_string(),
+            None,
+            None,
+        );
+        let mut rejected = false;
+        while session.current().is_some() {
+            let events = session.apply_current(StepInput::default());
+            if events.iter().any(|e| {
+                matches!(e, EngineEvent::OrderRejected { reason, .. } if *reason == "max_positions")
+            }) {
+                rejected = true;
+            }
+        }
+        assert!(rejected, "the resting order must be refused portfolio-wide");
+        assert!(!session.kernel(1).is_in_position());
+    }
+
+    #[test]
+    fn unset_max_positions_is_unconstrained() {
+        let mut session = session_two_instruments_gated(None, None);
+        session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        let events = session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(0.25),
+            ..StepInput::default()
+        });
+        assert!(!events.iter().any(|e| matches!(e, EngineEvent::EntryRejected { .. })));
+        assert!(session.kernel(0).is_in_position());
+        assert!(session.kernel(1).is_in_position());
+    }
+
+    #[test]
+    fn drawdown_halt_blocks_entries_on_all_instruments() {
+        // AAA collapses; the portfolio drawdown gate halts BBB too, even
+        // though BBB never traded.
+        let config = BacktestConfig {
+            fees: 0.0,
+            max_drawdown_pct: Some(15.0),
+            ..BacktestConfig::default()
+        };
+        let mut session = EventSession::new(config);
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let b =
+            session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
+        session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+        session.seal();
+
+        // AAA goes all-in, then collapses.
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        let mut reasons = Vec::new();
+        while session.current().is_some() {
+            for event in session.apply_current(StepInput { entry: true, ..StepInput::default() }) {
+                if let EngineEvent::EntryRejected { reason, .. } = event {
+                    reasons.push(reason);
+                }
+            }
+        }
+        assert!(session.is_halted(), "the drawdown gate must latch");
+        assert!(
+            reasons.contains(&RejectReason::DrawdownHalt),
+            "expected a drawdown rejection, got {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn drawdown_halt_reports_its_own_reason_not_margin_call() {
+        // A cash-account portfolio has no margin switch to trip; the halt
+        // must not borrow the margin-call reason. BBB stays flat so its
+        // entry attempts actually reach the gate.
+        let config = BacktestConfig {
+            fees: 0.0,
+            max_drawdown_pct: Some(15.0),
+            ..BacktestConfig::default()
+        };
+        let mut session = EventSession::new(config);
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        let b =
+            session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
+        session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+        session.seal();
+
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        let mut reasons = Vec::new();
+        while session.current().is_some() {
+            for event in session.apply_current(StepInput { entry: true, ..StepInput::default() }) {
+                if let EngineEvent::EntryRejected { reason, .. } = event {
+                    reasons.push(reason);
+                }
+            }
+        }
+        assert!(reasons.contains(&RejectReason::DrawdownHalt));
+        assert!(
+            !reasons.contains(&RejectReason::MarginCall),
+            "a drawdown halt must not be labeled a margin call, got {reasons:?}"
+        );
+        assert!(!session.kernel(0).is_margin_halted());
+    }
+
+    #[test]
+    fn drawdown_halt_records_halted_at_on_the_account() {
+        let config = BacktestConfig {
+            fees: 0.0,
+            max_drawdown_pct: Some(15.0),
+            ..BacktestConfig::default()
+        };
+        let mut session = EventSession::new(config);
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
+        session.seal();
+
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        while session.current().is_some() {
+            session.apply_current(StepInput::default());
+        }
+        let outcome = session.finish();
+        assert!(outcome.halted);
+        // The account is the single source of truth for *where*, whether the
+        // halt came from a margin call or the drawdown gate.
+        assert_eq!(outcome.halted_at, Some(1), "latched on the collapsing event");
+    }
+
+    #[test]
+    fn a_latched_drawdown_halt_suppresses_a_later_margin_call() {
+        // Halts are latch-once: `halt_all` records the first cause, and the
+        // maintenance check skips an already-halted account. Pins the
+        // documented consequence of routing both causes through the account.
+        let config = BacktestConfig {
+            fees: 0.0,
+            max_drawdown_pct: Some(15.0),
+            ..BacktestConfig::default()
+        };
+        let mut session =
+            EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+        let a =
+            session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
+        session.seal();
+
+        session.apply_current(StepInput { entry: true, ..StepInput::default() });
+        let mut margin_calls = 0;
+        while session.current().is_some() {
+            margin_calls += session
+                .apply_current(StepInput::default())
+                .iter()
+                .filter(|e| matches!(e, EngineEvent::MarginCall { .. }))
+                .count();
+        }
+        let outcome = session.finish();
+        assert!(outcome.halted);
+        assert!(
+            margin_calls <= 1,
+            "a halted portfolio must not keep emitting margin calls, got {margin_calls}"
+        );
     }
 
     /// Margin-mode twin of [`session_two_instruments`].

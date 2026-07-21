@@ -137,6 +137,12 @@ def run_portfolio_strategy(
     Under margin the account is shared: ``leverage`` applies across all
     instruments, and a margin call halts every one of them, surfacing as
     ``on_margin_call`` plus ``halted``/``halted_at`` on the result.
+
+    Risk limits on ``config`` are portfolio-wide: ``max_positions`` counts
+    open positions across all symbols, and ``max_drawdown_pct`` trips on
+    portfolio equity and halts entries on every symbol. Capital allocation
+    is the strategy's own: each entry is offered the full free balance, so
+    size it with ``size_frac``.
     """
     if isinstance(strategy, type):
         strategy = strategy()

@@ -158,6 +158,9 @@ pub struct EngineKernel {
 
     /// Pre-trade constraints, checked before an entry opens.
     risk: RiskGate,
+    /// Open-position count the risk gate should see, when a portfolio owns
+    /// it. `None` (the default) means count this kernel's own ledger.
+    external_open_count: Option<usize>,
 
     effective_stop: StopConfig,
     effective_target: TargetConfig,
@@ -213,6 +216,7 @@ impl EngineKernel {
             margin: MarginBook::default(),
             fill_rng: FillRng::new(config_seed),
             risk: RiskGate::unconstrained(),
+            external_open_count: None,
             effective_stop,
             effective_target,
             alloted_capital: inst_config.and_then(|ic| ic.alloted_capital),
@@ -613,6 +617,29 @@ impl EngineKernel {
         self.margin.total_locked()
     }
 
+    /// Open positions in this kernel's own ledger.
+    #[inline]
+    pub fn open_count(&self) -> usize {
+        self.ledger.open_count()
+    }
+
+    /// Override the open-position count the risk gate checks against.
+    ///
+    /// A portfolio session sets this to the count across *all* its
+    /// instruments before stepping a kernel, so `max_positions` means
+    /// concurrent positions portfolio-wide rather than per instrument, and
+    /// clears it afterward. `None` restores ledger-derived counting.
+    #[inline]
+    pub fn set_external_open_count(&mut self, count: Option<usize>) {
+        self.external_open_count = count;
+    }
+
+    /// The open-position count the risk gate is checked against.
+    #[inline]
+    fn gating_open_count(&self) -> usize {
+        self.external_open_count.unwrap_or_else(|| self.ledger.open_count())
+    }
+
     /// Direction-aware unrealized PnL of open positions, or 0.0 when flat.
     ///
     /// The margin-mode marking counterpart of [`EngineKernel::position_value`].
@@ -759,7 +786,7 @@ impl EngineKernel {
 
             // Gate before opening, so a refused entry never reaches the equity
             // curve and the metrics describe the constrained run.
-            let open_positions = self.ledger.open_count();
+            let open_positions = self.gating_open_count();
             match self.risk.check_entry(open_positions) {
                 Ok(()) => {
                     if let Some(event) = self.try_enter(idx, bar, input) {
@@ -926,7 +953,7 @@ impl EngineKernel {
                 reject(&mut self.orders, events, "margin_call");
                 return;
             }
-            if let Err(reason) = self.risk.check_entry(self.ledger.open_count()) {
+            if let Err(reason) = self.risk.check_entry(self.gating_open_count()) {
                 self.risk.record_rejection();
                 reject(&mut self.orders, events, reason.as_str());
                 return;
@@ -1509,6 +1536,34 @@ mod tests {
         let mut kernel = make_kernel();
         kernel.set_stop_price(Some(90.0));
         assert!(kernel.position_snapshot().is_none());
+    }
+
+    #[test]
+    fn external_open_count_overrides_the_ledger() {
+        // A flat kernel would pass a max_positions=1 gate on its own ledger;
+        // a portfolio that already holds a position elsewhere says otherwise.
+        let mut kernel = make_kernel().with_risk_gate(RiskGate::new(Some(1), None));
+        assert_eq!(kernel.open_count(), 0);
+
+        kernel.set_external_open_count(Some(1));
+        let events = kernel.step(
+            0,
+            &bar(0, 100.0),
+            StepInput { entry: true, ..StepInput::default() },
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [EngineEvent::EntryRejected { reason: RejectReason::MaxPositions, .. }]
+            ),
+            "expected a portfolio-wide rejection, got {events:?}"
+        );
+        assert!(!kernel.is_in_position());
+
+        // Clearing it restores ledger-derived counting: the slot is free.
+        kernel.set_external_open_count(None);
+        enter(&mut kernel, 1, 100.0);
+        assert!(kernel.is_in_position());
     }
 
     #[test]
