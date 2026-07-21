@@ -49,7 +49,7 @@ fn schedule_interleaves_deterministically() {
     let mut session = session_two_instruments();
     let mut order = Vec::new();
     while let Some(entry) = session.current() {
-        order.push((entry.instrument, entry.local_idx, entry.bar.timestamp));
+        order.push((entry.instrument, entry.local_idx, entry.timestamp()));
         session.apply_current(StepInput::default());
     }
     assert_eq!(
@@ -655,4 +655,132 @@ fn locked_margin_released_on_close() {
         (final_balance - (100_000.0 + total_pnl)).abs() < 1e-6,
         "balance {final_balance} should reconcile to 100000 + {total_pnl}"
     );
+}
+
+fn tick_data(rows: &[(i64, f64, f64, f64)]) -> TickData {
+    // (timestamp, ltp, bid, ask); 0.0 means absent.
+    TickData {
+        timestamps: rows.iter().map(|r| r.0).collect(),
+        ltp: rows.iter().map(|r| r.1).collect(),
+        bid: rows.iter().map(|r| r.2).collect(),
+        ask: rows.iter().map(|r| r.3).collect(),
+        buy_qty_delta: rows.iter().map(|_| 1.0).collect(),
+        sell_qty_delta: rows.iter().map(|_| 0.0).collect(),
+        oi: rows.iter().map(|_| 0.0).collect(),
+    }
+}
+
+#[test]
+fn seal_keeps_trade_and_quote_events() {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 102.0, 0.0, 0.0)]));
+    session.seal();
+
+    let mut kinds = Vec::new();
+    while let Some(entry) = session.current() {
+        kinds.push(match entry.data {
+            ScheduleData::Bar(_) => "bar",
+            ScheduleData::Trade(_) => "trade",
+            ScheduleData::Quote(_) => "quote",
+        });
+        session.apply_current(StepInput::default());
+    }
+    // Row 1 yields a trade and a quote; row 2 only a trade (no book).
+    assert_eq!(kinds, vec!["trade", "quote", "trade"]);
+}
+
+#[test]
+fn trade_precedes_the_quote_of_the_same_feed_row() {
+    // The print is what the book state at that row followed, so a strategy
+    // reading the book inside a trade handler sees the *prior* quote — not
+    // the one the print itself moved.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0)]));
+    session.seal();
+
+    let first = session.current().expect("an event");
+    assert!(matches!(first.data, ScheduleData::Trade(_)));
+    session.apply_current(StepInput::default());
+    let second = session.current().expect("a second event");
+    assert!(matches!(second.data, ScheduleData::Quote(_)));
+    assert_eq!(first.timestamp(), second.timestamp());
+}
+
+#[test]
+fn quotes_do_not_sample_the_equity_curve() {
+    // Metrics must not depend on how chatty the feed is.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let with_quotes = {
+        let mut s = EventSession::new(config.clone());
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 101.0, 100.0, 102.0)]));
+        s.seal();
+        while s.current().is_some() {
+            s.apply_current(StepInput::default());
+        }
+        s.finish()
+    };
+    let without_quotes = {
+        let mut s = EventSession::new(config);
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 101.0, 0.0, 0.0)]));
+        s.seal();
+        while s.current().is_some() {
+            s.apply_current(StepInput::default());
+        }
+        s.finish()
+    };
+    assert_eq!(
+        with_quotes.result.equity_curve.len(),
+        without_quotes.result.equity_curve.len(),
+        "quote events must not lengthen the equity curve"
+    );
+    assert_eq!(with_quotes.result.equity_curve, without_quotes.result.equity_curve);
+}
+
+#[test]
+fn tick_entries_lend_and_drain_the_shared_account() {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 110.0, 0.0, 0.0)]));
+    session.seal();
+
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
+    assert!(session.kernel(0).is_in_position());
+    // Half the pool went into the position and the rest came back.
+    assert!(session.cash() < 100_000.0 && session.cash() > 0.0);
+
+    while session.current().is_some() {
+        session.apply_current(StepInput::default());
+    }
+    let outcome = session.finish();
+    assert_eq!(outcome.result.trades.len(), 1, "force-closed at the last print");
+    assert!(outcome.instruments[0].pnl > 0.0, "the print rose from 100 to 110");
+}
+
+#[test]
+fn max_positions_gates_tick_entries_portfolio_wide() {
+    let config =
+        BacktestConfig { fees: 0.0, max_positions: Some(1), ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (30, 101.0, 0.0, 0.0)]));
+    session.set_ticks(b, tick_data(&[(20, 50.0, 0.0, 0.0), (40, 51.0, 0.0, 0.0)]));
+    session.seal();
+
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    let events =
+        session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EngineEvent::EntryRejected { reason: RejectReason::MaxPositions, .. }
+    )));
+    let open = (0..2).filter(|&i| session.kernel(i).is_in_position()).count();
+    assert_eq!(open, 1);
 }

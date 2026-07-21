@@ -26,7 +26,8 @@
 
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
-use crate::data::{EventFeed, EventPayload, MarketEvent};
+use crate::core::types::TickData;
+use crate::data::{tick_data_to_events, EventFeed, EventPayload, MarketEvent, QuoteTick, TradeTick};
 use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
@@ -35,12 +36,53 @@ use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::risk::RejectReason;
 use crate::core::types::OhlcvBar;
 
+/// The market data one schedule entry carries.
+#[derive(Debug, Clone, Copy)]
+pub enum ScheduleData {
+    Bar(KernelBar),
+    Trade(TradeTick),
+    Quote(QuoteTick),
+}
+
 /// One entry of the merged schedule.
+///
+/// `local_idx` is a per-instrument event ordinal, not a bar index: in a
+/// tick session it advances on every event of that instrument. Order
+/// matching keys off it (an order cannot rest into the event it was
+/// submitted on), so it must stay monotone per instrument.
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduleEntry {
     pub instrument: usize,
     pub local_idx: usize,
-    pub bar: KernelBar,
+    pub data: ScheduleData,
+}
+
+impl ScheduleEntry {
+    /// The bar this entry carries, or the degenerate bar of a trade print.
+    /// `None` for quotes, which have no traded price.
+    pub fn as_bar(&self) -> Option<KernelBar> {
+        match self.data {
+            ScheduleData::Bar(bar) => Some(bar),
+            ScheduleData::Trade(t) => Some(KernelBar {
+                timestamp: t.timestamp,
+                open: t.price,
+                high: t.price,
+                low: t.price,
+                close: t.price,
+                volume: t.size,
+            }),
+            ScheduleData::Quote(_) => None,
+        }
+    }
+
+    /// Event timestamp, whatever the payload.
+    pub fn timestamp(&self) -> i64 {
+        match self.data {
+            ScheduleData::Bar(bar) => bar.timestamp,
+            ScheduleData::Trade(t) => t.timestamp,
+            ScheduleData::Quote(q) => q.timestamp,
+        }
+    }
 }
 
 /// Per-instrument outcome summary.
@@ -82,6 +124,7 @@ pub struct EventSession {
     kernels: Vec<EngineKernel>,
     symbols: Vec<String>,
     bars: Vec<Vec<KernelBar>>,
+    ticks: Vec<Option<TickData>>,
     schedule: Vec<ScheduleEntry>,
     cursor: usize,
     account: SharedAccount,
@@ -113,6 +156,7 @@ impl EventSession {
             kernels: Vec::new(),
             symbols: Vec::new(),
             bars: Vec::new(),
+            ticks: Vec::new(),
             schedule: Vec::new(),
             cursor: 0,
             account: SharedAccount::new(mode, pool),
@@ -159,6 +203,7 @@ impl EventSession {
         self.kernels.push(kernel);
         self.symbols.push(symbol);
         self.bars.push(Vec::new());
+        self.ticks.push(None);
         self.last_close.push(None);
         self.last_seen.push(None);
         self.kernels.len() - 1
@@ -169,18 +214,33 @@ impl EventSession {
         self.bars[instrument] = bars;
     }
 
+    /// Attach an instrument's tick series (ascending timestamps).
+    ///
+    /// Trades and quotes are merged into the schedule alongside any bars,
+    /// ordered by timestamp then phase — a trade precedes the quote of the
+    /// same feed row, and both precede a bar closing at that timestamp.
+    pub fn set_ticks(&mut self, instrument: usize, ticks: TickData) {
+        self.ticks[instrument] = Some(ticks);
+    }
+
     /// Merge all streams into the deterministic schedule. Idempotent.
     pub fn seal(&mut self) {
         if self.sealed {
             return;
         }
         let mut feed = EventFeed::new();
+        // Stream ids must be globally unique for the merge's tiebreak, so
+        // hand them out from one counter rather than reusing the instrument
+        // index (a tick instrument needs three).
+        let mut next_stream = 0u32;
         for (i, bars) in self.bars.iter().enumerate() {
+            let stream = next_stream;
+            next_stream += 1;
             let events: Vec<MarketEvent> = bars
                 .iter()
                 .map(|b| MarketEvent {
                     instrument: i as u32,
-                    stream: i as u32,
+                    stream,
                     payload: EventPayload::Bar(OhlcvBar {
                         timestamp: b.timestamp,
                         open: b.open,
@@ -193,25 +253,45 @@ impl EventSession {
                 .collect();
             feed.add_stream(events);
         }
+        for (i, ticks) in self.ticks.iter().enumerate() {
+            let Some(ticks) = ticks else { continue };
+            let trade_stream = next_stream;
+            let quote_stream = next_stream + 1;
+            next_stream += 2;
+            let events = tick_data_to_events(ticks, i as u32, trade_stream, quote_stream);
+            // One conversion emits both kinds interleaved; the feed needs
+            // each stream monotone, so split them back apart.
+            let trades: Vec<MarketEvent> = events
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::Trade(_)))
+                .copied()
+                .collect();
+            let quotes: Vec<MarketEvent> = events
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::Quote(_)))
+                .copied()
+                .collect();
+            feed.add_stream(trades);
+            feed.add_stream(quotes);
+        }
         let mut counters = vec![0usize; self.bars.len()];
         for event in feed {
             let instrument = event.instrument as usize;
-            if let EventPayload::Bar(bar) = event.payload {
-                let local_idx = counters[instrument];
-                counters[instrument] += 1;
-                self.schedule.push(ScheduleEntry {
-                    instrument,
-                    local_idx,
-                    bar: KernelBar {
-                        timestamp: bar.timestamp,
-                        open: bar.open,
-                        high: bar.high,
-                        low: bar.low,
-                        close: bar.close,
-                        volume: bar.volume,
-                    },
-                });
-            }
+            let data = match event.payload {
+                EventPayload::Bar(bar) => ScheduleData::Bar(KernelBar {
+                    timestamp: bar.timestamp,
+                    open: bar.open,
+                    high: bar.high,
+                    low: bar.low,
+                    close: bar.close,
+                    volume: bar.volume,
+                }),
+                EventPayload::Trade(t) => ScheduleData::Trade(t),
+                EventPayload::Quote(q) => ScheduleData::Quote(q),
+            };
+            let local_idx = counters[instrument];
+            counters[instrument] += 1;
+            self.schedule.push(ScheduleEntry { instrument, local_idx, data });
         }
         self.sealed = true;
     }
@@ -326,7 +406,11 @@ impl EventSession {
         };
         kernel.set_cash(injected);
         kernel.set_external_open_count(portfolio_open);
-        let mut events = kernel.step(entry.local_idx, &entry.bar, input);
+        let mut events = match entry.data {
+            ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
+            ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
+            ScheduleData::Quote(quote) => kernel.step_quote(&quote),
+        };
         let delta_cash = kernel.cash() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
@@ -346,8 +430,20 @@ impl EventSession {
             }
         }
 
-        self.last_close[instrument] = Some(entry.bar.close);
-        self.last_seen[instrument] = Some((entry.local_idx, entry.bar));
+        // Quotes carry no traded price: they leave the mark alone, and the
+        // print that follows updates it.
+        if let Some(bar) = entry.as_bar() {
+            self.last_close[instrument] = Some(bar.close);
+            self.last_seen[instrument] = Some((entry.local_idx, bar));
+        }
+
+        // A quote does not sample equity. Marking on one would append a
+        // zero return per quote, inflating the period count and distorting
+        // annualized metrics purely from how chatty the feed is.
+        if matches!(entry.data, ScheduleData::Quote(_)) {
+            self.cursor += 1;
+            return events;
+        }
 
         // Sample the portfolio once per event; feed every kernel's
         // kill-switch so a portfolio-level drawdown halts all entries.
@@ -363,7 +459,7 @@ impl EventSession {
             _ => 0.0,
         };
         self.returns.push(ret);
-        self.timestamps.push(entry.bar.timestamp);
+        self.timestamps.push(entry.timestamp());
 
         // Portfolio maintenance: the requirement is the sum of every
         // instrument's own requirement, so per-instrument `margin_maint`

@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
-use crate::portfolio::session::EventSession;
+use crate::portfolio::session::{EventSession, ScheduleData};
 
 use super::bindings::{
     convert_result, PyBacktestConfig, PyInstrumentConfig, PyInstrumentSummary, PyPortfolioResult,
@@ -151,19 +151,70 @@ impl PyPortfolioSession {
     }
 
     /// The pending event: `(instrument, local_idx, ts, o, h, l, c, v)`.
+    ///
+    /// Bar sessions only. A session carrying ticks must use
+    /// [`PyPortfolioSession::current_event`], which names the payload kind;
+    /// this returns `None` on a non-bar event rather than mispresenting a
+    /// print as a bar.
     #[allow(clippy::type_complexity)]
     fn current(&self) -> PyResult<Option<(usize, usize, i64, f64, f64, f64, f64, f64)>> {
-        Ok(self.session_ref()?.current().map(|e| {
-            (
+        Ok(self.session_ref()?.current().and_then(|e| match e.data {
+            ScheduleData::Bar(bar) => Some((
                 e.instrument,
                 e.local_idx,
-                e.bar.timestamp,
-                e.bar.open,
-                e.bar.high,
-                e.bar.low,
-                e.bar.close,
-                e.bar.volume,
-            )
+                bar.timestamp,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+            )),
+            _ => None,
+        }))
+    }
+
+    /// The pending event, tagged by kind:
+    /// `(kind, instrument, local_idx, ts, a, b, c, d, e)` where `kind` is
+    /// `"bar"` (o/h/l/c/v), `"trade"` (price, size, 0, 0, 0) or `"quote"`
+    /// (bid, ask, 0, 0, 0).
+    #[allow(clippy::type_complexity)]
+    fn current_event(
+        &self,
+    ) -> PyResult<Option<(String, usize, usize, i64, f64, f64, f64, f64, f64)>> {
+        Ok(self.session_ref()?.current().map(|e| match e.data {
+            ScheduleData::Bar(bar) => (
+                "bar".to_string(),
+                e.instrument,
+                e.local_idx,
+                bar.timestamp,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+            ),
+            ScheduleData::Trade(t) => (
+                "trade".to_string(),
+                e.instrument,
+                e.local_idx,
+                t.timestamp,
+                t.price,
+                t.size,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            ScheduleData::Quote(q) => (
+                "quote".to_string(),
+                e.instrument,
+                e.local_idx,
+                q.timestamp,
+                q.bid,
+                q.ask,
+                0.0,
+                0.0,
+                0.0,
+            ),
         }))
     }
 

@@ -18,6 +18,7 @@ use crate::execution::orders::{
 use crate::accounts::{AccountMode, MarginBook};
 use crate::execution::fill::FillRng;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
+use crate::data::{QuoteTick, TradeTick};
 use crate::instruments::InstrumentSpec;
 use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
 use crate::portfolio::position::ExitDetails;
@@ -190,6 +191,10 @@ pub struct EngineKernel {
     /// Events produced between steps (order accepted/canceled), delivered
     /// at the front of the next step's event list.
     pub(crate) pending_events: Vec<EngineEvent>,
+    /// Latest observed book, recorded from quotes. Not yet used for fill
+    /// pricing — fills price off trade prints.
+    best_bid: Option<Price>,
+    best_ask: Option<Price>,
 }
 
 impl EngineKernel {
@@ -235,6 +240,8 @@ impl EngineKernel {
             spec: None,
             orders: OrderEngine::new(),
             pending_events: Vec::new(),
+            best_bid: None,
+            best_ask: None,
         }
     }
 
@@ -550,6 +557,63 @@ impl EngineKernel {
     /// An exit and a re-entry may both occur on the same bar.
     pub fn step(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Vec<EngineEvent> {
         self.step_inner(idx, bar, input, StepMode::Bar)
+    }
+
+    /// Advance the simulation by one trade print.
+    ///
+    /// The print drives the same phase order as a bar, carried as a
+    /// degenerate bar (`open == high == low == close == price`): expiry,
+    /// extremes, exits, pending closes, margin maintenance, order matching,
+    /// entries. Only the matching path differs — see
+    /// [`OrderEngine::match_trade`].
+    ///
+    /// Position trailing stops ratchet off every print, so they resolve at
+    /// tick rather than bar resolution. That is deliberately *not* identical
+    /// to a bar run over the same data: a bar can trigger a stop against a
+    /// low that preceded the high which set the watermark, and prints cannot.
+    pub fn step_trade(
+        &mut self,
+        idx: usize,
+        tick: &TradeTick,
+        input: StepInput,
+    ) -> Vec<EngineEvent> {
+        let bar = KernelBar {
+            timestamp: tick.timestamp,
+            open: tick.price,
+            high: tick.price,
+            low: tick.price,
+            close: tick.price,
+            volume: tick.size,
+        };
+        self.step_inner(idx, &bar, input, StepMode::Trade)
+    }
+
+    /// Observe a quote, recording the book without simulating anything.
+    ///
+    /// A quote is not a trade: it does not move the trailing-stop watermark,
+    /// mark margin, match orders, or open positions. Ratcheting a stop off a
+    /// bid that never traded would manufacture exits, and filling against a
+    /// quote asserts a counterparty the engine has no evidence for — the
+    /// print that follows is that evidence.
+    ///
+    /// Returns any acknowledgments queued since the last step, so orders
+    /// submitted from a quote handler surface in order.
+    pub fn step_quote(&mut self, quote: &QuoteTick) -> Vec<EngineEvent> {
+        self.best_bid = Some(quote.bid);
+        self.best_ask = Some(quote.ask);
+        std::mem::take(&mut self.pending_events)
+    }
+
+    /// Best bid from the most recent quote, if any.
+    #[inline]
+    pub fn best_bid(&self) -> Option<Price> {
+        self.best_bid
+    }
+
+    /// Best ask from the most recent quote, if any.
+    #[inline]
+    pub fn best_ask(&self) -> Option<Price> {
+        self.best_ask
     }
 
     /// Shared body of the bar and tick step paths.
@@ -1175,6 +1239,114 @@ mod tests {
         let mut kernel = make_kernel();
         kernel.set_stop_price(Some(90.0));
         assert!(kernel.position_snapshot().is_none());
+    }
+
+    fn trade(ts: i64, price: Price, size: f64) -> TradeTick {
+        TradeTick { timestamp: ts, price, size }
+    }
+
+    #[test]
+    fn step_trade_enters_and_exits_at_the_print() {
+        let mut kernel = make_kernel();
+        let events =
+            kernel.step_trade(0, &trade(0, 100.0, 5.0), StepInput { entry: true, ..Default::default() });
+        assert!(matches!(events.as_slice(), [EngineEvent::Entered { price, .. }] if *price == 100.0));
+        assert!(kernel.is_in_position());
+
+        let events =
+            kernel.step_trade(1, &trade(1, 110.0, 5.0), StepInput { exit: true, ..Default::default() });
+        assert!(matches!(events.as_slice(), [EngineEvent::Exited { trade, .. }] if trade.exit_price == 110.0));
+    }
+
+    #[test]
+    fn step_quote_does_not_move_the_trailing_watermark() {
+        // A bid that never traded must not ratchet a position's trailing
+        // stop — that would manufacture exits from an untraded price.
+        let mut kernel = make_kernel();
+        kernel.step_trade(0, &trade(0, 100.0, 1.0), StepInput { entry: true, ..Default::default() });
+        let before = kernel.position_snapshot().expect("in position");
+
+        let events = kernel.step_quote(&QuoteTick { timestamp: 1, bid: 500.0, ask: 501.0 });
+        assert!(events.is_empty());
+        let after = kernel.position_snapshot().expect("still in position");
+        assert_eq!(before.stop_price, after.stop_price);
+        assert_eq!(kernel.best_bid(), Some(500.0));
+        assert_eq!(kernel.best_ask(), Some(501.0));
+    }
+
+    #[test]
+    fn step_quote_does_not_match_resting_orders() {
+        let mut kernel = make_kernel();
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 90.0 },
+            TimeInForce::Gtc,
+            0,
+            0,
+            "q".to_string(),
+            None,
+            None,
+        );
+        // A quote straddling the limit must not fill it.
+        kernel.step_quote(&QuoteTick { timestamp: 1, bid: 80.0, ask: 81.0 });
+        assert!(!kernel.is_in_position());
+
+        // The print that follows is the evidence, and does fill it.
+        let events = kernel.step_trade(1, &trade(2, 89.0, 10.0), StepInput::default());
+        assert!(
+            events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+            "the print should fill the resting limit, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn step_trade_does_not_fill_bar_phase_market_orders() {
+        // AT_CLOSE queues for a bar phase a print does not have.
+        let mut kernel = make_kernel();
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Market,
+            TimeInForce::AtClose,
+            0,
+            0,
+            "atclose".to_string(),
+            None,
+            None,
+        );
+        let events = kernel.step_trade(1, &trade(1, 100.0, 1.0), StepInput::default());
+        assert!(
+            !events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+            "AT_CLOSE must keep resting on a print, got {events:?}"
+        );
+        assert!(!kernel.is_in_position());
+
+        // It fills on the next bar event.
+        let events = kernel.step(2, &bar(2, 100.0), StepInput::default());
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+    }
+
+    #[test]
+    fn step_trade_skips_orders_submitted_on_the_same_event() {
+        let mut kernel = make_kernel();
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 200.0 },
+            TimeInForce::Gtc,
+            5,
+            0,
+            "same".to_string(),
+            None,
+            None,
+        );
+        // Submitted while observing event 5: cannot rest into event 5.
+        let events = kernel.step_trade(5, &trade(5, 100.0, 1.0), StepInput::default());
+        assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+        // Event 6 matches it.
+        let events = kernel.step_trade(6, &trade(6, 100.0, 1.0), StepInput::default());
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
     }
 
     #[test]
