@@ -30,12 +30,24 @@ pub struct MarketEvent {
     pub payload: EventPayload,
 }
 
+/// A depth snapshot's slot in the owning session's store.
+///
+/// Depth rides the feed as a handle rather than inline: a five-level book is
+/// ~176 bytes, and putting that in the payload would make every event —
+/// bars and quotes included — four times fatter for no benefit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthRef {
+    pub slot: u32,
+    pub timestamp: Timestamp,
+}
+
 /// The event body.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EventPayload {
     Bar(OhlcvBar),
     Quote(QuoteTick),
     Trade(TradeTick),
+    Depth(DepthRef),
 }
 
 impl MarketEvent {
@@ -46,18 +58,24 @@ impl MarketEvent {
             EventPayload::Bar(b) => b.timestamp,
             EventPayload::Quote(q) => q.timestamp,
             EventPayload::Trade(t) => t.timestamp,
+            EventPayload::Depth(d) => d.timestamp,
         }
     }
 
     /// Merge priority at equal timestamps: intra-bar data precedes the bar
-    /// that summarizes it — trades, then quotes, then bars. A bar closing
-    /// at `t` therefore "sees" every tick ≤ `t`.
+    /// that summarizes it — trades, then book updates, then bars. A bar
+    /// closing at `t` therefore "sees" every tick ≤ `t`.
+    ///
+    /// A print precedes the book state observed alongside it, so a handler
+    /// reading the book during a trade sees what stood *before* that print
+    /// rather than the book the print itself moved.
     #[inline]
     pub fn phase(&self) -> u8 {
         match &self.payload {
             EventPayload::Trade(_) => 0,
             EventPayload::Quote(_) => 1,
-            EventPayload::Bar(_) => 2,
+            EventPayload::Depth(_) => 2,
+            EventPayload::Bar(_) => 3,
         }
     }
 }

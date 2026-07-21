@@ -39,6 +39,7 @@ class PyBacktestConfig:
     max_drawdown_pct: float | None
     fill_prob_limit: float
     fill_prob_slippage: float
+    queue_fill_model: bool
     fill_seed: int
     bar_path_adaptive: bool
     legacy_annualization: bool
@@ -432,6 +433,13 @@ class PyPortfolioSession:
         bid: _F64 | None = ..., ask: _F64 | None = ...,
         buy_qty_delta: _F64 | None = ..., sell_qty_delta: _F64 | None = ...,
     ) -> None: ...
+    def set_depth(
+        self, instrument: int, timestamps: _I64,
+        bid_prices: Any, bid_sizes: Any, ask_prices: Any, ask_sizes: Any,
+    ) -> None: ...
+    def current_depth(
+        self,
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None: ...
     def seal(self) -> None: ...
     def __len__(self) -> int: ...
     # Bar sessions only; returns None on a tick event.

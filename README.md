@@ -821,6 +821,43 @@ Three semantics to know:
   data legitimately differ there, since a bar can trigger a stop against a
   low that preceded the high which set the watermark.
 
+#### Order Book and Queue-Position Fills
+
+Pass `depth=` to `run_tick_strategy` for five-level book snapshots, which
+arrive via `on_order_book` and persist on `ctx.book`:
+
+```python
+depth = {"NIFTY24600PE": dict(
+    timestamps=ts,                      # int64 ns, one row per snapshot
+    bid_prices=bp, bid_sizes=bs,        # (n_snapshots, levels), best first
+    ask_prices=ap, ask_sizes=asz,
+)}
+
+class Maker(raptorbt.Strategy):
+    def on_order_book(self, ctx, book):
+        if book.imbalance and book.imbalance > 0.7:      # bid-heavy
+            self.submit_order(orders.Limit(side="buy", price=book.best_bid, units=10))
+
+config.queue_fill_model = True          # opt-in
+result = raptorbt.run_tick_strategy(Maker, ticks, config=config, depth=depth)
+```
+
+`queue_fill_model` replaces `fill_prob_limit`'s coin flip with the tape. The
+size queued ahead is estimated once when the order rests, then consumed by
+print volume at that price; a print *through* the level fills
+unconditionally. Progress is monotone, so an order passed over repeatedly
+genuinely advances — the probability model has no such memory.
+
+It does not claim a real queue rank. Market-by-price data cannot tell you
+where you stand in line, nor separate size that executed ahead of you from
+size that was cancelled, so the model falls back to `fill_prob_limit` rather
+than guessing: on bar events (a bar's volume is not volume *at* the limit
+price) and on a quote-only book (a quote gives the price, not the size). A
+level outside the visible five reads as unknown, never as empty.
+
+Books, like quotes, are observation only — they never fill an order, move a
+trailing stop, or mark equity. Displayed size is intent, not a trade.
+
 #### Tick Signal & Feature Helpers
 
 Precompute entry/exit signal arrays and tick microstructure features before calling `run_tick_backtest`:

@@ -29,7 +29,7 @@ from raptorbt._raptorbt import (
     PyPortfolioSession,
 )
 from raptorbt.strategy.base import Strategy
-from raptorbt.strategy.context import Bar, QuoteTick, TradeTick
+from raptorbt.strategy.context import Bar, BookSnapshot, QuoteTick, TradeTick
 from raptorbt.strategy.portfolio_runner import (
     PortfolioContext,
     apply_commands_on,
@@ -48,6 +48,7 @@ class TickContext(PortfolioContext):
         super().__init__(session, symbols, data)
         self._tick: TradeTick | None = None
         self._quote: QuoteTick | None = None
+        self._book: dict[str, BookSnapshot] = {}
         self._best_bid: dict[str, float] = {}
         self._best_ask: dict[str, float] = {}
         self._last_price: dict[str, float] = {}
@@ -61,6 +62,15 @@ class TickContext(PortfolioContext):
     def quote(self) -> QuoteTick | None:
         """The quote being handled, or ``None`` outside ``on_quote``."""
         return self._quote
+
+    @property
+    def book(self) -> BookSnapshot | None:
+        """Last seen book for the current symbol, or ``None``.
+
+        Unlike ``ctx.quote``/``ctx.tick`` this persists outside its hook, so
+        a strategy can read the book while handling a print.
+        """
+        return self._book.get(self.symbol)
 
     @property
     def best_bid(self) -> float | None:
@@ -100,6 +110,7 @@ def run_tick_strategy(
     ticks: dict[str, dict],
     config: PyBacktestConfig | None = None,
     primary_bars: tuple[int, str] | None = None,
+    depth: dict[str, dict] | None = None,
     directions: dict[str, int] | None = None,
     instruments: dict | None = None,
     instrument_configs: dict[str, PyInstrumentConfig] | None = None,
@@ -157,6 +168,17 @@ def run_tick_strategy(
             a["buy_qty_delta"],
             a["sell_qty_delta"],
         )
+    for i, symbol in enumerate(symbols):
+        levels = (depth or {}).get(symbol)
+        if levels is not None:
+            session.set_depth(
+                i,
+                np.ascontiguousarray(levels["timestamps"], dtype=np.int64),
+                np.ascontiguousarray(levels["bid_prices"], dtype=np.float64),
+                np.ascontiguousarray(levels["bid_sizes"], dtype=np.float64),
+                np.ascontiguousarray(levels["ask_prices"], dtype=np.float64),
+                np.ascontiguousarray(levels["ask_sizes"], dtype=np.float64),
+            )
     session.seal()
 
     ctx = TickContext(session, symbols, arrays)
@@ -195,6 +217,20 @@ def run_tick_strategy(
         # Clock first: scheduled times precede the data revealing them.
         for time_event in strategy.clock._advance(ts):
             strategy.on_time_event(ctx, time_event)
+
+        if kind == "book":
+            bids, asks = session.current_depth() or ((), ())
+            snapshot = BookSnapshot(ts, tuple(bids), tuple(asks), symbol)
+            ctx._book[symbol] = snapshot
+            if snapshot.best_bid is not None:
+                ctx._best_bid[symbol] = snapshot.best_bid
+            if snapshot.best_ask is not None:
+                ctx._best_ask[symbol] = snapshot.best_ask
+            strategy.on_order_book(ctx, snapshot)
+            apply_commands(instrument, local_idx, ts)
+            # A book cannot carry an entry: nothing traded at it.
+            dispatch_events(strategy, ctx, session.apply_current())
+            continue
 
         if kind == "quote":
             quote = QuoteTick(ts, a, b, symbol)

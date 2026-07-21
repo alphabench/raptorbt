@@ -94,6 +94,30 @@ migrate.
 
 ### Added
 
+- **Order book state and queue-position limit fills.** `OrderBook` tracks
+  the visible book from quotes (L1) or depth snapshots (L2, five levels),
+  exposed to strategies through a new `on_order_book(ctx, book)` hook,
+  `ctx.book`, and a `depth=` argument to `run_tick_strategy`.
+
+  With `queue_fill_model=True` (opt-in, default off), resting limits fill
+  from observed queue position rather than `fill_prob_limit`'s coin flip.
+  The size ahead is estimated once, when the order rests, then consumed by
+  print volume at that price; a print *through* the level fills
+  unconditionally. Unlike the probability model, progress is monotone — an
+  order passed over repeatedly genuinely gets closer to the front.
+
+  The model claims no real queue rank: without an order-by-order feed there
+  is no way to know your position, nor to tell size that executed ahead of
+  you from size that was cancelled. It therefore falls back to
+  `fill_prob_limit` rather than guessing — on bar events (a bar's volume is
+  not volume *at* the limit price) and on a quote-only book (a quote gives
+  the price but not the size). A level outside the visible five reports
+  "unknown", never "empty".
+
+  Book updates are observation only, like quotes: they never fill an order,
+  move a trailing stop, mark equity, or sample the equity curve. They do
+  change *future* fills by sizing the queue a new order joins.
+
 - **Tick-driven class contract** — `run_tick_strategy(strategy, ticks, ...)`
   drives the same event session from trade prints and quotes, so orders,
   positions, risk gates and the shared account behave as they do on bars;

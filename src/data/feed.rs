@@ -146,11 +146,19 @@ mod tests {
 
         let order: Vec<(i64, u8, u32)> =
             feed.map(|e| (e.timestamp(), e.phase(), e.stream)).collect();
-        // At ts=10: trade (phase 0) < quote (1) < bar (2).
-        assert_eq!(
-            order,
-            vec![(10, 0, 1), (10, 1, 2), (10, 2, 0), (15, 0, 1), (20, 2, 0)]
+        // At ts=10 intra-bar data precedes the bar summarizing it:
+        // trade, then book updates, then the bar. Assert the relative
+        // order rather than the phase numbers, which shift as kinds are
+        // added between them.
+        let streams_at_10: Vec<u32> =
+            order.iter().filter(|(ts, ..)| *ts == 10).map(|(.., s)| *s).collect();
+        assert_eq!(streams_at_10, vec![1, 2, 0], "trade, quote, then bar");
+        assert!(
+            order.windows(2).all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1)),
+            "merged order must be non-decreasing in (timestamp, phase): {order:?}"
         );
+        assert_eq!(order.len(), 5);
+        assert_eq!(order.last().map(|(ts, ..)| *ts), Some(20));
     }
 
     #[test]

@@ -203,3 +203,48 @@ class QuoteTick(NamedTuple):
     @property
     def spread(self) -> float:
         return self.ask - self.bid
+
+
+class BookSnapshot(NamedTuple):
+    """A visible order book, best level first.
+
+    Books are observation only: they never fill an order or mark equity.
+    They do inform later fills, by sizing the queue a resting limit joins
+    when ``queue_fill_model`` is enabled.
+    """
+
+    timestamp: int
+    bids: tuple[tuple[float, float], ...]
+    asks: tuple[tuple[float, float], ...]
+    symbol: str | None = None
+
+    @property
+    def best_bid(self) -> float | None:
+        return self.bids[0][0] if self.bids else None
+
+    @property
+    def best_ask(self) -> float | None:
+        return self.asks[0][0] if self.asks else None
+
+    @property
+    def spread(self) -> float | None:
+        if not self.bids or not self.asks:
+            return None
+        return self.asks[0][0] - self.bids[0][0]
+
+    @property
+    def mid(self) -> float | None:
+        if not self.bids or not self.asks:
+            return None
+        return (self.asks[0][0] + self.bids[0][0]) / 2.0
+
+    @property
+    def imbalance(self) -> float | None:
+        """Bid share of touch size, in ``[0, 1]``; ``None`` without sizes."""
+        if not self.bids or not self.asks:
+            return None
+        bid_size, ask_size = self.bids[0][1], self.asks[0][1]
+        total = bid_size + ask_size
+        if total <= 0.0:
+            return None
+        return bid_size / total

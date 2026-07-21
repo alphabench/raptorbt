@@ -314,3 +314,136 @@ class TestBarsFromTicks:
         run_tick_strategy(strategy, data, config=_zero_fee_config())
 
         assert strategy.composites == [("AAA", 102.0), ("AAA", 105.0)]
+
+
+def _depth(rows, start_ts=0, step=10):
+    """rows: list of (bids, asks), each a list of (price, size)."""
+    n = len(rows)
+    width = max(max(len(b), len(a)) for b, a in rows)
+    bp = np.zeros((n, width))
+    bs = np.zeros((n, width))
+    ap = np.zeros((n, width))
+    asz = np.zeros((n, width))
+    for i, (bids, asks) in enumerate(rows):
+        for j, (price, size) in enumerate(bids):
+            bp[i, j], bs[i, j] = price, size
+        for j, (price, size) in enumerate(asks):
+            ap[i, j], asz[i, j] = price, size
+    return {
+        "timestamps": np.arange(start_ts, start_ts + n * step, step, dtype=np.int64),
+        "bid_prices": bp,
+        "bid_sizes": bs,
+        "ask_prices": ap,
+        "ask_sizes": asz,
+    }
+
+
+class TestOrderBook:
+    def test_on_order_book_fires_with_levels(self):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.books = []
+
+            def on_order_book(self, ctx, book):
+                self.books.append(book)
+
+        depth = _depth([([(99.0, 300.0), (98.0, 200.0)], [(101.0, 400.0)])], start_ts=5)
+        strategy = S()
+        run_tick_strategy(
+            strategy,
+            {"AAA": _ticks([100.0], start_ts=10)},
+            config=_zero_fee_config(),
+            depth=depth_for("AAA", depth),
+        )
+
+        assert len(strategy.books) == 1
+        book = strategy.books[0]
+        assert book.best_bid == 99.0
+        assert book.best_ask == 101.0
+        assert book.spread == pytest.approx(2.0)
+        assert book.symbol == "AAA"
+        assert len(book.bids) == 2
+        # 300 / (300 + 400)
+        assert book.imbalance == pytest.approx(300.0 / 700.0)
+
+    def test_ctx_book_persists_into_trade_handler(self):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.seen = []
+
+            def on_trade_tick(self, ctx, tick):
+                self.seen.append(ctx.book.best_bid if ctx.book else None)
+
+        depth = _depth([([(99.0, 300.0)], [(101.0, 400.0)])], start_ts=5)
+        strategy = S()
+        run_tick_strategy(
+            strategy,
+            {"AAA": _ticks([100.0, 100.0], start_ts=10, step=10)},
+            config=_zero_fee_config(),
+            depth=depth_for("AAA", depth),
+        )
+        assert strategy.seen == [99.0, 99.0]
+
+    def test_a_book_alone_produces_no_trades_or_equity_samples(self):
+        class S(Strategy):
+            def on_order_book(self, ctx, book):
+                # Displayed size is intent; this rests until a print.
+                self.submit_order(orders.Limit(side="buy", price=99.0, units=10.0))
+
+        depth = _depth(
+            [([(99.0, 300.0)], [(101.0, 400.0)]), ([(99.5, 300.0)], [(101.5, 400.0)])],
+            start_ts=5,
+        )
+        result = run_tick_strategy(
+            S(),
+            {"AAA": _ticks([100.0], start_ts=100)},
+            config=_zero_fee_config(),
+            depth=depth_for("AAA", depth),
+        )
+        assert len(result.result.trades()) == 0
+        # One print sampled equity; the two book updates did not.
+        assert len(result.result.equity_curve()) == 1
+
+
+class TestQueueFills:
+    def _run(self, queue_model, print_sizes):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.sent = False
+
+            def on_order_book(self, ctx, book):
+                if not self.sent:
+                    self.sent = True
+                    self.submit_order(orders.Limit(side="buy", price=99.0, units=10.0))
+
+        config = _zero_fee_config()
+        config.queue_fill_model = queue_model
+        prices = [99.0] * len(print_sizes)
+        ticks = _ticks(prices, start_ts=100, step=10)
+        ticks["buy_qty_delta"] = np.asarray(print_sizes, dtype=np.float64)
+        depth = _depth([([(99.0, 300.0)], [(101.0, 400.0)])], start_ts=5)
+        return run_tick_strategy(
+            S(), {"AAA": ticks}, config=config, depth=depth_for("AAA", depth)
+        )
+
+    def test_order_waits_behind_displayed_size(self):
+        # 300 displayed ahead; 50 + 50 does not reach us.
+        result = self._run(queue_model=True, print_sizes=[50.0, 50.0])
+        assert len(result.result.trades()) == 0
+
+    def test_order_fills_once_the_queue_is_exhausted(self):
+        # Cumulative 350 > 300 displayed ahead.
+        result = self._run(queue_model=True, print_sizes=[150.0, 200.0])
+        assert len(result.result.trades()) == 1
+
+    def test_without_the_queue_model_the_first_print_fills(self):
+        # The default path ignores size entirely.
+        result = self._run(queue_model=False, print_sizes=[50.0, 50.0])
+        assert len(result.result.trades()) == 1
+
+
+def depth_for(symbol, arrays):
+    return {symbol: arrays}

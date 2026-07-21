@@ -1,12 +1,13 @@
 //! Python bindings for the multi-instrument event session.
 
-use numpy::PyReadonlyArray1;
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
+use crate::data::{BookLevel, BookSide, DepthTick};
 use crate::portfolio::session::{EventSession, ScheduleData};
 
 use super::bindings::{
@@ -17,6 +18,14 @@ use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64};
 use super::strategy_bindings::{
     parse_account_mode, parse_qty_spec, submit_order_on, PyEngineEvent, PyPositionSnapshot,
 };
+
+/// Visible levels of one side of a depth snapshot.
+fn book_levels(book: &DepthTick, side: BookSide) -> &[BookLevel] {
+    match side {
+        BookSide::Bid => &book.bids[..book.bid_len as usize],
+        BookSide::Ask => &book.asks[..book.ask_len as usize],
+    }
+}
 
 /// Multi-instrument session over deterministically merged bar streams.
 ///
@@ -189,6 +198,75 @@ impl PyPortfolioSession {
         Ok(())
     }
 
+    /// Attach an instrument's depth snapshots.
+    ///
+    /// Price/size arrays are `(n_snapshots, levels)`, best level first:
+    /// bids descending, asks ascending. Levels beyond the book's capacity
+    /// are truncated.
+    #[allow(clippy::too_many_arguments)]
+    fn set_depth(
+        &mut self,
+        instrument: usize,
+        timestamps: PyReadonlyArray1<i64>,
+        bid_prices: PyReadonlyArray2<f64>,
+        bid_sizes: PyReadonlyArray2<f64>,
+        ask_prices: PyReadonlyArray2<f64>,
+        ask_sizes: PyReadonlyArray2<f64>,
+    ) -> PyResult<()> {
+        let ts = numpy_to_vec_i64(timestamps);
+        let n = ts.len();
+        let bp = bid_prices.as_array();
+        let bs = bid_sizes.as_array();
+        let ap = ask_prices.as_array();
+        let asz = ask_sizes.as_array();
+        for arr in [&bp, &bs, &ap, &asz] {
+            if arr.shape()[0] != n {
+                return Err(PyValueError::new_err(
+                    "depth arrays must have one row per timestamp",
+                ));
+            }
+        }
+        if bp.shape()[1] != bs.shape()[1] || ap.shape()[1] != asz.shape()[1] {
+            return Err(PyValueError::new_err(
+                "price and size arrays must have the same level count",
+            ));
+        }
+        let snapshots: Vec<DepthTick> = (0..n)
+            .map(|row| {
+                let bids: Vec<BookLevel> = (0..bp.shape()[1])
+                    .map(|l| BookLevel { price: bp[[row, l]], size: bs[[row, l]] })
+                    .filter(|level| level.price > 0.0)
+                    .collect();
+                let asks: Vec<BookLevel> = (0..ap.shape()[1])
+                    .map(|l| BookLevel { price: ap[[row, l]], size: asz[[row, l]] })
+                    .filter(|level| level.price > 0.0)
+                    .collect();
+                DepthTick::from_levels(ts[row], &bids, &asks)
+            })
+            .collect();
+        self.session_mut()?.set_depth(instrument, snapshots);
+        Ok(())
+    }
+
+    /// Full levels of the pending depth event, or `None` for other kinds.
+    ///
+    /// Returns `(bids, asks)` as `(price, size)` lists, best first.
+    #[allow(clippy::type_complexity)]
+    fn current_depth(&self) -> PyResult<Option<(Vec<(f64, f64)>, Vec<(f64, f64)>)>> {
+        let session = self.session_ref()?;
+        let Some(entry) = session.current() else { return Ok(None) };
+        let ScheduleData::Depth(handle) = entry.data else { return Ok(None) };
+        Ok(session.depth_at(handle.slot).map(|book| {
+            let levels = |side| {
+                book_levels(&book, side)
+                    .iter()
+                    .map(|l| (l.price, l.size))
+                    .collect::<Vec<_>>()
+            };
+            (levels(BookSide::Bid), levels(BookSide::Ask))
+        }))
+    }
+
     /// Merge all streams into the deterministic schedule.
     fn seal(&mut self) -> PyResult<()> {
         self.session_mut()?.seal();
@@ -254,6 +332,30 @@ impl PyPortfolioSession {
                 0.0,
                 0.0,
             ),
+            ScheduleData::Depth(d) => {
+                // Full levels come from `current_depth`; the scalar slots
+                // carry the touch so a strategy can act without them.
+                let book = self.session_ref().ok().and_then(|s| s.depth_at(d.slot));
+                let (bid, bid_size) = book
+                    .and_then(|b| b.bids.first().copied().filter(|_| b.bid_len > 0))
+                    .map(|l| (l.price, l.size))
+                    .unwrap_or((0.0, 0.0));
+                let (ask, ask_size) = book
+                    .and_then(|b| b.asks.first().copied().filter(|_| b.ask_len > 0))
+                    .map(|l| (l.price, l.size))
+                    .unwrap_or((0.0, 0.0));
+                (
+                    "book".to_string(),
+                    e.instrument,
+                    e.local_idx,
+                    d.timestamp,
+                    bid,
+                    ask,
+                    bid_size,
+                    ask_size,
+                    0.0,
+                )
+            }
             ScheduleData::Quote(q) => (
                 "quote".to_string(),
                 e.instrument,

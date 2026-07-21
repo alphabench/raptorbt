@@ -27,7 +27,10 @@
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
 use crate::core::types::TickData;
-use crate::data::{tick_data_to_events, EventFeed, EventPayload, MarketEvent, QuoteTick, TradeTick};
+use crate::data::{
+    tick_data_to_events, DepthRef, DepthTick, EventFeed, EventPayload, MarketEvent, QuoteTick,
+    TradeTick,
+};
 use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
@@ -42,6 +45,9 @@ pub enum ScheduleData {
     Bar(KernelBar),
     Trade(TradeTick),
     Quote(QuoteTick),
+    /// A depth snapshot, held in the session's store; the handle keeps
+    /// schedule entries small and `Copy`.
+    Depth(DepthRef),
 }
 
 /// One entry of the merged schedule.
@@ -71,7 +77,7 @@ impl ScheduleEntry {
                 close: t.price,
                 volume: t.size,
             }),
-            ScheduleData::Quote(_) => None,
+            ScheduleData::Quote(_) | ScheduleData::Depth(_) => None,
         }
     }
 
@@ -81,6 +87,7 @@ impl ScheduleEntry {
             ScheduleData::Bar(bar) => bar.timestamp,
             ScheduleData::Trade(t) => t.timestamp,
             ScheduleData::Quote(q) => q.timestamp,
+            ScheduleData::Depth(d) => d.timestamp,
         }
     }
 }
@@ -125,6 +132,10 @@ pub struct EventSession {
     symbols: Vec<String>,
     bars: Vec<Vec<KernelBar>>,
     ticks: Vec<Option<TickData>>,
+    /// Depth snapshots, referenced by slot from the schedule.
+    depth: Vec<DepthTick>,
+    /// Pending per-instrument depth, merged at seal.
+    depth_input: Vec<Vec<DepthTick>>,
     schedule: Vec<ScheduleEntry>,
     cursor: usize,
     account: SharedAccount,
@@ -157,6 +168,8 @@ impl EventSession {
             symbols: Vec::new(),
             bars: Vec::new(),
             ticks: Vec::new(),
+            depth: Vec::new(),
+            depth_input: Vec::new(),
             schedule: Vec::new(),
             cursor: 0,
             account: SharedAccount::new(mode, pool),
@@ -204,6 +217,7 @@ impl EventSession {
         self.symbols.push(symbol);
         self.bars.push(Vec::new());
         self.ticks.push(None);
+        self.depth_input.push(Vec::new());
         self.last_close.push(None);
         self.last_seen.push(None);
         self.kernels.len() - 1
@@ -221,6 +235,20 @@ impl EventSession {
     /// same feed row, and both precede a bar closing at that timestamp.
     pub fn set_ticks(&mut self, instrument: usize, ticks: TickData) {
         self.ticks[instrument] = Some(ticks);
+    }
+
+    /// Attach an instrument's depth snapshots (ascending timestamps).
+    ///
+    /// Book updates are observation only: like quotes, they never fill an
+    /// order or mark equity. They do inform later fills, by sizing the
+    /// queue a resting limit joins.
+    pub fn set_depth(&mut self, instrument: usize, depth: Vec<DepthTick>) {
+        self.depth_input[instrument] = depth;
+    }
+
+    /// A depth snapshot by slot.
+    pub fn depth_at(&self, slot: u32) -> Option<DepthTick> {
+        self.depth.get(slot as usize).copied()
     }
 
     /// Merge all streams into the deterministic schedule. Idempotent.
@@ -274,6 +302,28 @@ impl EventSession {
             feed.add_stream(trades);
             feed.add_stream(quotes);
         }
+        for i in 0..self.depth_input.len() {
+            if self.depth_input[i].is_empty() {
+                continue;
+            }
+            let stream = next_stream;
+            next_stream += 1;
+            let snapshots = std::mem::take(&mut self.depth_input[i]);
+            let events: Vec<MarketEvent> = snapshots
+                .into_iter()
+                .map(|snapshot| {
+                    let slot = self.depth.len() as u32;
+                    let timestamp = snapshot.timestamp;
+                    self.depth.push(snapshot);
+                    MarketEvent {
+                        instrument: i as u32,
+                        stream,
+                        payload: EventPayload::Depth(DepthRef { slot, timestamp }),
+                    }
+                })
+                .collect();
+            feed.add_stream(events);
+        }
         let mut counters = vec![0usize; self.bars.len()];
         for event in feed {
             let instrument = event.instrument as usize;
@@ -288,6 +338,7 @@ impl EventSession {
                 }),
                 EventPayload::Trade(t) => ScheduleData::Trade(t),
                 EventPayload::Quote(q) => ScheduleData::Quote(q),
+                EventPayload::Depth(d) => ScheduleData::Depth(d),
             };
             let local_idx = counters[instrument];
             counters[instrument] += 1;
@@ -396,6 +447,12 @@ impl EventSession {
         // minus its own locked margin, so hand it the balance less every
         // *other* kernel's locks — then its arithmetic sees the portfolio's
         // free capital.
+        // Copy the snapshot out before borrowing the kernel mutably.
+        let depth_snapshot = match entry.data {
+            ScheduleData::Depth(handle) => self.depth_at(handle.slot),
+            _ => None,
+        };
+
         let kernel = &mut self.kernels[instrument];
         let locked_before = kernel.locked_margin();
         let injected = match self.account.mode() {
@@ -410,6 +467,10 @@ impl EventSession {
             ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
             ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
             ScheduleData::Quote(quote) => kernel.step_quote(&quote),
+            ScheduleData::Depth(_) => match depth_snapshot {
+                Some(snapshot) => kernel.step_depth(&snapshot),
+                None => Vec::new(),
+            },
         };
         let delta_cash = kernel.cash() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
@@ -440,7 +501,7 @@ impl EventSession {
         // A quote does not sample equity. Marking on one would append a
         // zero return per quote, inflating the period count and distorting
         // annualized metrics purely from how chatty the feed is.
-        if matches!(entry.data, ScheduleData::Quote(_)) {
+        if matches!(entry.data, ScheduleData::Quote(_) | ScheduleData::Depth(_)) {
             self.cursor += 1;
             return events;
         }

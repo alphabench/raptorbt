@@ -76,6 +76,14 @@ class Strategy:
         that price.
         """
 
+    def on_order_book(self, ctx: StrategyContext, book) -> None:
+        """The order book changed. Only fires in tick runs with depth data.
+
+        Like quotes, books do not fill orders — displayed size is intent,
+        not a trade. An order submitted here rests and matches on the next
+        print.
+        """
+
     def on_composite_bar(self, ctx: StrategyContext, bar) -> None:
         """Called when a subscribed higher-timeframe bar completes.
 

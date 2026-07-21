@@ -684,6 +684,7 @@ fn seal_keeps_trade_and_quote_events() {
             ScheduleData::Bar(_) => "bar",
             ScheduleData::Trade(_) => "trade",
             ScheduleData::Quote(_) => "quote",
+            ScheduleData::Depth(_) => "book",
         });
         session.apply_current(StepInput::default());
     }
@@ -783,4 +784,92 @@ fn max_positions_gates_tick_entries_portfolio_wide() {
     )));
     let open = (0..2).filter(|&i| session.kernel(i).is_in_position()).count();
     assert_eq!(open, 1);
+}
+
+fn depth_snapshot(ts: i64, bid: (f64, f64), ask: (f64, f64)) -> DepthTick {
+    DepthTick::from_levels(
+        ts,
+        &[crate::data::BookLevel { price: bid.0, size: bid.1 }],
+        &[crate::data::BookLevel { price: ask.0, size: ask.1 }],
+    )
+}
+
+#[test]
+fn depth_events_merge_and_reach_the_kernel_book() {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0)]));
+    session.set_depth(a, vec![depth_snapshot(10, (99.0, 500.0), (101.0, 400.0))]);
+    session.seal();
+
+    // The book precedes the print that follows it in time.
+    let first = session.current().expect("an event");
+    assert!(matches!(first.data, ScheduleData::Depth(_)));
+    session.apply_current(StepInput::default());
+
+    let book = &session.kernel(0).book;
+    assert_eq!(book.best_bid(), Some(99.0));
+    assert_eq!(book.size_at(crate::data::BookSide::Bid, 99.0), Some(500.0));
+}
+
+#[test]
+fn depth_events_do_not_sample_the_equity_curve() {
+    // Same reasoning as quotes, and depth feeds are chattier still.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let curve_with_depth = {
+        let mut s = EventSession::new(config.clone());
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)]));
+        s.set_depth(
+            a,
+            vec![
+                depth_snapshot(10, (99.0, 500.0), (101.0, 400.0)),
+                depth_snapshot(30, (100.0, 500.0), (102.0, 400.0)),
+            ],
+        );
+        s.seal();
+        while s.current().is_some() {
+            s.apply_current(StepInput::default());
+        }
+        s.finish().result.equity_curve
+    };
+    let curve_without = {
+        let mut s = EventSession::new(config);
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)]));
+        s.seal();
+        while s.current().is_some() {
+            s.apply_current(StepInput::default());
+        }
+        s.finish().result.equity_curve
+    };
+    assert_eq!(curve_with_depth, curve_without);
+}
+
+#[test]
+fn depth_events_do_not_fill_resting_orders() {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_ticks(a, tick_data(&[(30, 100.0, 0.0, 0.0)]));
+    // A book straddling the limit is intent, not a trade.
+    session.set_depth(a, vec![depth_snapshot(10, (89.0, 500.0), (91.0, 400.0))]);
+    session.seal();
+
+    session.kernel_mut(0).submit_order(
+        crate::execution::orders::OrderSide::Buy,
+        crate::execution::orders::QtySpec::Units(10.0),
+        crate::execution::orders::OrderKind::Limit { price: 90.0 },
+        crate::execution::orders::TimeInForce::Gtc,
+        0,
+        0,
+        "d".to_string(),
+        None,
+        None,
+    );
+    while session.current().is_some() {
+        session.apply_current(StepInput::default());
+    }
+    assert!(!session.kernel(0).is_in_position(), "a book must not fill an order");
 }
