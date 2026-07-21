@@ -181,6 +181,20 @@ impl From<EngineEvent> for PyEngineEvent {
                 client_order_id: Some(client_id),
                 ..empty
             },
+            EngineEvent::AlgoStarted { idx, algo_id, client_id } => Self {
+                kind: "algo_started".to_string(),
+                idx,
+                order_id: Some(algo_id),
+                client_order_id: Some(client_id),
+                ..empty
+            },
+            EngineEvent::AlgoCompleted { idx, algo_id, client_id } => Self {
+                kind: "algo_completed".to_string(),
+                idx,
+                order_id: Some(algo_id),
+                client_order_id: Some(client_id),
+                ..empty
+            },
             EngineEvent::MarginCall { idx, equity, required } => Self {
                 kind: "margin_call".to_string(),
                 idx,
@@ -414,6 +428,50 @@ impl PyKernelSession {
     /// Cancel every working order, returning canceled ids.
     fn cancel_all_orders(&mut self, idx: usize) -> PyResult<Vec<u64>> {
         Ok(self.runner_mut()?.kernel_mut().cancel_all_orders(idx))
+    }
+
+    /// Register a TWAP schedule; returns its id.
+    #[pyo3(signature = (units, side, slices, interval_ns, submitted_idx, submitted_ts, client_id, reduce_only=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn submit_twap(
+        &mut self,
+        units: f64,
+        side: &str,
+        slices: u32,
+        interval_ns: i64,
+        submitted_idx: usize,
+        submitted_ts: i64,
+        client_id: &str,
+        reduce_only: bool,
+    ) -> PyResult<u64> {
+        let side = match side {
+            "buy" => OrderSide::Buy,
+            "sell" => OrderSide::Sell,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "side must be 'buy' or 'sell', got {other:?}"
+                )))
+            }
+        };
+        self.runner_mut()?
+            .kernel_mut()
+            .submit_algo(
+                side,
+                QtySpec::Units(units),
+                OrderKind::Market,
+                TimeInForce::Gtc,
+                client_id.to_string(),
+                crate::execution::algos::ExecAlgorithm::Twap { slices, interval_ns },
+                reduce_only,
+                submitted_ts,
+                submitted_idx,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Stop a schedule and cancel the slices it has working.
+    fn cancel_twap(&mut self, algo_id: u64, idx: usize) -> PyResult<bool> {
+        Ok(self.runner_mut()?.kernel_mut().cancel_algo(algo_id, idx))
     }
 
     /// Replace a working order's prices and/or quantity.

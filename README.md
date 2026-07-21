@@ -518,6 +518,36 @@ including on symbols that never traded. Results carry `halted` and
 report. `result.rejected_entries` is the sum across instruments, whereas the
 array portfolio runner reports its single shared risk gate's counter.
 
+### Execution Algorithms
+
+`orders.Twap` slices an order into equal parts released at a fixed
+interval, each an ordinary order with its own fill:
+
+```python
+class Accumulate(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.idx == 0:
+            self.submit_order(orders.Twap(
+                side="buy", units=1_000, slices=10,
+                every=60_000_000_000,        # one slice per minute
+            ))
+
+    def on_order_filled(self, ctx, event):
+        # client ids are "<parent>#0", "<parent>#1", ...
+        ...
+```
+
+The interval is a duration rather than a bar count, because a bar index
+means different things in bar and tick sessions — "every 1 bar" would
+silently become "every 1 print" on a tick feed. Use `every_bars=N,
+bar_ns=...` if you prefer to think in bars.
+
+A schedule is not an order: cancelling it (`cancel_twap`) stops the
+remaining slices but does not unwind the ones that already traded, and
+`on_algo_completed` means fully *released*, not fully filled. Only explicit
+`units` can be sliced — `size_frac` resolves against equity at fill time,
+so each slice would size against a different account.
+
 ### Position Policies, Margin Accounts, and Fill Realism
 
 New in 0.5.0, all default-off (defaults reproduce prior results bit-for-bit;

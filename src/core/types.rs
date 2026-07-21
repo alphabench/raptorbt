@@ -347,6 +347,20 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub fill_prob_slippage: f64,
 
+    /// Offset added to timestamps before deriving the trading date that
+    /// `TimeInForce::Day` expires on.
+    ///
+    /// `0` (the default) rolls DAY orders at UTC midnight. A session whose
+    /// local hours cross UTC midnight needs its own offset — e.g.
+    /// `IST_OFFSET_NS` — or a DAY order placed late in one trading date
+    /// expires while that date is still running.
+    ///
+    /// This follows the trading *date*, not the trading *session*: a DAY
+    /// order still survives past the session close to the next session's
+    /// first bar of the same date.
+    #[serde(default)]
+    pub session_tz_offset_ns: i64,
+
     /// Fill resting limits from observed queue position instead of
     /// `fill_prob_limit`'s coin flip.
     ///
@@ -391,6 +405,7 @@ impl Default for BacktestConfig {
             legacy_annualization: false,
             fill_prob_limit: 1.0,
             queue_fill_model: false,
+            session_tz_offset_ns: 0,
             fill_prob_slippage: 0.0,
             fill_seed: 0,
             bar_path_adaptive: false,

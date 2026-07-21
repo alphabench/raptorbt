@@ -15,7 +15,7 @@ from raptorbt._raptorbt import (
 )
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import StrategyContext
-from raptorbt.strategy.orders import ClosePosition, MarketOrder
+from raptorbt.strategy.orders import ClosePosition, MarketOrder, Twap
 from raptorbt.strategy.streams import StreamState
 
 
@@ -44,6 +44,12 @@ def dispatch_events(strategy: Strategy, ctx, events) -> None:
             order_fill_preceded = False
         elif event.kind == "entry_rejected":
             strategy.on_order_rejected(ctx, event)
+        elif event.kind == "algo_started":
+            strategy.on_algo_started(ctx, event)
+            strategy.on_order_event(ctx, event)
+        elif event.kind == "algo_completed":
+            strategy.on_algo_completed(ctx, event)
+            strategy.on_order_event(ctx, event)
         elif event.kind == "margin_call":
             strategy.on_margin_call(ctx, event)
             strategy.on_order_event(ctx, event)
@@ -177,6 +183,19 @@ def run_strategy_backtest(
         for command in strategy.drain_commands():
             if command[0] == "submit":
                 _, client_id, order, parent, _symbol = command
+                if isinstance(order, Twap):
+                    # A schedule, not an order: it releases its own slices.
+                    session.submit_twap(
+                        order.units,
+                        order.side,
+                        order.slices,
+                        order.interval_ns,
+                        i,
+                        int(timestamps[i]),
+                        client_id,
+                        order.reduce_only,
+                    )
+                    continue
                 parent_engine_id = id_map.get(parent) if parent else None
                 if parent and parent_engine_id is None:
                     raise ValueError(f"unknown parent order {parent!r}")

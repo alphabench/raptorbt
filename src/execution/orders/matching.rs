@@ -56,11 +56,35 @@ fn side_as_fill_args(side: OrderSide) -> (Direction, bool) {
 pub struct OrderEngine {
     orders: Vec<Order>,
     next_id: u64,
+    /// Offset applied before deriving the trading date for DAY expiry.
+    /// `0` is UTC, which is what `Default` yields.
+    tz_offset_ns: i64,
 }
 
 impl OrderEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An engine whose DAY orders expire on a trading date offset from UTC.
+    pub fn with_tz_offset(tz_offset_ns: i64) -> Self {
+        Self { tz_offset_ns, ..Self::default() }
+    }
+
+    /// Tag an order as a slice of an execution schedule.
+    pub fn set_algo_id(&mut self, order_id: u64, algo_id: Option<u64>) {
+        if let Some(order) = self.get_mut(order_id) {
+            order.algo_id = algo_id;
+        }
+    }
+
+    /// Working orders released by a schedule.
+    pub fn algo_order_ids(&self, algo_id: u64) -> Vec<u64> {
+        self.orders
+            .iter()
+            .filter(|o| o.algo_id == Some(algo_id) && !o.status.is_terminal())
+            .map(|o| o.id)
+            .collect()
     }
 
     /// Register a new order and return its engine id.
@@ -235,6 +259,7 @@ impl OrderEngine {
     ) -> Vec<MatchOutcome> {
         let mut expiries = Vec::new();
         let mut actions = Vec::new();
+        let tz = self.tz_offset_ns;
 
         // Parent states for one-triggers-other gating, resolved up front so
         // the mutable iteration below stays borrow-clean. Held children of a
@@ -261,7 +286,7 @@ impl OrderEngine {
                 }
             }
 
-            if expired(order, bar.timestamp) {
+            if expired(order, bar.timestamp, tz) {
                 let _ = order.transition(OrderStatus::Expired);
                 expiries.push(MatchOutcome::Expire { order_id: order.id });
                 continue;
@@ -405,11 +430,14 @@ impl OrderEngine {
 }
 
 /// Whether an order's time-in-force has lapsed at the bar timestamp.
-fn expired(order: &Order, ts: Timestamp) -> bool {
+fn expired(order: &Order, ts: Timestamp, tz_offset_ns: i64) -> bool {
     match order.tif {
         TimeInForce::Gtd { expire_ns } => ts >= expire_ns,
         TimeInForce::Day => {
-            ts.div_euclid(NS_PER_DAY) > order.submitted_ts.div_euclid(NS_PER_DAY)
+            // Compare trading dates, not UTC dates: the two diverge for any
+            // session whose local hours cross UTC midnight.
+            let local = |t: Timestamp| (t + tz_offset_ns).div_euclid(NS_PER_DAY);
+            local(ts) > local(order.submitted_ts)
         }
         TimeInForce::Gtc
         | TimeInForce::Ioc
@@ -515,6 +543,70 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn day_expiry_follows_the_trading_date_not_the_utc_date() {
+        // A session running past 05:30 IST crosses UTC midnight while the
+        // IST trading date is unchanged. Under UTC-only expiry a DAY order
+        // placed before that crossing dies mid-session.
+        const IST: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+        let day = 20_468i64 * NS_PER_DAY;
+        // 22:30 UTC = 04:00 IST the next IST date.
+        let submitted = day + 22 * 3_600_000_000_000 + 1_800_000_000_000;
+        // 00:30 UTC the next UTC date = 06:00 IST, same IST trading date.
+        let later = day + NS_PER_DAY + 1_800_000_000_000;
+
+        let mut order = Order::plain(
+            OrderSide::Buy,
+            QtySpec::Units(1.0),
+            OrderKind::Limit { price: 90.0 },
+            TimeInForce::Day,
+        );
+        order.submitted_ts = submitted;
+        let _ = order.transition(OrderStatus::Accepted);
+
+        // UTC dates rolled, so the naive rule expires it.
+        assert!(expired(&order, later, 0), "the UTC date rolled");
+        // The IST trading date did not, so it must survive.
+        assert!(!expired(&order, later, IST), "the trading date is unchanged");
+    }
+
+    #[test]
+    fn day_expiry_honors_a_negative_offset() {
+        // US Eastern is behind UTC: a 20:00 ET order and a 22:00 ET bar are
+        // the same trading date but land on different UTC dates.
+        const ET: i64 = -5 * 3600 * 1_000_000_000;
+        let day = 20_468i64 * NS_PER_DAY;
+        let submitted = day + 1_800_000_000_000; // 00:30 UTC = 19:30 ET prior day
+        let later = day + 3 * 3_600_000_000_000; // 03:00 UTC = 22:00 ET same ET day
+
+        let mut order = Order::plain(
+            OrderSide::Buy,
+            QtySpec::Units(1.0),
+            OrderKind::Limit { price: 90.0 },
+            TimeInForce::Day,
+        );
+        order.submitted_ts = submitted;
+        let _ = order.transition(OrderStatus::Accepted);
+        assert!(!expired(&order, later, 0), "same UTC date");
+        assert!(!expired(&order, later, ET), "and the same ET trading date");
+    }
+
+    #[test]
+    fn gtd_ignores_the_trading_date_offset() {
+        // GTD names an absolute instant; the session calendar is irrelevant.
+        let expire_ns = 20_468i64 * NS_PER_DAY + 3_600_000_000_000;
+        let mut order = Order::plain(
+            OrderSide::Buy,
+            QtySpec::Units(1.0),
+            OrderKind::Limit { price: 90.0 },
+            TimeInForce::Gtd { expire_ns },
+        );
+        let _ = order.transition(OrderStatus::Accepted);
+        const IST: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+        assert_eq!(expired(&order, expire_ns, 0), expired(&order, expire_ns, IST));
+        assert!(expired(&order, expire_ns, IST));
+    }
+
     fn day_expires_on_utc_date_rollover() {
         let (mut engine, id) =
             engine_with(OrderKind::Limit { price: 90.0 }, OrderSide::Buy, TimeInForce::Day);

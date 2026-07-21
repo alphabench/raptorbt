@@ -87,7 +87,8 @@ pub enum OrderKind {
 pub enum TimeInForce {
     /// Rest until filled or canceled.
     Gtc,
-    /// Expire when the bar date (UTC) rolls over past the submission date.
+    /// Expire when the trading date rolls over past the submission date.
+    /// The date is UTC unless `session_tz_offset_ns` shifts it.
     Day,
     /// Expire at an explicit timestamp.
     Gtd { expire_ns: Timestamp },
@@ -168,6 +169,10 @@ pub struct Order {
     /// One-triggers-other: held (not matched) until the parent order fills;
     /// canceled if the parent dies unfilled.
     pub parent_id: Option<u64>,
+    /// Schedule that released this order, when it is an algo slice.
+    /// Purely a back-pointer: slices match like any other order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algo_id: Option<u64>,
     /// One-cancels-other group: when any member fills, working siblings are
     /// canceled. One-updates-other reduces to this without partial fills.
     pub oco_group: Option<u64>,
@@ -198,6 +203,7 @@ impl Order {
             post_only: false,
             reduce_only: false,
             parent_id: None,
+            algo_id: None,
             oco_group: None,
             trail_watermark: None,
             trail_limit: None,

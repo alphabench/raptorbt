@@ -10,10 +10,103 @@ use crate::execution::orders::{
 };
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
+use crate::execution::algos::{AlgoError, ExecAlgorithm};
 use crate::execution::queue::QueueVerdict;
 use crate::portfolio::risk::RejectReason;
 
 impl EngineKernel {
+    /// Register an execution schedule that releases slices over time.
+    ///
+    /// Only `QtySpec::Units` is sliceable: `CapitalFrac` resolves against
+    /// equity at fill time, so each slice would size against a different
+    /// account, and `FullPosition` sliced N ways would close the whole
+    /// position N times. Both are refused rather than guessed at.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_algo(
+        &mut self,
+        side: OrderSide,
+        qty: QtySpec,
+        kind: OrderKind,
+        tif: TimeInForce,
+        client_id: String,
+        algo: ExecAlgorithm,
+        reduce_only: bool,
+        now_ns: i64,
+        idx: usize,
+    ) -> Result<u64, AlgoError> {
+        let units = match qty {
+            QtySpec::Units(units) => units,
+            _ => return Err(AlgoError::InvalidUnits),
+        };
+        let algo_id = self.algos.submit(
+            client_id.clone(),
+            side,
+            kind,
+            tif,
+            units,
+            algo,
+            reduce_only,
+            now_ns,
+        )?;
+        self.pending_events.push(EngineEvent::AlgoStarted { idx, algo_id, client_id });
+        Ok(algo_id)
+    }
+
+    /// Submit every slice due at this timestamp.
+    ///
+    /// Called from the step just before market orders sweep, so a released
+    /// slice fills on the same step rather than trailing one behind.
+    pub(crate) fn release_algo_slices(
+        &mut self,
+        idx: usize,
+        now_ns: i64,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        if self.algos.is_empty() {
+            return;
+        }
+        for slice in self.algos.release_due(now_ns) {
+            let order_id = self.submit_order_full(
+                slice.side,
+                QtySpec::Units(slice.units),
+                slice.kind,
+                slice.tif,
+                idx,
+                now_ns,
+                slice.client_id,
+                None,
+                None,
+                false,
+                slice.reduce_only,
+                None,
+            );
+            self.orders.set_algo_id(order_id, Some(slice.algo_id));
+        }
+        events.append(&mut self.pending_events);
+        for algo_id in self.algos.drain_completed() {
+            events.push(EngineEvent::AlgoCompleted { idx, algo_id, client_id: String::new() });
+        }
+    }
+
+    /// Stop a schedule and cancel the slices it has working.
+    ///
+    /// Slices that already filled stay filled: cancelling a schedule halts
+    /// the remainder, it does not unwind what traded.
+    pub fn cancel_algo(&mut self, algo_id: u64, idx: usize) -> bool {
+        if !self.algos.cancel(algo_id) {
+            return false;
+        }
+        for order_id in self.orders.algo_order_ids(algo_id) {
+            self.cancel_order(idx, order_id);
+        }
+        true
+    }
+
+    /// Units still unreleased by a schedule, for diagnostics.
+    pub fn algo_released(&self, algo_id: u64) -> Option<u32> {
+        self.algos.get(algo_id).map(|s| s.released())
+    }
+
     /// Submit an order from the class-based order API.
     ///
     /// `submitted_idx` is the bar the strategy was observing when it placed

@@ -115,6 +115,16 @@ class Strategy:
     def on_order_event(self, ctx: StrategyContext, event) -> None:
         """Called for every order/account event, after its granular hook."""
 
+    def on_algo_started(self, ctx: StrategyContext, event) -> None:
+        """An execution schedule was registered. Slices arrive afterwards
+        as ordinary order events, with client ids of ``"<parent>#<n>"``."""
+
+    def on_algo_completed(self, ctx: StrategyContext, event) -> None:
+        """A schedule released its last slice, or was cancelled.
+
+        "Completed" means fully *released*, not necessarily fully filled.
+        """
+
     def on_margin_call(self, ctx: StrategyContext, event) -> None:
         """Called when equity breaches the maintenance requirement (margin
         accounts). ``event.price`` carries the equity, ``event.size`` the

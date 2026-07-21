@@ -204,3 +204,55 @@ class TrailingStopLimit(_OrderBase):
     @property
     def kind(self) -> str:
         return "trailing_stop_limit"
+
+
+@dataclass(frozen=True, kw_only=True)
+class Twap(_OrderBase):
+    """Slice an order into equal parts released at a fixed interval.
+
+    A TWAP is a schedule, not an order: it releases ``slices`` ordinary
+    orders spaced ``every`` nanoseconds apart, the first immediately. Each
+    slice reports its own fill, with a client id of ``"<parent>#<n>"``.
+
+    ``every`` is a duration rather than a bar count because a bar index
+    means different things in bar and tick sessions — "every 1 bar" would
+    silently become "every 1 print" on a tick feed. Pass ``every_bars``
+    with ``bar_ns`` if you would rather think in bars.
+
+    Only explicit ``units`` can be sliced. ``size_frac`` resolves against
+    equity at fill time, so each slice would size against a different
+    account.
+
+    Cancelling a schedule stops the remaining slices; it does not unwind
+    the ones that already traded.
+    """
+
+    slices: int = 2
+    every: int = 0
+    every_bars: int | None = None
+    bar_ns: int | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.slices < 1:
+            raise ValueError("slices must be >= 1")
+        if self.units is None:
+            raise ValueError("Twap needs explicit units; size_frac cannot be sliced")
+        if self.every_bars is not None:
+            if self.bar_ns is None:
+                raise ValueError("every_bars needs bar_ns to convert to a duration")
+            if self.every:
+                raise ValueError("pass every or every_bars, not both")
+        elif self.every <= 0:
+            raise ValueError("every must be > 0 nanoseconds")
+
+    @property
+    def kind(self) -> str:
+        return "market"
+
+    @property
+    def interval_ns(self) -> int:
+        """Resolved slice interval in nanoseconds."""
+        if self.every_bars is not None:
+            return self.every_bars * int(self.bar_ns)
+        return self.every

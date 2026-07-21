@@ -19,6 +19,17 @@ migrate.
 
 ### Fixed
 
+- **`TimeInForce::Day` expired on the UTC date, not the trading date.**
+  A session whose local hours cross UTC midnight would see DAY orders die
+  while the trading date was still running. `session_tz_offset_ns` on
+  `PyBacktestConfig` sets the offset — e.g. `IST_OFFSET_NS` — and defaults
+  to `0`, which is arithmetically identical to the old behavior.
+
+  This is a latent fix rather than a live bug for NSE users: 09:15–15:30 IST
+  does not cross UTC midnight, so the common case was already correct. It
+  follows the trading *date*, not the trading *session* — a DAY order still
+  survives past the session close to the next session of the same date.
+
 - **Indicator registration was a silent no-op in portfolio runs.**
   `register_indicator` appended to the strategy's list but
   `run_portfolio_strategy` never updated anything, so `.value` stayed `None`
@@ -93,6 +104,30 @@ migrate.
   ubuntu/macos × Python 3.10–3.12.
 
 ### Added
+
+- **TWAP execution schedules.** `orders.Twap(side=..., units=..., slices=N,
+  every=<ns>)` releases N equal slices at a fixed interval, each an ordinary
+  order reporting its own fill with a client id of `"<parent>#<n>"`. New
+  `on_algo_started` / `on_algo_completed` hooks bracket the schedule;
+  "completed" means fully released, not necessarily fully filled.
+
+  A schedule is deliberately not an order. Modelling it as a parent would
+  deadlock its slices — the one-triggers-other gate holds a child until its
+  parent *fills*, and a schedule never fills — so slices carry only a
+  back-pointer and the matcher needs to know nothing about them.
+
+  The interval is a duration, not a bar count: `idx` is a bar ordinal in a
+  bar session and an event ordinal in a tick session, so "every 1 bar" would
+  silently mean "every 1 print" on a tick feed and collapse a five-slice
+  TWAP into a burst. Pass `every_bars` with `bar_ns` for bar-shaped
+  ergonomics. Slices release one per step even after a data gap, since
+  dumping a backlog defeats the point of spreading an order.
+
+  Only explicit `units` can be sliced — `size_frac` resolves against equity
+  at fill time, so each slice would size against a different account.
+  Cancelling a schedule stops the remaining slices; it does not unwind what
+  already traded. Only TWAP ships in 0.5.x; VWAP needs a volume forecast and
+  POV needs partial fills, both still deferred.
 
 - **Renko and signed-flow bar units.** Every variant declared in
   `AggregationUnit` now builds; none returns `Unimplemented`.

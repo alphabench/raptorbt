@@ -17,6 +17,7 @@ use crate::execution::orders::{
 };
 use crate::accounts::{AccountMode, MarginBook};
 use crate::execution::fill::FillRng;
+use crate::execution::algos::AlgoEngine;
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
@@ -82,6 +83,12 @@ pub enum EngineEvent {
     /// Equity fell below the maintenance requirement (margin mode). New
     /// entries halt; open positions are not force-liquidated.
     MarginCall { idx: usize, equity: f64, required: f64 },
+    /// An execution schedule was registered. Slices follow as ordinary
+    /// order events.
+    AlgoStarted { idx: usize, algo_id: u64, client_id: String },
+    /// A schedule released its last slice, or was canceled. "Completed"
+    /// means fully released, not necessarily fully filled.
+    AlgoCompleted { idx: usize, algo_id: u64, client_id: String },
 }
 
 /// Per-bar inputs that vary independently of the bar itself.
@@ -197,6 +204,8 @@ pub struct EngineKernel {
     pub(crate) book: OrderBook,
     /// Per-order queue estimates, used only when `queue_fill_model` is on.
     pub(crate) queue: QueueTracker,
+    /// Working execution schedules (TWAP). Empty unless one is submitted.
+    pub(crate) algos: AlgoEngine,
     /// Whether the current step is driven by a trade print. Only a print
     /// carries volume at a price, which is what the queue model consumes.
     pub(crate) stepping_trade: bool,
@@ -222,6 +231,7 @@ impl EngineKernel {
 
         let cash = config.initial_capital;
         let config_seed = config.fill_seed;
+        let tz_offset_ns = config.session_tz_offset_ns;
 
         Self {
             config,
@@ -243,10 +253,11 @@ impl EngineKernel {
             alloted_capital: inst_config.and_then(|ic| ic.alloted_capital),
             lot_size: inst_config.and_then(|ic| ic.lot_size),
             spec: None,
-            orders: OrderEngine::new(),
+            orders: OrderEngine::with_tz_offset(tz_offset_ns),
             pending_events: Vec::new(),
             book: OrderBook::new(),
             queue: QueueTracker::new(),
+            algos: AlgoEngine::new(),
             stepping_trade: false,
         }
     }
@@ -761,6 +772,11 @@ impl EngineKernel {
                 }
             }
         }
+
+        // Execution schedules release here, just before the market sweep
+        // below, so a slice fills on the step it was released on rather
+        // than trailing a step behind its schedule.
+        self.release_algo_slices(idx, bar.timestamp, &mut events);
 
         // Market orders placed while this bar was observed fill last, at the
         // configured fill-price model — the same contract as signal entries.

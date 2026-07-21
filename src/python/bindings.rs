@@ -80,6 +80,9 @@ pub struct PyBacktestConfig {
     /// Fill resting limits from observed queue position (needs depth data).
     #[pyo3(get, set)]
     pub queue_fill_model: bool,
+    /// Offset for the trading date DAY orders expire on (0 = UTC).
+    #[pyo3(get, set)]
+    pub session_tz_offset_ns: i64,
     /// Seed for the stochastic-fill RNG.
     #[pyo3(get, set)]
     pub fill_seed: u64,
@@ -113,6 +116,7 @@ impl PyBacktestConfig {
         fill_seed=0,
         bar_path_adaptive=false,
         queue_fill_model=false,
+        session_tz_offset_ns=0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -133,6 +137,7 @@ impl PyBacktestConfig {
         fill_seed: u64,
         bar_path_adaptive: bool,
         queue_fill_model: bool,
+        session_tz_offset_ns: i64,
     ) -> Self {
         Self {
             initial_capital,
@@ -149,6 +154,7 @@ impl PyBacktestConfig {
             legacy_annualization,
             fill_prob_limit,
             queue_fill_model,
+            session_tz_offset_ns,
             fill_prob_slippage,
             fill_seed,
             bar_path_adaptive,
@@ -207,6 +213,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             legacy_annualization: py_config.legacy_annualization,
             fill_prob_limit: py_config.fill_prob_limit,
             queue_fill_model: py_config.queue_fill_model,
+            session_tz_offset_ns: py_config.session_tz_offset_ns,
             fill_prob_slippage: py_config.fill_prob_slippage,
             fill_seed: py_config.fill_seed,
             bar_path_adaptive: py_config.bar_path_adaptive,

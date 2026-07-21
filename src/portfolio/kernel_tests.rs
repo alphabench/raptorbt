@@ -876,3 +876,163 @@ fn entry_without_override_uses_config_stop() {
     assert_eq!(snap.direction, Direction::Long);
     assert_eq!(snap.entry_idx, 0);
 }
+
+const ALGO_SEC: i64 = 1_000_000_000;
+
+/// A TWAP accumulates: under the default netting policy only the first
+/// slice can open, so these tests use the hedging policy.
+fn twap_kernel() -> EngineKernel {
+    make_kernel().with_position_policy(crate::portfolio::ledger::PositionPolicy::Independent)
+}
+
+#[test]
+fn a_twap_slice_fills_on_the_step_it_is_released_on() {
+    // The whole design depends on this: slices are submitted inside the
+    // step, just before the market sweep, so they do not trail a step
+    // behind their own schedule.
+    let mut kernel = twap_kernel();
+    kernel
+        .submit_algo(
+            OrderSide::Buy,
+            QtySpec::Units(30.0),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            "tw".to_string(),
+            crate::execution::algos::ExecAlgorithm::Twap { slices: 3, interval_ns: ALGO_SEC },
+            false,
+            0,
+            0,
+        )
+        .expect("valid schedule");
+
+    let events = kernel.step(0, &bar(0, 100.0), StepInput::default());
+    assert!(
+        events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+        "the first slice must fill on its release step, got {events:?}"
+    );
+    assert!(kernel.is_in_position());
+}
+
+#[test]
+fn twap_releases_one_slice_per_interval_through_the_kernel() {
+    let mut kernel = twap_kernel();
+    kernel
+        .submit_algo(
+            OrderSide::Buy,
+            QtySpec::Units(30.0),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            "tw".to_string(),
+            crate::execution::algos::ExecAlgorithm::Twap { slices: 3, interval_ns: ALGO_SEC },
+            false,
+            0,
+            0,
+        )
+        .expect("valid schedule");
+
+    let mut fills = 0;
+    for i in 0..3i64 {
+        let ts = i * ALGO_SEC;
+        let events = kernel.step(
+            i as usize,
+            &KernelBar {
+                timestamp: ts,
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+                volume: 1.0,
+            },
+            StepInput::default(),
+        );
+        fills += events.iter().filter(|e| matches!(e, EngineEvent::OrderFilled { .. })).count();
+    }
+    assert_eq!(fills, 3, "one slice per interval");
+}
+
+#[test]
+fn a_tick_session_slices_on_time_not_on_event_count() {
+    // Many prints inside one interval must not accelerate the schedule.
+    // This is why slicing is timed rather than counted in bars: `idx` is an
+    // event ordinal on a tick feed.
+    let mut kernel = twap_kernel();
+    kernel
+        .submit_algo(
+            OrderSide::Buy,
+            QtySpec::Units(20.0),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            "tw".to_string(),
+            crate::execution::algos::ExecAlgorithm::Twap { slices: 2, interval_ns: ALGO_SEC },
+            false,
+            0,
+            0,
+        )
+        .expect("valid schedule");
+
+    let mut fills = 0;
+    // Ten prints, all inside the first interval.
+    for i in 0..10i64 {
+        let tick = TradeTick { timestamp: i * 1_000_000, price: 100.0, size: 1.0, signed_size: 0.0 };
+        let events = kernel.step_trade(i as usize, &tick, StepInput::default());
+        fills += events.iter().filter(|e| matches!(e, EngineEvent::OrderFilled { .. })).count();
+    }
+    assert_eq!(fills, 1, "only the first slice is due inside one interval");
+}
+
+#[test]
+fn cancelling_a_schedule_stops_further_slices() {
+    let mut kernel = twap_kernel();
+    let algo_id = kernel
+        .submit_algo(
+            OrderSide::Buy,
+            QtySpec::Units(40.0),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            "tw".to_string(),
+            crate::execution::algos::ExecAlgorithm::Twap { slices: 4, interval_ns: ALGO_SEC },
+            false,
+            0,
+            0,
+        )
+        .expect("valid schedule");
+
+    kernel.step(0, &bar(0, 100.0), StepInput::default());
+    assert!(kernel.cancel_algo(algo_id, 1));
+
+    let mut later_fills = 0;
+    for i in 1..4i64 {
+        let events = kernel.step(
+            i as usize,
+            &KernelBar {
+                timestamp: i * ALGO_SEC,
+                open: 100.0,
+                high: 100.0,
+                low: 100.0,
+                close: 100.0,
+                volume: 1.0,
+            },
+            StepInput::default(),
+        );
+        later_fills +=
+            events.iter().filter(|e| matches!(e, EngineEvent::OrderFilled { .. })).count();
+    }
+    assert_eq!(later_fills, 0, "a cancelled schedule releases nothing further");
+}
+
+#[test]
+fn a_schedule_refuses_capital_fraction_sizing() {
+    let mut kernel = twap_kernel();
+    let result = kernel.submit_algo(
+        OrderSide::Buy,
+        QtySpec::CapitalFrac(0.5),
+        OrderKind::Market,
+        TimeInForce::Gtc,
+        "tw".to_string(),
+        crate::execution::algos::ExecAlgorithm::Twap { slices: 2, interval_ns: ALGO_SEC },
+        false,
+        0,
+        0,
+    );
+    assert!(result.is_err(), "each slice would size against a different account");
+}

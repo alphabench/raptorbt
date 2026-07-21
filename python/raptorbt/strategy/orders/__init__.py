@@ -17,6 +17,7 @@ from raptorbt.strategy.orders.types import (
     StopMarket,
     TrailingStopLimit,
     TrailingStopMarket,
+    Twap,
 )
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "MarketOrder",
     "MarketToLimit",
     "StopLimit",
+    "Twap",
     "StopMarket",
     "TrailingStopLimit",
     "TrailingStopMarket",

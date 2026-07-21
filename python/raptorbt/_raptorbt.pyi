@@ -40,6 +40,7 @@ class PyBacktestConfig:
     fill_prob_limit: float
     fill_prob_slippage: float
     queue_fill_model: bool
+    session_tz_offset_ns: int
     fill_seed: int
     bar_path_adaptive: bool
     legacy_annualization: bool
@@ -553,6 +554,12 @@ class PyKernelSession:
     def link_oco(self, order_ids: list[int]) -> None: ...
     def cancel_order(self, idx: int, order_id: int) -> bool: ...
     def cancel_all_orders(self, idx: int) -> list[int]: ...
+    def submit_twap(
+        self, units: float, side: str, slices: int, interval_ns: int,
+        submitted_idx: int, submitted_ts: int, client_id: str,
+        reduce_only: bool = ...,
+    ) -> int: ...
+    def cancel_twap(self, algo_id: int, idx: int) -> bool: ...
     def modify_order(
         self,
         order_id: int,
