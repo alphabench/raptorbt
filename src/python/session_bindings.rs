@@ -15,7 +15,7 @@ use super::bindings::{
 use super::instrument_bindings::PyInstrumentSpec;
 use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64};
 use super::strategy_bindings::{
-    parse_account_mode, submit_order_on, PyEngineEvent, PyPositionSnapshot,
+    parse_account_mode, parse_qty_spec, submit_order_on, PyEngineEvent, PyPositionSnapshot,
 };
 
 /// Multi-instrument session over deterministically merged bar streams.
@@ -252,6 +252,24 @@ impl PyPortfolioSession {
 
     fn cancel_order(&mut self, instrument: usize, idx: usize, order_id: u64) -> PyResult<bool> {
         Ok(self.session_mut()?.kernel_mut(instrument).cancel_order(idx, order_id))
+    }
+
+    /// Replace a working order's prices and/or quantity on one instrument.
+    #[pyo3(signature = (instrument, order_id, units=None, size_frac=None, limit_price=None, trigger_price=None))]
+    fn modify_order(
+        &mut self,
+        instrument: usize,
+        order_id: u64,
+        units: Option<f64>,
+        size_frac: Option<f64>,
+        limit_price: Option<f64>,
+        trigger_price: Option<f64>,
+    ) -> PyResult<bool> {
+        let qty = parse_qty_spec(units, size_frac)?;
+        Ok(self
+            .session_mut()?
+            .kernel_mut(instrument)
+            .modify_order(order_id, qty, limit_price, trigger_price))
     }
 
     fn cancel_all_orders(&mut self, instrument: usize, idx: usize) -> PyResult<Vec<u64>> {

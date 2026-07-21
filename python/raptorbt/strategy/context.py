@@ -156,6 +156,8 @@ class CompositeBar(NamedTuple):
     ``timestamp`` is the window-end for time aggregations — the bar contains
     only data strictly before it, never the bar that completed it.
     ``stream_id`` is the handle returned by ``Strategy.subscribe_bars``.
+    ``symbol`` names the instrument the bar was built from in portfolio
+    runs, and is ``None`` in single-instrument ones.
     """
 
     stream_id: int
@@ -167,3 +169,4 @@ class CompositeBar(NamedTuple):
     low: float
     close: float
     volume: float
+    symbol: str | None = None

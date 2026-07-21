@@ -9,11 +9,19 @@ closes route to the current symbol by default, or explicitly via
 
 With ``account_type="margin"`` the instruments also share one pool of locked
 initial margin, so leverage applies portfolio-wide and a margin call halts
-every instrument at once. Composite-bar subscriptions are not yet available
-in portfolio runs.
+every instrument at once.
+
+Indicators and composite-bar subscriptions are per symbol: one
+``subscribe_bars`` declaration yields one aggregated stream per symbol, and
+``register_indicator(..., symbol=...)`` routes an indicator to one of them.
+A symbol's composite bar dispatches before the ``on_bar`` of that symbol's
+primary bar that completed it; across symbols, order follows the merged
+schedule.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 
@@ -27,6 +35,7 @@ from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import Bar
 from raptorbt.strategy.orders import ClosePosition, MarketOrder
 from raptorbt.strategy.runner import dispatch_events
+from raptorbt.strategy.streams import StreamState
 
 
 class PortfolioContext:
@@ -177,12 +186,24 @@ def run_portfolio_strategy(
     ctx = PortfolioContext(session, symbols, arrays)
     strategy.drain_orders()
     strategy.drain_commands()
+    strategy._bar_subscriptions = []
+    strategy._indicators = []
     from raptorbt.strategy.cache import Cache
     from raptorbt.strategy.clock import Clock
 
     strategy.clock = Clock()
     strategy.cache = Cache()
     strategy.on_start(ctx)
+
+    # Subscriptions and indicators are declared in on_start, so the per-symbol
+    # aggregators and indicator routing are built once it returns.
+    streams = StreamState(strategy, symbols)
+    if streams.has_unrouted_indicators:
+        warnings.warn(
+            "register_indicator() without symbol= in a portfolio run feeds the "
+            "indicator every symbol's bars interleaved; pass symbol= to route it",
+            stacklevel=2,
+        )
 
     # client order id -> (instrument index, engine order id).
     id_map: dict[str, tuple[int, int]] = {}
@@ -250,13 +271,11 @@ def run_portfolio_strategy(
                 for snapshot in session.positions(instrument):
                     session.request_close(instrument, snapshot.position_id)
             elif command[0] == "modify":
-                # Modify routing needs the engine id's instrument.
+                # The id map carries the owning instrument, so a modify
+                # routes without the caller naming a symbol.
                 mapped = id_map.get(command[1])
                 if mapped is not None:
-                    raise NotImplementedError(
-                        "modify_order in portfolio runs arrives with the "
-                        "instrument-routed modify binding in a later release"
-                    )
+                    session.modify_order(mapped[0], mapped[1], **command[2])
 
     while True:
         current = session.current()
@@ -269,6 +288,11 @@ def run_portfolio_strategy(
 
         for time_event in strategy.clock._advance(ts):
             strategy.on_time_event(ctx, time_event)
+
+        # Composite bars and indicators for THIS symbol only, before on_bar
+        # sees the bar. Orders queued from on_composite_bar are drained by
+        # this bar's apply_commands and route to the completing symbol.
+        streams.push(strategy, ctx, ts, o, h, l, c, v, symbol=ctx.symbol)
 
         strategy.on_bar(ctx)
         apply_commands(instrument, local_idx, ts)

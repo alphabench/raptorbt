@@ -19,6 +19,22 @@ use super::bindings::{
 };
 use super::instrument_bindings::PyInstrumentSpec;
 
+/// Fold the `units` / `size_frac` kwargs into a quantity spec.
+///
+/// Shared by the single-symbol and portfolio `modify_order` bindings so the
+/// two report the same error for the same mistake.
+pub(crate) fn parse_qty_spec(
+    units: Option<f64>,
+    size_frac: Option<f64>,
+) -> PyResult<Option<QtySpec>> {
+    match (units, size_frac) {
+        (Some(_), Some(_)) => Err(PyValueError::new_err("pass units or size_frac, not both")),
+        (Some(u), None) => Ok(Some(QtySpec::Units(u))),
+        (None, Some(f)) => Ok(Some(QtySpec::CapitalFrac(f))),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Parse the `account_type` / `leverage` kwargs shared by the single-symbol
 /// and portfolio session constructors.
 pub(crate) fn parse_account_mode(
@@ -410,14 +426,7 @@ impl PyKernelSession {
         limit_price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<bool> {
-        let qty = match (units, size_frac) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err("pass units or size_frac, not both"))
-            }
-            (Some(u), None) => Some(QtySpec::Units(u)),
-            (None, Some(f)) => Some(QtySpec::CapitalFrac(f)),
-            (None, None) => None,
-        };
+        let qty = parse_qty_spec(units, size_frac)?;
         Ok(self.runner_mut()?.kernel_mut().modify_order(order_id, qty, limit_price, trigger_price))
     }
 

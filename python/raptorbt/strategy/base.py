@@ -163,7 +163,9 @@ class Strategy:
         self._pending_commands.append(("submit", client_id, order, parent, symbol))
         return client_id
 
-    def register_indicator(self, indicator, stream_id: int | None = None):
+    def register_indicator(
+        self, indicator, stream_id: int | None = None, symbol: str | None = None
+    ):
         """Auto-update a streaming indicator (``raptorbt.Indicator``) from
         bar data, *before* handlers see the bar.
 
@@ -171,13 +173,43 @@ class Strategy:
         :meth:`subscribe_bars` feeds it that composite stream instead.
         Returns the indicator for chained assignment. Call from
         ``on_start``.
+
+        ``symbol`` routes the indicator in portfolio runs and is ignored in
+        single-instrument ones. **Pass it.** Without it the indicator is fed
+        every symbol's bars interleaved, which is almost never meaningful —
+        one indicator cannot track N series. The usual shape is one
+        indicator per symbol::
+
+            self.fast = {
+                s: self.register_indicator(Indicator.sma(10), symbol=s)
+                for s in ctx.symbols
+            }
+
+        or, equivalently, :meth:`register_indicators`.
         """
-        self._indicators.append((indicator, stream_id))
+        self._indicators.append((indicator, stream_id, symbol))
         return indicator
 
+    def register_indicators(self, factory, symbols, stream_id: int | None = None) -> dict:
+        """Register one indicator per symbol, built by ``factory()``.
+
+        Returns ``symbol -> indicator``::
+
+            self.fast = self.register_indicators(
+                lambda: Indicator.sma(10), ctx.symbols
+            )
+        """
+        return {
+            symbol: self.register_indicator(factory(), stream_id=stream_id, symbol=symbol)
+            for symbol in symbols
+        }
+
     def indicators_initialized(self) -> bool:
-        """Whether every registered indicator has completed warmup."""
-        return all(ind.initialized for ind, _ in self._indicators)
+        """Whether every registered indicator has completed warmup.
+
+        In a portfolio run that means every symbol's indicator is warm.
+        """
+        return all(ind.initialized for ind, _, _ in self._indicators)
 
     def subscribe_bars(self, step: int, unit: str) -> int:
         """Subscribe to bars aggregated from the primary stream.
@@ -186,6 +218,10 @@ class Strategy:
         :meth:`on_composite_bar`. Returns the stream handle carried on each
         bar's ``stream_id``. Units: time (``"ms"``/``"s"``/``"m"``/``"h"``/
         ``"d"``/``"w"``), ``"tick"``, ``"volume"``, ``"value"``.
+
+        In a portfolio run one subscription yields one aggregated stream
+        *per symbol*, each built only from that symbol's bars. The symbol
+        that completed a bar arrives as ``bar.symbol`` (and ``ctx.symbol``).
         """
         if step < 1:
             raise ValueError("step must be >= 1")

@@ -352,6 +352,12 @@ completed the window — the composite closed strictly earlier. A partial
 final window is not dispatched to strategies (it never closed); the batch
 helpers do include it, flushed at end of data.
 
+In a portfolio run one `subscribe_bars` declaration yields one aggregated
+stream **per symbol**, each built only from that symbol's bars. The symbol
+that completed a bar arrives as `bar.symbol` (and `ctx.symbol`); the
+dispatch-before-`on_bar` guarantee holds per symbol, while ordering across
+symbols follows the merged schedule.
+
 Calendar `"month"`/`"year"` units aggregate on civil UTC dates. Passing
 `tz_offset_ns` (e.g. `raptorbt.IST_OFFSET_NS`) aligns day/week/month/year
 windows to that timezone's civil dates — an NSE day bar covers one IST
@@ -382,6 +388,28 @@ New in 0.5.0:
           if not self.indicators_initialized():
               return
           if self.fast.value > self.slow.value and ctx.position is None:
+              self.enter()
+  ```
+
+  In portfolio runs an indicator tracks one symbol, so register one per
+  symbol with `symbol=` — an unrouted registration is fed every symbol's
+  bars interleaved (and warns):
+
+  ```python
+  class Cross(raptorbt.Strategy):
+      def on_start(self, ctx):
+          self.fast = self.register_indicators(
+              lambda: raptorbt.Indicator.ema(10), ctx.symbols
+          )
+          # Equivalently, explicit per symbol:
+          self.slow = {
+              s: self.register_indicator(raptorbt.Indicator.ema(30), symbol=s)
+              for s in ctx.symbols
+          }
+
+      def on_bar(self, ctx):
+          fast, slow = self.fast[ctx.symbol], self.slow[ctx.symbol]
+          if self.indicators_initialized() and fast.value > slow.value:
               self.enter()
   ```
 

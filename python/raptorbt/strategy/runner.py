@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 from raptorbt._raptorbt import (
-    BarAggregator,
     InstrumentSpec,
     PyBacktestConfig,
     PyBacktestResult,
@@ -15,8 +14,9 @@ from raptorbt._raptorbt import (
     resolve_atr_period,
 )
 from raptorbt.strategy.base import Strategy
-from raptorbt.strategy.context import CompositeBar, StrategyContext
+from raptorbt.strategy.context import StrategyContext
 from raptorbt.strategy.orders import ClosePosition, MarketOrder
+from raptorbt.strategy.streams import StreamState
 
 
 def dispatch_events(strategy: Strategy, ctx, events) -> None:
@@ -168,10 +168,7 @@ def run_strategy_backtest(
     # Multi-timeframe: one streaming aggregator per subscription declared in
     # on_start. Completed composite bars dispatch before the primary on_bar
     # of the bar that completed them (they closed strictly earlier).
-    aggregators = [
-        (stream_id, step, unit, BarAggregator(step, unit))
-        for stream_id, (step, unit) in enumerate(strategy._bar_subscriptions)
-    ]
+    streams = StreamState(strategy)
 
     # client order id -> engine order id, for cancel/modify routing.
     id_map: dict[str, int] = {}
@@ -234,28 +231,16 @@ def run_strategy_backtest(
         for time_event in strategy.clock._advance(int(timestamps[i])):
             strategy.on_time_event(ctx, time_event)
 
-        for stream_id, step, unit, aggregator in aggregators:
-            completed = aggregator.push_bar(
-                int(timestamps[i]),
-                float(open_[i]),
-                float(high[i]),
-                float(low[i]),
-                float(close[i]),
-                float(volume[i]),
-            )
-            if completed is not None:
-                bar = CompositeBar(stream_id, step, unit, *completed)
-                for indicator, ind_stream in strategy._indicators:
-                    if ind_stream == stream_id:
-                        indicator.update_bar(bar.open, bar.high, bar.low, bar.close)
-                strategy.on_composite_bar(ctx, bar)
-
-        # Primary-registered indicators update before on_bar sees the bar.
-        for indicator, ind_stream in strategy._indicators:
-            if ind_stream is None:
-                indicator.update_bar(
-                    float(open_[i]), float(high[i]), float(low[i]), float(close[i])
-                )
+        streams.push(
+            strategy,
+            ctx,
+            int(timestamps[i]),
+            float(open_[i]),
+            float(high[i]),
+            float(low[i]),
+            float(close[i]),
+            float(volume[i]),
+        )
 
         strategy.on_bar(ctx)
         apply_commands(i)

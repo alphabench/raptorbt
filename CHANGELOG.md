@@ -19,6 +19,18 @@ migrate.
 
 ### Fixed
 
+- **Indicator registration was a silent no-op in portfolio runs.**
+  `register_indicator` appended to the strategy's list but
+  `run_portfolio_strategy` never updated anything, so `.value` stayed `None`
+  and `indicators_initialized()` never became true. Indicators now update,
+  routed per symbol. Registrations also reset per run, so re-running one
+  strategy instance no longer accumulates duplicates (matching
+  `run_strategy_backtest`).
+
+- **`modify_order` raised `NotImplementedError` in portfolio runs.** The id
+  map already carried the owning instrument; the routed binding was missing.
+  Modifies now route without the caller naming a symbol.
+
 - **`max_positions` was per-instrument in portfolio strategy runs.**
   `EventSession` gave each instrument its own copy of the risk gate, and
   `RiskGate` is `Copy`, so every kernel checked the limit against its own
@@ -81,6 +93,22 @@ migrate.
   ubuntu/macos × Python 3.10–3.12.
 
 ### Added
+
+- **Per-symbol indicators and composite bars in portfolio runs.**
+  `register_indicator(indicator, stream_id=None, symbol=None)` gains
+  `symbol=` to route an indicator to one instrument, and
+  `register_indicators(factory, symbols)` builds one per symbol. One
+  `subscribe_bars` declaration now yields one aggregated stream per symbol,
+  each built only from that symbol's bars, and `CompositeBar` gains a
+  trailing `symbol` field (`None` outside portfolio runs) naming the
+  instrument that completed it. A symbol's composite bar dispatches before
+  that symbol's `on_bar` which completed it; across symbols, order follows
+  the merged schedule.
+
+  Note: an indicator registered *without* `symbol=` in a portfolio run is
+  fed every symbol's bars interleaved — rarely meaningful, since one
+  indicator cannot track N series — and now warns. It previously did
+  nothing at all, so no working strategy changes behavior.
 
 - **Shared margin accounts in portfolio runs** — `run_portfolio_strategy`
   accepts `account_type="margin"` and `leverage`, previously available only
