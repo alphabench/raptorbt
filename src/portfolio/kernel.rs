@@ -109,6 +109,17 @@ pub struct StepInput {
     pub target_price_override: Option<Price>,
 }
 
+/// Which market event is driving a step.
+///
+/// Selects the matching path only: every other phase of the step is shared.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StepMode {
+    /// A completed OHLC bar.
+    Bar,
+    /// A single trade print, carried as a degenerate bar.
+    Trade,
+}
+
 /// Read-only view of the currently open position.
 #[derive(Debug, Clone, Copy)]
 pub struct PositionSnapshot {
@@ -538,6 +549,21 @@ impl EngineKernel {
     /// update extremes, then exits (stop > target > signal), then entries.
     /// An exit and a re-entry may both occur on the same bar.
     pub fn step(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Vec<EngineEvent> {
+        self.step_inner(idx, bar, input, StepMode::Bar)
+    }
+
+    /// Shared body of the bar and tick step paths.
+    ///
+    /// The phase order is load-bearing and identical for both; `mode` only
+    /// selects how resting orders are matched, since a trade print is not a
+    /// bar and cannot honor bar-phase time-in-force.
+    pub(crate) fn step_inner(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        input: StepInput,
+        mode: StepMode,
+    ) -> Vec<EngineEvent> {
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
@@ -608,7 +634,11 @@ impl EngineKernel {
         // Resting orders committed on earlier bars match against this bar,
         // after the position's own protective exits (stop > target > signal
         // keeps its priority) and before this bar's new signals.
-        let outcomes = self.orders.match_bar(idx, &bar.to_ohlcv_bar(), &self.fill_model);
+        let ohlcv = bar.to_ohlcv_bar();
+        let outcomes = match mode {
+            StepMode::Bar => self.orders.match_bar(idx, &ohlcv, &self.fill_model),
+            StepMode::Trade => self.orders.match_trade(idx, &ohlcv, &self.fill_model),
+        };
         for outcome in outcomes {
             self.apply_match_outcome(idx, bar, outcome, &mut events);
         }

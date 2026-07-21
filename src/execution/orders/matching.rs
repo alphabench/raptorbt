@@ -14,6 +14,13 @@ use crate::execution::orders::OrderSide;
 
 const NS_PER_DAY: i64 = 86_400_000_000_000;
 
+/// Whether a match pass is driven by a bar or a single trade print.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MatchMode {
+    Bar,
+    Trade,
+}
+
 /// What happened to one order during a bar.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchOutcome {
@@ -194,6 +201,38 @@ impl OrderEngine {
     /// fills; the kernel confirms or rejects each fill (position state may
     /// refuse it) and transitions the order itself.
     pub fn match_bar(&mut self, idx: usize, bar: &OhlcvBar, fill_model: &FillModel) -> Vec<MatchOutcome> {
+        self.match_events(idx, bar, fill_model, MatchMode::Bar)
+    }
+
+    /// Evaluate all working orders against one trade print.
+    ///
+    /// The print is carried as a degenerate bar (`open == high == low ==
+    /// close`), which the fill model's predicates reduce over correctly: a
+    /// limit fills when the print reaches it, a stop triggers when the print
+    /// crosses it, and gap handling collapses to a no-op because a print has
+    /// no range.
+    ///
+    /// Two kinds do *not* reduce, and are refused rather than mispriced:
+    /// `AT_OPEN`/`AT_CLOSE` market orders queue for a bar phase that a print
+    /// does not have, so they keep resting. Everything else — including
+    /// trailing stops, which ratchet off the print — matches as it would on
+    /// a bar, at tick resolution.
+    pub fn match_trade(
+        &mut self,
+        idx: usize,
+        tick: &OhlcvBar,
+        fill_model: &FillModel,
+    ) -> Vec<MatchOutcome> {
+        self.match_events(idx, tick, fill_model, MatchMode::Trade)
+    }
+
+    fn match_events(
+        &mut self,
+        idx: usize,
+        bar: &OhlcvBar,
+        fill_model: &FillModel,
+        mode: MatchMode,
+    ) -> Vec<MatchOutcome> {
         let mut expiries = Vec::new();
         let mut actions = Vec::new();
 
@@ -239,8 +278,12 @@ impl OrderEngine {
                 // queued to a bar phase (AT_OPEN/AT_CLOSE) or activated
                 // one-triggers-other children, which fill at the open.
                 OrderKind::Market => match order.tif {
-                    TimeInForce::AtOpen => Some(fill(bar.open)),
-                    TimeInForce::AtClose => Some(fill(bar.close)),
+                    // A print has no open or close to queue against, so these
+                    // keep resting until a bar event arrives.
+                    TimeInForce::AtOpen if mode == MatchMode::Bar => Some(fill(bar.open)),
+                    TimeInForce::AtClose if mode == MatchMode::Bar => Some(fill(bar.close)),
+                    TimeInForce::AtOpen | TimeInForce::AtClose => None,
+                    // "Next available price": the bar's open, or the print.
                     _ if order.parent_id.is_some() => Some(fill(bar.open)),
                     _ => None,
                 },
