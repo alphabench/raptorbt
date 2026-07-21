@@ -77,6 +77,9 @@ pub struct PyBacktestConfig {
     /// Probability a stop/market fill slips one tick against the trader.
     #[pyo3(get, set)]
     pub fill_prob_slippage: f64,
+    /// Fill resting limits from observed queue position (needs depth data).
+    #[pyo3(get, set)]
+    pub queue_fill_model: bool,
     /// Seed for the stochastic-fill RNG.
     #[pyo3(get, set)]
     pub fill_seed: u64,
@@ -109,6 +112,7 @@ impl PyBacktestConfig {
         fill_prob_slippage=0.0,
         fill_seed=0,
         bar_path_adaptive=false,
+        queue_fill_model=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -128,6 +132,7 @@ impl PyBacktestConfig {
         fill_prob_slippage: f64,
         fill_seed: u64,
         bar_path_adaptive: bool,
+        queue_fill_model: bool,
     ) -> Self {
         Self {
             initial_capital,
@@ -143,6 +148,7 @@ impl PyBacktestConfig {
             max_drawdown_pct,
             legacy_annualization,
             fill_prob_limit,
+            queue_fill_model,
             fill_prob_slippage,
             fill_seed,
             bar_path_adaptive,
@@ -200,6 +206,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             max_drawdown_pct: py_config.max_drawdown_pct,
             legacy_annualization: py_config.legacy_annualization,
             fill_prob_limit: py_config.fill_prob_limit,
+            queue_fill_model: py_config.queue_fill_model,
             fill_prob_slippage: py_config.fill_prob_slippage,
             fill_seed: py_config.fill_seed,
             bar_path_adaptive: py_config.bar_path_adaptive,

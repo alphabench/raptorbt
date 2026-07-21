@@ -10,6 +10,7 @@ use crate::execution::orders::{
 };
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
+use crate::execution::queue::QueueVerdict;
 use crate::portfolio::risk::RejectReason;
 
 impl EngineKernel {
@@ -168,6 +169,44 @@ impl EngineKernel {
     /// state may still refuse it (opening while a position is open, closing
     /// while flat), in which case the order rejects. A NaN fill price marks
     /// a market order, priced here by the fill-price model.
+
+    /// Queue verdict for a resting limit, or `None` when the queue model is
+    /// off or cannot see enough to judge — the caller then falls back to
+    /// `fill_prob_limit`.
+    ///
+    /// Only trade prints carry the size the model consumes, so bar events
+    /// always fall back: a bar's volume is not volume *at* the limit price.
+    fn queue_verdict(
+        &mut self,
+        order_id: u64,
+        kind: OrderKind,
+        status: OrderStatus,
+        side: OrderSide,
+        bar: &KernelBar,
+    ) -> Option<QueueVerdict> {
+        if !self.config.queue_fill_model || !self.stepping_trade {
+            return None;
+        }
+        let limit_price = match kind {
+            OrderKind::Limit { price } => price,
+            OrderKind::StopLimit { price, .. } if status == OrderStatus::Triggered => price,
+            _ => return None,
+        };
+        let direction = match side {
+            OrderSide::Buy => Direction::Long,
+            OrderSide::Sell => Direction::Short,
+        };
+        let verdict = self.queue.observe_print(
+            order_id,
+            limit_price,
+            direction,
+            &self.book,
+            bar.close,
+            bar.volume,
+        );
+        (verdict != QueueVerdict::Unknown).then_some(verdict)
+    }
+
     pub(crate) fn apply_match_outcome(
         &mut self,
         idx: usize,
@@ -218,9 +257,20 @@ impl EngineKernel {
         // market fills may instead slip one tick against the trader.
         let is_limit_fill = matches!(kind, OrderKind::Limit { .. })
             || (matches!(kind, OrderKind::StopLimit { .. }) && status == OrderStatus::Triggered);
-        if is_limit_fill && self.config.fill_prob_limit < 1.0 {
-            if self.fill_rng.next_f64() >= self.config.fill_prob_limit {
-                return; // untouched: still Accepted/Triggered, retries next bar
+        if is_limit_fill {
+            // The queue model reads the tape; it consumes no randomness, so
+            // enabling it must not shift the RNG stream for other orders.
+            let verdict = self.queue_verdict(id, kind, status, side, bar);
+            match verdict {
+                Some(QueueVerdict::Resting) => return,
+                Some(_) => {} // filled: through the level, or queue exhausted
+                None => {
+                    if self.config.fill_prob_limit < 1.0
+                        && self.fill_rng.next_f64() >= self.config.fill_prob_limit
+                    {
+                        return; // untouched: still Accepted/Triggered, retries next bar
+                    }
+                }
             }
         }
         let matched_price = if !is_limit_fill

@@ -17,8 +17,9 @@ use crate::execution::orders::{
 };
 use crate::accounts::{AccountMode, MarginBook};
 use crate::execution::fill::FillRng;
+use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
-use crate::data::{QuoteTick, TradeTick};
+use crate::data::{OrderBook, QuoteTick, TradeTick};
 use crate::instruments::InstrumentSpec;
 use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
 use crate::portfolio::position::ExitDetails;
@@ -191,10 +192,14 @@ pub struct EngineKernel {
     /// Events produced between steps (order accepted/canceled), delivered
     /// at the front of the next step's event list.
     pub(crate) pending_events: Vec<EngineEvent>,
-    /// Latest observed book, recorded from quotes. Not yet used for fill
-    /// pricing — fills price off trade prints.
-    best_bid: Option<Price>,
-    best_ask: Option<Price>,
+    /// Latest observed book, from quotes (L1) or depth (L2). Fills still
+    /// price off trade prints; the book informs queue position.
+    pub(crate) book: OrderBook,
+    /// Per-order queue estimates, used only when `queue_fill_model` is on.
+    pub(crate) queue: QueueTracker,
+    /// Whether the current step is driven by a trade print. Only a print
+    /// carries volume at a price, which is what the queue model consumes.
+    pub(crate) stepping_trade: bool,
 }
 
 impl EngineKernel {
@@ -240,8 +245,9 @@ impl EngineKernel {
             spec: None,
             orders: OrderEngine::new(),
             pending_events: Vec::new(),
-            best_bid: None,
-            best_ask: None,
+            book: OrderBook::new(),
+            queue: QueueTracker::new(),
+            stepping_trade: false,
         }
     }
 
@@ -599,21 +605,20 @@ impl EngineKernel {
     /// Returns any acknowledgments queued since the last step, so orders
     /// submitted from a quote handler surface in order.
     pub fn step_quote(&mut self, quote: &QuoteTick) -> Vec<EngineEvent> {
-        self.best_bid = Some(quote.bid);
-        self.best_ask = Some(quote.ask);
+        self.book.apply_quote(quote.timestamp, quote.bid, quote.ask);
         std::mem::take(&mut self.pending_events)
     }
 
     /// Best bid from the most recent quote, if any.
     #[inline]
     pub fn best_bid(&self) -> Option<Price> {
-        self.best_bid
+        self.book.best_bid()
     }
 
     /// Best ask from the most recent quote, if any.
     #[inline]
     pub fn best_ask(&self) -> Option<Price> {
-        self.best_ask
+        self.book.best_ask()
     }
 
     /// Shared body of the bar and tick step paths.
@@ -628,6 +633,7 @@ impl EngineKernel {
         input: StepInput,
         mode: StepMode,
     ) -> Vec<EngineEvent> {
+        self.stepping_trade = mode == StepMode::Trade;
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
@@ -1347,6 +1353,142 @@ mod tests {
         // Event 6 matches it.
         let events = kernel.step_trade(6, &trade(6, 100.0, 1.0), StepInput::default());
         assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+    }
+
+    #[test]
+    fn queue_model_is_off_by_default() {
+        // A resting limit fills on the first print that reaches it, exactly
+        // as before the queue model existed.
+        let mut kernel = make_kernel();
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 99.0 },
+            TimeInForce::Gtc,
+            0,
+            0,
+            "q".to_string(),
+            None,
+            None,
+        );
+        let events = kernel.step_trade(1, &trade(1, 99.0, 1.0), StepInput::default());
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+    }
+
+    #[test]
+    fn queue_model_holds_an_order_behind_displayed_size() {
+        let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+        // 300 lots displayed at our price: we join behind them.
+        kernel.book.apply_depth(&crate::data::DepthTick::from_levels(
+            0,
+            &[crate::data::BookLevel { price: 99.0, size: 300.0 }],
+            &[crate::data::BookLevel { price: 101.0, size: 100.0 }],
+        ));
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 99.0 },
+            TimeInForce::Gtc,
+            0,
+            0,
+            "q".to_string(),
+            None,
+            None,
+        );
+
+        // A small print at our price does not reach us.
+        let events = kernel.step_trade(1, &trade(1, 99.0, 100.0), StepInput::default());
+        assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+        assert!(!kernel.is_in_position());
+
+        // Enough volume prints through the queue ahead, and we fill.
+        let events = kernel.step_trade(2, &trade(2, 99.0, 250.0), StepInput::default());
+        assert!(
+            events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+            "the queue ahead was exhausted, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn queue_model_fills_when_the_level_trades_through() {
+        let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+        kernel.book.apply_depth(&crate::data::DepthTick::from_levels(
+            0,
+            &[crate::data::BookLevel { price: 99.0, size: 100_000.0 }],
+            &[crate::data::BookLevel { price: 101.0, size: 100.0 }],
+        ));
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 99.0 },
+            TimeInForce::Gtc,
+            0,
+            0,
+            "q".to_string(),
+            None,
+            None,
+        );
+        // A huge queue ahead, but the print cleared the level entirely.
+        let events = kernel.step_trade(1, &trade(1, 98.0, 1.0), StepInput::default());
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+    }
+
+    #[test]
+    fn queue_model_falls_back_to_probability_on_bar_events() {
+        // A bar's volume is not volume at the limit price, so the queue
+        // model must not consume it; fill_prob_limit=1.0 fills as always.
+        let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Close,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+        kernel.book.apply_depth(&crate::data::DepthTick::from_levels(
+            0,
+            &[crate::data::BookLevel { price: 99.0, size: 100_000.0 }],
+            &[crate::data::BookLevel { price: 101.0, size: 100.0 }],
+        ));
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Limit { price: 99.0 },
+            TimeInForce::Gtc,
+            0,
+            0,
+            "q".to_string(),
+            None,
+            None,
+        );
+        let events = kernel.step(1, &bar(1, 98.5), StepInput::default());
+        assert!(
+            events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+            "bar events fall back to fill_prob_limit, got {events:?}"
+        );
     }
 
     #[test]

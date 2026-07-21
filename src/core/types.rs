@@ -347,6 +347,16 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub fill_prob_slippage: f64,
 
+    /// Fill resting limits from observed queue position instead of
+    /// `fill_prob_limit`'s coin flip.
+    ///
+    /// Off by default: enabling it changes fills, so it is opt-in rather
+    /// than something a user gets for happening to supply a book. Needs
+    /// depth data and trade prints; falls back to `fill_prob_limit` on bar
+    /// events and wherever the queue cannot be estimated.
+    #[serde(default)]
+    pub queue_fill_model: bool,
+
     /// Seed for the stochastic-fill RNG; same seed, same fills.
     #[serde(default)]
     pub fill_seed: u64,
@@ -380,6 +390,7 @@ impl Default for BacktestConfig {
             max_drawdown_pct: None,
             legacy_annualization: false,
             fill_prob_limit: 1.0,
+            queue_fill_model: false,
             fill_prob_slippage: 0.0,
             fill_seed: 0,
             bar_path_adaptive: false,
