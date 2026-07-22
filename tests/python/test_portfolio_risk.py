@@ -42,7 +42,7 @@ class _EnterEverything(Strategy):
     def on_bar(self, ctx):
         self.enter(size_frac=self.size_frac)
         open_now = sum(
-            1 for symbol in ("AAA", "BBB", "CCC") if ctx.position(symbol) is not None
+            1 for symbol in ("AAA", "BBB", "CCC") if ctx.position_for(symbol) is not None
         )
         self.max_concurrent = max(self.max_concurrent, open_now)
 

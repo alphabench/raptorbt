@@ -93,7 +93,7 @@ class TestPortfolioSession:
                     self.enter(size_frac=0.4)
                 if ctx.idx == 2:
                     self.snapshots.append(
-                        (ctx.symbol, ctx.position() is not None, ctx.equity, ctx.cash)
+                        (ctx.symbol, ctx.position is not None, ctx.equity, ctx.cash)
                     )
 
         data = {
@@ -179,7 +179,7 @@ class TestPortfolioSession:
                     self.enter()
                 # From BBB's bar 2, flatten AAA by symbol routing.
                 if ctx.symbol == "BBB" and ctx.idx == 2:
-                    if ctx.position("AAA") is not None:
+                    if ctx.position_for("AAA") is not None:
                         self.close_position(symbol="AAA")
 
         data = {
@@ -199,7 +199,7 @@ class TestPortfolioSession:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.enter(size_frac=0.3)
-                elif ctx.idx == 3 and ctx.position() is not None:
+                elif ctx.idx == 3 and ctx.position is not None:
                     self.close_position()
 
         data = {

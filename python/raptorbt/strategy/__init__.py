@@ -11,6 +11,7 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.tick_runner import run_tick_strategy
+from raptorbt.strategy.tick_stream import TickStrategyStream
 from raptorbt.strategy.config import StrategyConfig
 from raptorbt.strategy.context import (
     Bar,
@@ -30,6 +31,7 @@ __all__ = [
     "QuoteTick",
     "TradeTick",
     "run_tick_strategy",
+    "TickStrategyStream",
     "MarketOrder",
     "Strategy",
     "StrategyConfig",

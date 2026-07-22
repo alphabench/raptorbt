@@ -85,7 +85,7 @@ class TestPortfolioMargin:
                 if ctx.idx == 0:
                     self.enter(size_frac=0.25)
                 if ctx.idx == 2:
-                    self.seen.append((ctx.symbol, ctx.position() is not None))
+                    self.seen.append((ctx.symbol, ctx.position is not None))
 
         data = {
             "AAA": _bars([100.0, 101.0, 102.0]),

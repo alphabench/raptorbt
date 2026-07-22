@@ -873,3 +873,103 @@ fn depth_events_do_not_fill_resting_orders() {
     }
     assert!(!session.kernel(0).is_in_position(), "a book must not fill an order");
 }
+
+#[test]
+fn push_tick_matches_batch_replay() {
+    // A live session pushing rows one at a time must land on the exact
+    // numbers a batch replay of the same rows produces.
+    let rows = [(10, 100.0, 99.0, 101.0), (20, 102.0, 0.0, 0.0), (30, 105.0, 104.0, 106.0)];
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+
+    let batch = {
+        let mut s = EventSession::new(config.clone());
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.set_ticks(a, tick_data(&rows));
+        s.seal();
+        let mut first = true;
+        while s.current().is_some() {
+            let input = if first {
+                first = false;
+                StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() }
+            } else {
+                StepInput::default()
+            };
+            s.apply_current(input);
+        }
+        s.finish()
+    };
+
+    let streamed = {
+        let mut s = EventSession::new(config);
+        let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+        s.seal();
+        let mut first = true;
+        for (ts, ltp, bid, ask) in rows {
+            // tick_data() stamps buy/sell deltas of 1.0/0.0 per row.
+            s.push_tick(a, ts, ltp, bid, ask, 1.0, 0.0);
+            while s.current().is_some() {
+                let input = if first {
+                    first = false;
+                    StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() }
+                } else {
+                    StepInput::default()
+                };
+                s.apply_current(input);
+            }
+        }
+        s.finish()
+    };
+
+    assert_eq!(batch.result.equity_curve, streamed.result.equity_curve);
+    assert_eq!(batch.result.trades.len(), streamed.result.trades.len());
+    assert_eq!(batch.instruments[0].pnl, streamed.instruments[0].pnl);
+}
+
+#[test]
+fn pushes_append_behind_warmup_bars() {
+    // Batch bars attached before the first push merge ahead of it, and the
+    // per-instrument ordinal keeps counting across the seam — order matching
+    // depends on local_idx staying monotone.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_bars(a, bars(0, &[100.0, 101.0]));
+
+    // No explicit seal: the first push seals implicitly.
+    session.push_tick(a, 30, 102.0, 0.0, 0.0, 0.0, 0.0);
+
+    let mut seen = Vec::new();
+    while let Some(entry) = session.current() {
+        let kind = match entry.data {
+            ScheduleData::Bar(_) => "bar",
+            ScheduleData::Trade(_) => "trade",
+            _ => "other",
+        };
+        seen.push((kind, entry.local_idx, entry.timestamp()));
+        session.apply_current(StepInput::default());
+    }
+    assert_eq!(seen, vec![("bar", 0, 0), ("bar", 1, 10), ("trade", 2, 30)]);
+}
+
+#[test]
+fn remaining_counts_unapplied_events() {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.seal();
+    assert_eq!(session.remaining(), 0);
+
+    // One row carrying both a print and a book appends two events.
+    assert_eq!(session.push_tick(a, 10, 100.0, 99.0, 101.0, 0.0, 0.0), 2);
+    assert_eq!(session.remaining(), 2);
+    session.apply_current(StepInput::default());
+    assert_eq!(session.remaining(), 1);
+    session.apply_current(StepInput::default());
+    assert_eq!(session.remaining(), 0);
+
+    session.push_bar(
+        a,
+        KernelBar { timestamp: 20, open: 100.0, high: 101.0, low: 99.0, close: 100.5, volume: 10.0 },
+    );
+    assert_eq!(session.remaining(), 1);
+}

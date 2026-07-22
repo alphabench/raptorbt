@@ -105,6 +105,126 @@ def _as_tick_arrays(arrays: dict) -> dict[str, np.ndarray]:
     return out
 
 
+def setup_tick_strategy(strategy, ctx, symbols, primary_bars):
+    """Reset a strategy and build the per-symbol runner state.
+
+    Returns ``(clocks, streams, primary)``: one clock per symbol, the
+    stream/indicator routing declared in ``on_start``, and the primary bar
+    aggregators (empty when ``primary_bars`` is ``None``).
+    """
+    strategy.drain_orders()
+    strategy.drain_commands()
+    strategy._bar_subscriptions = []
+    strategy._indicators = []
+    from raptorbt.strategy.cache import Cache
+    from raptorbt.strategy.clock import Clock
+
+    strategy.clock = Clock()
+    strategy.cache = Cache()
+    strategy.on_start(ctx)
+
+    # One clock per symbol: a timer set in on_start belongs to every symbol,
+    # not to whichever one's event happens to cross the threshold first.
+    clocks = {symbol: strategy.clock.clone_schedule() for symbol in symbols}
+
+    streams = StreamState(strategy, symbols)
+    # One primary aggregator per symbol, feeding on_bar and the indicators
+    # registered without a stream_id. Bars from ticks are a view only.
+    primary = (
+        {symbol: BarAggregator(*primary_bars) for symbol in symbols}
+        if primary_bars is not None
+        else {}
+    )
+    return clocks, streams, primary
+
+
+def drive_tick_events(strategy, ctx, session, symbols, clocks, streams, primary, apply_commands):
+    """Drain every pending schedule event through the strategy's hooks.
+
+    Shared by the batch tick runner and the live stream: both produce the
+    same schedule shapes, so one dispatch loop keeps their semantics
+    identical. Returns once the session has no pending event.
+    """
+    while True:
+        current = session.current_event()
+        if current is None:
+            break
+        kind, instrument, local_idx, ts, a, b, c, d, e = current
+        symbol = symbols[instrument]
+        ctx.symbol = symbol
+        ctx.idx = local_idx
+
+        # Clock first: scheduled times precede the data revealing them.
+        strategy.clock = clocks[symbol]
+        for time_event in strategy.clock._advance(ts):
+            strategy.on_time_event(ctx, time_event)
+
+        if kind == "bar":
+            # Real bars in a tick session: warmup history or a pushed live
+            # bar. These execute — same semantics as the portfolio runner.
+            ctx._bar = Bar(ts, a, b, c, d, e)
+            ctx._last_price[symbol] = d
+            streams.push(strategy, ctx, ts, a, b, c, d, e, symbol=symbol)
+            strategy.on_bar(ctx)
+            apply_commands(instrument, local_idx, ts)
+            events = session.apply_current(**drain_intents(strategy, symbol, local_idx))
+            dispatch_events(strategy, ctx, events)
+            continue
+
+        if kind == "book":
+            bids, asks = session.current_depth() or ((), ())
+            snapshot = BookSnapshot(ts, tuple(bids), tuple(asks), symbol)
+            ctx._book[symbol] = snapshot
+            if snapshot.best_bid is not None:
+                ctx._best_bid[symbol] = snapshot.best_bid
+            if snapshot.best_ask is not None:
+                ctx._best_ask[symbol] = snapshot.best_ask
+            strategy.on_order_book(ctx, snapshot)
+            apply_commands(instrument, local_idx, ts)
+            # A book cannot carry an entry: nothing traded at it.
+            dispatch_events(strategy, ctx, session.apply_current())
+            continue
+
+        if kind == "quote":
+            quote = QuoteTick(ts, a, b, symbol)
+            ctx._best_bid[symbol] = a
+            ctx._best_ask[symbol] = b
+            ctx._quote = quote
+            strategy.on_quote(ctx, quote)
+            ctx._quote = None
+            apply_commands(instrument, local_idx, ts)
+            # A quote cannot carry an entry: nothing traded at it.
+            dispatch_events(strategy, ctx, session.apply_current())
+            continue
+
+        tick = TradeTick(ts, a, b, symbol)
+
+        # A bar that completed on this print closed strictly before it, so it
+        # dispatches first — the same rule composite bars follow.
+        aggregator = primary.get(symbol)
+        if aggregator is not None:
+            completed = aggregator.push_trade(ts, a, b)
+            if completed is not None:
+                ctx._bar = Bar(*completed)
+                for indicator in streams.primary_indicators(symbol):
+                    indicator.update_bar(
+                        ctx._bar.open, ctx._bar.high, ctx._bar.low, ctx._bar.close
+                    )
+                strategy.on_bar(ctx)
+                apply_commands(instrument, local_idx, ts)
+
+        streams.push_trade(strategy, ctx, ts, a, b, symbol=symbol)
+
+        ctx._last_price[symbol] = a
+        ctx._tick = tick
+        strategy.on_trade_tick(ctx, tick)
+        ctx._tick = None
+        apply_commands(instrument, local_idx, ts)
+
+        events = session.apply_current(**drain_intents(strategy, symbol, local_idx))
+        dispatch_events(strategy, ctx, events)
+
+
 def run_tick_strategy(
     strategy: Strategy | type[Strategy],
     ticks: dict[str, dict],
@@ -182,99 +302,14 @@ def run_tick_strategy(
     session.seal()
 
     ctx = TickContext(session, symbols, arrays)
-    strategy.drain_orders()
-    strategy.drain_commands()
-    strategy._bar_subscriptions = []
-    strategy._indicators = []
-    from raptorbt.strategy.cache import Cache
-    from raptorbt.strategy.clock import Clock
-
-    strategy.clock = Clock()
-    strategy.cache = Cache()
-    strategy.on_start(ctx)
-
-    # One clock per symbol: a timer set in on_start belongs to every symbol,
-    # not to whichever one's event happens to cross the threshold first.
-    clocks = {symbol: strategy.clock.clone_schedule() for symbol in symbols}
-
-    streams = StreamState(strategy, symbols)
-    # One primary aggregator per symbol, feeding on_bar and the indicators
-    # registered without a stream_id. Bars from ticks are a view only.
-    primary = (
-        {symbol: BarAggregator(*primary_bars) for symbol in symbols}
-        if primary_bars is not None
-        else {}
-    )
+    clocks, streams, primary = setup_tick_strategy(strategy, ctx, symbols, primary_bars)
 
     id_map: dict[str, tuple[int, int]] = {}
     apply_commands = apply_commands_on(strategy, session, ctx, symbols, id_map)
 
-    while True:
-        current = session.current_event()
-        if current is None:
-            break
-        kind, instrument, local_idx, ts, a, b, _c, _d, _e = current
-        symbol = symbols[instrument]
-        ctx.symbol = symbol
-        ctx.idx = local_idx
-
-        # Clock first: scheduled times precede the data revealing them.
-        strategy.clock = clocks[symbol]
-        for time_event in strategy.clock._advance(ts):
-            strategy.on_time_event(ctx, time_event)
-
-        if kind == "book":
-            bids, asks = session.current_depth() or ((), ())
-            snapshot = BookSnapshot(ts, tuple(bids), tuple(asks), symbol)
-            ctx._book[symbol] = snapshot
-            if snapshot.best_bid is not None:
-                ctx._best_bid[symbol] = snapshot.best_bid
-            if snapshot.best_ask is not None:
-                ctx._best_ask[symbol] = snapshot.best_ask
-            strategy.on_order_book(ctx, snapshot)
-            apply_commands(instrument, local_idx, ts)
-            # A book cannot carry an entry: nothing traded at it.
-            dispatch_events(strategy, ctx, session.apply_current())
-            continue
-
-        if kind == "quote":
-            quote = QuoteTick(ts, a, b, symbol)
-            ctx._best_bid[symbol] = a
-            ctx._best_ask[symbol] = b
-            ctx._quote = quote
-            strategy.on_quote(ctx, quote)
-            ctx._quote = None
-            apply_commands(instrument, local_idx, ts)
-            # A quote cannot carry an entry: nothing traded at it.
-            dispatch_events(strategy, ctx, session.apply_current())
-            continue
-
-        tick = TradeTick(ts, a, b, symbol)
-
-        # A bar that completed on this print closed strictly before it, so it
-        # dispatches first — the same rule composite bars follow.
-        aggregator = primary.get(symbol)
-        if aggregator is not None:
-            completed = aggregator.push_trade(ts, a, b)
-            if completed is not None:
-                ctx._bar = Bar(*completed)
-                for indicator in streams.primary_indicators(symbol):
-                    indicator.update_bar(
-                        ctx._bar.open, ctx._bar.high, ctx._bar.low, ctx._bar.close
-                    )
-                strategy.on_bar(ctx)
-                apply_commands(instrument, local_idx, ts)
-
-        streams.push_trade(strategy, ctx, ts, a, b, symbol=symbol)
-
-        ctx._last_price[symbol] = a
-        ctx._tick = tick
-        strategy.on_trade_tick(ctx, tick)
-        ctx._tick = None
-        apply_commands(instrument, local_idx, ts)
-
-        events = session.apply_current(**drain_intents(strategy, symbol, local_idx))
-        dispatch_events(strategy, ctx, events)
+    drive_tick_events(
+        strategy, ctx, session, symbols, clocks, streams, primary, apply_commands
+    )
 
     strategy.on_stop(ctx)
     return session.finish()

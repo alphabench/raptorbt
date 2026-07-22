@@ -273,6 +273,83 @@ impl PyPortfolioSession {
         Ok(())
     }
 
+    /// Append one live feed row to the schedule tail.
+    ///
+    /// Seals first (idempotent), so batch data attached beforehand — warmup
+    /// bars, replayed history — merges ahead of everything pushed. A row
+    /// with `ltp > 0` appends a trade print; a row with both `bid > 0` and
+    /// `ask > 0` appends a quote after it. Returns how many events were
+    /// appended (0–2); drive them with `current_event()`/`apply_current()`.
+    #[pyo3(signature = (instrument, timestamp, ltp, bid=0.0, ask=0.0, buy_qty_delta=0.0, sell_qty_delta=0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn push_tick(
+        &mut self,
+        instrument: usize,
+        timestamp: i64,
+        ltp: f64,
+        bid: f64,
+        ask: f64,
+        buy_qty_delta: f64,
+        sell_qty_delta: f64,
+    ) -> PyResult<usize> {
+        Ok(self.session_mut()?.push_tick(
+            instrument,
+            timestamp,
+            ltp,
+            bid,
+            ask,
+            buy_qty_delta,
+            sell_qty_delta,
+        ))
+    }
+
+    /// Append one live bar to the schedule tail (seals first, idempotent).
+    #[allow(clippy::too_many_arguments)]
+    fn push_bar(
+        &mut self,
+        instrument: usize,
+        timestamp: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> PyResult<()> {
+        self.session_mut()?.push_bar(
+            instrument,
+            KernelBar { timestamp, open, high, low, close, volume },
+        );
+        Ok(())
+    }
+
+    /// Append one live depth snapshot to the schedule tail.
+    ///
+    /// `bids`/`asks` are `(price, size)` lists, best level first.
+    fn push_depth(
+        &mut self,
+        instrument: usize,
+        timestamp: i64,
+        bids: Vec<(f64, f64)>,
+        asks: Vec<(f64, f64)>,
+    ) -> PyResult<()> {
+        let to_levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
+            levels
+                .iter()
+                .filter(|(price, _)| *price > 0.0)
+                .map(|&(price, size)| BookLevel { price, size })
+                .collect()
+        };
+        let snapshot =
+            DepthTick::from_levels(timestamp, &to_levels(&bids), &to_levels(&asks));
+        self.session_mut()?.push_depth(instrument, snapshot);
+        Ok(())
+    }
+
+    /// Events pushed or merged but not yet applied.
+    fn remaining(&self) -> PyResult<usize> {
+        Ok(self.session_ref()?.remaining())
+    }
+
     /// Number of scheduled events.
     fn __len__(&self) -> PyResult<usize> {
         Ok(self.session_ref()?.len())

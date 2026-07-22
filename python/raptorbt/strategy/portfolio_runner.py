@@ -7,6 +7,14 @@ with ``ctx.symbol`` naming the instrument whose bar just closed. Orders and
 closes route to the current symbol by default, or explicitly via
 ``symbol=``.
 
+Position state follows the single-instrument context's style:
+``ctx.position`` / ``ctx.is_flat`` / ``ctx.is_net_long`` /
+``ctx.is_net_short`` / ``ctx.net_position`` are properties reading the
+CURRENT symbol, so a strategy written against ``StrategyContext``
+(``if ctx.position is None``) behaves identically here. Cross-symbol
+lookups are explicit methods: ``position_for(symbol)``,
+``positions(symbol=None)``, ``net_position_for(symbol)``.
+
 With ``account_type="margin"`` the instruments also share one pool of locked
 initial margin, so leverage applies portfolio-wide and a margin call halts
 every instrument at once.
@@ -74,7 +82,17 @@ class PortfolioContext:
 
     # -- portfolio state -----------------------------------------------------
 
-    def position(self, symbol: str | None = None):
+    @property
+    def position(self):
+        """Earliest open position of the current symbol, or ``None``.
+
+        A property, matching the single-instrument ``StrategyContext`` — the
+        same ``if ctx.position is None`` works on both paths. For another
+        symbol use :meth:`position_for`.
+        """
+        return self._session.position(self._index_of[self.symbol])
+
+    def position_for(self, symbol: str | None = None):
         """Earliest open position of a symbol, or ``None``."""
         return self._session.position(self._index_of[symbol or self.symbol])
 
@@ -90,18 +108,26 @@ class PortfolioContext:
         """
         self._session.set_underlying_price(self._instrument_index(symbol), price)
 
-    def net_position(self, symbol: str | None = None) -> float:
+    @property
+    def net_position(self) -> float:
+        """Signed unit total across the current symbol's open positions."""
+        return self.net_position_for(self.symbol)
+
+    def net_position_for(self, symbol: str | None = None) -> float:
         """Signed unit total across a symbol's open positions."""
         return sum(p.size * p.direction for p in self.positions(symbol))
 
-    def is_net_long(self, symbol: str | None = None) -> bool:
-        return self.net_position(symbol) > 0.0
+    @property
+    def is_net_long(self) -> bool:
+        return self.net_position > 0.0
 
-    def is_net_short(self, symbol: str | None = None) -> bool:
-        return self.net_position(symbol) < 0.0
+    @property
+    def is_net_short(self) -> bool:
+        return self.net_position < 0.0
 
-    def is_flat(self, symbol: str | None = None) -> bool:
-        return not self.positions(symbol)
+    @property
+    def is_flat(self) -> bool:
+        return not self.positions()
 
     @property
     def equity(self) -> float:

@@ -121,6 +121,22 @@ migrate.
 
 ### Added
 
+- **Incremental (live) session feed.** `PyPortfolioSession` gains
+  `push_tick`, `push_bar`, `push_depth` and `remaining()`: events append to
+  the schedule tail in arrival order after `seal()` (idempotent — batch
+  warmup data merges ahead of the first push), and the existing
+  `current_event()`/`apply_current()` loop drives them. A batch replay and
+  a push-per-row stream of the same rows produce identical results.
+
+- **`TickStrategyStream`** — a Python driver for open-ended live feeds.
+  Construct with symbols and optional `warmup_bars`, then `push_tick` /
+  `push_bar` / `push_depth` as events arrive; every strategy hook a push
+  triggers fires before it returns. `finish()` closes out and computes
+  metrics. Shares its dispatch loop with `run_tick_strategy`, with one
+  addition in streaming sessions: real bars (warmup or pushed) *execute* —
+  they match orders and mark equity — unlike bars aggregated from prints
+  via `primary_bars`, which remain a view.
+
 - **Four deferred execution knobs**, all default-off:
 
   `limit_slippage` applies an adverse adjustment to limit fills, which
@@ -373,6 +389,15 @@ migrate.
 
 ### Changed
 
+- **`PortfolioContext` position state matches `StrategyContext`.**
+  `position`, `positions` reads for the current symbol, plus `is_flat` /
+  `is_net_long` / `is_net_short` / `net_position`, are now PROPERTIES on
+  the portfolio and tick contexts, exactly as on the single-instrument
+  context — so a bar-style strategy (`if ctx.position is None`) behaves
+  identically on the live stream instead of silently seeing a truthy bound
+  method and never entering. Cross-symbol lookups are explicit methods:
+  `position_for(symbol)`, `positions(symbol=None)`,
+  `net_position_for(symbol)`.
 - Stop and take-profit fills route through `FillModel`, which handles
   gap-through for all four `(direction, is_entry)` cases; the engine previously
   inlined a long/short-only copy. Behavior is unchanged.

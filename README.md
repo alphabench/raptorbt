@@ -454,8 +454,10 @@ New in 0.5.0:
   calls): `order(client_id)` / `orders_open()` / `is_order_open()`,
   `closed_trades()`, `realized_pnl(symbol=None)`.
 - **Portfolio view** — `ctx.net_position` / `is_net_long` / `is_net_short`
-  / `is_flat` (signed across hedged positions); per-symbol variants on the
-  portfolio context.
+  / `is_flat` (signed across hedged positions) — properties on every
+  context; per-symbol lookups via `position_for(symbol)` /
+  `positions(symbol)` / `net_position_for(symbol)` on the portfolio
+  context.
 
 ### Multi-Instrument Strategies
 
@@ -474,7 +476,7 @@ class Rotation(raptorbt.Strategy):
             # Orders and closes can route across symbols explicitly.
             self.submit_order(orders.Limit(side="buy", price=2400.0,
                                            units=10.0), symbol="TCS")
-            if ctx.position("RELIANCE") is not None:
+            if ctx.position_for("RELIANCE") is not None:
                 self.close_position(symbol="RELIANCE")
 
 result = raptorbt.run_portfolio_strategy(
@@ -492,7 +494,9 @@ result.per_instrument         # per-symbol trades / pnl / rejections
 
 `ctx` in portfolio runs is a `PortfolioContext`: `ctx.bar` / `ctx.symbol` /
 `ctx.idx` (local to the symbol), `ctx.series(symbol)` for full arrays,
-`ctx.position(symbol)` / `ctx.positions(symbol)`, and portfolio-level
+`ctx.position` / `ctx.is_flat` (properties for the current symbol, same as the
+single-instrument context), `ctx.position_for(symbol)` /
+`ctx.positions(symbol)`, and portfolio-level
 `ctx.equity` / `ctx.cash`. Composite-bar subscriptions are single-instrument
 for now, and one-cancels-other links cannot span symbols.
 
@@ -885,7 +889,7 @@ class Scalper(raptorbt.Strategy):
     def on_trade_tick(self, ctx, tick):
         # ctx.best_bid / ctx.best_ask are the book observed BEFORE this
         # print — the quote from the same feed row arrives next.
-        if not self.wide and ctx.is_flat() and ctx.best_bid is not None:
+        if not self.wide and ctx.is_flat and ctx.best_bid is not None:
             self.submit_order(orders.Limit(side="buy", price=ctx.best_bid, units=10))
 
     def on_bar(self, ctx):

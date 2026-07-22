@@ -137,6 +137,9 @@ pub struct EventSession {
     /// Pending per-instrument depth, merged at seal.
     depth_input: Vec<Vec<DepthTick>>,
     schedule: Vec<ScheduleEntry>,
+    /// Next per-instrument event ordinal, shared by the batch merge and the
+    /// streaming pushes so `local_idx` stays monotone across both.
+    local_idx_next: Vec<usize>,
     cursor: usize,
     account: SharedAccount,
     last_close: Vec<Option<f64>>,
@@ -171,6 +174,7 @@ impl EventSession {
             depth: Vec::new(),
             depth_input: Vec::new(),
             schedule: Vec::new(),
+            local_idx_next: Vec::new(),
             cursor: 0,
             account: SharedAccount::new(mode, pool),
             last_close: Vec::new(),
@@ -218,6 +222,7 @@ impl EventSession {
         self.bars.push(Vec::new());
         self.ticks.push(None);
         self.depth_input.push(Vec::new());
+        self.local_idx_next.push(0);
         self.last_close.push(None);
         self.last_seen.push(None);
         self.kernels.len() - 1
@@ -324,7 +329,6 @@ impl EventSession {
                 .collect();
             feed.add_stream(events);
         }
-        let mut counters = vec![0usize; self.bars.len()];
         for event in feed {
             let instrument = event.instrument as usize;
             let data = match event.payload {
@@ -340,11 +344,77 @@ impl EventSession {
                 EventPayload::Quote(q) => ScheduleData::Quote(q),
                 EventPayload::Depth(d) => ScheduleData::Depth(d),
             };
-            let local_idx = counters[instrument];
-            counters[instrument] += 1;
+            let local_idx = self.local_idx_next[instrument];
+            self.local_idx_next[instrument] += 1;
             self.schedule.push(ScheduleEntry { instrument, local_idx, data });
         }
         self.sealed = true;
+    }
+
+    /// Append one entry to the schedule tail with the next local ordinal.
+    ///
+    /// Seals first (idempotent), so any batch data attached beforehand —
+    /// warmup bars, replayed history — merges ahead of everything pushed.
+    /// Pushed events land in arrival order: in a live session, arrival
+    /// order *is* the schedule.
+    fn push_entry(&mut self, instrument: usize, data: ScheduleData) {
+        self.seal();
+        let local_idx = self.local_idx_next[instrument];
+        self.local_idx_next[instrument] += 1;
+        self.schedule.push(ScheduleEntry { instrument, local_idx, data });
+    }
+
+    /// Append a live feed row: a trade print when `ltp > 0`, then a quote
+    /// when both sides of the book are present — the same split
+    /// [`tick_data_to_events`] applies to batch arrays. Returns how many
+    /// events were appended (0..=2).
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_tick(
+        &mut self,
+        instrument: usize,
+        timestamp: i64,
+        ltp: f64,
+        bid: f64,
+        ask: f64,
+        buy_qty_delta: f64,
+        sell_qty_delta: f64,
+    ) -> usize {
+        let mut appended = 0;
+        if ltp > 0.0 {
+            let size = buy_qty_delta.abs() + sell_qty_delta.abs();
+            let signed_size = buy_qty_delta.abs() - sell_qty_delta.abs();
+            self.push_entry(
+                instrument,
+                ScheduleData::Trade(TradeTick { timestamp, price: ltp, size, signed_size }),
+            );
+            appended += 1;
+        }
+        if bid > 0.0 && ask > 0.0 {
+            self.push_entry(
+                instrument,
+                ScheduleData::Quote(QuoteTick { timestamp, bid, ask }),
+            );
+            appended += 1;
+        }
+        appended
+    }
+
+    /// Append a live bar to the schedule tail.
+    pub fn push_bar(&mut self, instrument: usize, bar: KernelBar) {
+        self.push_entry(instrument, ScheduleData::Bar(bar));
+    }
+
+    /// Append a live depth snapshot to the schedule tail.
+    pub fn push_depth(&mut self, instrument: usize, snapshot: DepthTick) {
+        let slot = self.depth.len() as u32;
+        let timestamp = snapshot.timestamp;
+        self.depth.push(snapshot);
+        self.push_entry(instrument, ScheduleData::Depth(DepthRef { slot, timestamp }));
+    }
+
+    /// Events pushed or merged but not yet applied.
+    pub fn remaining(&self) -> usize {
+        self.schedule.len() - self.cursor
     }
 
     /// Total scheduled events.
