@@ -211,6 +211,31 @@ class TestPerSymbolClock:
         )
         assert sorted(strategy.fired) == ["AAA", "BBB"]
 
+    def test_a_timer_fires_for_every_symbol_in_a_tick_run(self):
+        class S(raptorbt.Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_timer("beat", interval_ns=2, start_ns=2)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append(ctx.symbol)
+
+        def ticks(n):
+            return {
+                "timestamps": np.arange(n, dtype=np.int64),
+                "ltp": np.full(n, 100.0),
+            }
+
+        strategy = S()
+        raptorbt.run_tick_strategy(
+            strategy, {"AAA": ticks(6), "BBB": ticks(6)}, config=_config()
+        )
+        assert {sym for sym in strategy.fired} == {"AAA", "BBB"}
+        assert len(strategy.fired) == 4
+
     def test_a_single_symbol_run_is_unchanged(self):
         class S(raptorbt.Strategy):
             def __init__(self, config=None):
@@ -252,6 +277,73 @@ class TestLimitSlippage:
     def test_slippage_moves_the_fill_against_the_buyer(self):
         # 1% adverse on a 99.0 limit.
         assert self._fill_price(0.01) == pytest.approx(99.99)
+
+
+class TestOptionSettlement:
+    """An option's bars carry the option's price, so intrinsic value has to
+    come from an underlying the strategy supplies."""
+
+    def _run(self, underlying):
+        spec = raptorbt.InstrumentSpec.option(
+            "CE", expiration_ns=3, strike=100.0, right="call", lot_size=1.0
+        )
+
+        class S(raptorbt.Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter(size_frac=0.5)
+                if underlying is not None:
+                    ctx.set_underlying_price(underlying)
+
+        # The option decays to 0.5 while spot stays well above the strike.
+        px = np.array([7.0, 6.0, 0.5, 0.5])
+        bars = {
+            "timestamps": np.arange(4, dtype=np.int64),
+            "open": px, "high": px, "low": px, "close": px,
+            "volume": np.ones(4),
+        }
+        result = raptorbt.run_strategy_backtest(
+            S(), **bars, config=_config(), instrument=spec
+        )
+        return result.trades()[0]
+
+    def test_without_an_underlying_it_settles_at_its_own_close(self):
+        assert self._run(None).exit_price == pytest.approx(0.5)
+
+    def test_with_an_underlying_it_settles_to_intrinsic(self):
+        # Spot 112 against a 100 strike is worth 12, not the 0.5 the
+        # contract last printed at.
+        assert self._run(112.0).exit_price == pytest.approx(12.0)
+
+    def test_an_out_of_the_money_option_settles_worthless(self):
+        assert self._run(95.0).exit_price == pytest.approx(0.0)
+
+    def test_the_underlying_routes_per_symbol_in_portfolio_runs(self):
+        spec = raptorbt.InstrumentSpec.option(
+            "CE", expiration_ns=3, strike=100.0, right="call", lot_size=1.0
+        )
+
+        class S(raptorbt.Strategy):
+            def on_bar(self, ctx):
+                if ctx.symbol == "CE":
+                    if ctx.idx == 0:
+                        self.enter(size_frac=0.5)
+                    ctx.set_underlying_price(112.0)
+
+        px = np.array([7.0, 6.0, 0.5, 0.5])
+        opt = {
+            "timestamps": np.arange(4, dtype=np.int64),
+            "open": px, "high": px, "low": px, "close": px,
+            "volume": np.ones(4),
+        }
+        result = raptorbt.run_portfolio_strategy(
+            S(),
+            {"CE": opt, "OTHER": _flat_bars(4)},
+            config=_config(),
+            instruments={"CE": spec},
+        )
+        settled = [t for t in result.result.trades() if t.symbol == "CE"]
+        assert settled[0].exit_price == pytest.approx(12.0)
 
 
 class TestSettlementFees:

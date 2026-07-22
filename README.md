@@ -540,7 +540,17 @@ costs, reporting `exit_reason == "Liquidation"`.
 
 Options settle at their own last close unless you supply an underlying —
 an option's bars carry the option's price, so intrinsic value has to come
-from somewhere else.
+from somewhere else:
+
+```python
+class Hold(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        # From whatever index series the strategy already tracks.
+        ctx.set_underlying_price(spot_close[ctx.idx])
+```
+
+Without it a 100-strike call whose own price decayed to 0.50 settles at
+0.50, even with spot at 112 — where intrinsic is 12.00.
 
 ### Execution Algorithms
 

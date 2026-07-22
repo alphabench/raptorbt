@@ -484,6 +484,13 @@ impl PyPortfolioSession {
         Ok(())
     }
 
+    /// Set the underlying price one instrument settles its options against.
+    #[pyo3(signature = (instrument, price=None))]
+    fn set_underlying_price(&mut self, instrument: usize, price: Option<f64>) -> PyResult<()> {
+        self.session_mut()?.kernel_mut(instrument).set_underlying_price(price);
+        Ok(())
+    }
+
     fn request_close(&mut self, instrument: usize, position_id: u64) -> PyResult<()> {
         self.session_mut()?.kernel_mut(instrument).request_close(position_id);
         Ok(())

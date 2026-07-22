@@ -30,9 +30,10 @@ migrate.
   `settlement_value(close, None)`, and the `None` meant the option branch
   could never match, so every option settled at its own last close no
   matter how far from intrinsic that was. The strategy can now supply an
-  underlying via `set_underlying_price`; without one, contracts still
-  settle at their own close, since an option's bars carry the option's
-  price and the engine has no second series to read.
+  underlying via `ctx.set_underlying_price(...)` — routed per symbol in
+  portfolio runs — and without one, contracts still settle at their own
+  close, since an option's bars carry the option's price and the engine has
+  no second series to read.
 
 - **`TimeInForce::Day` expired on the UTC date, not the trading date.**
   A session whose local hours cross UTC midnight would see DAY orders die

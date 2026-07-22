@@ -82,6 +82,14 @@ class PortfolioContext:
         """All open positions of a symbol, in opening order."""
         return self._session.positions(self._index_of[symbol or self.symbol])
 
+    def set_underlying_price(self, price: float | None, symbol: str | None = None) -> None:
+        """Price a symbol's options settle against at expiry.
+
+        Routes to the current symbol by default, so a strategy tracking an
+        index alongside its options can set it from ``on_bar``.
+        """
+        self._session.set_underlying_price(self._instrument_index(symbol), price)
+
     def net_position(self, symbol: str | None = None) -> float:
         """Signed unit total across a symbol's open positions."""
         return sum(p.size * p.direction for p in self.positions(symbol))

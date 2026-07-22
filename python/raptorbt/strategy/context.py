@@ -99,6 +99,16 @@ class StrategyContext:
         """All open positions, in opening order (hedging holds several)."""
         return self._session.positions()
 
+    def set_underlying_price(self, price: float | None) -> None:
+        """Price an option settles against at expiry.
+
+        An option's bars carry the option's price, so intrinsic value needs
+        the underlying from somewhere else — usually another series the
+        strategy is tracking. Without it, contracts settle at their own
+        close.
+        """
+        self._session.set_underlying_price(price)
+
     @property
     def free_capital(self) -> float:
         """Cash not locked as margin (margin accounts); all cash otherwise."""

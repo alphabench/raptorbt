@@ -430,6 +430,17 @@ impl PyKernelSession {
         Ok(self.runner_mut()?.kernel_mut().cancel_all_orders(idx))
     }
 
+    /// Set the underlying price used to settle options at expiry.
+    ///
+    /// An option's own bars carry the option's price, so intrinsic value
+    /// needs the underlying from somewhere else. Without it, contracts
+    /// settle at their own close.
+    #[pyo3(signature = (price=None))]
+    fn set_underlying_price(&mut self, price: Option<f64>) -> PyResult<()> {
+        self.runner_mut()?.kernel_mut().set_underlying_price(price);
+        Ok(())
+    }
+
     /// Register a TWAP schedule; returns its id.
     #[pyo3(signature = (units, side, slices, interval_ns, submitted_idx, submitted_ts, client_id, reduce_only=false))]
     #[allow(clippy::too_many_arguments)]
