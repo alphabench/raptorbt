@@ -250,6 +250,31 @@ bit-for-bit. `margin_init`/`margin_maint`/`maker_fee`/`taker_fee` are
 carried on the spec for the account layer that consumes them in a later
 0.5.x release.
 
+### Choosing a side
+
+New in 0.6.0. `enter()` opens in the session's configured `direction`, as it
+always has. To decide the side in code, call `enter_long()` / `enter_short()`
+(or `enter(side="buy"/"sell")`) — they take the same arguments and ignore the
+configured direction, so one run can hold long and short legs and a leg can
+flip side once it is flat:
+
+```python
+class CrossSectional(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.position is not None:
+            self.close_position()      # flat before flipping
+            return
+        if ctx.symbol in winners:
+            self.enter_long(size_frac=0.1)
+        elif ctx.symbol in losers:
+            self.enter_short(size_frac=0.1)
+```
+
+Under the default netting policy an order's side is authoritative for
+*opening*: with no position it opens in that side, while an order opposing an
+open position closes it (so bracket legs and take-profits behave as before).
+Mark an order `reduce_only` to guarantee it can only ever close.
+
 ### Typed Orders
 
 New in 0.5.0: alongside the `enter()`/`close_position()` sugar, strategies
