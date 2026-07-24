@@ -8,7 +8,7 @@ from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
 from raptorbt.strategy.config import StrategyConfig
 from raptorbt.strategy.context import StrategyContext
-from raptorbt.strategy.orders import ClosePosition, MarketOrder
+from raptorbt.strategy.orders import ClosePosition, Market, MarketOrder
 from raptorbt.strategy.orders.types import _OrderBase
 
 
@@ -143,14 +143,76 @@ class Strategy:
         size_frac: float | None = None,
         stop_price: float | None = None,
         target_price: float | None = None,
+        side: str | None = None,
     ) -> None:
-        """Queue a market entry in the session's direction for this bar."""
-        self._pending_orders.append(
-            MarketOrder(size_frac=size_frac, stop_price=stop_price, target_price=target_price)
+        """Queue a market entry for this bar.
+
+        Without ``side``, opens in the session's configured direction (the
+        run's ``direction``, or the leg's entry in ``directions``).
+
+        With ``side="buy"``/``"sell"``, the *order's* side decides: a leg
+        registered long can open a short and flip back on a later bar, once
+        flat. This is what a cross-sectional long/short book needs, where a
+        name's side follows its rank rather than being fixed for the run.
+        Prefer :meth:`enter_long` / :meth:`enter_short`, which read better
+        and cannot be mis-spelled.
+        """
+        if side is None:
+            self._pending_orders.append(
+                MarketOrder(
+                    size_frac=size_frac,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                )
+            )
+            return
+        if side not in ("buy", "sell"):
+            raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+        # A sided entry rides the typed-order path, where the side survives
+        # to the kernel. `size_frac` must be explicit: omitting both sizing
+        # kwargs means "close the whole position", which an opening order
+        # refuses.
+        self.submit_order(
+            Market(
+                side=side,
+                size_frac=1.0 if size_frac is None else size_frac,
+                stop_price=stop_price,
+                target_price=target_price,
+            )
         )
 
     # ``buy`` reads naturally in long-only strategies; it is the same intent.
     buy = enter
+
+    def enter_long(
+        self,
+        size_frac: float | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+    ) -> None:
+        """Queue a LONG market entry for this bar, whatever the leg's
+        configured direction. See :meth:`enter`."""
+        self.enter(
+            size_frac=size_frac,
+            stop_price=stop_price,
+            target_price=target_price,
+            side="buy",
+        )
+
+    def enter_short(
+        self,
+        size_frac: float | None = None,
+        stop_price: float | None = None,
+        target_price: float | None = None,
+    ) -> None:
+        """Queue a SHORT market entry for this bar, whatever the leg's
+        configured direction. See :meth:`enter`."""
+        self.enter(
+            size_frac=size_frac,
+            stop_price=stop_price,
+            target_price=target_price,
+            side="sell",
+        )
 
     def close_position(self, position_id: int | None = None, symbol: str | None = None) -> None:
         """Queue a close of the open position for this bar.
@@ -280,9 +342,11 @@ class Strategy:
         (stop + target activate when the entry fills) linked
         one-cancels-other with each other.
 
-        The legs close the full position on the opposite side. Netting
-        policy only — under hedging every order opens, so use per-position
-        ``stop_price``/``target_price`` attachments instead.
+        The legs close the full position on the opposite side. They are
+        ``reduce_only``, so a leg still working after the position closed by
+        another route can never open a fresh position on the opposite side.
+        Netting policy only — under hedging every order opens, so use
+        per-position ``stop_price``/``target_price`` attachments instead.
 
         Returns ``(entry_id, stop_id, target_id)``.
         """
@@ -291,13 +355,18 @@ class Strategy:
         exit_side = "sell" if entry.side == "buy" else "buy"
         entry_id = self.submit_order(entry)
         stop_order = (
-            StopMarket(side=exit_side, trigger=stop_trigger)
+            StopMarket(side=exit_side, trigger=stop_trigger, reduce_only=True)
             if stop_limit_price is None
-            else StopLimit(side=exit_side, trigger=stop_trigger, price=stop_limit_price)
+            else StopLimit(
+                side=exit_side,
+                trigger=stop_trigger,
+                price=stop_limit_price,
+                reduce_only=True,
+            )
         )
         stop_id = self.submit_order(stop_order, parent=entry_id)
         target_id = self.submit_order(
-            Limit(side=exit_side, price=target_price), parent=entry_id
+            Limit(side=exit_side, price=target_price, reduce_only=True), parent=entry_id
         )
         self.link_oco(stop_id, target_id)
         return entry_id, stop_id, target_id

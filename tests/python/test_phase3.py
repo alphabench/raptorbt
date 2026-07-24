@@ -252,3 +252,120 @@ class TestBarPathModel:
         trade = self._both_touched(adaptive=True)
         assert trade.exit_reason == "TakeProfit"
         assert trade.exit_price == pytest.approx(103.0)
+
+
+class TestSidedEntries:
+    """`enter_short()` on a long-registered leg, and the netting side rule."""
+
+    def test_enter_short_opens_a_short_on_a_default_long_run(self):
+        class S(Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter_short(size_frac=0.5)
+
+        data = _bars([100.0, 95.0, 90.0])
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        trades = result.trades()
+        assert len(trades) == 1
+        assert trades[0].direction == -1
+        # A short into a falling market makes money.
+        assert trades[0].pnl > 0
+
+    def test_enter_without_side_still_follows_the_run_direction(self):
+        class S(Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter(size_frac=0.5)
+
+        data = _bars([100.0, 95.0, 90.0])
+        result = run_strategy_backtest(
+            S(), **data, config=_zero_fee_config(), direction=-1
+        )
+        trades = result.trades()
+        assert len(trades) == 1
+        assert trades[0].direction == -1, "unsided enter() honors direction="
+
+    def test_a_leg_flips_side_within_one_run(self):
+        class S(Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter_long(size_frac=0.4)
+                elif ctx.idx == 2:
+                    self.close_position()
+                elif ctx.idx == 4:
+                    self.enter_short(size_frac=0.4)
+
+        data = _bars([100.0, 102.0, 104.0, 103.0, 102.0, 100.0, 98.0])
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        dirs = [t.direction for t in result.trades()]
+        assert dirs[:2] == [1, -1], f"expected long then short, got {dirs}"
+
+    def test_an_opposing_order_closes_rather_than_reversing(self):
+        class S(Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter_long(size_frac=0.4)
+                elif ctx.idx == 2:
+                    self.submit_order(orders.Market(side="sell", size_frac=0.4))
+
+        data = _bars([100.0, 102.0, 104.0, 106.0])
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        trades = result.trades()
+        assert len(trades) == 1, "the sell closed the long; it did not reverse"
+        assert trades[0].direction == 1
+
+    def test_a_refused_order_is_always_counted(self):
+        # `rejected_entries` surfaces on the portfolio result, so assert the
+        # count there; the refusal itself is kernel-level and identical on
+        # both paths.
+        from raptorbt import run_portfolio_strategy
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.rejects = []
+
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    # Reduce-only while flat: must refuse, loudly.
+                    self.submit_order(
+                        orders.Market(side="sell", size_frac=0.4, reduce_only=True)
+                    )
+
+            def on_order_rejected(self, ctx, event):
+                self.rejects.append(event.reject_reason)
+
+        strategy = S()
+        result = run_portfolio_strategy(
+            strategy,
+            data={"A": _bars([100.0, 101.0, 102.0])},
+            config=_zero_fee_config(),
+        )
+        assert strategy.rejects == ["reduce_only"]
+        assert result.rejected_entries >= 1, "a refusal must never be silent"
+        assert result.per_instrument[0].rejected_entries >= 1
+
+    def test_no_position_refusal_is_counted(self):
+        # The original silent drop: a close with nothing to close. It can
+        # still happen for an explicitly opposing order once flat.
+        from raptorbt import run_portfolio_strategy
+
+        class S(Strategy):
+            def on_bar(self, ctx):
+                if ctx.idx == 0:
+                    self.enter_long(size_frac=0.4)
+                elif ctx.idx == 1:
+                    # Closes the long.
+                    self.submit_order(orders.Market(side="sell", size_frac=0.4))
+                elif ctx.idx == 2:
+                    # Nothing left to close, and reduce_only forbids opening.
+                    self.submit_order(
+                        orders.Market(side="buy", size_frac=0.4, reduce_only=True)
+                    )
+
+        result = run_portfolio_strategy(
+            S(),
+            data={"A": _bars([100.0, 101.0, 102.0, 103.0])},
+            config=_zero_fee_config(),
+        )
+        assert result.rejected_entries >= 1

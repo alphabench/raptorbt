@@ -5,6 +5,43 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-25
+
+An order's `side` now decides the direction a position opens in, so a single
+run can hold long and short legs and a leg can flip side once it is flat.
+This makes a cross-sectional long/short book — long the winners, short the
+losers, rebalanced — expressible in one run against one capital pool.
+
+### Added
+
+- `Strategy.enter_long()` / `Strategy.enter_short()`, and `enter(side=...)`.
+  Without `side`, `enter()` opens in the session's configured direction
+  exactly as before.
+
+### Changed
+
+- **Netting: an order opposing a FLAT instrument now opens** in the order's
+  own side, where it was previously read as a close, found no position, and
+  was discarded. An order opposing an *open* position still closes it, so
+  bracket legs and take-profit orders are unaffected. `reduce_only` orders
+  route to the closing branch unconditionally and never open.
+- `submit_bracket` marks its stop and target legs `reduce_only`, so a leg
+  still working after the position closed by another route cannot open a
+  fresh position on the opposite side.
+- The kernel's per-instrument `direction` now governs the signal path only
+  (`enter()` and the signal arrays). Runs using `direction=` / `directions=`
+  without submitting sided orders are bit-identical to 0.5.0.
+
+### Fixed
+
+- Every refused order counts against `rejected_entries`. Previously
+  `no_position`, `position_open`, `reduce_only` and `invalid_qty` rejections
+  were invisible, so a discarded order looked like an order never placed.
+  Sizing refusals (`zero_size`) and unfillable *closes* stay uncounted: they
+  are not refused entries.
+- An order-path open honors an ATR stop/target config instead of computing
+  levels from a hardcoded zero ATR, which silently produced no stop at all.
+
 ## [0.5.0] - 2026-07-21
 
 This release fixes five defects where the engine silently returned wrong
