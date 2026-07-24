@@ -12,7 +12,7 @@ use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::execution::algos::{AlgoError, ExecAlgorithm};
 use crate::execution::queue::QueueVerdict;
-use crate::portfolio::risk::RejectReason;
+use crate::portfolio::risk::RiskGate;
 
 impl EngineKernel {
     /// Register an execution schedule that releases slices over time.
@@ -393,55 +393,110 @@ impl EngineKernel {
             matched_price
         };
 
-        let mut reject = |orders: &mut OrderEngine, events: &mut Vec<EngineEvent>, reason| {
+        // A refused order must always be observable. `reject` counts against
+        // `rejected_entries` so a discarded order can never look like an
+        // order that was never placed; `reject_uncounted` is the deliberate
+        // exception, for refusals that are not constraint decisions (sizing
+        // arithmetic, which `open_at` already reports, and failed closes,
+        // which are not refused *entries*).
+        fn reject_uncounted(
+            orders: &mut OrderEngine,
+            events: &mut Vec<EngineEvent>,
+            idx: usize,
+            id: u64,
+            client_id: &str,
+            reason: &'static str,
+        ) {
             if let Some(order) = orders.get_mut(id) {
                 let _ = order.transition(OrderStatus::Rejected);
             }
             events.push(EngineEvent::OrderRejected {
                 idx,
                 order_id: id,
-                client_id: client_id.clone(),
+                client_id: client_id.to_string(),
                 reason,
             });
-        };
+        }
+        fn reject(
+            orders: &mut OrderEngine,
+            risk: &mut RiskGate,
+            events: &mut Vec<EngineEvent>,
+            idx: usize,
+            id: u64,
+            client_id: &str,
+            reason: &'static str,
+        ) {
+            risk.record_rejection();
+            reject_uncounted(orders, events, idx, id, client_id, reason);
+        }
 
-        // Net policy: buy opens for a long-direction kernel and closes a
-        // short one; sell is the mirror. Independent (hedging) policy:
-        // every order opens in its own side's direction — closes are
-        // explicit (`request_close`) or via protective levels.
+        // An order's side is authoritative for opening. Independent
+        // (hedging) policy: every order opens in its own side's direction.
+        // Net policy: an order opposing the open position closes it — that
+        // is how bracket legs and take-profit orders exit — but with no
+        // position the order opens in its *own* side's direction. The
+        // kernel's `direction` field governs the signal path only and is
+        // never consulted here, so one run can hold long and short legs and
+        // a leg can flip side across rebalances once it goes flat.
+        //
+        // `reduce_only` short-circuits to the closing branch so a protective
+        // leg left working after a stop already exited can never reverse
+        // into a fresh position.
+        let order_direction = match side {
+            OrderSide::Buy => Direction::Long,
+            OrderSide::Sell => Direction::Short,
+        };
         let hedging = self.ledger.policy() == PositionPolicy::Independent;
+        let held = self.ledger.first().map(|m| m.position.direction);
         let (opens, open_direction) = if hedging {
-            let dir = match side {
-                OrderSide::Buy => Direction::Long,
-                OrderSide::Sell => Direction::Short,
-            };
-            (true, dir)
+            (true, order_direction)
+        } else if reduce_only {
+            (false, order_direction)
         } else {
-            let opens = match (self.direction, side) {
-                (Direction::Long, OrderSide::Buy) | (Direction::Short, OrderSide::Sell) => true,
-                (Direction::Long, OrderSide::Sell) | (Direction::Short, OrderSide::Buy) => false,
-            };
-            (opens, self.direction)
+            match held {
+                // Opposing an open position is a close.
+                Some(dir) if dir != order_direction => (false, order_direction),
+                // Agreeing with one: netting refuses to add (below).
+                Some(_) => (true, order_direction),
+                // Flat: the order's own side decides the direction.
+                None => (true, order_direction),
+            }
         };
 
         if opens {
             if reduce_only {
-                // A reduce-only order must never increase exposure.
-                reject(&mut self.orders, events, "reduce_only");
+                // A reduce-only order must never increase exposure. Under
+                // netting `reduce_only` already routed to the closing branch,
+                // so this only fires for hedging, where every order opens.
+                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, "reduce_only");
                 return;
             }
             if !hedging && self.ledger.is_in_position() {
-                reject(&mut self.orders, events, "position_open");
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "position_open",
+                );
                 return;
             }
             if self.margin.is_halted() {
-                self.risk.record_rejection();
-                reject(&mut self.orders, events, "margin_call");
+                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, "margin_call");
                 return;
             }
             if let Err(reason) = self.risk.check_entry(self.gating_open_count()) {
-                self.risk.record_rejection();
-                reject(&mut self.orders, events, reason.as_str());
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    reason.as_str(),
+                );
                 return;
             }
             let raw_price = if matched_price.is_nan() {
@@ -453,7 +508,15 @@ impl EngineKernel {
                 QtySpec::Units(u) => (None, Some(u)),
                 QtySpec::CapitalFrac(f) => (Some(f), None),
                 QtySpec::FullPosition => {
-                    reject(&mut self.orders, events, "invalid_qty");
+                    reject(
+                        &mut self.orders,
+                        &mut self.risk,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        "invalid_qty",
+                    );
                     return;
                 }
             };
@@ -464,7 +527,10 @@ impl EngineKernel {
                 raw_price,
                 size_mult,
                 explicit_units,
-                0.0,
+                // The most recent bar's ATR, so an order-path open honors an
+                // ATR stop/target config exactly as a signal entry does.
+                // Passing 0.0 here silently yielded no stop at all.
+                self.last_atr,
                 stop_attach,
                 target_attach,
             ) {
@@ -483,13 +549,29 @@ impl EngineKernel {
                     self.after_fill(idx, id, events);
                 }
                 Some(EngineEvent::EntryRejected { reason, .. }) => {
-                    reject(&mut self.orders, events, reason.as_str());
+                    // `open_at` already reported this; sizing arithmetic is
+                    // not a constraint refusal, and the signal path does not
+                    // count it either.
+                    reject_uncounted(&mut self.orders, events, idx, id, &client_id, reason.as_str());
                 }
-                _ => reject(&mut self.orders, events, "unfillable"),
+                _ => reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "unfillable",
+                ),
             }
         } else {
             let Some(first) = self.ledger.first() else {
-                reject(&mut self.orders, events, "no_position");
+                // Nothing to close. A reduce-only order was routed here on
+                // purpose and keeps reporting `reduce_only` (it must never
+                // open, which is exactly what happened); any other order
+                // wanted to open and was refused. Both are counted.
+                let reason = if reduce_only { "reduce_only" } else { "no_position" };
+                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, reason);
                 return;
             };
             let position_id = first.id;
@@ -514,7 +596,9 @@ impl EngineKernel {
                     events.push(EngineEvent::Exited { idx, trade });
                     self.after_fill(idx, id, events);
                 }
-                _ => reject(&mut self.orders, events, "unfillable"),
+                // A close that could not fill is not a refused *entry*, so it
+                // stays out of the rejected-entries count.
+                _ => reject_uncounted(&mut self.orders, events, idx, id, &client_id, "unfillable"),
             }
         }
     }

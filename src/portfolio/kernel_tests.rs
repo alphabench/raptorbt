@@ -1260,3 +1260,129 @@ fn liquidation_does_not_fire_without_a_margin_call() {
     assert!(!events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })));
     assert!(kernel.is_in_position());
 }
+
+// -- order side is authoritative for opening ---------------------------------
+
+/// Submit a market order and step one bar so it fills.
+fn market_order(
+    kernel: &mut EngineKernel,
+    idx: usize,
+    price: Price,
+    side: OrderSide,
+    reduce_only: bool,
+) -> Vec<EngineEvent> {
+    kernel.submit_order_full(
+        side,
+        QtySpec::CapitalFrac(0.5),
+        OrderKind::Market,
+        TimeInForce::Gtc,
+        idx,
+        idx as i64,
+        format!("o{idx}"),
+        None,
+        None,
+        false,
+        reduce_only,
+        None,
+    );
+    kernel.step(idx, &bar(idx as i64, price), StepInput::default())
+}
+
+#[test]
+fn sell_order_opens_short_on_a_default_long_kernel() {
+    // The bug this fixes: the sell was reinterpreted as a close, found no
+    // position, and vanished without a trade or a rejection.
+    let mut kernel = make_kernel();
+    let events = market_order(&mut kernel, 0, 100.0, OrderSide::Sell, false);
+    match events.iter().find(|e| matches!(e, EngineEvent::Entered { .. })) {
+        Some(EngineEvent::Entered { direction, .. }) => {
+            assert_eq!(*direction, Direction::Short, "the order's side decides");
+        }
+        _ => panic!("expected a short entry, got {events:?}"),
+    }
+    assert!(kernel.is_in_position());
+}
+
+#[test]
+fn short_opened_by_order_orients_stop_above_and_target_below() {
+    let config = BacktestConfig {
+        stop: StopConfig::Fixed { percent: 0.05 },
+        target: TargetConfig::Fixed { percent: 0.10 },
+        ..BacktestConfig::default()
+    };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+    market_order(&mut kernel, 0, 100.0, OrderSide::Sell, false);
+    let snap = kernel.position_snapshot().expect("a short position");
+    assert_eq!(snap.direction, Direction::Short);
+    let stop = snap.stop_price.expect("a stop");
+    let target = snap.target_price.expect("a target");
+    assert!(stop > snap.entry_price, "a short's stop sits ABOVE entry: {stop}");
+    assert!(target < snap.entry_price, "a short's target sits BELOW entry: {target}");
+}
+
+#[test]
+fn a_short_opened_by_order_profits_when_price_falls() {
+    let mut kernel = make_kernel();
+    market_order(&mut kernel, 0, 100.0, OrderSide::Sell, false);
+    // Buy back lower: the close is the opposing side while in position.
+    let events = market_order(&mut kernel, 1, 90.0, OrderSide::Buy, false);
+    match events.iter().find(|e| matches!(e, EngineEvent::Exited { .. })) {
+        Some(EngineEvent::Exited { trade, .. }) => {
+            assert!(trade.pnl > 0.0, "short profits on a fall, got {}", trade.pnl);
+        }
+        _ => panic!("expected the buy to close the short, got {events:?}"),
+    }
+    assert!(!kernel.is_in_position());
+}
+
+#[test]
+fn an_opposing_order_still_closes_rather_than_reversing() {
+    // Bracket legs and take-profit orders depend on this.
+    let mut kernel = make_kernel();
+    enter(&mut kernel, 0, 100.0);
+    let events = market_order(&mut kernel, 1, 110.0, OrderSide::Sell, false);
+    assert!(
+        events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })),
+        "expected a close, got {events:?}"
+    );
+    assert!(!kernel.is_in_position(), "it must not reverse into a short");
+}
+
+#[test]
+fn a_reduce_only_order_never_opens_and_is_counted() {
+    let mut kernel = make_kernel();
+    let events = market_order(&mut kernel, 0, 100.0, OrderSide::Sell, true);
+    assert!(!kernel.is_in_position(), "reduce-only must never open");
+    match events.iter().find(|e| matches!(e, EngineEvent::OrderRejected { .. })) {
+        Some(EngineEvent::OrderRejected { reason, .. }) => {
+            assert_eq!(*reason, "reduce_only");
+        }
+        _ => panic!("expected a rejection, got {events:?}"),
+    }
+    assert_eq!(kernel.rejected_entries(), 1, "a refusal must be observable");
+}
+
+#[test]
+fn a_leg_can_flip_side_within_one_run() {
+    // The whole point: long, flat, then short on the same kernel.
+    let mut kernel = make_kernel();
+    market_order(&mut kernel, 0, 100.0, OrderSide::Buy, false);
+    assert_eq!(kernel.position_snapshot().expect("a position").direction, Direction::Long);
+    market_order(&mut kernel, 1, 110.0, OrderSide::Sell, false);
+    assert!(!kernel.is_in_position(), "flat between the two sides");
+    market_order(&mut kernel, 2, 110.0, OrderSide::Sell, false);
+    assert_eq!(
+        kernel.position_snapshot().expect("a position").direction,
+        Direction::Short,
+        "the same leg reopened on the other side"
+    );
+}

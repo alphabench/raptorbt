@@ -165,8 +165,15 @@ pub struct EngineKernel {
     /// original single-position behavior; Independent allows hedging.
     pub(crate) ledger: PositionLedger,
     cash: f64,
-    /// Trading direction for new signal-path entries.
+    /// Default direction for signal-path entries (`enter()` and the signal
+    /// arrays). The order path does NOT consult this: an order's own side
+    /// decides the direction it opens in, so one kernel can hold a long and
+    /// later a short.
     pub(crate) direction: Direction,
+    /// Most recent bar's ATR, carried from the step input so an order-path
+    /// open can honor an ATR stop/target config. Signal entries read
+    /// `input.atr` directly.
+    pub(crate) last_atr: f64,
     /// Position ids the strategy asked to close, applied on the next step.
     pub(crate) pending_closes: Vec<u64>,
     /// Cash (default, historical) vs leveraged margin funding.
@@ -250,6 +257,7 @@ impl EngineKernel {
             ledger: PositionLedger::new(symbol, PositionPolicy::Net),
             cash,
             direction,
+            last_atr: 0.0,
             pending_closes: Vec::new(),
             account: AccountMode::Cash,
             margin: MarginBook::default(),
@@ -676,6 +684,8 @@ impl EngineKernel {
         mode: StepMode,
     ) -> Vec<EngineEvent> {
         self.stepping_trade = mode == StepMode::Trade;
+        // Carried for order-path opens, which have no StepInput of their own.
+        self.last_atr = input.atr;
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
