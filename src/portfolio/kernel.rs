@@ -335,11 +335,22 @@ impl EngineKernel {
     }
 
     /// Maintenance margin rate in margin mode; half the initial rate when
-    /// the instrument does not declare one.
+    /// the instrument does not declare one, and `None` when the position is
+    /// fully funded.
     fn maint_rate(&self) -> Option<f64> {
         let init = self.margin_rate()?;
-        let from_spec = self.spec.as_ref().map(|s| s.margin_maint).filter(|&m| m > 0.0);
-        Some(from_spec.unwrap_or(init * 0.5))
+        if let Some(rate) = self.spec.as_ref().map(|s| s.margin_maint).filter(|&m| m > 0.0) {
+            return Some(rate);
+        }
+        // Fully funded (initial rate >= 1.0): the whole notional is locked, so
+        // the position cannot impair the account and nothing needs maintaining.
+        // Without this a leverage-1.0 book margin-calls against *gross*
+        // notional — hedged legs never net out, so a market-neutral portfolio
+        // trips at once — and the halt latches, blocking every later entry.
+        if init >= 1.0 {
+            return None;
+        }
+        Some(init * 0.5)
     }
 
     /// Symbol this kernel simulates.

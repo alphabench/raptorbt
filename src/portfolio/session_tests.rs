@@ -496,6 +496,35 @@ fn margin_equity_is_direction_aware() {
 }
 
 #[test]
+fn fully_funded_hedged_book_has_no_maintenance_requirement() {
+    // A leverage-1.0 book locks the whole notional, so it cannot be
+    // impaired and must never margin-call. Maintenance is charged on
+    // *gross* notional, so without the fully-funded carve-out a hedged
+    // long/short portfolio trips immediately — and the halt latches,
+    // silently blocking every later entry.
+    let mut session = session_two_instruments_margin(1.0, true);
+    session.apply_current(StepInput {
+        entry: true,
+        size_mult: Some(0.5),
+        ..StepInput::default()
+    });
+    session.apply_current(StepInput {
+        entry: true,
+        size_mult: Some(0.5),
+        ..StepInput::default()
+    });
+    assert!(session.kernel(0).is_in_position());
+    assert!(session.kernel(1).is_in_position());
+    assert_eq!(session.kernel(0).maintenance_requirement(102.0), 0.0);
+    assert_eq!(session.kernel(1).maintenance_requirement(52.0), 0.0);
+
+    while session.current().is_some() {
+        session.apply_current(StepInput::default());
+    }
+    assert!(!session.is_halted(), "a fully-funded hedged book must not margin-call");
+}
+
+#[test]
 fn portfolio_margin_call_halts_all_kernels() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session =
