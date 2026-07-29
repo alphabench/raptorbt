@@ -234,6 +234,119 @@ def simulate_portfolio_mc(
     seed: int = ...,
 ) -> dict[str, Any]: ...
 
+# --- Portfolio math ----------------------------------------------------------
+
+class PyRiskModel:
+    asset_ids: list[str]
+    n_assets: int
+    periods_per_year: float
+    shrinkage_intensity: float
+    n_obs: int
+    def cov(self) -> _F64: ...
+
+class PyOptimizerConfig:
+    risk_aversion: float
+    turnover_penalty: float
+    position_cap: float
+    sector_ids: list[int]
+    sector_caps: list[float]
+    no_trade_band: float
+    min_trade_value: float
+    portfolio_value: float
+    cash_max: float
+    max_iter: int
+    tolerance: float
+    def __init__(
+        self,
+        risk_aversion: float,
+        turnover_penalty: float,
+        position_cap: float,
+        sector_ids: Sequence[int],
+        sector_caps: Sequence[float],
+        no_trade_band: float = ...,
+        min_trade_value: float = ...,
+        portfolio_value: float = ...,
+        cash_max: float = ...,
+        max_iter: int = ...,
+        tolerance: float = ...,
+    ) -> None: ...
+
+class PyOptimizationResult:
+    snapped: list[bool]
+    cash: float
+    turnover: float
+    objective: float
+    vol_annualized: float
+    solver_status: str
+    iterations: int
+    def weights(self) -> _F64: ...
+    def trades(self) -> _F64: ...
+
+class PyRiskContributions:
+    total_vol_annualized: float
+    def marginal(self) -> _F64: ...
+    def contribution(self) -> _F64: ...
+    def pct_contribution(self) -> _F64: ...
+
+class PyOptimizeItem:
+    def __init__(
+        self,
+        item_id: str,
+        alpha: _F64,
+        w_current: _F64,
+        portfolio_value: float | None = ...,
+    ) -> None: ...
+
+class PyRebalanceSimResult:
+    n_rebalances: int
+    n_trades: int
+    total_cost_drag_annualized: float
+    def equity_curve(self) -> _F64: ...
+    def turnover(self) -> _F64: ...
+    def cost_regulatory(self) -> _F64: ...
+    def cost_brokerage(self) -> _F64: ...
+    def cost_dp(self) -> _F64: ...
+
+def estimate_covariance(
+    returns: _F64,
+    asset_ids: Sequence[str],
+    periods_per_year: float,
+) -> PyRiskModel: ...
+def optimize_portfolio(
+    model: PyRiskModel,
+    alpha: _F64,
+    w_current: _F64,
+    asset_ids: Sequence[str],
+    config: PyOptimizerConfig,
+) -> PyOptimizationResult: ...
+def batch_optimize_portfolios(
+    model: PyRiskModel,
+    items: Sequence[PyOptimizeItem],
+    config: PyOptimizerConfig,
+) -> list[tuple[str, PyOptimizationResult]]: ...
+def compute_risk_contributions(
+    model: PyRiskModel,
+    weights: _F64,
+    asset_ids: Sequence[str],
+) -> PyRiskContributions: ...
+def winsorize_panel(values: _F64, pct: float) -> _F64: ...
+def zscore_panel(values: _F64, min_names: int) -> _F64: ...
+def rank_panel(values: _F64, min_names: int) -> _F64: ...
+def momentum_panel(prices: _F64, lookback: int, skip: int) -> _F64: ...
+def composite_scores(factors: Sequence[_F64], weights: _F64) -> _F64: ...
+def simulate_rebalance_policy(
+    prices: _F64,
+    target_weights: _F64,
+    initial_capital: float,
+    policy: str,
+    policy_param: float,
+    segment: str = ...,
+    min_trade_value: float = ...,
+    dp_charge_per_isin: float = ...,
+    periods_per_year: float = ...,
+) -> PyRebalanceSimResult: ...
+def indian_cost_schedule(segment: str) -> dict[str, float]: ...
+
 # --- Indicators -------------------------------------------------------------
 
 def sma(data: _F64, period: int) -> _F64: ...

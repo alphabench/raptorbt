@@ -87,6 +87,26 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     // Register Monte Carlo simulation
     m.add_function(wrap_pyfunction!(python::bindings::simulate_portfolio_mc, m)?)?;
 
+    // Register portfolio math (covariance, optimizer, factor panels, risk
+    // contributions, rebalance simulation, cost schedule export)
+    m.add_class::<python::portfolio_bindings::PyRiskModel>()?;
+    m.add_class::<python::portfolio_bindings::PyOptimizerConfig>()?;
+    m.add_class::<python::portfolio_bindings::PyOptimizationResult>()?;
+    m.add_class::<python::portfolio_bindings::PyRiskContributions>()?;
+    m.add_class::<python::portfolio_bindings::PyOptimizeItem>()?;
+    m.add_class::<python::portfolio_bindings::PyRebalanceSimResult>()?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::estimate_covariance, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::optimize_portfolio, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::batch_optimize_portfolios, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::compute_risk_contributions, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::winsorize_panel, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::zscore_panel, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::rank_panel, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::momentum_panel, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::composite_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::simulate_rebalance_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::indian_cost_schedule, m)?)?;
+
     // Register tick signal functions
     m.add_function(wrap_pyfunction!(python::bindings::compute_tick_entry_signals, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::compute_tick_exit_signals, m)?)?;

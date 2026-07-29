@@ -1,7 +1,17 @@
 //! Zero-copy numpy array interface.
 
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
+
+/// Convert a 2-D numpy array to a row-major flat Vec plus its shape.
+///
+/// Iterates the ndarray view in logical order, so a non-C-contiguous input
+/// (e.g. a transposed slice) is copied correctly rather than rejected.
+pub fn numpy_to_vec2_f64(arr: PyReadonlyArray2<f64>) -> (Vec<f64>, usize, usize) {
+    let view = arr.as_array();
+    let (rows, cols) = (view.nrows(), view.ncols());
+    (view.iter().cloned().collect(), rows, cols)
+}
 
 /// Convert numpy array to Vec<f64>.
 pub fn numpy_to_vec_f64(arr: PyReadonlyArray1<f64>) -> Vec<f64> {

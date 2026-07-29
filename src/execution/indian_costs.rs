@@ -98,6 +98,23 @@ const GST: f64 = 0.18;
 const SEBI: f64 = 0.000001;
 const BROKERAGE: f64 = 20.0;
 
+/// Depository participant charge on equity delivery sells, in rupees:
+/// Rs 13.00 (Zerodha DP fee, CDSL) + 18% GST = Rs 15.34.
+///
+/// This is **per ISIN per day with any sell**, not per order -- selling one
+/// scrip across five orders in a day incurs it once, selling five scrips
+/// incurs it five times. That unit is why it is NOT a `CostSchedule` field:
+/// every rate there applies per side of one trade, and folding a per-ISIN-day
+/// flat fee into them would either overcount multi-order days or undercount
+/// multi-scrip days. Consumers (the rebalance simulator, and the backend's
+/// small-book refusal arithmetic) count distinct ISINs with net sells per day
+/// and multiply.
+///
+/// Measured consequence (2026-07 dev study): this flat charge, not the
+/// percentage rates, is what dominates rebalancing costs on small delivery
+/// books -- at a Rs 3,000 sell it is ~0.5% before STT.
+pub const DP_SELL_CHARGE_PER_ISIN_PER_DAY: f64 = 15.34;
+
 impl Segment {
     /// Regulatory schedule for this segment.
     pub fn schedule(&self) -> CostSchedule {

@@ -42,6 +42,25 @@ from raptorbt._raptorbt import (
     batch_spread_backtest,
     # Monte Carlo simulation
     simulate_portfolio_mc,
+    # Portfolio math (covariance, optimizer, factor panels, risk
+    # contributions, rebalance simulation, cost schedule)
+    PyRiskModel,
+    PyOptimizerConfig,
+    PyOptimizationResult,
+    PyRiskContributions,
+    PyOptimizeItem,
+    PyRebalanceSimResult,
+    estimate_covariance,
+    optimize_portfolio,
+    batch_optimize_portfolios,
+    compute_risk_contributions,
+    winsorize_panel,
+    zscore_panel,
+    rank_panel,
+    momentum_panel,
+    composite_scores,
+    simulate_rebalance_policy,
+    indian_cost_schedule,
     # Tick signal functions
     compute_tick_entry_signals,
     compute_tick_exit_signals,
@@ -130,6 +149,24 @@ __all__ = [
     # Batch backtest
     "PyBatchSpreadItem",
     "batch_spread_backtest",
+    # Portfolio math
+    "PyRiskModel",
+    "PyOptimizerConfig",
+    "PyOptimizationResult",
+    "PyRiskContributions",
+    "PyOptimizeItem",
+    "PyRebalanceSimResult",
+    "estimate_covariance",
+    "optimize_portfolio",
+    "batch_optimize_portfolios",
+    "compute_risk_contributions",
+    "winsorize_panel",
+    "zscore_panel",
+    "rank_panel",
+    "momentum_panel",
+    "composite_scores",
+    "simulate_rebalance_policy",
+    "indian_cost_schedule",
     # Monte Carlo simulation
     "simulate_portfolio_mc",
     # Tick signal functions
