@@ -263,10 +263,7 @@ impl PositionLedger {
 
     /// Direction-aware unrealized PnL across open positions.
     pub fn unrealized_total(&self, price: Price) -> f64 {
-        self.open
-            .iter()
-            .map(|p| p.position.unrealized_pnl(price) * self.contract_multiplier)
-            .sum()
+        self.open.iter().map(|p| p.position.unrealized_pnl(price) * self.contract_multiplier).sum()
     }
 
     /// Notional value of open positions at the given price (unsigned).
@@ -334,12 +331,10 @@ mod tests {
     #[test]
     fn trade_ids_are_sequential_in_close_order() {
         let mut ledger = PositionLedger::new("T".into(), PositionPolicy::Independent);
-        let a = ledger
-            .open_position(0, 0, 100.0, 1.0, Direction::Long, None, None, 0.0, None)
-            .unwrap();
-        let b = ledger
-            .open_position(0, 0, 100.0, 1.0, Direction::Long, None, None, 0.0, None)
-            .unwrap();
+        let a =
+            ledger.open_position(0, 0, 100.0, 1.0, Direction::Long, None, None, 0.0, None).unwrap();
+        let b =
+            ledger.open_position(0, 0, 100.0, 1.0, Direction::Long, None, None, 0.0, None).unwrap();
         // Close b first: it takes trade id 0.
         assert_eq!(ledger.close_position(b, exit(1, 101.0)).unwrap().id, 0);
         assert_eq!(ledger.close_position(a, exit(2, 102.0)).unwrap().id, 1);
@@ -374,9 +369,8 @@ mod tests {
     fn multiplier_scales_trade_pnl() {
         let mut ledger = PositionLedger::new("T".into(), PositionPolicy::Net);
         ledger.set_contract_multiplier(50.0);
-        let id = ledger
-            .open_position(0, 0, 100.0, 2.0, Direction::Long, None, None, 0.0, None)
-            .unwrap();
+        let id =
+            ledger.open_position(0, 0, 100.0, 2.0, Direction::Long, None, None, 0.0, None).unwrap();
         let trade = ledger.close_position(id, exit(1, 101.0)).unwrap();
         assert!((trade.pnl - 1.0 * 2.0 * 50.0).abs() < 1e-9);
     }

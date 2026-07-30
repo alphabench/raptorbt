@@ -56,14 +56,19 @@ fn trade(ts: i64, price: Price, size: f64) -> TradeTick {
 #[test]
 fn step_trade_enters_and_exits_at_the_print() {
     let mut kernel = make_kernel();
-    let events =
-        kernel.step_trade(0, &trade(0, 100.0, 5.0), StepInput { entry: true, ..Default::default() });
+    let events = kernel.step_trade(
+        0,
+        &trade(0, 100.0, 5.0),
+        StepInput { entry: true, ..Default::default() },
+    );
     assert!(matches!(events.as_slice(), [EngineEvent::Entered { price, .. }] if *price == 100.0));
     assert!(kernel.is_in_position());
 
     let events =
         kernel.step_trade(1, &trade(1, 110.0, 5.0), StepInput { exit: true, ..Default::default() });
-    assert!(matches!(events.as_slice(), [EngineEvent::Exited { trade, .. }] if trade.exit_price == 110.0));
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Exited { trade, .. }] if trade.exit_price == 110.0)
+    );
 }
 
 #[test]
@@ -301,11 +306,7 @@ fn external_open_count_overrides_the_ledger() {
     assert_eq!(kernel.open_count(), 0);
 
     kernel.set_external_open_count(Some(1));
-    let events = kernel.step(
-        0,
-        &bar(0, 100.0),
-        StepInput { entry: true, ..StepInput::default() },
-    );
+    let events = kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
     assert!(
         matches!(
             events.as_slice(),
@@ -413,8 +414,7 @@ fn zero_size_entry_emits_rejection() {
         Some(&inst),
     );
 
-    let events =
-        kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
+    let events = kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
     match events.as_slice() {
         [EngineEvent::EntryRejected { reason, .. }] => {
             assert_eq!(reason.as_str(), "zero_size");
@@ -601,10 +601,9 @@ fn opening_order_rejected_while_in_position() {
     );
 
     let events = kernel.step(1, &bar(1, 98.5), StepInput::default());
-    assert!(events.iter().any(|e| matches!(
-        e,
-        EngineEvent::OrderRejected { reason: "position_open", .. }
-    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::OrderRejected { reason: "position_open", .. })));
     assert_eq!(kernel.position_snapshot().unwrap().entry_idx, 0);
 }
 
@@ -624,10 +623,9 @@ fn oversized_unit_order_rejects_for_capital() {
     );
     let _ = kernel.step(0, &bar(0, 100.0), StepInput::default());
     let events = kernel.step(1, &bar(1, 99.0), StepInput::default());
-    assert!(events.iter().any(|e| matches!(
-        e,
-        EngineEvent::OrderRejected { reason: "insufficient_capital", .. }
-    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, EngineEvent::OrderRejected { reason: "insufficient_capital", .. })));
     assert!(!kernel.is_in_position());
 }
 
@@ -655,8 +653,7 @@ fn per_contract_fees_charge_on_contracts_not_notional() {
     enter(&mut kernel, 0, 100.0);
     let size = kernel.position_snapshot().unwrap().size;
 
-    let events =
-        kernel.step(1, &bar(1, 100.0), StepInput { exit: true, ..StepInput::default() });
+    let events = kernel.step(1, &bar(1, 100.0), StepInput { exit: true, ..StepInput::default() });
     match events.as_slice() {
         [EngineEvent::Exited { trade, .. }] => {
             // Round trip: 2.5 per contract per side, NOT 2.5 * 50.
@@ -695,8 +692,7 @@ fn percentage_fees_charge_on_notional() {
     enter(&mut kernel, 0, 100.0);
     let size = kernel.position_snapshot().unwrap().size;
 
-    let events =
-        kernel.step(1, &bar(1, 100.0), StepInput { exit: true, ..StepInput::default() });
+    let events = kernel.step(1, &bar(1, 100.0), StepInput { exit: true, ..StepInput::default() });
     match events.as_slice() {
         [EngineEvent::Exited { trade, .. }] => {
             // 0.1% of true notional (price * size * multiplier), each side.
@@ -746,8 +742,7 @@ fn expiry_settles_position_and_rejects_entries() {
     assert!(!kernel.is_in_position());
 
     // Post-expiry entry is refused.
-    let events =
-        kernel.step(6, &bar(6, 103.0), StepInput { entry: true, ..StepInput::default() });
+    let events = kernel.step(6, &bar(6, 103.0), StepInput { entry: true, ..StepInput::default() });
     match events.as_slice() {
         [EngineEvent::EntryRejected { reason, .. }] => {
             assert_eq!(reason.as_str(), "expired");
@@ -777,8 +772,7 @@ fn pre_activation_entry_is_rejected() {
     )
     .with_instrument(spec);
 
-    let events =
-        kernel.step(0, &bar(5, 100.0), StepInput { entry: true, ..StepInput::default() });
+    let events = kernel.step(0, &bar(5, 100.0), StepInput { entry: true, ..StepInput::default() });
     match events.as_slice() {
         [EngineEvent::EntryRejected { reason, .. }] => {
             assert_eq!(reason.as_str(), "inactive");
@@ -786,8 +780,7 @@ fn pre_activation_entry_is_rejected() {
         other => panic!("expected inactive rejection, got {other:?}"),
     }
 
-    let events =
-        kernel.step(1, &bar(10, 100.0), StepInput { entry: true, ..StepInput::default() });
+    let events = kernel.step(1, &bar(10, 100.0), StepInput { entry: true, ..StepInput::default() });
     assert!(matches!(events.as_slice(), [EngineEvent::Entered { .. }]));
 }
 
@@ -795,15 +788,11 @@ fn pre_activation_entry_is_rejected() {
 fn config_stop_quantizes_to_tick_grid() {
     use crate::instruments::{InstrumentKind, InstrumentSpec};
 
-    let config = BacktestConfig {
-        stop: StopConfig::Fixed { percent: 0.033 },
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { stop: StopConfig::Fixed { percent: 0.033 }, ..BacktestConfig::default() };
     let fee_model = config.fee_model();
-    let spec = InstrumentSpec {
-        price_increment: 0.05,
-        ..InstrumentSpec::new("EQ", InstrumentKind::Cash)
-    };
+    let spec =
+        InstrumentSpec { price_increment: 0.05, ..InstrumentSpec::new("EQ", InstrumentKind::Cash) };
     let mut kernel = EngineKernel::new(
         config,
         fee_model,
@@ -853,10 +842,8 @@ fn spec_lot_size_defers_to_instrument_config() {
 
 #[test]
 fn entry_without_override_uses_config_stop() {
-    let config = BacktestConfig {
-        stop: StopConfig::Fixed { percent: 0.05 },
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { stop: StopConfig::Fixed { percent: 0.05 }, ..BacktestConfig::default() };
     let fee_model = config.fee_model();
     let mut kernel = EngineKernel::new(
         config,
@@ -973,7 +960,8 @@ fn a_tick_session_slices_on_time_not_on_event_count() {
     let mut fills = 0;
     // Ten prints, all inside the first interval.
     for i in 0..10i64 {
-        let tick = TradeTick { timestamp: i * 1_000_000, price: 100.0, size: 1.0, signed_size: 0.0 };
+        let tick =
+            TradeTick { timestamp: i * 1_000_000, price: 100.0, size: 1.0, signed_size: 0.0 };
         let events = kernel.step_trade(i as usize, &tick, StepInput::default());
         fills += events.iter().filter(|e| matches!(e, EngineEvent::OrderFilled { .. })).count();
     }
@@ -1200,10 +1188,7 @@ fn a_margin_call_only_halts_by_default() {
     enter(&mut kernel, 0, 100.0);
     let events = kernel.step(1, &bar(1, 40.0), StepInput::default());
     assert!(events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })));
-    assert!(
-        kernel.is_in_position(),
-        "the position rides on; the strategy decides what to do"
-    );
+    assert!(kernel.is_in_position(), "the position rides on; the strategy decides what to do");
 }
 
 #[test]
@@ -1224,11 +1209,8 @@ fn liquidation_closes_positions_on_the_call() {
 #[test]
 fn liquidation_pays_exit_costs_unlike_settlement() {
     // A forced close crosses the spread; settlement does not.
-    let config = BacktestConfig {
-        fees: 0.001,
-        liquidate_on_margin_call: true,
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { fees: 0.001, liquidate_on_margin_call: true, ..BacktestConfig::default() };
     let fee_model = config.fee_model();
     let mut kernel = EngineKernel::new(
         config,

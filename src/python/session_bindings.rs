@@ -5,9 +5,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
+use crate::data::{BookLevel, BookSide, DepthTick};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
-use crate::data::{BookLevel, BookSide, DepthTick};
 use crate::portfolio::session::{EventSession, ScheduleData};
 
 use super::bindings::{
@@ -58,11 +58,7 @@ impl PyPortfolioSession {
 impl PyPortfolioSession {
     #[new]
     #[pyo3(signature = (config=None, account_type="cash", leverage=1.0))]
-    fn new(
-        config: Option<&PyBacktestConfig>,
-        account_type: &str,
-        leverage: f64,
-    ) -> PyResult<Self> {
+    fn new(config: Option<&PyBacktestConfig>, account_type: &str, leverage: f64) -> PyResult<Self> {
         let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
         let account = parse_account_mode(account_type, leverage)?;
         Ok(Self { session: Some(EventSession::with_account(rust_config, account)) })
@@ -173,9 +169,7 @@ impl PyPortfolioSession {
                 Some(a) => {
                     let v = numpy_to_vec_f64(a);
                     if v.len() != n {
-                        return Err(PyValueError::new_err(
-                            "all tick arrays must share one length",
-                        ));
+                        return Err(PyValueError::new_err("all tick arrays must share one length"));
                     }
                     Ok(v)
                 }
@@ -221,9 +215,7 @@ impl PyPortfolioSession {
         let asz = ask_sizes.as_array();
         for arr in [&bp, &bs, &ap, &asz] {
             if arr.shape()[0] != n {
-                return Err(PyValueError::new_err(
-                    "depth arrays must have one row per timestamp",
-                ));
+                return Err(PyValueError::new_err("depth arrays must have one row per timestamp"));
             }
         }
         if bp.shape()[1] != bs.shape()[1] || ap.shape()[1] != asz.shape()[1] {
@@ -258,10 +250,7 @@ impl PyPortfolioSession {
         let ScheduleData::Depth(handle) = entry.data else { return Ok(None) };
         Ok(session.depth_at(handle.slot).map(|book| {
             let levels = |side| {
-                book_levels(&book, side)
-                    .iter()
-                    .map(|l| (l.price, l.size))
-                    .collect::<Vec<_>>()
+                book_levels(&book, side).iter().map(|l| (l.price, l.size)).collect::<Vec<_>>()
             };
             (levels(BookSide::Bid), levels(BookSide::Ask))
         }))
@@ -315,10 +304,8 @@ impl PyPortfolioSession {
         close: f64,
         volume: f64,
     ) -> PyResult<()> {
-        self.session_mut()?.push_bar(
-            instrument,
-            KernelBar { timestamp, open, high, low, close, volume },
-        );
+        self.session_mut()?
+            .push_bar(instrument, KernelBar { timestamp, open, high, low, close, volume });
         Ok(())
     }
 
@@ -339,8 +326,7 @@ impl PyPortfolioSession {
                 .map(|&(price, size)| BookLevel { price, size })
                 .collect()
         };
-        let snapshot =
-            DepthTick::from_levels(timestamp, &to_levels(&bids), &to_levels(&asks));
+        let snapshot = DepthTick::from_levels(timestamp, &to_levels(&bids), &to_levels(&asks));
         self.session_mut()?.push_depth(instrument, snapshot);
         Ok(())
     }
@@ -466,12 +452,7 @@ impl PyPortfolioSession {
             stop_price_override: stop_price,
             target_price_override: target_price,
         };
-        Ok(self
-            .session_mut()?
-            .apply_current(input)
-            .into_iter()
-            .map(PyEngineEvent::from)
-            .collect())
+        Ok(self.session_mut()?.apply_current(input).into_iter().map(PyEngineEvent::from).collect())
     }
 
     /// Submit a typed order routed to one instrument's kernel.
@@ -546,10 +527,12 @@ impl PyPortfolioSession {
         trigger_price: Option<f64>,
     ) -> PyResult<bool> {
         let qty = parse_qty_spec(units, size_frac)?;
-        Ok(self
-            .session_mut()?
-            .kernel_mut(instrument)
-            .modify_order(order_id, qty, limit_price, trigger_price))
+        Ok(self.session_mut()?.kernel_mut(instrument).modify_order(
+            order_id,
+            qty,
+            limit_price,
+            trigger_price,
+        ))
     }
 
     fn cancel_all_orders(&mut self, instrument: usize, idx: usize) -> PyResult<Vec<u64>> {

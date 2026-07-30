@@ -25,8 +25,9 @@
 //! `EqualWeight` budget has no counterpart here yet.
 
 use crate::accounts::{AccountMode, SharedAccount};
-use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
+use crate::core::types::OhlcvBar;
 use crate::core::types::TickData;
+use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
 use crate::data::{
     tick_data_to_events, DepthRef, DepthTick, EventFeed, EventPayload, MarketEvent, QuoteTick,
     TradeTick,
@@ -37,7 +38,6 @@ use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::risk::RejectReason;
-use crate::core::types::OhlcvBar;
 
 /// The market data one schedule entry carries.
 #[derive(Debug, Clone, Copy)]
@@ -390,10 +390,7 @@ impl EventSession {
             appended += 1;
         }
         if bid > 0.0 && ask > 0.0 {
-            self.push_entry(
-                instrument,
-                ScheduleData::Quote(QuoteTick { timestamp, bid, ask }),
-            );
+            self.push_entry(instrument, ScheduleData::Quote(QuoteTick { timestamp, bid, ask }));
             appended += 1;
         }
         appended
@@ -616,8 +613,7 @@ impl EventSession {
                         let injected = match self.account.mode() {
                             AccountMode::Cash => self.account.balance(),
                             AccountMode::Margin { .. } => {
-                                self.account.balance()
-                                    - (self.account.locked() - locked_before)
+                                self.account.balance() - (self.account.locked() - locked_before)
                             }
                         };
                         kernel.set_cash(injected);

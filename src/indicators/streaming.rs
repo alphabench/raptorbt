@@ -100,12 +100,7 @@ pub struct StreamingEma {
 impl StreamingEma {
     pub fn new(period: usize) -> Self {
         let period = period.max(1);
-        Self {
-            period,
-            alpha: 2.0 / (period as f64 + 1.0),
-            seed: Window::new(period),
-            latest: None,
-        }
+        Self { period, alpha: 2.0 / (period as f64 + 1.0), seed: Window::new(period), latest: None }
     }
 
     /// Wilder-style smoothing (alpha = 1/period), SMA-seeded.
@@ -311,10 +306,8 @@ impl StreamingIndicator for StreamingRsi {
                 self.seed_gains.push(gain);
                 self.seed_losses.push(loss);
                 if self.seed_gains.len() == self.period {
-                    let ag =
-                        self.seed_gains.iter().sum::<f64>() / self.period as f64;
-                    let al =
-                        self.seed_losses.iter().sum::<f64>() / self.period as f64;
+                    let ag = self.seed_gains.iter().sum::<f64>() / self.period as f64;
+                    let al = self.seed_losses.iter().sum::<f64>() / self.period as f64;
                     self.avg_gain = Some(ag);
                     self.avg_loss = Some(al);
                     self.latest = Some(Self::rsi_of(ag, al));

@@ -132,7 +132,10 @@ impl OrderStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            OrderStatus::Filled | OrderStatus::Canceled | OrderStatus::Expired | OrderStatus::Rejected
+            OrderStatus::Filled
+                | OrderStatus::Canceled
+                | OrderStatus::Expired
+                | OrderStatus::Rejected
         )
     }
 }

@@ -196,8 +196,10 @@ impl PyInstrumentSpec {
         if strike <= 0.0 {
             return Err(PyValueError::new_err("strike must be > 0"));
         }
-        let spec =
-            InstrumentSpec::new(symbol, InstrumentKind::Option { strike, right, underlying, binary });
+        let spec = InstrumentSpec::new(
+            symbol,
+            InstrumentKind::Option { strike, right, underlying, binary },
+        );
         Ok(Self {
             inner: apply_common(
                 spec,

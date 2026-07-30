@@ -13,11 +13,7 @@
 
 use super::errors::PortfolioMathError;
 
-fn check_shape(
-    values: &[f64],
-    n_dates: usize,
-    n_assets: usize,
-) -> Result<(), PortfolioMathError> {
+fn check_shape(values: &[f64], n_dates: usize, n_assets: usize) -> Result<(), PortfolioMathError> {
     if values.len() != n_dates * n_assets {
         return Err(PortfolioMathError::ShapeMismatch(format!(
             "expected {n_dates}x{n_assets}={} values, got {}",
@@ -27,10 +23,7 @@ fn check_shape(
     }
     for (idx, v) in values.iter().enumerate() {
         if v.is_infinite() {
-            return Err(PortfolioMathError::NonFinite {
-                row: idx / n_assets,
-                col: idx % n_assets,
-            });
+            return Err(PortfolioMathError::NonFinite { row: idx / n_assets, col: idx % n_assets });
         }
     }
     Ok(())
@@ -38,11 +31,7 @@ fn check_shape(
 
 /// Indices of finite values in one date row.
 fn finite_cols(row: &[f64]) -> Vec<usize> {
-    row.iter()
-        .enumerate()
-        .filter(|(_, v)| v.is_finite())
-        .map(|(i, _)| i)
-        .collect()
+    row.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect()
 }
 
 /// Winsorize each date's cross-section at the `pct`/`1-pct` quantiles.
@@ -202,9 +191,7 @@ pub fn composite_scores(
     n_assets: usize,
 ) -> Result<Vec<f64>, PortfolioMathError> {
     if factors.is_empty() {
-        return Err(PortfolioMathError::DegenerateInput(
-            "no factor panels supplied".into(),
-        ));
+        return Err(PortfolioMathError::DegenerateInput("no factor panels supplied".into()));
     }
     if weights.len() != factors.len() {
         return Err(PortfolioMathError::ShapeMismatch(format!(
@@ -336,9 +323,7 @@ pub fn rank_ic(
     check_shape(factor, n_dates, n_assets)?;
     check_shape(prices, n_dates, n_assets)?;
     if horizon == 0 {
-        return Err(PortfolioMathError::DegenerateInput(
-            "horizon must be >= 1".into(),
-        ));
+        return Err(PortfolioMathError::DegenerateInput("horizon must be >= 1".into()));
     }
     if min_names < 2 {
         return Err(PortfolioMathError::DegenerateInput(format!(
@@ -420,9 +405,7 @@ mod tests {
             }
         }
         // Factor ranks assets in the same order as their growth rate.
-        let factor: Vec<f64> = (0..n_dates)
-            .flat_map(|_| (0..n_assets).map(|a| a as f64))
-            .collect();
+        let factor: Vec<f64> = (0..n_dates).flat_map(|_| (0..n_assets).map(|a| a as f64)).collect();
         let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 2).unwrap();
         assert_eq!(out.n_dates_scored, 4); // last date has no forward window
         assert!((out.mean_ic - 1.0).abs() < 1e-12);
@@ -440,9 +423,8 @@ mod tests {
             }
         }
         // Reversed factor: highest score on the worst performer.
-        let factor: Vec<f64> = (0..n_dates)
-            .flat_map(|_| (0..n_assets).map(|a| -(a as f64)))
-            .collect();
+        let factor: Vec<f64> =
+            (0..n_dates).flat_map(|_| (0..n_assets).map(|a| -(a as f64))).collect();
         let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 2).unwrap();
         assert!((out.mean_ic + 1.0).abs() < 1e-12);
     }
@@ -453,9 +435,15 @@ mod tests {
         let n_dates = 3;
         // Date 0 has 3 finite factor values, dates 1-2 have only 1.
         let factor = vec![
-            0.0, 1.0, 2.0, //
-            0.0, f64::NAN, f64::NAN, //
-            0.0, f64::NAN, f64::NAN,
+            0.0,
+            1.0,
+            2.0, //
+            0.0,
+            f64::NAN,
+            f64::NAN, //
+            0.0,
+            f64::NAN,
+            f64::NAN,
         ];
         let prices = vec![100.0; n_dates * n_assets];
         // Constant prices -> forward returns all zero -> no dispersion, so even

@@ -15,6 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # clippy builds pyo3, so this job carries the same interpreter ceiling
+      # as `test` -- pinned for the same reason.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,6 +46,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+
+      # pyo3 0.20.3 supports Python 3.12 at the newest, and its build script
+      # aborts against anything later. Runner images have moved their default
+      # interpreter past that, so the version is pinned here rather than left
+      # to the image -- an unpinned runner upgrade breaks the build, not a
+      # change in this repo.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

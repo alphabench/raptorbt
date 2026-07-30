@@ -5,13 +5,13 @@
 //! `impl EngineKernel`, not a separate type.
 
 use crate::core::types::{Direction, ExitReason, Price, Trade};
+use crate::execution::algos::{AlgoError, ExecAlgorithm};
 use crate::execution::orders::{
     MatchOutcome, Order, OrderEngine, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce,
 };
+use crate::execution::queue::QueueVerdict;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
-use crate::execution::algos::{AlgoError, ExecAlgorithm};
-use crate::execution::queue::QueueVerdict;
 use crate::portfolio::risk::RiskGate;
 
 impl EngineKernel {
@@ -221,13 +221,8 @@ impl EngineKernel {
     pub fn cancel_all_orders(&mut self, idx: usize) -> Vec<u64> {
         let ids = self.orders.cancel_all();
         for id in &ids {
-            let client_id =
-                self.orders.get(*id).map(|o| o.client_id.clone()).unwrap_or_default();
-            self.pending_events.push(EngineEvent::OrderCanceled {
-                idx,
-                order_id: *id,
-                client_id,
-            });
+            let client_id = self.orders.get(*id).map(|o| o.client_id.clone()).unwrap_or_default();
+            self.pending_events.push(EngineEvent::OrderCanceled { idx, order_id: *id, client_id });
         }
         ids
     }
@@ -468,7 +463,15 @@ impl EngineKernel {
                 // A reduce-only order must never increase exposure. Under
                 // netting `reduce_only` already routed to the closing branch,
                 // so this only fires for hedging, where every order opens.
-                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, "reduce_only");
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "reduce_only",
+                );
                 return;
             }
             if !hedging && self.ledger.is_in_position() {
@@ -484,7 +487,15 @@ impl EngineKernel {
                 return;
             }
             if self.margin.is_halted() {
-                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, "margin_call");
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "margin_call",
+                );
                 return;
             }
             if let Err(reason) = self.risk.check_entry(self.gating_open_count()) {
@@ -552,7 +563,14 @@ impl EngineKernel {
                     // `open_at` already reported this; sizing arithmetic is
                     // not a constraint refusal, and the signal path does not
                     // count it either.
-                    reject_uncounted(&mut self.orders, events, idx, id, &client_id, reason.as_str());
+                    reject_uncounted(
+                        &mut self.orders,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        reason.as_str(),
+                    );
                 }
                 _ => reject(
                     &mut self.orders,

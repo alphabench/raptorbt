@@ -60,11 +60,7 @@ pub fn risk_contributions(
     let sigma = variance.sqrt();
 
     let marginal: Vec<f64> = cov_w.iter().map(|c| c / sigma).collect();
-    let contribution: Vec<f64> = weights
-        .iter()
-        .zip(marginal.iter())
-        .map(|(w, m)| w * m)
-        .collect();
+    let contribution: Vec<f64> = weights.iter().zip(marginal.iter()).map(|(w, m)| w * m).collect();
     let pct_contribution: Vec<f64> = contribution.iter().map(|c| c / sigma).collect();
 
     Ok(RiskContributions {

@@ -346,10 +346,7 @@ mod tests {
             close: 100.0,
             volume: 1.0,
         };
-        assert_eq!(
-            model.get_limit_fill_price(99.0, &bar, Direction::Long, true),
-            Some(99.0)
-        );
+        assert_eq!(model.get_limit_fill_price(99.0, &bar, Direction::Long, true), Some(99.0));
     }
 
     #[test]
@@ -364,15 +361,9 @@ mod tests {
             volume: 1.0,
         };
         // A buy pays more than its limit.
-        assert_eq!(
-            model.get_limit_fill_price(100.0, &bar, Direction::Long, true),
-            Some(101.0)
-        );
+        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Long, true), Some(101.0));
         // A sell receives less.
-        assert_eq!(
-            model.get_limit_fill_price(100.0, &bar, Direction::Short, true),
-            Some(99.0)
-        );
+        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Short, true), Some(99.0));
     }
 
     #[test]

@@ -13,9 +13,7 @@ use crate::data::{
     builder_for, builder_for_with, AggregationUnit, BarBuilder, BarSpec, SourceRecord,
 };
 
-use super::numpy_bridge::{
-    numpy_to_vec_f64, numpy_to_vec_i64, vec_to_numpy_f64, vec_to_numpy_i64,
-};
+use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64, vec_to_numpy_f64, vec_to_numpy_i64};
 
 fn parse_spec(step: u32, unit: &str) -> PyResult<BarSpec> {
     let unit = AggregationUnit::parse(unit).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -110,8 +108,7 @@ impl PyBarAggregator {
 
     /// Emit any in-progress bar at end of data.
     fn flush(&mut self) -> Option<BarTuple> {
-        self.builder.flush()
-    .map(to_tuple)
+        self.builder.flush().map(to_tuple)
     }
 }
 

@@ -111,8 +111,7 @@ impl QueueTracker {
                 let Some(ahead) = initial_queue(book, side, limit_price) else {
                     return QueueVerdict::Unknown;
                 };
-                self.orders
-                    .insert(order_id, QueueState { ahead, traded: 0.0, price: limit_price });
+                self.orders.insert(order_id, QueueState { ahead, traded: 0.0, price: limit_price });
                 self.orders.get_mut(&order_id).expect("just inserted")
             }
         };
@@ -172,8 +171,7 @@ mod tests {
         let mut tracker = QueueTracker::new();
         let book = depth_book((99.0, 10_000.0), (101.0, 500.0));
         // Huge queue ahead, but the print cleared the level entirely.
-        let verdict =
-            tracker.observe_print(1, 99.0, Direction::Long, &book, 98.5, 1.0);
+        let verdict = tracker.observe_print(1, 99.0, Direction::Long, &book, 98.5, 1.0);
         assert_eq!(verdict, QueueVerdict::FilledThrough);
     }
 

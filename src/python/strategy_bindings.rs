@@ -590,7 +590,9 @@ impl PyKernelSession {
     }
 }
 
-pub(crate) fn convert_snapshot(p: crate::portfolio::kernel::PositionSnapshot) -> PyPositionSnapshot {
+pub(crate) fn convert_snapshot(
+    p: crate::portfolio::kernel::PositionSnapshot,
+) -> PyPositionSnapshot {
     PyPositionSnapshot {
         position_id: p.position_id,
         entry_idx: p.entry_idx,
@@ -643,7 +645,6 @@ pub fn resolve_atr_period(
     }
 }
 
-
 /// Parse Python order arguments and submit onto a kernel — shared by the
 /// single-instrument session and the portfolio session.
 #[allow(clippy::too_many_arguments)]
@@ -669,112 +670,104 @@ pub(crate) fn submit_order_on(
     reduce_only: bool,
     parent_id: Option<u64>,
 ) -> PyResult<u64> {
-        let side = match side {
-            "buy" => OrderSide::Buy,
-            "sell" => OrderSide::Sell,
-            other => return Err(PyValueError::new_err(format!("unknown side {other:?}"))),
-        };
-        let qty = match (units, size_frac) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err("pass units or size_frac, not both"))
-            }
-            (Some(u), None) if u <= 0.0 => {
-                return Err(PyValueError::new_err("units must be > 0"))
-            }
-            (Some(u), None) => QtySpec::Units(u),
-            (None, Some(f)) if f <= 0.0 || f > 1.0 => {
-                return Err(PyValueError::new_err("size_frac must be in (0, 1]"))
-            }
-            (None, Some(f)) => QtySpec::CapitalFrac(f),
-            (None, None) => QtySpec::FullPosition,
-        };
-        let need_limit = || {
-            limit_price.ok_or_else(|| PyValueError::new_err(format!("{kind} needs limit_price")))
-        };
-        let need_trigger = || {
-            trigger_price
-                .ok_or_else(|| PyValueError::new_err(format!("{kind} needs trigger_price")))
-        };
-        let trail_offset = |kernel: &crate::portfolio::kernel::EngineKernel| -> PyResult<TrailOffset> {
-            let raw = offset
-                .ok_or_else(|| PyValueError::new_err(format!("{kind} needs offset")))?;
-            if raw <= 0.0 {
-                return Err(PyValueError::new_err("offset must be > 0"));
-            }
-            match offset_kind {
-                "price" => Ok(TrailOffset::Price(raw)),
-                "bps" => Ok(TrailOffset::Bps(raw)),
-                "ticks" => {
-                    let tick = kernel.price_increment();
-                    if tick <= 0.0 {
-                        return Err(PyValueError::new_err(
-                            "offset_kind='ticks' needs an instrument with price_increment",
-                        ));
-                    }
-                    Ok(TrailOffset::Price(raw * tick))
+    let side = match side {
+        "buy" => OrderSide::Buy,
+        "sell" => OrderSide::Sell,
+        other => return Err(PyValueError::new_err(format!("unknown side {other:?}"))),
+    };
+    let qty = match (units, size_frac) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err("pass units or size_frac, not both"))
+        }
+        (Some(u), None) if u <= 0.0 => return Err(PyValueError::new_err("units must be > 0")),
+        (Some(u), None) => QtySpec::Units(u),
+        (None, Some(f)) if f <= 0.0 || f > 1.0 => {
+            return Err(PyValueError::new_err("size_frac must be in (0, 1]"))
+        }
+        (None, Some(f)) => QtySpec::CapitalFrac(f),
+        (None, None) => QtySpec::FullPosition,
+    };
+    let need_limit =
+        || limit_price.ok_or_else(|| PyValueError::new_err(format!("{kind} needs limit_price")));
+    let need_trigger = || {
+        trigger_price.ok_or_else(|| PyValueError::new_err(format!("{kind} needs trigger_price")))
+    };
+    let trail_offset = |kernel: &crate::portfolio::kernel::EngineKernel| -> PyResult<TrailOffset> {
+        let raw = offset.ok_or_else(|| PyValueError::new_err(format!("{kind} needs offset")))?;
+        if raw <= 0.0 {
+            return Err(PyValueError::new_err("offset must be > 0"));
+        }
+        match offset_kind {
+            "price" => Ok(TrailOffset::Price(raw)),
+            "bps" => Ok(TrailOffset::Bps(raw)),
+            "ticks" => {
+                let tick = kernel.price_increment();
+                if tick <= 0.0 {
+                    return Err(PyValueError::new_err(
+                        "offset_kind='ticks' needs an instrument with price_increment",
+                    ));
                 }
-                other => Err(PyValueError::new_err(format!(
-                    "offset_kind must be 'price', 'bps', or 'ticks', got {other:?}"
-                ))),
+                Ok(TrailOffset::Price(raw * tick))
             }
-        };
-
-        let kernel_ref = &*kernel;
-        let kind_parsed = match kind {
-            "market" => OrderKind::Market,
-            "limit" => OrderKind::Limit { price: need_limit()? },
-            "stop_market" => OrderKind::StopMarket { trigger: need_trigger()? },
-            "stop_limit" => {
-                OrderKind::StopLimit { trigger: need_trigger()?, price: need_limit()? }
-            }
-            "market_if_touched" => OrderKind::MarketIfTouched { trigger: need_trigger()? },
-            "limit_if_touched" => {
-                OrderKind::LimitIfTouched { trigger: need_trigger()?, price: need_limit()? }
-            }
-            "market_to_limit" => OrderKind::MarketToLimit,
-            "trailing_stop_market" => {
-                OrderKind::TrailingStopMarket { offset: trail_offset(kernel_ref)? }
-            }
-            "trailing_stop_limit" => OrderKind::TrailingStopLimit {
-                offset: trail_offset(kernel_ref)?,
-                limit_offset,
-            },
-            other => return Err(PyValueError::new_err(format!("unknown order kind {other:?}"))),
-        };
-        let tif = match tif {
-            "gtc" => TimeInForce::Gtc,
-            "day" => TimeInForce::Day,
-            "gtd" => TimeInForce::Gtd {
-                expire_ns: expire_ns
-                    .ok_or_else(|| PyValueError::new_err("gtd orders need expire_ns"))?,
-            },
-            "ioc" => TimeInForce::Ioc,
-            "fok" => TimeInForce::Fok,
-            "at_open" => TimeInForce::AtOpen,
-            "at_close" => TimeInForce::AtClose,
-            other => return Err(PyValueError::new_err(format!("unknown tif {other:?}"))),
-        };
-        if matches!(tif, TimeInForce::AtOpen | TimeInForce::AtClose)
-            && !matches!(kind_parsed, OrderKind::Market)
-        {
-            return Err(PyValueError::new_err("at_open/at_close apply to market orders"));
+            other => Err(PyValueError::new_err(format!(
+                "offset_kind must be 'price', 'bps', or 'ticks', got {other:?}"
+            ))),
         }
-        if post_only && !matches!(kind_parsed, OrderKind::Limit { .. }) {
-            return Err(PyValueError::new_err("post_only applies to limit orders"));
-        }
+    };
 
-        Ok(kernel.submit_order_full(
-            side,
-            qty,
-            kind_parsed,
-            tif,
-            submitted_idx,
-            submitted_ts,
-            client_id.to_string(),
-            stop_price,
-            target_price,
-            post_only,
-            reduce_only,
-            parent_id,
-        ))
+    let kernel_ref = &*kernel;
+    let kind_parsed = match kind {
+        "market" => OrderKind::Market,
+        "limit" => OrderKind::Limit { price: need_limit()? },
+        "stop_market" => OrderKind::StopMarket { trigger: need_trigger()? },
+        "stop_limit" => OrderKind::StopLimit { trigger: need_trigger()?, price: need_limit()? },
+        "market_if_touched" => OrderKind::MarketIfTouched { trigger: need_trigger()? },
+        "limit_if_touched" => {
+            OrderKind::LimitIfTouched { trigger: need_trigger()?, price: need_limit()? }
+        }
+        "market_to_limit" => OrderKind::MarketToLimit,
+        "trailing_stop_market" => {
+            OrderKind::TrailingStopMarket { offset: trail_offset(kernel_ref)? }
+        }
+        "trailing_stop_limit" => {
+            OrderKind::TrailingStopLimit { offset: trail_offset(kernel_ref)?, limit_offset }
+        }
+        other => return Err(PyValueError::new_err(format!("unknown order kind {other:?}"))),
+    };
+    let tif = match tif {
+        "gtc" => TimeInForce::Gtc,
+        "day" => TimeInForce::Day,
+        "gtd" => TimeInForce::Gtd {
+            expire_ns: expire_ns
+                .ok_or_else(|| PyValueError::new_err("gtd orders need expire_ns"))?,
+        },
+        "ioc" => TimeInForce::Ioc,
+        "fok" => TimeInForce::Fok,
+        "at_open" => TimeInForce::AtOpen,
+        "at_close" => TimeInForce::AtClose,
+        other => return Err(PyValueError::new_err(format!("unknown tif {other:?}"))),
+    };
+    if matches!(tif, TimeInForce::AtOpen | TimeInForce::AtClose)
+        && !matches!(kind_parsed, OrderKind::Market)
+    {
+        return Err(PyValueError::new_err("at_open/at_close apply to market orders"));
+    }
+    if post_only && !matches!(kind_parsed, OrderKind::Limit { .. }) {
+        return Err(PyValueError::new_err("post_only applies to limit orders"));
+    }
+
+    Ok(kernel.submit_order_full(
+        side,
+        qty,
+        kind_parsed,
+        tif,
+        submitted_idx,
+        submitted_ts,
+        client_id.to_string(),
+        stop_price,
+        target_price,
+        post_only,
+        reduce_only,
+        parent_id,
+    ))
 }

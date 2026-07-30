@@ -23,20 +23,8 @@ fn bars(start_ts: i64, closes: &[f64]) -> Vec<KernelBar> {
 fn session_two_instruments() -> EventSession {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
-    let a = session.add_instrument(
-        "AAA".into(),
-        Direction::Long,
-        None,
-        None,
-        PositionPolicy::Net,
-    );
-    let b = session.add_instrument(
-        "BBB".into(),
-        Direction::Long,
-        None,
-        None,
-        PositionPolicy::Net,
-    );
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     // Interleaved timestamps: AAA at 0,10,20..., BBB offset by 5.
     session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
     session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
@@ -52,10 +40,7 @@ fn schedule_interleaves_deterministically() {
         order.push((entry.instrument, entry.local_idx, entry.timestamp()));
         session.apply_current(StepInput::default());
     }
-    assert_eq!(
-        order,
-        vec![(0, 0, 0), (1, 0, 5), (0, 1, 10), (1, 1, 15), (0, 2, 20), (1, 2, 25)]
-    );
+    assert_eq!(order, vec![(0, 0, 0), (1, 0, 5), (0, 1, 10), (1, 1, 15), (0, 2, 20), (1, 2, 25)]);
 }
 
 #[test]
@@ -69,9 +54,7 @@ fn shared_pool_constrains_second_instrument() {
 
     // BBB tries to enter with an empty pool: zero-size rejection.
     let events = session.apply_current(StepInput { entry: true, ..StepInput::default() });
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, EngineEvent::EntryRejected { .. })));
+    assert!(events.iter().any(|e| matches!(e, EngineEvent::EntryRejected { .. })));
     assert!(!session.kernel(1).is_in_position());
 }
 
@@ -79,11 +62,7 @@ fn shared_pool_constrains_second_instrument() {
 fn equity_marks_both_instruments() {
     let mut session = session_two_instruments();
     // Enter AAA with half the pool.
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.5),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
     // BBB enters with what remains.
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
     assert!(session.kernel(0).is_in_position());
@@ -109,17 +88,11 @@ fn session_two_instruments_gated(
     max_positions: Option<usize>,
     max_drawdown_pct: Option<f64>,
 ) -> EventSession {
-    let config = BacktestConfig {
-        fees: 0.0,
-        max_positions,
-        max_drawdown_pct,
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { fees: 0.0, max_positions, max_drawdown_pct, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    let b =
-        session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
     session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
     session.seal();
@@ -131,11 +104,7 @@ fn max_positions_caps_across_instruments() {
     // Regression: each kernel used to check only its own ledger, so a
     // limit of 1 allowed one position *per instrument*.
     let mut session = session_two_instruments_gated(Some(1), None);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     assert!(session.kernel(0).is_in_position());
 
     let events = session.apply_current(StepInput {
@@ -159,11 +128,7 @@ fn max_positions_caps_across_instruments() {
 #[test]
 fn max_positions_frees_a_slot_on_exit() {
     let mut session = session_two_instruments_gated(Some(1), None);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     // Close AAA, then let BBB take the freed slot.
     let position_id = session.kernel(0).position_snapshots()[0].position_id;
     session.kernel_mut(0).request_close(position_id);
@@ -190,11 +155,7 @@ fn max_positions_gates_the_order_path() {
     use crate::execution::orders::{OrderKind, OrderSide, QtySpec, TimeInForce};
 
     let mut session = session_two_instruments_gated(Some(1), None);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     assert!(session.kernel(0).is_in_position(), "AAA holds the only slot");
 
     // BBB rests a marketable buy limit; it matches on its next bar.
@@ -225,11 +186,7 @@ fn max_positions_gates_the_order_path() {
 #[test]
 fn unset_max_positions_is_unconstrained() {
     let mut session = session_two_instruments_gated(None, None);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     let events = session.apply_current(StepInput {
         entry: true,
         size_mult: Some(0.25),
@@ -244,16 +201,11 @@ fn unset_max_positions_is_unconstrained() {
 fn drawdown_halt_blocks_entries_on_all_instruments() {
     // AAA collapses; the portfolio drawdown gate halts BBB too, even
     // though BBB never traded.
-    let config = BacktestConfig {
-        fees: 0.0,
-        max_drawdown_pct: Some(15.0),
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    let b =
-        session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
     session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
     session.seal();
@@ -280,16 +232,11 @@ fn drawdown_halt_reports_its_own_reason_not_margin_call() {
     // A cash-account portfolio has no margin switch to trip; the halt
     // must not borrow the margin-call reason. BBB stays flat so its
     // entry attempts actually reach the gate.
-    let config = BacktestConfig {
-        fees: 0.0,
-        max_drawdown_pct: Some(15.0),
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    let b =
-        session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
     session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
     session.seal();
@@ -313,14 +260,10 @@ fn drawdown_halt_reports_its_own_reason_not_margin_call() {
 
 #[test]
 fn drawdown_halt_records_halted_at_on_the_account() {
-    let config = BacktestConfig {
-        fees: 0.0,
-        max_drawdown_pct: Some(15.0),
-        ..BacktestConfig::default()
-    };
+    let config =
+        BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
     session.seal();
 
@@ -340,15 +283,10 @@ fn a_latched_drawdown_halt_suppresses_a_later_margin_call() {
     // Halts are latch-once: `halt_all` records the first cause, and the
     // maintenance check skips an already-halted account. Pins the
     // documented consequence of routing both causes through the account.
-    let config = BacktestConfig {
-        fees: 0.0,
-        max_drawdown_pct: Some(15.0),
-        ..BacktestConfig::default()
-    };
-    let mut session =
-        EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let config =
+        BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
+    let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
     session.seal();
 
@@ -373,8 +311,7 @@ fn a_latched_drawdown_halt_suppresses_a_later_margin_call() {
 fn session_two_instruments_margin(leverage: f64, short_second: bool) -> EventSession {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::with_account(config, AccountMode::Margin { leverage });
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let second_dir = if short_second { Direction::Short } else { Direction::Long };
     let b = session.add_instrument("BBB".into(), second_dir, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
@@ -388,11 +325,7 @@ fn cash_mode_arithmetic_unchanged() {
     // Drift tripwire: the cash path must be bit-identical to the
     // single-pool implementation this replaced.
     let mut session = session_two_instruments();
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.5),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
     while session.current().is_some() {
         session.apply_current(StepInput::default());
@@ -416,11 +349,7 @@ fn margin_pool_shared_across_kernels() {
     // units and leaves 75k; under 5x it buys 1250 units for the same
     // 25k of locked margin — and BBB still draws on the shared balance.
     let mut session = session_two_instruments_margin(5.0, false);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     assert!(session.kernel(0).is_in_position());
     assert_eq!(session.kernel(0).position_snapshots()[0].size, 1_250.0);
     // Locks reserve capital without debiting cash.
@@ -463,16 +392,8 @@ fn margin_equity_is_direction_aware() {
     // cash-mode marking would price the short's `position_value` as a
     // gain. Only direction-aware marking nets them correctly.
     let mut session = session_two_instruments_margin(2.0, true);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     assert!(session.kernel(0).is_in_position());
     assert!(session.kernel(1).is_in_position());
 
@@ -503,16 +424,8 @@ fn fully_funded_hedged_book_has_no_maintenance_requirement() {
     // long/short portfolio trips immediately — and the halt latches,
     // silently blocking every later entry.
     let mut session = session_two_instruments_margin(1.0, true);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.5),
-        ..StepInput::default()
-    });
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.5),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
     assert!(session.kernel(0).is_in_position());
     assert!(session.kernel(1).is_in_position());
     assert_eq!(session.kernel(0).maintenance_requirement(102.0), 0.0);
@@ -527,12 +440,9 @@ fn fully_funded_hedged_book_has_no_maintenance_requirement() {
 #[test]
 fn portfolio_margin_call_halts_all_kernels() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
-    let mut session =
-        EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    let b =
-        session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     // AAA collapses after entry; BBB is untouched and never enters.
     session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
     session.set_bars(b, bars(5, &[50.0, 50.0, 50.0]));
@@ -558,16 +468,8 @@ fn maintenance_requirement_sums_per_instrument_rates() {
     // Each instrument contributes its own spec rate; a blended rate
     // would misprice the portfolio requirement.
     let mut session = session_two_instruments_margin(4.0, false);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     let required: f64 = [
         session.kernel(0).maintenance_requirement(102.0),
         session.kernel(1).maintenance_requirement(52.0),
@@ -587,12 +489,9 @@ fn finish_reports_rejected_entries_and_halt() {
     // a counted constraint refusal, on the untouched instrument too.
     // (Zero-size sizing is deliberately *not* counted — see the kernel.)
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
-    let mut session =
-        EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    let b =
-        session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
     session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
     session.seal();
@@ -605,10 +504,7 @@ fn finish_reports_rejected_entries_and_halt() {
     assert!(session.is_halted());
 
     let outcome = session.finish();
-    assert!(
-        outcome.rejected_entries > 0,
-        "rejections must be reported, not hardcoded to zero"
-    );
+    assert!(outcome.rejected_entries > 0, "rejections must be reported, not hardcoded to zero");
     let per_instrument: usize = outcome.instruments.iter().map(|o| o.rejected_entries).sum();
     assert_eq!(outcome.rejected_entries, per_instrument);
     // The instrument that never traded was halted by the shared account.
@@ -620,11 +516,7 @@ fn finish_reports_rejected_entries_and_halt() {
 #[test]
 fn finish_reports_no_halt_on_a_clean_run() {
     let mut session = session_two_instruments();
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.5),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
     while session.current().is_some() {
         session.apply_current(StepInput::default());
     }
@@ -637,10 +529,8 @@ fn finish_reports_no_halt_on_a_clean_run() {
 #[test]
 fn finish_reports_margin_halt() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
-    let mut session =
-        EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
-    let a =
-        session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
     session.seal();
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
@@ -655,16 +545,8 @@ fn finish_reports_margin_halt() {
 #[test]
 fn locked_margin_released_on_close() {
     let mut session = session_two_instruments_margin(5.0, false);
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
-    session.apply_current(StepInput {
-        entry: true,
-        size_mult: Some(0.25),
-        ..StepInput::default()
-    });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
     assert!(session.free_capital() < session.cash());
 
     while session.current().is_some() {
@@ -675,11 +557,8 @@ fn locked_margin_released_on_close() {
     // Every lock is released, so the closing balance is exactly the
     // starting capital plus realized PnL (fees are zero in this config).
     let total_pnl: f64 = outcome.instruments.iter().map(|o| o.pnl).sum();
-    let final_balance = *outcome
-        .result
-        .equity_curve
-        .last()
-        .expect("the schedule produced equity samples");
+    let final_balance =
+        *outcome.result.equity_curve.last().expect("the schedule produced equity samples");
     assert!(
         (final_balance - (100_000.0 + total_pnl)).abs() < 1e-6,
         "balance {final_balance} should reconcile to 100000 + {total_pnl}"
@@ -795,8 +674,7 @@ fn tick_entries_lend_and_drain_the_shared_account() {
 
 #[test]
 fn max_positions_gates_tick_entries_portfolio_wide() {
-    let config =
-        BacktestConfig { fees: 0.0, max_positions: Some(1), ..BacktestConfig::default() };
+    let config = BacktestConfig { fees: 0.0, max_positions: Some(1), ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
@@ -805,8 +683,11 @@ fn max_positions_gates_tick_entries_portfolio_wide() {
     session.seal();
 
     session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
-    let events =
-        session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
+    let events = session.apply_current(StepInput {
+        entry: true,
+        size_mult: Some(0.25),
+        ..StepInput::default()
+    });
     assert!(events.iter().any(|e| matches!(
         e,
         EngineEvent::EntryRejected { reason: RejectReason::MaxPositions, .. }
@@ -998,7 +879,14 @@ fn remaining_counts_unapplied_events() {
 
     session.push_bar(
         a,
-        KernelBar { timestamp: 20, open: 100.0, high: 101.0, low: 99.0, close: 100.5, volume: 10.0 },
+        KernelBar {
+            timestamp: 20,
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.5,
+            volume: 10.0,
+        },
     );
     assert_eq!(session.remaining(), 1);
 }

@@ -65,10 +65,7 @@ pub(crate) fn require_finite(
     }
     for (idx, v) in values.iter().enumerate() {
         if !v.is_finite() {
-            return Err(PortfolioMathError::NonFinite {
-                row: idx / n_cols,
-                col: idx % n_cols,
-            });
+            return Err(PortfolioMathError::NonFinite { row: idx / n_cols, col: idx % n_cols });
         }
     }
     Ok(())

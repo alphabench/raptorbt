@@ -79,9 +79,7 @@ pub fn simulate_rebalance_policy(
     require_finite(prices, n_dates, n_assets)?;
     require_finite(target_weights, n_dates, n_assets)?;
     if n_dates == 0 || n_assets == 0 {
-        return Err(PortfolioMathError::DegenerateInput(
-            "empty panel".into(),
-        ));
+        return Err(PortfolioMathError::DegenerateInput("empty panel".into()));
     }
     for (idx, p) in prices.iter().enumerate() {
         if *p <= 0.0 {
@@ -151,10 +149,8 @@ pub fn simulate_rebalance_policy(
         let equity = holdings_value + cash;
 
         // Current weights and one-way drift to target.
-        let drift: f64 = (0..n_assets)
-            .map(|a| ((units[a] * px[a]) / equity - tw[a]).abs())
-            .sum::<f64>()
-            * 0.5;
+        let drift: f64 =
+            (0..n_assets).map(|a| ((units[a] * px[a]) / equity - tw[a]).abs()).sum::<f64>() * 0.5;
 
         let should_rebalance = match cfg.policy {
             RebalancePolicy::Calendar { every_n } => d % every_n == 0,
@@ -177,12 +173,7 @@ pub fn simulate_rebalance_policy(
                 }
                 let is_buy = delta_value > 0.0;
                 // Long-only book: a buy is a long entry, a sell a long exit.
-                let fees = calculate_side(
-                    cfg.segment,
-                    delta_value.abs(),
-                    Direction::Long,
-                    is_buy,
-                );
+                let fees = calculate_side(cfg.segment, delta_value.abs(), Direction::Long, is_buy);
                 let fee_total = fees.total();
                 day_brk += fees.brokerage;
                 day_reg += fee_total - fees.brokerage;
@@ -258,7 +249,14 @@ mod tests {
         // date 1 has no drift so nothing trades.
         let prices = vec![100.0, 50.0, 100.0, 50.0];
         let targets = vec![0.5, 0.5, 0.5, 0.5];
-        let r = simulate_rebalance_policy(&prices, 2, 2, &targets, &cfg(RebalancePolicy::Band { band: 0.05 })).unwrap();
+        let r = simulate_rebalance_policy(
+            &prices,
+            2,
+            2,
+            &targets,
+            &cfg(RebalancePolicy::Band { band: 0.05 }),
+        )
+        .unwrap();
         assert_eq!(r.cost_dp[0], 0.0);
         assert_eq!(r.n_rebalances, 1);
         assert_eq!(r.n_trades, 2);
@@ -341,7 +339,14 @@ mod tests {
         // Prices drift slightly; band is wide; only date 0 trades.
         let prices = vec![100.0, 100.0, 101.0, 99.5, 102.0, 99.0];
         let targets = vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
-        let r = simulate_rebalance_policy(&prices, 3, 2, &targets, &cfg(RebalancePolicy::Band { band: 0.10 })).unwrap();
+        let r = simulate_rebalance_policy(
+            &prices,
+            3,
+            2,
+            &targets,
+            &cfg(RebalancePolicy::Band { band: 0.10 }),
+        )
+        .unwrap();
         assert_eq!(r.n_rebalances, 1);
         assert_eq!(r.turnover[1], 0.0);
         assert_eq!(r.turnover[2], 0.0);
@@ -351,9 +356,23 @@ mod tests {
     fn refuses_nan_and_bad_targets() {
         let prices = vec![100.0, f64::NAN];
         let targets = vec![0.5, 0.5];
-        assert!(simulate_rebalance_policy(&prices, 1, 2, &targets, &cfg(RebalancePolicy::Calendar { every_n: 1 })).is_err());
+        assert!(simulate_rebalance_policy(
+            &prices,
+            1,
+            2,
+            &targets,
+            &cfg(RebalancePolicy::Calendar { every_n: 1 })
+        )
+        .is_err());
         let prices = vec![100.0, 100.0];
         let targets = vec![0.7, 0.6]; // sums over 1
-        assert!(simulate_rebalance_policy(&prices, 1, 2, &targets, &cfg(RebalancePolicy::Calendar { every_n: 1 })).is_err());
+        assert!(simulate_rebalance_policy(
+            &prices,
+            1,
+            2,
+            &targets,
+            &cfg(RebalancePolicy::Calendar { every_n: 1 })
+        )
+        .is_err());
     }
 }

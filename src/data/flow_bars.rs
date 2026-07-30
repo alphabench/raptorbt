@@ -222,8 +222,7 @@ mod tests {
     #[test]
     fn imbalance_and_runs_agree_on_one_directional_flow() {
         // With no opposing flow, net and one-sided accumulation are equal.
-        let mut imbalance =
-            FlowBarBuilder::new(FlowMagnitude::Volume, FlowRule::Imbalance, 10.0);
+        let mut imbalance = FlowBarBuilder::new(FlowMagnitude::Volume, FlowRule::Imbalance, 10.0);
         let mut runs = FlowBarBuilder::new(FlowMagnitude::Volume, FlowRule::Runs, 10.0);
         let mut a = Vec::new();
         let mut b = Vec::new();

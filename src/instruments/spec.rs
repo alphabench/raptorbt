@@ -174,7 +174,11 @@ impl InstrumentSpec {
     /// one is known; everything else (and options without one) settles at the
     /// provided fallback price, which callers pass as the settlement bar's
     /// close.
-    pub fn settlement_value(&self, fallback_price: Price, underlying_price: Option<Price>) -> Price {
+    pub fn settlement_value(
+        &self,
+        fallback_price: Price,
+        underlying_price: Option<Price>,
+    ) -> Price {
         match (&self.kind, underlying_price) {
             (InstrumentKind::Option { strike, right, binary, .. }, Some(under)) => {
                 let intrinsic = match right {

@@ -157,10 +157,9 @@ impl OrderEngine {
             (OrderKind::Market | OrderKind::MarketToLimit, _) => return false,
             // Trailing offsets are the order's identity; replacing one is a
             // new order. Cancel-and-replace instead.
-            (
-                OrderKind::TrailingStopMarket { .. } | OrderKind::TrailingStopLimit { .. },
-                _,
-            ) => return false,
+            (OrderKind::TrailingStopMarket { .. } | OrderKind::TrailingStopLimit { .. }, _) => {
+                return false
+            }
             (OrderKind::MarketIfTouched { trigger }, _) => {
                 if let Some(t) = trigger_price {
                     *trigger = t;
@@ -224,7 +223,12 @@ impl OrderEngine {
     /// The engine reports outcomes but does not apply status transitions for
     /// fills; the kernel confirms or rejects each fill (position state may
     /// refuse it) and transitions the order itself.
-    pub fn match_bar(&mut self, idx: usize, bar: &OhlcvBar, fill_model: &FillModel) -> Vec<MatchOutcome> {
+    pub fn match_bar(
+        &mut self,
+        idx: usize,
+        bar: &OhlcvBar,
+        fill_model: &FillModel,
+    ) -> Vec<MatchOutcome> {
         self.match_events(idx, bar, fill_model, MatchMode::Bar)
     }
 
@@ -489,11 +493,8 @@ mod tests {
 
     #[test]
     fn sell_stop_gap_through_fills_at_open() {
-        let (mut engine, id) = engine_with(
-            OrderKind::StopMarket { trigger: 95.0 },
-            OrderSide::Sell,
-            TimeInForce::Gtc,
-        );
+        let (mut engine, id) =
+            engine_with(OrderKind::StopMarket { trigger: 95.0 }, OrderSide::Sell, TimeInForce::Gtc);
         let fm = FillModel::default();
         // Gap down through the trigger: fill at the (worse) open.
         let outcomes = engine.match_bar(1, &bar(1, 93.0, 94.0, 92.0, 93.5), &fm);
@@ -612,7 +613,9 @@ mod tests {
             engine_with(OrderKind::Limit { price: 90.0 }, OrderSide::Buy, TimeInForce::Day);
         let fm = FillModel::default();
         // Same UTC day: still working.
-        assert!(engine.match_bar(1, &bar(NS_PER_DAY - 1, 100.0, 101.0, 99.0, 100.0), &fm).is_empty());
+        assert!(engine
+            .match_bar(1, &bar(NS_PER_DAY - 1, 100.0, 101.0, 99.0, 100.0), &fm)
+            .is_empty());
         // Next UTC day: expired.
         let outcomes = engine.match_bar(2, &bar(NS_PER_DAY, 100.0, 101.0, 99.0, 100.0), &fm);
         assert_eq!(outcomes, vec![MatchOutcome::Expire { order_id: id }]);
@@ -670,8 +673,7 @@ mod tests {
 
     #[test]
     fn at_open_market_fills_at_next_open() {
-        let (mut engine, id) =
-            engine_with(OrderKind::Market, OrderSide::Buy, TimeInForce::AtOpen);
+        let (mut engine, id) = engine_with(OrderKind::Market, OrderSide::Buy, TimeInForce::AtOpen);
         let fm = FillModel::default();
         let outcomes = engine.match_bar(1, &bar(1, 102.5, 103.0, 101.0, 101.5), &fm);
         assert_eq!(outcomes, vec![MatchOutcome::Fill { order_id: id, price: 102.5 }]);

@@ -119,7 +119,10 @@ pub trait BarBuilder: std::fmt::Debug {
 /// (epoch), a timezone offset (e.g. [`IST_OFFSET_NS`]) aligns day/week/
 /// month/year windows to that timezone's civil dates — an NSE day bar
 /// covers one IST trading date rather than a UTC one.
-pub fn builder_for(spec: BarSpec, align_offset_ns: i64) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
+pub fn builder_for(
+    spec: BarSpec,
+    align_offset_ns: i64,
+) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
     builder_for_with(spec, align_offset_ns, BuilderParams::default())
 }
 
@@ -437,8 +440,10 @@ mod tests {
     fn composite_from_bars_preserves_ohlc_identity() {
         // Two 5-unit bars into one 10-unit bar.
         let mut b = TimeBarBuilder::new(10, 0);
-        let bar1 = OhlcvBar { timestamp: 3, open: 10.0, high: 12.0, low: 9.0, close: 11.0, volume: 5.0 };
-        let bar2 = OhlcvBar { timestamp: 8, open: 11.0, high: 15.0, low: 10.5, close: 14.0, volume: 7.0 };
+        let bar1 =
+            OhlcvBar { timestamp: 3, open: 10.0, high: 12.0, low: 9.0, close: 11.0, volume: 5.0 };
+        let bar2 =
+            OhlcvBar { timestamp: 8, open: 11.0, high: 15.0, low: 10.5, close: 14.0, volume: 7.0 };
         assert!(b.push(&SourceRecord::from_bar(&bar1)).is_none());
         assert!(b.push(&SourceRecord::from_bar(&bar2)).is_none());
         let out = b.flush().expect("bar");
@@ -542,8 +547,23 @@ mod tests {
         // should still return Unimplemented.
         use AggregationUnit::*;
         for unit in [
-            Millisecond, Second, Minute, Hour, Day, Week, Month, Year, Tick, Volume, Value,
-            Renko, TickImbalance, TickRuns, VolumeImbalance, VolumeRuns, ValueImbalance,
+            Millisecond,
+            Second,
+            Minute,
+            Hour,
+            Day,
+            Week,
+            Month,
+            Year,
+            Tick,
+            Volume,
+            Value,
+            Renko,
+            TickImbalance,
+            TickRuns,
+            VolumeImbalance,
+            VolumeRuns,
+            ValueImbalance,
             ValueRuns,
         ] {
             let spec = BarSpec::new(1, unit).unwrap();

@@ -91,7 +91,12 @@ impl MarketEvent {
 /// plus sell quantity delta, `0.0` when unavailable); ticks carrying a
 /// two-sided book become [`QuoteTick`]s as well. Zero prices mark missing
 /// data and are skipped.
-pub fn tick_data_to_events(ticks: &TickData, instrument: u32, trade_stream: u32, quote_stream: u32) -> Vec<MarketEvent> {
+pub fn tick_data_to_events(
+    ticks: &TickData,
+    instrument: u32,
+    trade_stream: u32,
+    quote_stream: u32,
+) -> Vec<MarketEvent> {
     let mut events = Vec::with_capacity(ticks.len() * 2);
     for i in 0..ticks.len() {
         let ts = ticks.timestamps[i];
@@ -140,14 +145,10 @@ mod tests {
             oi: vec![0.0, 0.0, 0.0],
         };
         let events = tick_data_to_events(&ticks, 0, 1, 2);
-        let trades: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e.payload, EventPayload::Trade(_)))
-            .collect();
-        let quotes: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e.payload, EventPayload::Quote(_)))
-            .collect();
+        let trades: Vec<_> =
+            events.iter().filter(|e| matches!(e.payload, EventPayload::Trade(_))).collect();
+        let quotes: Vec<_> =
+            events.iter().filter(|e| matches!(e.payload, EventPayload::Quote(_))).collect();
         // ltp=0 at ts=2 skipped; ask-only book at ts=3 skipped.
         assert_eq!(trades.len(), 2);
         assert_eq!(quotes.len(), 2);

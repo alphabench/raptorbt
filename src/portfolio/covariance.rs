@@ -151,11 +151,7 @@ pub fn ledoit_wolf(
     let mut f = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..n {
-            f[i * n + j] = if i == j {
-                s[i * n + i]
-            } else {
-                r_bar * sqrt_var[i] * sqrt_var[j]
-            };
+            f[i * n + j] = if i == j { s[i * n + i] } else { r_bar * sqrt_var[i] * sqrt_var[j] };
         }
     }
 
@@ -204,8 +200,8 @@ pub fn ledoit_wolf(
             }
             th_ii /= t;
             th_jj /= t;
-            rho_hat += (r_bar / 2.0)
-                * ((s_jj / s_ii).sqrt() * th_ii + (s_ii / s_jj).sqrt() * th_jj);
+            rho_hat +=
+                (r_bar / 2.0) * ((s_jj / s_ii).sqrt() * th_ii + (s_ii / s_jj).sqrt() * th_jj);
         }
     }
 
@@ -300,9 +296,7 @@ mod tests {
     fn synth_returns(n_obs: usize, n_assets: usize, seed: u64) -> Vec<f64> {
         let mut state = seed;
         let mut next = || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (state >> 33) as f64 / (u32::MAX as f64) - 0.5
         };
         let mut out = Vec::with_capacity(n_obs * n_assets);
@@ -395,10 +389,7 @@ mod tests {
         // Rank-deficient: second row is a copy of the first. The clamping
         // cholesky in monte_carlo.rs would repair this; chol_strict must not.
         let a = vec![1.0, 1.0, 1.0, 1.0];
-        assert!(matches!(
-            chol_strict(&a, 2),
-            Err(PortfolioMathError::NotPositiveDefinite(_))
-        ));
+        assert!(matches!(chol_strict(&a, 2), Err(PortfolioMathError::NotPositiveDefinite(_))));
     }
 
     #[test]

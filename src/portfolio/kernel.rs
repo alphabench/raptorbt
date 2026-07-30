@@ -8,19 +8,19 @@
 //!
 //! [`PortfolioEngine`]: crate::portfolio::engine::PortfolioEngine
 
+use crate::accounts::{AccountMode, MarginBook};
 use crate::core::types::{
     BacktestConfig, Direction, ExitReason, InstrumentConfig, OhlcvBar, Price, StopConfig,
     TargetConfig, Trade,
 };
+use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
+use crate::execution::algos::AlgoEngine;
+use crate::execution::fill::FillRng;
 use crate::execution::orders::{
     MatchOutcome, Order, OrderEngine, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce,
 };
-use crate::accounts::{AccountMode, MarginBook};
-use crate::execution::fill::FillRng;
-use crate::execution::algos::AlgoEngine;
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
-use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
 use crate::instruments::InstrumentSpec;
 use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
 use crate::portfolio::position::ExitDetails;
@@ -249,11 +249,7 @@ impl EngineKernel {
             fee_model,
             slippage_model,
             fill_price,
-            fill_model: FillModel {
-                fill_price,
-                limit_slippage,
-                ..FillModel::default()
-            },
+            fill_model: FillModel { fill_price, limit_slippage, ..FillModel::default() },
             ledger: PositionLedger::new(symbol, PositionPolicy::Net),
             cash,
             direction,
@@ -327,8 +323,7 @@ impl EngineKernel {
         match self.account {
             AccountMode::Cash => None,
             AccountMode::Margin { leverage } => {
-                let from_spec =
-                    self.spec.as_ref().map(|s| s.margin_init).filter(|&m| m > 0.0);
+                let from_spec = self.spec.as_ref().map(|s| s.margin_init).filter(|&m| m > 0.0);
                 Some(from_spec.unwrap_or(1.0 / leverage.max(1.0)))
             }
         }
@@ -473,7 +468,6 @@ impl EngineKernel {
     pub fn request_close(&mut self, position_id: u64) {
         self.pending_closes.push(position_id);
     }
-
 
     /// Read-only view of the earliest open position, or `None` when flat.
     pub fn position_snapshot(&self) -> Option<PositionSnapshot> {
@@ -1057,7 +1051,12 @@ impl EngineKernel {
     }
 
     /// Entry path: size against available capital, round to lot, open.
-    pub(crate) fn try_enter(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Option<EngineEvent> {
+    pub(crate) fn try_enter(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        input: StepInput,
+    ) -> Option<EngineEvent> {
         let entry_price = self.fill_price_for(bar, self.direction, true);
         self.open_at(
             idx,
@@ -1252,7 +1251,12 @@ impl EngineKernel {
     /// Delegates to [`FillPrice::get_price_from_arrays`] rather than matching
     /// inline: the `Worst`/`Best` variants are direction- and entry-dependent,
     /// and duplicating that table invites drift.
-    pub(crate) fn fill_price_for(&self, bar: &KernelBar, direction: Direction, is_entry: bool) -> Price {
+    pub(crate) fn fill_price_for(
+        &self,
+        bar: &KernelBar,
+        direction: Direction,
+        is_entry: bool,
+    ) -> Price {
         self.fill_price
             .get_price_from_arrays(bar.open, bar.high, bar.low, bar.close, direction, is_entry)
     }

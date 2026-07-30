@@ -186,10 +186,7 @@ impl OrderBook {
     /// `None` when the price is outside the visible window — unknown, which
     /// a caller must not read as "no liquidity".
     pub fn size_at(&self, side: BookSide, price: Price) -> Option<f64> {
-        self.levels(side)
-            .iter()
-            .find(|level| level.price == price)
-            .map(|level| level.size)
+        self.levels(side).iter().find(|level| level.price == price).map(|level| level.size)
     }
 
     /// Whether any level has been recorded.

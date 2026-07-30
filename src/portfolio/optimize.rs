@@ -25,8 +25,7 @@
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{
-    DefaultSettingsBuilder, DefaultSolver, IPSolver, NonnegativeConeT, SolverStatus,
-    SupportedConeT,
+    DefaultSettingsBuilder, DefaultSolver, IPSolver, NonnegativeConeT, SolverStatus, SupportedConeT,
 };
 
 use super::covariance::RiskModel;
@@ -357,8 +356,8 @@ pub fn optimize_long_only(
     for i in 0..n {
         let delta = weights[i] - w_current[i];
         let below_band = delta.abs() < cfg.no_trade_band;
-        let below_value = cfg.min_trade_value > 0.0
-            && delta.abs() * cfg.portfolio_value < cfg.min_trade_value;
+        let below_value =
+            cfg.min_trade_value > 0.0 && delta.abs() * cfg.portfolio_value < cfg.min_trade_value;
         if (below_band || below_value) && delta != 0.0 {
             weights[i] = w_current[i];
             snapped[i] = true;
@@ -368,10 +367,7 @@ pub fn optimize_long_only(
     let invested: f64 = weights.iter().sum();
     let mut cash = 1.0 - invested;
     let eps = (10.0 * cfg.tolerance).max(1e-9);
-    let no_trade = weights
-        .iter()
-        .zip(w_current.iter())
-        .all(|(w, c)| (w - c).abs() < eps);
+    let no_trade = weights.iter().zip(w_current.iter()).all(|(w, c)| (w - c).abs() < eps);
     if no_trade {
         // Every diff snapped away: the status-quo book stands. Its cash is
         // whatever it already is -- the cash_max bound governs PROPOSED
@@ -394,11 +390,7 @@ pub fn optimize_long_only(
         cash = cash.clamp(0.0, cfg.cash_max);
     }
 
-    let trades: Vec<f64> = weights
-        .iter()
-        .zip(w_current.iter())
-        .map(|(w, c)| w - c)
-        .collect();
+    let trades: Vec<f64> = weights.iter().zip(w_current.iter()).map(|(w, c)| w - c).collect();
     let turnover = 0.5 * trades.iter().map(|t| t.abs()).sum::<f64>();
 
     // Annualized vol of the final book.
@@ -462,10 +454,7 @@ mod tests {
         // with sum(w)=1, minimizing w'Sigma w gives the inverse-variance split
         // w1 = s2/(s1+s2).
         let m = model(vec![0.04, 0.0, 0.0, 0.08], 2);
-        let cfg = OptimizerConfig {
-            risk_aversion: 10.0,
-            ..base_cfg(2)
-        };
+        let cfg = OptimizerConfig { risk_aversion: 10.0, ..base_cfg(2) };
         let r = optimize_long_only(&m, &[0.0, 0.0], &[0.5, 0.5], &cfg).unwrap();
         let expect_w0 = 0.08 / (0.04 + 0.08);
         assert!((r.weights[0] - expect_w0).abs() < 1e-4, "{:?}", r.weights);
@@ -476,10 +465,7 @@ mod tests {
     #[test]
     fn position_cap_binds() {
         // Asset 0 has huge alpha; cap forces the excess into asset 1 and 2.
-        let m = model(
-            vec![0.04, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.04],
-            3,
-        );
+        let m = model(vec![0.04, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.04], 3);
         let mut cfg = base_cfg(3);
         cfg.position_cap = 0.4;
         let r = optimize_long_only(&m, &[10.0, 0.0, 0.0], &[1.0 / 3.0; 3], &cfg).unwrap();
@@ -489,10 +475,7 @@ mod tests {
     #[test]
     fn sector_cap_binds() {
         // Assets 0,1 share sector 0 capped at 0.5; asset 2 alone in sector 1.
-        let m = model(
-            vec![0.04, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.04],
-            3,
-        );
+        let m = model(vec![0.04, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.04], 3);
         let mut cfg = base_cfg(3);
         cfg.sector_ids = vec![0, 0, 1];
         cfg.sector_caps = vec![0.5, 1.0];
@@ -586,10 +569,7 @@ mod tests {
     #[test]
     fn deterministic_across_runs() {
         let m = model(vec![0.04, 0.01, 0.01, 0.08], 2);
-        let cfg = OptimizerConfig {
-            turnover_penalty: 0.05,
-            ..base_cfg(2)
-        };
+        let cfg = OptimizerConfig { turnover_penalty: 0.05, ..base_cfg(2) };
         let a = optimize_long_only(&m, &[0.3, 0.1], &[0.6, 0.4], &cfg).unwrap();
         let b = optimize_long_only(&m, &[0.3, 0.1], &[0.6, 0.4], &cfg).unwrap();
         assert_eq!(a.weights, b.weights);

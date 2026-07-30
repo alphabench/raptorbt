@@ -109,8 +109,7 @@ pub struct BuilderParams {
 impl BuilderParams {
     /// Brick height for a spec, resolving the `step` fallback.
     pub fn resolved_brick(&self, spec: BarSpec) -> Result<f64, SpecError> {
-        let brick =
-            if self.brick_size > 0.0 { self.brick_size } else { spec.step as f64 };
+        let brick = if self.brick_size > 0.0 { self.brick_size } else { spec.step as f64 };
         if !brick.is_finite() || brick <= 0.0 {
             return Err(SpecError::InvalidParam("brick_size must be finite and > 0"));
         }

@@ -258,7 +258,9 @@ impl PyOptimizationResult {
     fn __repr__(&self) -> String {
         format!(
             "PyOptimizationResult(turnover={:.4}, cash={:.4}, vol_annualized={:.4}, status={})",
-            self.inner.turnover, self.inner.cash, self.inner.vol_annualized,
+            self.inner.turnover,
+            self.inner.cash,
+            self.inner.vol_annualized,
             self.inner.solver_status
         )
     }
@@ -561,8 +563,8 @@ pub fn rank_ic(
             "factor is {rows}x{cols} but prices is {p_rows}x{p_cols}"
         )));
     }
-    let out =
-        factor_panel::rank_ic(&f_flat, &p_flat, rows, cols, horizon, min_names).map_err(to_py_err)?;
+    let out = factor_panel::rank_ic(&f_flat, &p_flat, rows, cols, horizon, min_names)
+        .map_err(to_py_err)?;
     Ok(PyRankIc {
         mean_ic: out.mean_ic,
         stdev_ic: out.stdev_ic,
@@ -715,9 +717,6 @@ pub fn indian_cost_schedule(segment: &str) -> PyResult<HashMap<String, f64>> {
     out.insert("sebi_turnover_rate".into(), s.sebi_turnover_rate);
     out.insert("stamp_duty_rate".into(), s.stamp_duty_rate);
     out.insert("gst_rate".into(), s.gst_rate);
-    out.insert(
-        "dp_sell_charge_per_isin_per_day".into(),
-        DP_SELL_CHARGE_PER_ISIN_PER_DAY,
-    );
+    out.insert("dp_sell_charge_per_isin_per_day".into(), DP_SELL_CHARGE_PER_ISIN_PER_DAY);
     Ok(out)
 }
