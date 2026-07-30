@@ -50,6 +50,7 @@ from raptorbt._raptorbt import (
     PyRiskContributions,
     PyOptimizeItem,
     PyRebalanceSimResult,
+    PyRankIc,
     estimate_covariance,
     optimize_portfolio,
     batch_optimize_portfolios,
@@ -59,6 +60,7 @@ from raptorbt._raptorbt import (
     rank_panel,
     momentum_panel,
     composite_scores,
+    rank_ic,
     simulate_rebalance_policy,
     indian_cost_schedule,
     # Tick signal functions
@@ -156,6 +158,7 @@ __all__ = [
     "PyRiskContributions",
     "PyOptimizeItem",
     "PyRebalanceSimResult",
+    "PyRankIc",
     "estimate_covariance",
     "optimize_portfolio",
     "batch_optimize_portfolios",
@@ -165,6 +168,7 @@ __all__ = [
     "rank_panel",
     "momentum_panel",
     "composite_scores",
+    "rank_ic",
     "simulate_rebalance_policy",
     "indian_cost_schedule",
     # Monte Carlo simulation

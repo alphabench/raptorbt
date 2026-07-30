@@ -242,9 +242,237 @@ pub fn composite_scores(
     Ok(out)
 }
 
+/// Rank information coefficient of a factor against forward returns.
+///
+/// The per-date Spearman correlation between the factor's cross-sectional rank
+/// and the rank of the return realized over the NEXT `horizon` rows, then the
+/// mean of those daily ICs with a Newey-West-free t-statistic
+/// `mean / (stdev / sqrt(n))` over the dates that scored.
+///
+/// This is the falsifiability tool: a factor earns a place in the platform only
+/// by clearing a t-bar measured here, and the number it returns is the number
+/// that must be persisted as that factor's provenance.
+///
+/// Deliberate choices, each of which changes the answer:
+/// - **Forward returns are computed from `prices`, not supplied.** A caller
+///   passing its own forward returns can silently leak lookahead; the shift is
+///   done here where `horizon` is unambiguous.
+/// - **Ranks, not levels.** Momentum's cross-section is fat-tailed, so a
+///   Pearson IC on raw values is dominated by a handful of names.
+/// - **A date is scored only if at least `min_names` assets have BOTH a finite
+///   factor value and a finite forward return.** Pairing after the intersection
+///   is what stops a thin tail of the panel producing a confident-looking IC.
+/// - **NaN dates are skipped, never zero-filled.** A zero IC is a measurement;
+///   an absent one is not.
+pub struct RankIc {
+    /// Mean of the per-date rank correlations.
+    pub mean_ic: f64,
+    /// Sample standard deviation of the per-date rank correlations.
+    pub stdev_ic: f64,
+    /// `mean_ic / (stdev_ic / sqrt(n_dates_scored))`; 0 when undefined.
+    pub t_stat: f64,
+    /// Number of dates that produced an IC.
+    pub n_dates_scored: usize,
+    /// Mean number of paired names across the scored dates.
+    pub mean_names: f64,
+    /// The per-date ICs, NaN on dates that did not score.
+    pub daily_ic: Vec<f64>,
+}
+
+/// Spearman correlation of two equal-length finite slices, ties averaged.
+fn spearman(a: &[f64], b: &[f64]) -> Option<f64> {
+    let n = a.len();
+    if n < 2 {
+        return None;
+    }
+    let rank = |v: &[f64]| -> Vec<f64> {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&i, &j| v[i].partial_cmp(&v[j]).unwrap());
+        let mut r = vec![0.0; n];
+        let mut i = 0;
+        while i < n {
+            let mut j = i;
+            while j + 1 < n && v[order[j + 1]] == v[order[i]] {
+                j += 1;
+            }
+            let avg = (i + j) as f64 / 2.0;
+            for &idx in &order[i..=j] {
+                r[idx] = avg;
+            }
+            i = j + 1;
+        }
+        r
+    };
+    let ra = rank(a);
+    let rb = rank(b);
+    let mean_a: f64 = ra.iter().sum::<f64>() / n as f64;
+    let mean_b: f64 = rb.iter().sum::<f64>() / n as f64;
+    let mut cov = 0.0;
+    let mut var_a = 0.0;
+    let mut var_b = 0.0;
+    for i in 0..n {
+        let da = ra[i] - mean_a;
+        let db = rb[i] - mean_b;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+    // A constant cross-section on either side has no correlation to report.
+    if var_a <= 0.0 || var_b <= 0.0 {
+        return None;
+    }
+    Some(cov / (var_a * var_b).sqrt())
+}
+
+/// Measure a factor panel's rank IC against `horizon`-ahead returns.
+pub fn rank_ic(
+    factor: &[f64],
+    prices: &[f64],
+    n_dates: usize,
+    n_assets: usize,
+    horizon: usize,
+    min_names: usize,
+) -> Result<RankIc, PortfolioMathError> {
+    check_shape(factor, n_dates, n_assets)?;
+    check_shape(prices, n_dates, n_assets)?;
+    if horizon == 0 {
+        return Err(PortfolioMathError::DegenerateInput(
+            "horizon must be >= 1".into(),
+        ));
+    }
+    if min_names < 2 {
+        return Err(PortfolioMathError::DegenerateInput(format!(
+            "min_names must be >= 2, got {min_names}"
+        )));
+    }
+    let mut daily_ic = vec![f64::NAN; n_dates];
+    let mut ics: Vec<f64> = Vec::new();
+    let mut names_total = 0usize;
+    // A date can only score if its forward window lands inside the panel.
+    for d in 0..n_dates.saturating_sub(horizon) {
+        let mut xs: Vec<f64> = Vec::new();
+        let mut ys: Vec<f64> = Vec::new();
+        for a in 0..n_assets {
+            let f = factor[d * n_assets + a];
+            let p0 = prices[d * n_assets + a];
+            let p1 = prices[(d + horizon) * n_assets + a];
+            if f.is_finite() && p0.is_finite() && p1.is_finite() && p0 > 0.0 && p1 > 0.0 {
+                xs.push(f);
+                ys.push(p1 / p0 - 1.0);
+            }
+        }
+        if xs.len() < min_names {
+            continue;
+        }
+        if let Some(ic) = spearman(&xs, &ys) {
+            daily_ic[d] = ic;
+            ics.push(ic);
+            names_total += xs.len();
+        }
+    }
+    let n = ics.len();
+    if n == 0 {
+        return Ok(RankIc {
+            mean_ic: f64::NAN,
+            stdev_ic: f64::NAN,
+            t_stat: f64::NAN,
+            n_dates_scored: 0,
+            mean_names: f64::NAN,
+            daily_ic,
+        });
+    }
+    let mean_ic: f64 = ics.iter().sum::<f64>() / n as f64;
+    // Sample stdev (n-1); a single date has no dispersion to report.
+    let stdev_ic = if n > 1 {
+        (ics.iter().map(|v| (v - mean_ic) * (v - mean_ic)).sum::<f64>() / (n - 1) as f64).sqrt()
+    } else {
+        f64::NAN
+    };
+    let t_stat = if stdev_ic.is_finite() && stdev_ic > 0.0 {
+        mean_ic / (stdev_ic / (n as f64).sqrt())
+    } else {
+        f64::NAN
+    };
+    Ok(RankIc {
+        mean_ic,
+        stdev_ic,
+        t_stat,
+        n_dates_scored: n,
+        mean_names: names_total as f64 / n as f64,
+        daily_ic,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rank_ic_is_one_when_factor_perfectly_orders_forward_returns() {
+        // 3 assets, factor == next-period return order on every date.
+        let n_dates = 5;
+        let n_assets = 3;
+        // Prices rise fastest for asset 2, slowest for asset 0.
+        let mut prices = vec![0.0; n_dates * n_assets];
+        for d in 0..n_dates {
+            for a in 0..n_assets {
+                prices[d * n_assets + a] = (1.0 + 0.01 * (a as f64 + 1.0)).powi(d as i32);
+            }
+        }
+        // Factor ranks assets in the same order as their growth rate.
+        let factor: Vec<f64> = (0..n_dates)
+            .flat_map(|_| (0..n_assets).map(|a| a as f64))
+            .collect();
+        let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 2).unwrap();
+        assert_eq!(out.n_dates_scored, 4); // last date has no forward window
+        assert!((out.mean_ic - 1.0).abs() < 1e-12);
+        assert!((out.mean_names - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rank_ic_is_minus_one_when_factor_inverts_forward_returns() {
+        let n_dates = 4;
+        let n_assets = 3;
+        let mut prices = vec![0.0; n_dates * n_assets];
+        for d in 0..n_dates {
+            for a in 0..n_assets {
+                prices[d * n_assets + a] = (1.0 + 0.01 * (a as f64 + 1.0)).powi(d as i32);
+            }
+        }
+        // Reversed factor: highest score on the worst performer.
+        let factor: Vec<f64> = (0..n_dates)
+            .flat_map(|_| (0..n_assets).map(|a| -(a as f64)))
+            .collect();
+        let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 2).unwrap();
+        assert!((out.mean_ic + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rank_ic_skips_dates_below_min_names_and_never_zero_fills() {
+        let n_assets = 3;
+        let n_dates = 3;
+        // Date 0 has 3 finite factor values, dates 1-2 have only 1.
+        let factor = vec![
+            0.0, 1.0, 2.0, //
+            0.0, f64::NAN, f64::NAN, //
+            0.0, f64::NAN, f64::NAN,
+        ];
+        let prices = vec![100.0; n_dates * n_assets];
+        // Constant prices -> forward returns all zero -> no dispersion, so even
+        // date 0 cannot report a correlation.
+        let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 2).unwrap();
+        assert_eq!(out.n_dates_scored, 0);
+        assert!(out.mean_ic.is_nan());
+        assert!(out.daily_ic.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn rank_ic_refuses_bad_windows() {
+        let f = vec![1.0, 2.0];
+        let p = vec![1.0, 2.0];
+        assert!(rank_ic(&f, &p, 1, 2, 0, 2).is_err()); // horizon 0
+        assert!(rank_ic(&f, &p, 1, 2, 1, 1).is_err()); // min_names < 2
+    }
 
     #[test]
     fn momentum_matches_identity_on_ramp() {

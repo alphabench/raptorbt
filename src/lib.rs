@@ -95,6 +95,7 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<python::portfolio_bindings::PyRiskContributions>()?;
     m.add_class::<python::portfolio_bindings::PyOptimizeItem>()?;
     m.add_class::<python::portfolio_bindings::PyRebalanceSimResult>()?;
+    m.add_class::<python::portfolio_bindings::PyRankIc>()?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::estimate_covariance, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::optimize_portfolio, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::batch_optimize_portfolios, m)?)?;
@@ -104,6 +105,7 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::rank_panel, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::momentum_panel, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::composite_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(python::portfolio_bindings::rank_ic, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::simulate_rebalance_policy, m)?)?;
     m.add_function(wrap_pyfunction!(python::portfolio_bindings::indian_cost_schedule, m)?)?;
 

@@ -21,7 +21,7 @@ pub use allocation::{AllocationStrategy, CapitalAllocator};
 pub use covariance::{chol_strict, ledoit_wolf, RiskModel};
 pub use errors::PortfolioMathError;
 pub use factor_panel::{
-    composite_scores, momentum_panel, rank_panel, winsorize_panel, zscore_panel,
+    composite_scores, momentum_panel, rank_ic, rank_panel, winsorize_panel, zscore_panel, RankIc,
 };
 pub use optimize::{optimize_long_only, OptimizationResult, OptimizerConfig};
 pub use rebalance::{

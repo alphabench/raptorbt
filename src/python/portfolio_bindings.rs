@@ -498,6 +498,81 @@ pub fn composite_scores<'py>(
     to_pyarray2(py, out, rows, cols)
 }
 
+/// Measured rank IC of a factor against forward returns.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyRankIc {
+    mean_ic: f64,
+    stdev_ic: f64,
+    t_stat: f64,
+    n_dates_scored: usize,
+    mean_names: f64,
+    daily_ic: Vec<f64>,
+}
+
+#[pymethods]
+impl PyRankIc {
+    #[getter]
+    fn mean_ic(&self) -> f64 {
+        self.mean_ic
+    }
+
+    #[getter]
+    fn stdev_ic(&self) -> f64 {
+        self.stdev_ic
+    }
+
+    #[getter]
+    fn t_stat(&self) -> f64 {
+        self.t_stat
+    }
+
+    #[getter]
+    fn n_dates_scored(&self) -> usize {
+        self.n_dates_scored
+    }
+
+    #[getter]
+    fn mean_names(&self) -> f64 {
+        self.mean_names
+    }
+
+    fn daily_ic<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+        PyArray1::from_vec(py, self.daily_ic.clone())
+    }
+}
+
+/// Rank IC of a factor panel against `horizon`-ahead returns from `prices`.
+///
+/// Forward returns are derived here rather than supplied, so the shift cannot
+/// leak lookahead. Dates with fewer than `min_names` paired observations are
+/// skipped, never zero-filled.
+#[pyfunction]
+pub fn rank_ic(
+    factor: PyReadonlyArray2<f64>,
+    prices: PyReadonlyArray2<f64>,
+    horizon: usize,
+    min_names: usize,
+) -> PyResult<PyRankIc> {
+    let (f_flat, rows, cols) = numpy_to_vec2_f64(factor);
+    let (p_flat, p_rows, p_cols) = numpy_to_vec2_f64(prices);
+    if rows != p_rows || cols != p_cols {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "factor is {rows}x{cols} but prices is {p_rows}x{p_cols}"
+        )));
+    }
+    let out =
+        factor_panel::rank_ic(&f_flat, &p_flat, rows, cols, horizon, min_names).map_err(to_py_err)?;
+    Ok(PyRankIc {
+        mean_ic: out.mean_ic,
+        stdev_ic: out.stdev_ic,
+        t_stat: out.t_stat,
+        n_dates_scored: out.n_dates_scored,
+        mean_names: out.mean_names,
+        daily_ic: out.daily_ic,
+    })
+}
+
 /// Result of a rebalance-policy simulation.
 #[pyclass]
 #[derive(Debug, Clone)]
