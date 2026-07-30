@@ -259,6 +259,7 @@ mod tests {
                 entry_time: 0,
                 exit_time: 5,
                 fees: 0.0,
+                fee_breakdown: None,
                 exit_reason: ExitReason::Signal,
             },
             Trade {
@@ -275,6 +276,7 @@ mod tests {
                 entry_time: 10,
                 exit_time: 15,
                 fees: 0.0,
+                fee_breakdown: None,
                 exit_reason: ExitReason::StopLoss,
             },
             Trade {
@@ -291,6 +293,7 @@ mod tests {
                 entry_time: 20,
                 exit_time: 25,
                 fees: 0.0,
+                fee_breakdown: None,
                 exit_reason: ExitReason::TakeProfit,
             },
         ]

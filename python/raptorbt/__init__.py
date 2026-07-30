@@ -11,6 +11,12 @@ production quantitative trading:
 """
 
 from raptorbt._raptorbt import (
+    # Session lengths (minutes) for PyBacktestConfig(session_minutes=...)
+    SESSION_NSE,
+    SESSION_MCX,
+    SESSION_CDS,
+    SESSION_CONTINUOUS,
+    IST_OFFSET_NS,
     # Config classes
     PyBacktestConfig,
     PyInstrumentConfig,
@@ -20,9 +26,12 @@ from raptorbt._raptorbt import (
     PyBacktestResult,
     PyBacktestMetrics,
     PyTrade,
+    PyPortfolioResult,
+    PyInstrumentSummary,
     # Backtest functions
     run_single_backtest,
     run_basket_backtest,
+    run_portfolio_backtest,
     run_options_backtest,
     run_pairs_backtest,
     run_multi_backtest,
@@ -33,6 +42,27 @@ from raptorbt._raptorbt import (
     batch_spread_backtest,
     # Monte Carlo simulation
     simulate_portfolio_mc,
+    # Portfolio math (covariance, optimizer, factor panels, risk
+    # contributions, rebalance simulation, cost schedule)
+    PyRiskModel,
+    PyOptimizerConfig,
+    PyOptimizationResult,
+    PyRiskContributions,
+    PyOptimizeItem,
+    PyRebalanceSimResult,
+    PyRankIc,
+    estimate_covariance,
+    optimize_portfolio,
+    batch_optimize_portfolios,
+    compute_risk_contributions,
+    winsorize_panel,
+    zscore_panel,
+    rank_panel,
+    momentum_panel,
+    composite_scores,
+    rank_ic,
+    simulate_rebalance_policy,
+    indian_cost_schedule,
     # Tick signal functions
     compute_tick_entry_signals,
     compute_tick_exit_signals,
@@ -56,23 +86,63 @@ from raptorbt._raptorbt import (
     supertrend,
     rolling_min,
     rolling_max,
+    # Instrument market definitions
+    InstrumentSpec,
+    # Streaming indicators
+    Indicator,
+    # Bar aggregation
+    BarAggregator,
+    aggregate_bars,
+    bars_from_ticks,
+    # Per-bar strategy session (class-based strategy contract)
+    PyKernelSession,
+    PyEngineEvent,
+    PyPositionSnapshot,
+    resolve_atr_period,
+)
+from raptorbt.strategy import (
+    Bar,
+    PortfolioContext,
+    run_portfolio_strategy,
+    run_tick_strategy,
+    TickStrategyStream,
+    ClosePosition,
+    MarketOrder,
+    Strategy,
+    StrategyConfig,
+    StrategyContext,
+    run_strategy_backtest,
 )
 
-__version__ = "0.4.0"
+try:  # Python 3.8+
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("raptorbt")
+except Exception:  # pragma: no cover - source checkout without install metadata
+    __version__ = "unknown"
 
 __all__ = [
+    # Session lengths
+    "SESSION_NSE",
+    "SESSION_MCX",
+    "SESSION_CDS",
+    "SESSION_CONTINUOUS",
+    "IST_OFFSET_NS",
     # Config classes
     "PyBacktestConfig",
     "PyInstrumentConfig",
     "PyStopConfig",
     "PyTargetConfig",
     # Result classes
+    "PyPortfolioResult",
+    "PyInstrumentSummary",
     "PyBacktestResult",
     "PyBacktestMetrics",
     "PyTrade",
     # Backtest functions
     "run_single_backtest",
     "run_basket_backtest",
+    "run_portfolio_backtest",
     "run_options_backtest",
     "run_pairs_backtest",
     "run_multi_backtest",
@@ -81,6 +151,26 @@ __all__ = [
     # Batch backtest
     "PyBatchSpreadItem",
     "batch_spread_backtest",
+    # Portfolio math
+    "PyRiskModel",
+    "PyOptimizerConfig",
+    "PyOptimizationResult",
+    "PyRiskContributions",
+    "PyOptimizeItem",
+    "PyRebalanceSimResult",
+    "PyRankIc",
+    "estimate_covariance",
+    "optimize_portfolio",
+    "batch_optimize_portfolios",
+    "compute_risk_contributions",
+    "winsorize_panel",
+    "zscore_panel",
+    "rank_panel",
+    "momentum_panel",
+    "composite_scores",
+    "rank_ic",
+    "simulate_rebalance_policy",
+    "indian_cost_schedule",
     # Monte Carlo simulation
     "simulate_portfolio_mc",
     # Tick signal functions
@@ -106,4 +196,26 @@ __all__ = [
     "supertrend",
     "rolling_min",
     "rolling_max",
+    # Per-bar strategy session (class-based strategy contract)
+    "InstrumentSpec",
+    "Indicator",
+    "BarAggregator",
+    "aggregate_bars",
+    "bars_from_ticks",
+    "PyKernelSession",
+    "PyEngineEvent",
+    "PyPositionSnapshot",
+    "resolve_atr_period",
+    # Class-based strategy contract
+    "Bar",
+    "ClosePosition",
+    "MarketOrder",
+    "Strategy",
+    "StrategyConfig",
+    "StrategyContext",
+    "PortfolioContext",
+    "run_portfolio_strategy",
+    "run_tick_strategy",
+    "TickStrategyStream",
+    "run_strategy_backtest",
 ]

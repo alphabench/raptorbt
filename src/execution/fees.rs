@@ -1,6 +1,7 @@
 //! Fee calculation models.
 
 use crate::core::types::{Direction, Price};
+use crate::execution::indian_costs::{self, FeeBreakdown, Segment};
 
 /// Fee model for calculating transaction costs.
 #[derive(Debug, Clone)]
@@ -17,6 +18,11 @@ pub enum FeeModel {
     Tiered(Vec<(f64, f64)>), // (threshold, rate)
     /// Custom fee function (stored as percentage for simplicity).
     Custom { base: f64, per_share: f64 },
+    /// Itemized Indian regulatory costs for a market segment.
+    ///
+    /// Unlike the other variants this produces a per-component breakdown, so
+    /// the equity curve and the reported costs are the same numbers.
+    Indian { segment: Segment },
 }
 
 impl Default for FeeModel {
@@ -71,7 +77,53 @@ impl FeeModel {
                 trade_value * applicable_rate
             }
             FeeModel::Custom { base, per_share } => base + size.abs() * per_share,
+            FeeModel::Indian { segment } => {
+                indian_costs::calculate_side(*segment, trade_value, _direction, true).total()
+            }
         }
+    }
+
+    /// Itemized costs for one side of a trade.
+    ///
+    /// Returns `None` for the flat models, which have no component structure.
+    /// Unlike [`FeeModel::calculate`], this distinguishes entry from exit,
+    /// which matters because STT lands on the sell leg and stamp duty on the
+    /// buy leg.
+    pub fn breakdown(
+        &self,
+        price: Price,
+        size: f64,
+        direction: Direction,
+        is_entry: bool,
+    ) -> Option<FeeBreakdown> {
+        match self {
+            FeeModel::Indian { segment } => Some(indian_costs::calculate_side(
+                *segment,
+                price * size.abs(),
+                direction,
+                is_entry,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Fee for one side, honoring entry/exit asymmetry where the model has any.
+    pub fn calculate_side(
+        &self,
+        price: Price,
+        size: f64,
+        direction: Direction,
+        is_entry: bool,
+    ) -> f64 {
+        match self.breakdown(price, size, direction, is_entry) {
+            Some(b) => b.total(),
+            None => self.calculate(price, size, direction),
+        }
+    }
+
+    /// Create an itemized Indian cost model for a segment.
+    pub fn indian(segment: Segment) -> Self {
+        FeeModel::Indian { segment }
     }
 
     /// Calculate round-trip fees (entry + exit).

@@ -115,8 +115,8 @@ pub fn realized_vol_rolling(timestamps_ns: &[i64], ltp: &[f64], window_seconds: 
             continue;
         }
         let mean = log_rets.iter().sum::<f64>() / log_rets.len() as f64;
-        let variance = log_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
-            / (log_rets.len() - 1) as f64;
+        let variance =
+            log_rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (log_rets.len() - 1) as f64;
         out[i] = variance.sqrt() * 100.0; // as percentage of price
     }
     out
@@ -131,9 +131,7 @@ pub fn oi_position_pct(oi: &[f64], oi_day_high: f64, oi_day_low: f64) -> Vec<f64
     if range <= 0.0 {
         return vec![f64::NAN; oi.len()];
     }
-    oi.iter()
-        .map(|&o| (o - oi_day_low) / range * 100.0)
-        .collect()
+    oi.iter().map(|&o| (o - oi_day_low) / range * 100.0).collect()
 }
 
 /// Rolling tick velocity: number of ticks per minute in the preceding window.

@@ -60,6 +60,7 @@ RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphaben
 
 - [Overview](#overview)
 - [Performance](#performance)
+- [Class-Based Strategies](#class-based-strategies)
 - [Strategy Types](#strategy-types)
 - [Metrics](#metrics)
 - [Indicators](#indicators)
@@ -142,6 +143,502 @@ Max difference across 5 runs: 0.0000000000%
 not change between runs.)
 
 ---
+
+## Class-Based Strategies
+
+New in 0.5.0: strategies can be written as event-driven classes instead of
+precomputed signal arrays. Subclass `raptorbt.Strategy`, override lifecycle
+hooks, and emit order intents; the engine simulates fills and routes events
+back into your hooks. Both paths share one execution core, so identical
+decisions produce identical results — the class contract is the recommended
+way to write new strategies, while the array runners remain the fast path
+for vectorized workloads.
+
+```python
+import numpy as np
+import raptorbt
+
+
+class SmaCross(raptorbt.Strategy):
+    def on_start(self, ctx):
+        # Full OHLCV arrays are available for indicator precomputation.
+        self.fast = raptorbt.sma(ctx.close, 10)
+        self.slow = raptorbt.sma(ctx.close, 30)
+
+    def on_bar(self, ctx):
+        i = ctx.idx
+        if i == 0 or np.isnan(self.slow[i]) or np.isnan(self.slow[i - 1]):
+            return
+        crossed_up = self.fast[i] > self.slow[i] and self.fast[i - 1] <= self.slow[i - 1]
+        crossed_dn = self.fast[i] < self.slow[i] and self.fast[i - 1] >= self.slow[i - 1]
+        if crossed_up and ctx.position is None:
+            self.enter()                      # optional: size_frac=, stop_price=, target_price=
+        elif crossed_dn and ctx.position is not None:
+            self.close_position()
+
+    def on_position_closed(self, ctx, event):
+        self.log.info("closed: pnl=%.2f", event.trade.pnl)
+
+
+result = raptorbt.run_strategy_backtest(
+    SmaCross(), timestamps, open_, high, low, close, volume,
+    symbol="EXAMPLE", config=raptorbt.PyBacktestConfig(fees=0.001),
+)
+print(result.metrics.total_return_pct, len(result.trades()))
+```
+
+Hooks: `on_start`, `on_bar`, `on_stop`, `on_order_filled`,
+`on_order_rejected`, `on_position_opened`, `on_position_closed`. Inside
+`on_bar`, `ctx` provides the current `bar`, `position` snapshot, `equity`,
+`cash`, `history(n)`, and `set_stop_price()` / `set_target_price()` for
+programmatic exits. Decision logic must only read array values at `ctx.idx`
+or earlier — indexing past the current bar reads the future.
+
+Engine-level stop/target/sizing configuration (`PyBacktestConfig`,
+`PyInstrumentConfig`) applies to both paths. `run_strategy_backtest` returns
+the same `PyBacktestResult` as `run_single_backtest`. For advanced drivers
+(live feeds, custom loops), `PyKernelSession` exposes the per-bar engine
+step directly.
+
+Note: one Python hook call per bar makes the class path slower than the
+array path — fine for typical bar counts, but prefer arrays for large
+parameter sweeps.
+
+### Instrument Definitions
+
+New in 0.5.0: `InstrumentSpec` describes the market being traded — tick
+size, lot size, contract multiplier, expiry — separately from the per-run
+allocation knobs in `PyInstrumentConfig`. Attach one to a class-based run
+via `run_strategy_backtest(..., instrument=...)` (or directly on
+`PyKernelSession`):
+
+```python
+import raptorbt
+
+# NIFTY monthly future: 50-unit lots, expiry settlement at the contract's
+# expiration timestamp, entries refused before activation / after expiry.
+fut = raptorbt.InstrumentSpec.futures_contract(
+    "NIFTY24AUGFUT",
+    expiration_ns=1724839200_000_000_000,
+    lot_size=50.0,
+    price_increment=0.05,
+    underlying="NIFTY",
+)
+
+result = raptorbt.run_strategy_backtest(
+    MyStrategy, ts, o, h, l, c, v, instrument=fut,
+)
+```
+
+Constructors: `equity`, `futures_contract`, `perpetual`, `option` (vanilla
+and binary; settles to intrinsic value when an underlying price is known),
+`currency_pair`, and `index` (non-tradable reference). With a spec attached
+the engine:
+
+- scales notional by the contract `multiplier` — sizing, cash, PnL, and
+  value-based fees charge on `price * size * multiplier`, while
+  per-share/per-contract fee models keep charging per contract;
+- floors sizes to `lot_size` / `size_increment` (an explicit
+  `PyInstrumentConfig.lot_size` still wins — it is the per-run override);
+- rounds engine-derived stop/target prices onto the `price_increment` grid,
+  conservatively (never in the strategy's favor);
+- force-settles open positions at expiry (`Settlement` exit reason) and
+  rejects entries outside the activation/expiration window.
+
+Without a spec, behavior is unchanged — existing results reproduce
+bit-for-bit. `margin_init`/`margin_maint`/`maker_fee`/`taker_fee` are
+carried on the spec for the account layer that consumes them in a later
+0.5.x release.
+
+### Choosing a side
+
+New in 0.6.0. `enter()` opens in the session's configured `direction`, as it
+always has. To decide the side in code, call `enter_long()` / `enter_short()`
+(or `enter(side="buy"/"sell")`) — they take the same arguments and ignore the
+configured direction, so one run can hold long and short legs and a leg can
+flip side once it is flat:
+
+```python
+class CrossSectional(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.position is not None:
+            self.close_position()      # flat before flipping
+            return
+        if ctx.symbol in winners:
+            self.enter_long(size_frac=0.1)
+        elif ctx.symbol in losers:
+            self.enter_short(size_frac=0.1)
+```
+
+Under the default netting policy an order's side is authoritative for
+*opening*: with no position it opens in that side, while an order opposing an
+open position closes it (so bracket legs and take-profits behave as before).
+Mark an order `reduce_only` to guarantee it can only ever close.
+
+### Typed Orders
+
+New in 0.5.0: alongside the `enter()`/`close_position()` sugar, strategies
+can submit typed orders that rest across bars and report a full lifecycle:
+
+```python
+from raptorbt.strategy import orders
+
+class Breakout(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.idx == 20 and ctx.position is None:
+            # Buy stop above the market, protective stop attached.
+            self.oid = self.submit_order(orders.StopMarket(
+                side="buy",
+                trigger=float(ctx.high[:20].max()),
+                size_frac=0.5,
+                stop_price=float(ctx.close[ctx.idx] * 0.97),
+                tif="day",
+            ))
+        if ctx.position is not None:
+            self.submit_order(orders.Limit(side="sell", price=ctx.position.entry_price * 1.1))
+```
+
+- **Kinds**: `orders.Market`, `orders.Limit` (with `post_only=`),
+  `orders.StopMarket`, `orders.StopLimit` (trigger fires, then rests as a
+  limit from the next bar), `orders.MarketIfTouched` / `orders.LimitIfTouched`
+  (favorable-touch triggers — a buy fires when price *falls* to the
+  trigger), `orders.MarketToLimit` (fills at the next bar's open), and
+  `orders.TrailingStopMarket` / `orders.TrailingStopLimit` (trigger trails
+  the running favorable extreme; `offset_kind` is `"price"`, `"bps"`, or
+  `"ticks"` — ticks need an instrument `price_increment`).
+- **Time-in-force**: `gtc` (default), `day` (UTC-date rollover), `gtd`
+  (with `expire_ns`), `ioc`, `fok`, plus `at_open` / `at_close` for market
+  orders queued to a bar phase.
+- **Flags**: `post_only` (limit rejects if marketable at its first resting
+  open), `reduce_only` (a fill may never increase exposure).
+- **Brackets**: `self.submit_bracket(entry, stop_trigger=…, target_price=…,
+  stop_limit_price=None)` — the protective legs are held until the entry
+  fills (one-triggers-other), then linked one-cancels-other: the first leg
+  to fill cancels its sibling, and both die if the entry never fills.
+  Generic linkage: `submit_order(order, parent=other_id)` and
+  `self.link_oco(id_a, id_b, …)`. One-updates-other reduces to
+  one-cancels-other while fills are all-or-nothing (partial fills arrive
+  with book depth). Netting policy only — under hedging every order opens,
+  so protect positions with per-position `stop_price`/`target_price`
+  attachments instead.
+- **Sizing**: `units=` (explicit contracts; refused if it exceeds available
+  capital) or `size_frac=` (fraction of capital, resolved at fill time);
+  omit both on a closing-side order to close the full position.
+- **Semantics**: market orders fill on the submission bar at the configured
+  fill-price model — the same contract as `enter()`. Resting orders begin
+  matching on the *next* bar (an order cannot rest into a bar that had
+  already closed), with gap-throughs filling at the open.
+- **Lifecycle hooks**: `on_order_accepted`, `on_order_triggered`,
+  `on_order_filled`, `on_order_canceled`, `on_order_expired`,
+  `on_order_rejected`, plus catch-all `on_order_event`. Events carry
+  `client_order_id` (deterministic `"{order_id_tag}-{seq}"`).
+- **Management**: `self.cancel_order(client_id)`,
+  `self.cancel_all_orders()`, `self.modify_order(client_id, limit_price=…,
+  trigger_price=…, units=…)`.
+- Order-driven exits report `exit_reason == "Order"` on the trade record.
+  One position at a time: an opening order while a position is open rejects
+  with `"position_open"` (independent concurrent positions arrive in a
+  later 0.5.x release).
+
+The signal-array runners do not interact with the order book and are
+unaffected.
+
+### Bar Aggregation and Multi-Timeframe Strategies
+
+New in 0.5.0. Streaming and batch aggregation of bars (and raw ticks) into
+coarser bars — time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
+`"volume"`, and `"value"` units. Time bars use left-open epoch-aligned
+windows and are stamped with the window-*end* timestamp, so a bar labeled
+`t` contains only data strictly before `t` — no look-ahead by construction.
+Beyond time, tick, volume and value windows, two families sample on
+something other than the clock:
+
+**Renko** (`"renko"`) emits a brick per full brick-height price move and
+ignores time and volume entirely — a quiet hour produces nothing, a fast
+move produces several bricks at once. Set the height with `brick_size`;
+without it, `step` reads as whole price units. Because one record can
+complete several bricks, `push` returns only the first and the rest must be
+drained:
+
+```python
+agg = raptorbt.BarAggregator(1, "renko", brick_size=0.05)
+bar = agg.push_trade(ts, price, size)
+while bar is not None:
+    handle(bar)
+    bar = agg.next_pending()      # drain, or bricks are silently lost
+```
+
+Bricks carry no wicks, and a partial brick is discarded at end of data
+rather than flushed — an incomplete brick is not a brick.
+
+**Signed-flow bars** (`"{tick,volume,value}_imbalance"` and
+`"{tick,volume,value}_runs"`) sample by order-flow direction. *Imbalance*
+closes on net signed flow, so balanced two-sided trading never closes a bar
+however heavy it is; *runs* closes on the larger one-sided accumulation, so
+the same tape does close bars. `step` is the threshold — fixed, rather than
+the adaptive estimate in the literature, so runs stay reproducible.
+
+Direction comes from the buy/sell quantity deltas when you supply them
+(`bars_from_ticks`), and otherwise from the tick rule, which is what lets
+these units work over plain OHLC bars.
+
+```python
+# Batch: 1-minute bars -> 5-minute bars (or ticks -> bars).
+ts5, o5, h5, l5, c5, v5 = raptorbt.aggregate_bars(ts, o, h, l, c, v, 5, "m")
+bts, bo, bh, bl, bc, bv = raptorbt.bars_from_ticks(ts, ltp, buys, sells, 1000, "volume")
+# Signed flow: close a bar every 10,000 shares of net buying or selling.
+its = raptorbt.bars_from_ticks(ts, ltp, buys, sells, 10_000, "volume_imbalance")
+
+# In a strategy: a 5-minute trend filter gating 1-minute entries.
+class TrendGated(raptorbt.Strategy):
+    def on_start(self, ctx):
+        self.h5 = self.subscribe_bars(5, "m")
+        self.trend_up = False
+
+    def on_composite_bar(self, ctx, bar):   # fires when a 5m bar completes
+        self.trend_up = bar.close > bar.open
+
+    def on_bar(self, ctx):                  # every 1m bar
+        if self.trend_up and ctx.position is None:
+            self.enter()
+```
+
+`on_composite_bar` dispatches *before* the `on_bar` of the primary bar that
+completed the window — the composite closed strictly earlier. A partial
+final window is not dispatched to strategies (it never closed); the batch
+helpers do include it, flushed at end of data.
+
+In a portfolio run one `subscribe_bars` declaration yields one aggregated
+stream **per symbol**, each built only from that symbol's bars. The symbol
+that completed a bar arrives as `bar.symbol` (and `ctx.symbol`); the
+dispatch-before-`on_bar` guarantee holds per symbol, while ordering across
+symbols follows the merged schedule.
+
+Calendar `"month"`/`"year"` units aggregate on civil UTC dates. Passing
+`tz_offset_ns` (e.g. `raptorbt.IST_OFFSET_NS`) aligns day/week/month/year
+windows to that timezone's civil dates — an NSE day bar covers one IST
+trading date (a 23:30 IST print stays on its trading date instead of
+rolling into the next UTC day).
+
+### Streaming Indicators, Clock, and Cache
+
+New in 0.5.0:
+
+- **Streaming indicators** — `raptorbt.Indicator.sma(14)`, `.ema`,
+  `.wilder_ma`, `.wma`, `.roc`, `.stddev`, `.rsi`, `.atr`, `.donchian`
+  (value `(upper, lower)`), `.bollinger` (`(middle, upper, lower)`),
+  `.macd` (`(macd, signal, histogram)`). Rust incremental cores, O(1)-ish
+  per bar, producing values identical to the batch array functions
+  (equivalence-tested). Register for auto-update:
+
+  ```python
+  class Cross(raptorbt.Strategy):
+      def on_start(self, ctx):
+          self.fast = self.register_indicator(raptorbt.Indicator.ema(10))
+          self.slow = self.register_indicator(raptorbt.Indicator.ema(30))
+          # Or feed a subscribed higher timeframe instead:
+          h5 = self.subscribe_bars(5, "m")
+          self.trend = self.register_indicator(raptorbt.Indicator.sma(20), stream_id=h5)
+
+      def on_bar(self, ctx):
+          if not self.indicators_initialized():
+              return
+          if self.fast.value > self.slow.value and ctx.position is None:
+              self.enter()
+  ```
+
+  In portfolio runs an indicator tracks one symbol, so register one per
+  symbol with `symbol=` — an unrouted registration is fed every symbol's
+  bars interleaved (and warns):
+
+  ```python
+  class Cross(raptorbt.Strategy):
+      def on_start(self, ctx):
+          self.fast = self.register_indicators(
+              lambda: raptorbt.Indicator.ema(10), ctx.symbols
+          )
+          # Equivalently, explicit per symbol:
+          self.slow = {
+              s: self.register_indicator(raptorbt.Indicator.ema(30), symbol=s)
+              for s in ctx.symbols
+          }
+
+      def on_bar(self, ctx):
+          fast, slow = self.fast[ctx.symbol], self.slow[ctx.symbol]
+          if self.indicators_initialized() and fast.value > slow.value:
+              self.enter()
+  ```
+
+  Registered indicators update *before* handlers see the bar.
+- **Clock** — `self.clock.set_time_alert(name, at_ns)` (one-shot) and
+  `set_timer(name, interval_ns, start_ns=None, stop_ns=None)` (recurring;
+  one firing per bar, gaps collapse); due events reach `on_time_event`
+  *before* the bar's data handlers. Bar-granular by design: events carry
+  `ts_scheduled` and `ts_fired`.
+- **Cache** — `self.cache`, an event-sourced mirror (no per-query engine
+  calls): `order(client_id)` / `orders_open()` / `is_order_open()`,
+  `closed_trades()`, `realized_pnl(symbol=None)`.
+- **Portfolio view** — `ctx.net_position` / `is_net_long` / `is_net_short`
+  / `is_flat` (signed across hedged positions) — properties on every
+  context; per-symbol lookups via `position_for(symbol)` /
+  `positions(symbol)` / `net_position_for(symbol)` on the portfolio
+  context.
+
+### Multi-Instrument Strategies
+
+New in 0.5.0: one class-based strategy trading N instruments against a
+single shared cash pool. Bars from all instruments merge into one
+deterministic schedule (by timestamp, then registration order); `on_bar`
+fires once per event with `ctx.symbol` naming the instrument whose bar
+closed. Capital committed to one symbol is unavailable to the rest.
+
+```python
+class Rotation(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.idx == 0:
+            self.enter(size_frac=0.4)          # routes to ctx.symbol
+        if ctx.symbol == "INFY" and ctx.idx == 50:
+            # Orders and closes can route across symbols explicitly.
+            self.submit_order(orders.Limit(side="buy", price=2400.0,
+                                           units=10.0), symbol="TCS")
+            if ctx.position_for("RELIANCE") is not None:
+                self.close_position(symbol="RELIANCE")
+
+result = raptorbt.run_portfolio_strategy(
+    Rotation,
+    data={sym: dict(timestamps=..., open=..., high=..., low=..., close=...,
+                    volume=...) for sym in symbols},
+    instruments={...},        # optional per-symbol InstrumentSpec
+    oms_type="netting",       # or "hedging", per instrument
+    account_type="cash",      # or "margin", shared across all instruments
+    leverage=1.0,             # portfolio-wide under account_type="margin"
+)
+result.result.equity_curve()  # portfolio curve, sampled per merged event
+result.per_instrument         # per-symbol trades / pnl / rejections
+```
+
+`ctx` in portfolio runs is a `PortfolioContext`: `ctx.bar` / `ctx.symbol` /
+`ctx.idx` (local to the symbol), `ctx.series(symbol)` for full arrays,
+`ctx.position` / `ctx.is_flat` (properties for the current symbol, same as the
+single-instrument context), `ctx.position_for(symbol)` /
+`ctx.positions(symbol)`, and portfolio-level
+`ctx.equity` / `ctx.cash`. Composite-bar subscriptions are single-instrument
+for now, and one-cancels-other links cannot span symbols.
+
+Risk limits on the config are portfolio-wide, matching
+`run_portfolio_backtest`: `max_positions` counts open positions across all
+symbols (including entries from resting orders), and `max_drawdown_pct`
+trips on portfolio equity and halts entries on every symbol. Capital
+*allocation* is the strategy's own — each entry is offered the full free
+balance, so size it with `size_frac`; there is no `EqualWeight` budget on
+this path yet.
+
+With `account_type="margin"` the instruments share one account: `leverage`
+applies portfolio-wide, sizing draws on the portfolio's free capital
+(balance less every instrument's locked margin), and equity marks the
+balance plus direction-aware unrealized PnL so winning shorts price upward.
+The maintenance requirement is the **sum of each instrument's own**
+requirement, so per-symbol `margin_maint` rates apply rather than one
+blended rate. A breach fires `on_margin_call` once and halts new entries on
+*every* instrument — subsequent entries are rejected with `MarginCall`,
+including on symbols that never traded. Results carry `halted` and
+`halted_at`; in portfolio runs `halted_at` is a **schedule-event ordinal**
+(the session interleaves N streams), not the bar index the array runners
+report. `result.rejected_entries` is the sum across instruments, whereas the
+array portfolio runner reports its single shared risk gate's counter.
+
+### Execution Realism Knobs
+
+Four opt-in settings, all off by default:
+
+```python
+config.limit_slippage = 0.0005          # adverse adjustment on limit fills
+config.liquidate_on_margin_call = True  # broker closes you out, vs only halting
+spec.settlement_fee = 0.001             # charged on the settled notional at expiry
+```
+
+`limit_slippage` models adverse selection on a resting order — you tend to
+be filled when the market is about to move through you. It is suppressed
+when `queue_fill_model` granted the fill, since volume observed trading
+ahead of your order is evidence you genuinely held that price.
+
+`liquidate_on_margin_call` turns a margin call from a latching halt into a
+forced close. Unlike expiry settlement or end-of-data finalization, which
+close free, a liquidation prices through the fill model and pays exit
+costs, reporting `exit_reason == "Liquidation"`.
+
+Options settle at their own last close unless you supply an underlying —
+an option's bars carry the option's price, so intrinsic value has to come
+from somewhere else:
+
+```python
+class Hold(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        # From whatever index series the strategy already tracks.
+        ctx.set_underlying_price(spot_close[ctx.idx])
+```
+
+Without it a 100-strike call whose own price decayed to 0.50 settles at
+0.50, even with spot at 112 — where intrinsic is 12.00.
+
+### Execution Algorithms
+
+`orders.Twap` slices an order into equal parts released at a fixed
+interval, each an ordinary order with its own fill:
+
+```python
+class Accumulate(raptorbt.Strategy):
+    def on_bar(self, ctx):
+        if ctx.idx == 0:
+            self.submit_order(orders.Twap(
+                side="buy", units=1_000, slices=10,
+                every=60_000_000_000,        # one slice per minute
+            ))
+
+    def on_order_filled(self, ctx, event):
+        # client ids are "<parent>#0", "<parent>#1", ...
+        ...
+```
+
+The interval is a duration rather than a bar count, because a bar index
+means different things in bar and tick sessions — "every 1 bar" would
+silently become "every 1 print" on a tick feed. Use `every_bars=N,
+bar_ns=...` if you prefer to think in bars.
+
+A schedule is not an order: cancelling it (`cancel_twap`) stops the
+remaining slices but does not unwind the ones that already traded, and
+`on_algo_completed` means fully *released*, not fully filled. Only explicit
+`units` can be sliced — `size_frac` resolves against equity at fill time,
+so each slice would size against a different account.
+
+### Position Policies, Margin Accounts, and Fill Realism
+
+New in 0.5.0, all default-off (defaults reproduce prior results bit-for-bit;
+a committed golden-fixture suite enforces this):
+
+- **Hedging** — `run_strategy_backtest(..., oms_type="hedging")`: every
+  typed order opens an independent position in its own direction (buy →
+  long, sell → short), so longs and shorts coexist, each with its own
+  protective stop/target and trailing state. Inspect them via
+  `ctx.positions` (each has a `position_id`) and close one with
+  `self.close_position(position_id)`. The default `"netting"` keeps the
+  one-position-at-a-time behavior.
+- **Margin accounts** — `account_type="margin", leverage=N`: entries lock
+  initial margin (the instrument's `margin_init`, else `1/leverage`)
+  instead of full notional, equity marks balance plus direction-aware
+  unrealized PnL (shorts price correctly), and an equity breach of the
+  maintenance requirement (`margin_maint`, else half initial) fires
+  `on_margin_call` and halts new entries — no forced liquidation.
+  `ctx.free_capital` reports unlocked cash.
+- **Stochastic fills** — `PyBacktestConfig(fill_prob_limit=0.9,
+  fill_prob_slippage=0.1, fill_seed=42)`: a marketable resting limit may be
+  passed over (it stays working and retries), and stop/market fills may
+  slip one tick against the trader (needs an instrument `price_increment`).
+  Seeded and fully deterministic: same seed, same fills.
+- **Adaptive bar path** — `PyBacktestConfig(bar_path_adaptive=True)`: when
+  a stop and target are both touched inside one bar, infer the traversal
+  from candle geometry (up-candle: open→low→high→close) instead of the
+  conservative stop-first default.
 
 ## Strategy Types
 
@@ -400,6 +897,90 @@ print(f"trades: {result.metrics.total_trades}")
 print(f"profit_factor: {result.metrics.profit_factor:.2f}")
 print(f"win_rate: {result.metrics.win_rate_pct:.1f}%")
 ```
+
+#### Class-Contract Tick Strategies
+
+`run_tick_backtest` above is the array runner: precomputed signal arrays, one
+long-only position at a time. For the full class contract — typed orders,
+multiple positions, margin accounts, portfolio risk gates — drive the event
+session from ticks instead:
+
+```python
+class Scalper(raptorbt.Strategy):
+    def on_quote(self, ctx, quote):
+        # Quotes are observation only: nothing fills here.
+        self.wide = quote.spread > 0.05
+
+    def on_trade_tick(self, ctx, tick):
+        # ctx.best_bid / ctx.best_ask are the book observed BEFORE this
+        # print — the quote from the same feed row arrives next.
+        if not self.wide and ctx.is_flat and ctx.best_bid is not None:
+            self.submit_order(orders.Limit(side="buy", price=ctx.best_bid, units=10))
+
+    def on_bar(self, ctx):
+        # Only fires when primary_bars is set. A view, not a venue.
+        ...
+
+result = raptorbt.run_tick_strategy(
+    Scalper,
+    ticks={"NIFTY24600PE": dict(timestamps=ts, ltp=ltp, bid=bid, ask=ask)},
+    primary_bars=(1, "m"),     # aggregate prints into 1m bars for on_bar
+    account_type="margin", leverage=5.0,
+)
+```
+
+Three semantics to know:
+
+- **Quotes do not fill orders**, move trailing stops, or mark equity.
+  Filling against a quote asserts a counterparty the engine has no evidence
+  for; the print that follows is that evidence. Orders submitted from
+  `on_quote` rest and match on the next print. Quotes also do not sample the
+  equity curve, so metrics do not shift with how chatty the feed is.
+- **`primary_bars` builds bars from prints as a view.** They fire `on_bar`
+  and feed indicators registered without a `stream_id`; `subscribe_bars`
+  composites work too. Order matching still happens against ticks only.
+- **`AT_OPEN`/`AT_CLOSE` market orders keep resting** on a print — a print
+  has no bar phase to queue against. Trailing stops ratchet off every print,
+  so they resolve at tick resolution; a tick run and a bar run over the same
+  data legitimately differ there, since a bar can trigger a stop against a
+  low that preceded the high which set the watermark.
+
+#### Order Book and Queue-Position Fills
+
+Pass `depth=` to `run_tick_strategy` for five-level book snapshots, which
+arrive via `on_order_book` and persist on `ctx.book`:
+
+```python
+depth = {"NIFTY24600PE": dict(
+    timestamps=ts,                      # int64 ns, one row per snapshot
+    bid_prices=bp, bid_sizes=bs,        # (n_snapshots, levels), best first
+    ask_prices=ap, ask_sizes=asz,
+)}
+
+class Maker(raptorbt.Strategy):
+    def on_order_book(self, ctx, book):
+        if book.imbalance and book.imbalance > 0.7:      # bid-heavy
+            self.submit_order(orders.Limit(side="buy", price=book.best_bid, units=10))
+
+config.queue_fill_model = True          # opt-in
+result = raptorbt.run_tick_strategy(Maker, ticks, config=config, depth=depth)
+```
+
+`queue_fill_model` replaces `fill_prob_limit`'s coin flip with the tape. The
+size queued ahead is estimated once when the order rests, then consumed by
+print volume at that price; a print *through* the level fills
+unconditionally. Progress is monotone, so an order passed over repeatedly
+genuinely advances — the probability model has no such memory.
+
+It does not claim a real queue rank. Market-by-price data cannot tell you
+where you stand in line, nor separate size that executed ahead of you from
+size that was cancelled, so the model falls back to `fill_prob_limit` rather
+than guessing: on bar events (a bar's volume is not volume *at* the limit
+price) and on a quote-only book (a quote gives the price, not the size). A
+level outside the visible five reads as unknown, never as empty.
+
+Books, like quotes, are observation only — they never fill an order, move a
+trailing stop, or mark equity. Displayed size is intent, not a trade.
 
 #### Tick Signal & Feature Helpers
 

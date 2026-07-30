@@ -87,7 +87,6 @@ impl PairsBacktest {
         let mut drawdown_curve = vec![0.0; n];
         let mut returns = vec![0.0; n];
         let mut trades: Vec<Trade> = Vec::new();
-        let mut streaming = StreamingMetrics::new();
         let mut peak_equity = cash;
         let mut trade_counter = 0u64;
 
@@ -131,6 +130,7 @@ impl PairsBacktest {
                         entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg1_ohlcv.timestamps[i],
                         fees: fees / 2.0,
+                        fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                     });
 
@@ -150,11 +150,11 @@ impl PairsBacktest {
                         entry_time: leg2_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg2_ohlcv.timestamps[i],
                         fees: fees / 2.0,
+                        fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                     });
 
                     trade_counter += 1;
-                    streaming.update(return_pct / 100.0);
                 }
             }
 
@@ -249,14 +249,19 @@ impl PairsBacktest {
                 entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                 exit_time: leg1_ohlcv.timestamps[last_idx],
                 fees,
+                fee_breakdown: None,
                 exit_reason: ExitReason::EndOfData,
             });
-
-            streaming.update(return_pct / 100.0);
         }
 
         // Calculate metrics
-        let metrics = self.calculate_metrics(&equity_curve, &drawdown_curve, &trades, &streaming);
+        let metrics = self.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            leg1_ohlcv.timestamps.as_slice(),
+            &trades,
+        );
 
         BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
     }
@@ -311,8 +316,9 @@ impl PairsBacktest {
         &self,
         equity_curve: &[f64],
         drawdown_curve: &[f64],
+        returns: &[f64],
+        timestamps: &[i64],
         trades: &[Trade],
-        streaming: &StreamingMetrics,
     ) -> BacktestMetrics {
         let start_value = self.config.base.initial_capital;
         let end_value = *equity_curve.last().unwrap_or(&start_value);
@@ -342,10 +348,41 @@ impl PairsBacktest {
             0.0
         };
 
+        // Sharpe/Sortino from per-bar returns, matching run_single_backtest.
+        //
+        // Through 0.4.1 this path annualized per-*trade* returns at a hardcoded
+        // 252, which assumes one trade per trading day and inflates the ratio by
+        // roughly sqrt(n_bars / n_trades). legacy_annualization restores that
+        // basis as well as the constant, so old results stay reproducible.
+        let (sharpe_ratio, sortino_ratio) = if self.config.base.legacy_annualization {
+            let mut streaming = StreamingMetrics::new();
+            for trade in trades {
+                streaming.update(trade.return_pct / 100.0);
+            }
+            (
+                streaming.sharpe_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
+                streaming.sortino_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
+            )
+        } else {
+            let periods_per_year =
+                crate::metrics::annualization::resolve_periods_per_year_with_session(
+                    self.config.base.periods_per_year,
+                    timestamps,
+                    self.config.base.session_spec(),
+                    crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES,
+                );
+            let (sharpe, sortino, _omega) = crate::portfolio::engine::risk_metrics(
+                returns,
+                periods_per_year,
+                self.config.base.risk_free_rate,
+            );
+            (sharpe, sortino)
+        };
+
         BacktestMetrics {
             total_return_pct,
-            sharpe_ratio: streaming.sharpe_ratio(252.0),
-            sortino_ratio: streaming.sortino_ratio(252.0),
+            sharpe_ratio,
+            sortino_ratio,
             calmar_ratio: if max_drawdown_pct > 0.0 {
                 total_return_pct / max_drawdown_pct
             } else {

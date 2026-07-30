@@ -108,6 +108,29 @@ impl FillPrice {
     }
 }
 
+/// Deterministic SplitMix64 stream for stochastic fills.
+///
+/// Hand-rolled (like the Monte Carlo module's generator) to avoid an RNG
+/// dependency; the same seed always produces the same fill sequence.
+#[derive(Debug, Clone)]
+pub struct FillRng(u64);
+
+impl FillRng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    /// Next uniform draw in [0, 1).
+    pub fn next_f64(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
 /// Fill model combining price model with execution rules.
 #[derive(Debug, Clone)]
 pub struct FillModel {
@@ -117,23 +140,36 @@ pub struct FillModel {
     pub delay_to_next_bar: bool,
     /// Partial fill ratio (1.0 = full fill).
     pub fill_ratio: f64,
+    /// Adverse price adjustment applied to limit fills, as a fraction of
+    /// the limit price. `0.0` (default) fills exactly at the limit.
+    ///
+    /// Models being filled only when the market is about to move through
+    /// you — adverse selection on a resting order. It does *not* apply
+    /// when the queue model granted the fill: observed volume traded ahead
+    /// of you is evidence you genuinely held that price.
+    pub limit_slippage: f64,
 }
 
 impl Default for FillModel {
     fn default() -> Self {
-        Self { fill_price: FillPrice::Close, delay_to_next_bar: false, fill_ratio: 1.0 }
+        Self {
+            fill_price: FillPrice::Close,
+            delay_to_next_bar: false,
+            fill_ratio: 1.0,
+            limit_slippage: 0.0,
+        }
     }
 }
 
 impl FillModel {
     /// Create a fill model that executes at close.
     pub fn at_close() -> Self {
-        Self { fill_price: FillPrice::Close, delay_to_next_bar: false, fill_ratio: 1.0 }
+        Self { fill_price: FillPrice::Close, ..Self::default() }
     }
 
     /// Create a fill model that executes at next bar's open.
     pub fn at_next_open() -> Self {
-        Self { fill_price: FillPrice::Open, delay_to_next_bar: true, fill_ratio: 1.0 }
+        Self { fill_price: FillPrice::Open, delay_to_next_bar: true, ..Self::default() }
     }
 
     /// Set partial fill ratio.
@@ -190,12 +226,18 @@ impl FillModel {
         direction: Direction,
         is_entry: bool,
     ) -> Option<Price> {
-        if self.would_fill_limit(limit_price, bar, direction, is_entry) {
-            // For limit orders, fill at limit price (or better if gap)
-            Some(limit_price)
-        } else {
-            None
+        if !self.would_fill_limit(limit_price, bar, direction, is_entry) {
+            return None;
         }
+        if self.limit_slippage == 0.0 {
+            return Some(limit_price);
+        }
+        // Slip against the trader: a buy pays more, a sell receives less.
+        let adjust = limit_price * self.limit_slippage;
+        Some(match (direction, is_entry) {
+            (Direction::Long, true) | (Direction::Short, false) => limit_price + adjust,
+            _ => limit_price - adjust,
+        })
     }
 
     /// Check if a stop order would be triggered.
@@ -292,6 +334,53 @@ impl FillModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_fills_at_the_limit_by_default() {
+        let model = FillModel::default();
+        let bar = OhlcvBar {
+            timestamp: 0,
+            open: 100.0,
+            high: 101.0,
+            low: 98.0,
+            close: 100.0,
+            volume: 1.0,
+        };
+        assert_eq!(model.get_limit_fill_price(99.0, &bar, Direction::Long, true), Some(99.0));
+    }
+
+    #[test]
+    fn limit_slippage_moves_against_the_trader() {
+        let model = FillModel { limit_slippage: 0.01, ..FillModel::default() };
+        let bar = OhlcvBar {
+            timestamp: 0,
+            open: 100.0,
+            high: 101.0,
+            low: 98.0,
+            close: 100.0,
+            volume: 1.0,
+        };
+        // A buy pays more than its limit.
+        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Long, true), Some(101.0));
+        // A sell receives less.
+        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Short, true), Some(99.0));
+    }
+
+    #[test]
+    fn limit_slippage_does_not_create_fills() {
+        // A price the market never reached stays unfilled however the
+        // slippage is configured.
+        let model = FillModel { limit_slippage: 0.05, ..FillModel::default() };
+        let bar = OhlcvBar {
+            timestamp: 0,
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume: 1.0,
+        };
+        assert_eq!(model.get_limit_fill_price(90.0, &bar, Direction::Long, true), None);
+    }
 
     fn test_bar() -> OhlcvBar {
         OhlcvBar { timestamp: 0, open: 100.0, high: 105.0, low: 95.0, close: 102.0, volume: 1000.0 }

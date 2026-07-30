@@ -22,3 +22,11 @@ target
 
 # Python
 .venv
+# Compiled extension modules and debug symbols — built by maturin, never committed.
+# A checked-in .so shadows the real build and is wrong on every other platform.
+*.so
+*.pyd
+*.dylib
+*.dSYM/
+__pycache__/
+*.py[cod]

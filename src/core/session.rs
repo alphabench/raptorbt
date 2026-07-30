@@ -89,6 +89,16 @@ impl SessionConfig {
         self.market_close_minutes().saturating_sub(self.squareoff_minutes_before_close)
     }
 
+    /// Session length in minutes.
+    ///
+    /// Used to annualize intraday returns: an intraday series only accrues
+    /// returns while the market is open, so bars-per-session drives the period
+    /// count. NSE equity is 375 minutes; MCX commodity is 870, which is why
+    /// this cannot be a single hardcoded constant.
+    pub fn session_minutes(&self) -> u32 {
+        self.market_close_minutes().saturating_sub(self.market_open_minutes())
+    }
+
     /// Get timezone offset in seconds.
     pub fn timezone_offset_seconds(&self) -> i64 {
         (self.timezone_offset_hours as i64 * 3600) + (self.timezone_offset_minutes as i64 * 60)

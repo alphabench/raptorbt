@@ -42,7 +42,7 @@ impl Default for Direction {
 }
 
 /// OHLCV data for a single bar.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OhlcvBar {
     pub timestamp: Timestamp,
     pub open: Price,
@@ -143,6 +143,12 @@ impl TickData {
 }
 
 /// Compiled trading signals from strategy.
+///
+/// Note: precompiled boolean signal arrays are the legacy strategy
+/// representation. The class-based strategy contract (`Strategy` +
+/// `run_strategy_backtest` on the Python side) supersedes them for new
+/// strategies; array-based runners remain supported for backward
+/// compatibility and will be deprecated in a future release.
 #[derive(Debug, Clone)]
 pub struct CompiledSignals {
     /// Symbol identifier.
@@ -219,6 +225,12 @@ pub struct Trade {
     pub exit_time: Timestamp,
     /// Fees paid.
     pub fees: f64,
+    /// Itemized regulatory costs, when an itemized fee model is configured.
+    ///
+    /// Entry and exit components are summed, so `fee_breakdown.total()` equals
+    /// `fees` -- the equity curve and the reported costs are the same money.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
     /// Exit reason.
     pub exit_reason: ExitReason,
 }
@@ -250,8 +262,13 @@ pub enum ExitReason {
     TrailingStop,
     /// End of data.
     EndOfData,
+    /// Closed by an explicit order (class-based order API).
+    Order,
     /// Option expiry settlement.
     Settlement,
+    /// Force-closed by a margin call. Unlike a settlement this is a real
+    /// trade-out and pays exit costs.
+    Liquidation,
     /// Max hold time exceeded (tick backtest).
     TimeExit,
 }
@@ -271,6 +288,124 @@ pub struct BacktestConfig {
     pub target: TargetConfig,
     /// Whether to execute on bar close.
     pub upon_bar_close: bool,
+
+    /// Whether `slippage` is actually applied to fills.
+    ///
+    /// Through 0.4.1 the engine hardcoded `SlippageModel::None` and never read
+    /// `slippage`, so configuring it had no effect. Setting this to `false`
+    /// restores that behavior for reproducing pre-0.5.0 results.
+    pub apply_slippage: bool,
+
+    /// Periods per year used to annualize Sharpe and Sortino.
+    ///
+    /// `None` derives it from the median spacing between bar timestamps, which
+    /// is correct across daily and intraday data alike. An explicit value
+    /// overrides that inference.
+    pub periods_per_year: Option<f64>,
+
+    /// Annual risk-free rate as a fraction, used for excess returns.
+    pub risk_free_rate: f64,
+
+    /// Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT".
+    ///
+    /// When set, the engine charges the real regulatory schedule (STT, stamp
+    /// duty, GST, SEBI, exchange) instead of the flat `fees` fraction, and
+    /// reports the breakdown. `None` keeps the flat `fees` rate.
+    pub fee_segment: Option<String>,
+
+    /// Maximum concurrent open positions. `None` is unlimited.
+    ///
+    /// Enforced inside the simulation loop, before an entry opens, so the
+    /// resulting metrics describe the constrained run.
+    pub max_positions: Option<usize>,
+
+    /// Peak-to-trough drawdown percent that halts new entries. `None` disables.
+    ///
+    /// Latching: once tripped it stays tripped for the rest of the run.
+    pub max_drawdown_pct: Option<f64>,
+
+    /// Trading minutes per session, used to annualize intraday returns.
+    ///
+    /// NSE equity is 375 (09:15-15:30); MCX commodity is 870 (09:00-23:30);
+    /// CDS is 480. Assuming NSE on MCX data understates Sharpe by ~1.5x.
+    /// `Some(0.0)` marks a continuously traded (24x7) market, which annualizes
+    /// on calendar time instead. `None` uses the NSE default.
+    pub session_minutes: Option<f64>,
+
+    /// Reproduce pre-0.5.0 annualization.
+    ///
+    /// Through 0.4.1 the single-instrument path annualized at 365 while the
+    /// basket/pairs/options/multi paths used 252, and Calmar derived years from
+    /// bar count over 365.25 rather than elapsed time. Setting this to `true`
+    /// restores those constants.
+    pub legacy_annualization: bool,
+
+    /// Probability a marketable resting limit order actually fills on a bar
+    /// it touches. `1.0` (default) is deterministic legacy behavior.
+    #[serde(default = "default_one")]
+    pub fill_prob_limit: f64,
+
+    /// Probability a stop/market fill slips one tick against the trader.
+    /// `0.0` (default) disables. Requires an instrument `price_increment`.
+    #[serde(default)]
+    pub fill_prob_slippage: f64,
+
+    /// Force-close open positions when a margin call fires, instead of only
+    /// halting new entries.
+    ///
+    /// `false` (default) keeps the latching-halt behavior: the position
+    /// rides on and the strategy decides what to do. `true` models a broker
+    /// that liquidates, closing everything at the breaching bar's fill
+    /// price and paying exit costs.
+    #[serde(default)]
+    pub liquidate_on_margin_call: bool,
+
+    /// Adverse price adjustment on limit fills, as a fraction of the limit
+    /// price. `0.0` (default) fills exactly at the limit, as before.
+    ///
+    /// Models adverse selection on a resting order. Suppressed when
+    /// `queue_fill_model` granted the fill: volume observed trading ahead
+    /// of you is evidence you held the price.
+    #[serde(default)]
+    pub limit_slippage: f64,
+
+    /// Offset added to timestamps before deriving the trading date that
+    /// `TimeInForce::Day` expires on.
+    ///
+    /// `0` (the default) rolls DAY orders at UTC midnight. A session whose
+    /// local hours cross UTC midnight needs its own offset — e.g.
+    /// `IST_OFFSET_NS` — or a DAY order placed late in one trading date
+    /// expires while that date is still running.
+    ///
+    /// This follows the trading *date*, not the trading *session*: a DAY
+    /// order still survives past the session close to the next session's
+    /// first bar of the same date.
+    #[serde(default)]
+    pub session_tz_offset_ns: i64,
+
+    /// Fill resting limits from observed queue position instead of
+    /// `fill_prob_limit`'s coin flip.
+    ///
+    /// Off by default: enabling it changes fills, so it is opt-in rather
+    /// than something a user gets for happening to supply a book. Needs
+    /// depth data and trade prints; falls back to `fill_prob_limit` on bar
+    /// events and wherever the queue cannot be estimated.
+    #[serde(default)]
+    pub queue_fill_model: bool,
+
+    /// Seed for the stochastic-fill RNG; same seed, same fills.
+    #[serde(default)]
+    pub fill_seed: u64,
+
+    /// Infer intra-bar high/low ordering from candle geometry when a stop
+    /// and target are both touched in one bar (up-candle: open→low→high→
+    /// close). `false` (default) keeps the legacy stop-first assumption.
+    #[serde(default)]
+    pub bar_path_adaptive: bool,
+}
+
+fn default_one() -> f64 {
+    1.0
 }
 
 impl Default for BacktestConfig {
@@ -282,6 +417,68 @@ impl Default for BacktestConfig {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            apply_slippage: true,
+            periods_per_year: None,
+            risk_free_rate: 0.0,
+            session_minutes: None,
+            fee_segment: None,
+            max_positions: None,
+            max_drawdown_pct: None,
+            legacy_annualization: false,
+            fill_prob_limit: 1.0,
+            queue_fill_model: false,
+            session_tz_offset_ns: 0,
+            limit_slippage: 0.0,
+            liquidate_on_margin_call: false,
+            fill_prob_slippage: 0.0,
+            fill_seed: 0,
+            bar_path_adaptive: false,
+        }
+    }
+}
+
+impl BacktestConfig {
+    /// Fee model implied by this config.
+    ///
+    /// An unparseable `fee_segment` falls back to the flat rate rather than
+    /// erroring, matching how the rest of the config degrades.
+    pub fn fee_model(&self) -> crate::execution::FeeModel {
+        use crate::execution::{indian_costs::Segment, FeeModel};
+
+        let Some(spec) = self.fee_segment.as_deref() else {
+            return FeeModel::percentage(self.fees);
+        };
+
+        // "NFO-OPT" / "NSE-INTRADAY" / "MCX" all parse.
+        let (seg, ty) = match spec.split_once('-') {
+            Some((s, t)) => (s, Some(t)),
+            None => (spec, None),
+        };
+        let intraday = !matches!(ty.map(|t| t.to_ascii_uppercase()).as_deref(), Some("DELIVERY"));
+        let ty = match ty.map(|t| t.to_ascii_uppercase()) {
+            Some(t) if t == "DELIVERY" || t == "INTRADAY" => None,
+            other => other,
+        };
+
+        match Segment::parse(seg, ty.as_deref(), intraday) {
+            Some(segment) => FeeModel::indian(segment),
+            None => FeeModel::percentage(self.fees),
+        }
+    }
+
+    /// Pre-trade risk constraints declared by this config.
+    pub fn risk_gate(&self) -> crate::portfolio::risk::RiskGate {
+        crate::portfolio::risk::RiskGate::new(self.max_positions, self.max_drawdown_pct)
+    }
+
+    /// How intraday returns map onto trading time.
+    pub fn session_spec(&self) -> crate::metrics::annualization::SessionSpec {
+        use crate::metrics::annualization::SessionSpec;
+        match self.session_minutes {
+            // Explicit zero marks a continuously traded market.
+            Some(m) if m <= 0.0 => SessionSpec::Continuous,
+            Some(minutes) => SessionSpec::Session { minutes },
+            None => SessionSpec::default(),
         }
     }
 }

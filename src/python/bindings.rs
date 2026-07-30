@@ -41,20 +41,135 @@ pub struct PyBacktestConfig {
     pub slippage: f64,
     #[pyo3(get, set)]
     pub upon_bar_close: bool,
+    /// Whether `slippage` is applied to fills. Ignored entirely before 0.5.0.
+    #[pyo3(get, set)]
+    pub apply_slippage: bool,
+    /// Explicit annualization factor; `None` infers it from bar spacing.
+    #[pyo3(get, set)]
+    pub periods_per_year: Option<f64>,
+    /// Annual risk-free rate as a fraction.
+    #[pyo3(get, set)]
+    pub risk_free_rate: f64,
+    /// Trading minutes per session for intraday annualization.
+    ///
+    /// NSE equity 375, MCX 870, CDS 480. `0` marks a 24x7 market.
+    /// `None` defaults to NSE.
+    #[pyo3(get, set)]
+    pub session_minutes: Option<f64>,
+    /// Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT".
+    ///
+    /// When set, the engine charges the real regulatory schedule instead of
+    /// the flat `fees` fraction, and reports the breakdown per trade.
+    #[pyo3(get, set)]
+    pub fee_segment: Option<String>,
+    /// Maximum concurrent open positions. `None` is unlimited.
+    #[pyo3(get, set)]
+    pub max_positions: Option<usize>,
+    /// Drawdown percent that halts new entries. `None` disables.
+    #[pyo3(get, set)]
+    pub max_drawdown_pct: Option<f64>,
+    /// Reproduce pre-0.5.0 annualization constants.
+    #[pyo3(get, set)]
+    pub legacy_annualization: bool,
+    /// Probability a marketable resting limit order fills (1.0 = always).
+    #[pyo3(get, set)]
+    pub fill_prob_limit: f64,
+    /// Probability a stop/market fill slips one tick against the trader.
+    #[pyo3(get, set)]
+    pub fill_prob_slippage: f64,
+    /// Fill resting limits from observed queue position (needs depth data).
+    #[pyo3(get, set)]
+    pub queue_fill_model: bool,
+    /// Offset for the trading date DAY orders expire on (0 = UTC).
+    #[pyo3(get, set)]
+    pub session_tz_offset_ns: i64,
+    /// Adverse adjustment on limit fills, as a fraction of the limit price.
+    #[pyo3(get, set)]
+    pub limit_slippage: f64,
+    /// Force-close positions on a margin call instead of only halting entries.
+    #[pyo3(get, set)]
+    pub liquidate_on_margin_call: bool,
+    /// Seed for the stochastic-fill RNG.
+    #[pyo3(get, set)]
+    pub fill_seed: u64,
+    /// Infer intra-bar high/low order from candle geometry on stop/target
+    /// conflicts; false keeps the legacy stop-first assumption.
+    #[pyo3(get, set)]
+    pub bar_path_adaptive: bool,
     stop_config: StopConfig,
     target_config: TargetConfig,
 }
 
 #[pymethods]
 impl PyBacktestConfig {
+    // New parameters are appended so existing positional calls keep working.
     #[new]
-    #[pyo3(signature = (initial_capital=100000.0, fees=0.001, slippage=0.0, upon_bar_close=true))]
-    fn new(initial_capital: f64, fees: f64, slippage: f64, upon_bar_close: bool) -> Self {
+    #[pyo3(signature = (
+        initial_capital=100000.0,
+        fees=0.001,
+        slippage=0.0,
+        upon_bar_close=true,
+        apply_slippage=true,
+        periods_per_year=None,
+        risk_free_rate=0.0,
+        session_minutes=None,
+        fee_segment=None,
+        max_positions=None,
+        max_drawdown_pct=None,
+        legacy_annualization=false,
+        fill_prob_limit=1.0,
+        fill_prob_slippage=0.0,
+        fill_seed=0,
+        bar_path_adaptive=false,
+        queue_fill_model=false,
+        session_tz_offset_ns=0,
+        limit_slippage=0.0,
+        liquidate_on_margin_call=false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        initial_capital: f64,
+        fees: f64,
+        slippage: f64,
+        upon_bar_close: bool,
+        apply_slippage: bool,
+        periods_per_year: Option<f64>,
+        risk_free_rate: f64,
+        session_minutes: Option<f64>,
+        fee_segment: Option<String>,
+        max_positions: Option<usize>,
+        max_drawdown_pct: Option<f64>,
+        legacy_annualization: bool,
+        fill_prob_limit: f64,
+        fill_prob_slippage: f64,
+        fill_seed: u64,
+        bar_path_adaptive: bool,
+        queue_fill_model: bool,
+        session_tz_offset_ns: i64,
+        limit_slippage: f64,
+        liquidate_on_margin_call: bool,
+    ) -> Self {
         Self {
             initial_capital,
             fees,
             slippage,
             upon_bar_close,
+            apply_slippage,
+            periods_per_year,
+            risk_free_rate,
+            session_minutes,
+            fee_segment,
+            max_positions,
+            max_drawdown_pct,
+            legacy_annualization,
+            fill_prob_limit,
+            queue_fill_model,
+            session_tz_offset_ns,
+            limit_slippage,
+            liquidate_on_margin_call,
+            fill_prob_slippage,
+            fill_seed,
+            bar_path_adaptive,
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
         }
@@ -100,6 +215,22 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             stop: py_config.stop_config,
             target: py_config.target_config,
             upon_bar_close: py_config.upon_bar_close,
+            apply_slippage: py_config.apply_slippage,
+            periods_per_year: py_config.periods_per_year,
+            risk_free_rate: py_config.risk_free_rate,
+            session_minutes: py_config.session_minutes,
+            fee_segment: py_config.fee_segment.clone(),
+            max_positions: py_config.max_positions,
+            max_drawdown_pct: py_config.max_drawdown_pct,
+            legacy_annualization: py_config.legacy_annualization,
+            fill_prob_limit: py_config.fill_prob_limit,
+            queue_fill_model: py_config.queue_fill_model,
+            session_tz_offset_ns: py_config.session_tz_offset_ns,
+            limit_slippage: py_config.limit_slippage,
+            liquidate_on_margin_call: py_config.liquidate_on_margin_call,
+            fill_prob_slippage: py_config.fill_prob_slippage,
+            fill_seed: py_config.fill_seed,
+            bar_path_adaptive: py_config.bar_path_adaptive,
         }
     }
 }
@@ -340,6 +471,12 @@ pub struct PyTrade {
     pub exit_time: i64,
     #[pyo3(get)]
     pub fees: f64,
+    /// Itemized regulatory costs, when `config.fee_segment` is set.
+    ///
+    /// Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
+    /// `total` equals `fees`, so reported costs and the equity curve agree.
+    #[pyo3(get)]
+    pub fee_breakdown: Option<HashMap<String, f64>>,
     #[pyo3(get)]
     pub exit_reason: String,
 }
@@ -363,11 +500,11 @@ pub struct PyBacktestMetrics {
     #[pyo3(get)]
     pub sharpe_ratio: f64,
     #[pyo3(get)]
-    pub sortino_ratio: f64,
+    pub sortino_ratio: Option<f64>,
     #[pyo3(get)]
-    pub calmar_ratio: f64,
+    pub calmar_ratio: Option<f64>,
     #[pyo3(get)]
-    pub omega_ratio: f64,
+    pub omega_ratio: Option<f64>,
     #[pyo3(get)]
     pub max_drawdown_pct: f64,
     #[pyo3(get)]
@@ -375,7 +512,7 @@ pub struct PyBacktestMetrics {
     #[pyo3(get)]
     pub win_rate_pct: f64,
     #[pyo3(get)]
-    pub profit_factor: f64,
+    pub profit_factor: Option<f64>,
     #[pyo3(get)]
     pub expectancy: f64,
     #[pyo3(get)]
@@ -421,9 +558,9 @@ pub struct PyBacktestMetrics {
     #[pyo3(get)]
     pub exposure_pct: f64,
     #[pyo3(get)]
-    pub payoff_ratio: f64,
+    pub payoff_ratio: Option<f64>,
     #[pyo3(get)]
-    pub recovery_factor: f64,
+    pub recovery_factor: Option<f64>,
 }
 
 #[pymethods]
@@ -513,6 +650,12 @@ impl PyBacktestResult {
 // ============================================================================
 
 /// Run single instrument backtest.
+///
+/// Note: the array-based runners (precomputed boolean entry/exit signals)
+/// are the legacy strategy path. For new strategies prefer the class-based
+/// strategy contract (`raptorbt.Strategy` + `run_strategy_backtest`), which
+/// shares the same execution core and result types. Array runners remain
+/// supported and will only be deprecated in a future major release.
 #[pyfunction]
 #[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None, instrument_config=None))]
 pub fn run_single_backtest<'py>(
@@ -630,6 +773,186 @@ pub fn run_basket_backtest<'py>(
         backtest.run_with_instrument_configs(&rust_instruments, rust_inst_configs.as_ref());
 
     Ok(convert_result(result))
+}
+
+/// Per-instrument attribution from a portfolio backtest.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyInstrumentSummary {
+    #[pyo3(get)]
+    pub symbol: String,
+    #[pyo3(get)]
+    pub trades: usize,
+    #[pyo3(get)]
+    pub pnl: f64,
+    /// Entries refused because the portfolio was at its limit or halted.
+    #[pyo3(get)]
+    pub rejected_entries: usize,
+}
+
+#[pymethods]
+impl PyInstrumentSummary {
+    fn __repr__(&self) -> String {
+        format!(
+            "InstrumentSummary(symbol='{}', trades={}, pnl={:.2}, rejected_entries={})",
+            self.symbol, self.trades, self.pnl, self.rejected_entries
+        )
+    }
+}
+
+/// Result of a shared-capital portfolio backtest.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyPortfolioResult {
+    #[pyo3(get)]
+    pub result: PyBacktestResult,
+    #[pyo3(get)]
+    pub per_instrument: Vec<PyInstrumentSummary>,
+    /// Entries refused by the risk gate, across all instruments.
+    #[pyo3(get)]
+    pub rejected_entries: usize,
+    /// Whether the drawdown kill-switch tripped.
+    #[pyo3(get)]
+    pub halted: bool,
+    /// Bar index at which the kill-switch tripped.
+    #[pyo3(get)]
+    pub halted_at: Option<usize>,
+}
+
+#[pymethods]
+impl PyPortfolioResult {
+    /// Portfolio metrics, computed on the constrained run.
+    #[getter]
+    fn metrics(&self) -> PyBacktestMetrics {
+        self.result.metrics.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PortfolioResult(instruments={}, rejected_entries={}, halted={})",
+            self.per_instrument.len(),
+            self.rejected_entries,
+            self.halted
+        )
+    }
+}
+
+/// Run a shared-capital portfolio backtest.
+///
+/// Simulates every instrument against one cash pool, with `max_positions` and
+/// the drawdown kill-switch (set on `config`) gating each entry *before* it
+/// opens -- so the reported metrics describe the constrained run.
+///
+/// This is not the same as running one backtest per symbol and summing the
+/// equity curves: there each symbol gets its own private capital, so N symbols
+/// deploy N times the account and no cross-symbol limit can be applied.
+///
+/// `allocation`: "equal_weight" (default) divides the pool across the slots
+/// that could still open; "full" lets each entry take the whole remaining pool.
+#[pyfunction]
+#[pyo3(signature = (instruments, config=None, allocation="equal_weight", instrument_configs=None))]
+#[allow(clippy::type_complexity)]
+pub fn run_portfolio_backtest<'py>(
+    _py: Python<'py>,
+    instruments: Vec<(
+        PyReadonlyArray1<i64>,
+        PyReadonlyArray1<f64>,
+        PyReadonlyArray1<f64>,
+        PyReadonlyArray1<f64>,
+        PyReadonlyArray1<f64>,
+        PyReadonlyArray1<f64>,
+        PyReadonlyArray1<bool>,
+        PyReadonlyArray1<bool>,
+        i32,
+        f64,
+        String,
+    )>,
+    config: Option<&PyBacktestConfig>,
+    allocation: &str,
+    instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
+) -> PyResult<PyPortfolioResult> {
+    use crate::strategies::portfolio::{
+        CapitalAllocation, PortfolioBacktest, PortfolioBacktestConfig,
+    };
+
+    if instruments.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "run_portfolio_backtest requires at least one instrument",
+        ));
+    }
+
+    let rust_instruments: Vec<(OhlcvData, CompiledSignals)> = instruments
+        .into_iter()
+        .map(|(ts, o, h, l, c, v, entries, exits, dir, weight, sym)| {
+            let ohlcv = OhlcvData {
+                timestamps: numpy_to_vec_i64(ts),
+                open: numpy_to_vec_f64(o),
+                high: numpy_to_vec_f64(h),
+                low: numpy_to_vec_f64(l),
+                close: numpy_to_vec_f64(c),
+                volume: numpy_to_vec_f64(v),
+            };
+            let signals = CompiledSignals {
+                symbol: sym,
+                entries: numpy_to_vec_bool(entries),
+                exits: numpy_to_vec_bool(exits),
+                position_sizes: None,
+                direction: Direction::from_int(dir).unwrap_or(Direction::Long),
+                weight,
+            };
+            (ohlcv, signals)
+        })
+        .collect();
+
+    let n_bars = rust_instruments[0].0.len();
+    if let Some((idx, _)) =
+        rust_instruments.iter().enumerate().find(|(_, (o, _))| o.len() != n_bars)
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "all instruments must have the same number of bars; instrument {idx} has {}, expected {n_bars}",
+            rust_instruments[idx].0.len()
+        )));
+    }
+
+    let allocation = match allocation {
+        "full" => CapitalAllocation::Full,
+        "equal_weight" => CapitalAllocation::EqualWeight,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown allocation '{other}'; expected 'equal_weight' or 'full'"
+            )))
+        }
+    };
+
+    let portfolio_config = PortfolioBacktestConfig {
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
+        allocation,
+    };
+
+    let rust_inst_configs: Option<HashMap<String, InstrumentConfig>> =
+        instrument_configs.map(|configs| {
+            configs.iter().map(|(k, v)| (k.clone(), InstrumentConfig::from(v))).collect()
+        });
+
+    let backtest = PortfolioBacktest::new(portfolio_config);
+    let out = backtest.run(&rust_instruments, rust_inst_configs.as_ref());
+
+    Ok(PyPortfolioResult {
+        result: convert_result(out.result),
+        per_instrument: out
+            .per_instrument
+            .into_iter()
+            .map(|s| PyInstrumentSummary {
+                symbol: s.symbol,
+                trades: s.trades,
+                pnl: s.pnl,
+                rejected_entries: s.rejected_entries,
+            })
+            .collect(),
+        rejected_entries: out.rejected_entries,
+        halted: out.halted,
+        halted_at: out.halted_at,
+    })
 }
 
 /// Run options backtest.
@@ -1121,6 +1444,9 @@ pub fn run_tick_backtest<'py>(
             stop: crate::core::types::StopConfig::None,
             target: crate::core::types::TargetConfig::None,
             upon_bar_close: false,
+            // The tick engine reads `slippage` directly (see TickBacktest::run)
+            // and always honored it, unlike the bar engine.
+            ..Default::default()
         },
         stop_loss_pct,
         take_profit_pct,
@@ -1220,7 +1546,10 @@ pub fn tick_spread_pct<'py>(
 ) -> PyResult<&'py PyArray1<f64>> {
     Ok(vec_to_numpy_f64(
         py,
-        crate::indicators::tick_features::spread_pct(&numpy_to_vec_f64(bid), &numpy_to_vec_f64(ask)),
+        crate::indicators::tick_features::spread_pct(
+            &numpy_to_vec_f64(bid),
+            &numpy_to_vec_f64(ask),
+        ),
     ))
 }
 
@@ -1596,18 +1925,63 @@ pub fn simulate_portfolio_mc(
     Ok(dict.into())
 }
 
+/// Map a non-finite metric to `None`.
+///
+/// Ratios divide by a denominator that can legitimately be zero -- a strategy
+/// with no losing trades has an undefined profit factor, not an infinite one.
+/// `f64::INFINITY` crosses to Python as `float('inf')`, which `json.dumps`
+/// serializes as a bare `Infinity` token that is not valid JSON.
+fn finite(value: f64) -> Option<f64> {
+    if value.is_finite() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Convert a Rust trade to its Python counterpart.
+pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
+    PyTrade {
+        id: t.id,
+        symbol: t.symbol,
+        entry_idx: t.entry_idx,
+        exit_idx: t.exit_idx,
+        entry_price: t.entry_price,
+        exit_price: t.exit_price,
+        size: t.size,
+        direction: t.direction as i32,
+        pnl: t.pnl,
+        return_pct: t.return_pct,
+        entry_time: t.entry_time,
+        exit_time: t.exit_time,
+        fees: t.fees,
+        fee_breakdown: t.fee_breakdown.map(|b| {
+            HashMap::from([
+                ("brokerage".to_string(), b.brokerage),
+                ("stt".to_string(), b.stt),
+                ("exchange_txn".to_string(), b.exchange_txn),
+                ("sebi_fee".to_string(), b.sebi_fee),
+                ("stamp_duty".to_string(), b.stamp_duty),
+                ("gst".to_string(), b.gst),
+                ("total".to_string(), b.total()),
+            ])
+        }),
+        exit_reason: format!("{:?}", t.exit_reason),
+    }
+}
+
 /// Convert Rust BacktestResult to Python PyBacktestResult.
-fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
+pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
     let metrics = PyBacktestMetrics {
         total_return_pct: result.metrics.total_return_pct,
         sharpe_ratio: result.metrics.sharpe_ratio,
-        sortino_ratio: result.metrics.sortino_ratio,
-        calmar_ratio: result.metrics.calmar_ratio,
-        omega_ratio: result.metrics.omega_ratio,
+        sortino_ratio: finite(result.metrics.sortino_ratio),
+        calmar_ratio: finite(result.metrics.calmar_ratio),
+        omega_ratio: finite(result.metrics.omega_ratio),
         max_drawdown_pct: result.metrics.max_drawdown_pct,
         max_drawdown_duration: result.metrics.max_drawdown_duration,
         win_rate_pct: result.metrics.win_rate_pct,
-        profit_factor: result.metrics.profit_factor,
+        profit_factor: finite(result.metrics.profit_factor),
         expectancy: result.metrics.expectancy,
         sqn: result.metrics.sqn,
         total_trades: result.metrics.total_trades,
@@ -1630,30 +2004,11 @@ fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResul
         max_consecutive_losses: result.metrics.max_consecutive_losses,
         avg_holding_period: result.metrics.avg_holding_period,
         exposure_pct: result.metrics.exposure_pct,
-        payoff_ratio: result.metrics.payoff_ratio,
-        recovery_factor: result.metrics.recovery_factor,
+        payoff_ratio: finite(result.metrics.payoff_ratio),
+        recovery_factor: finite(result.metrics.recovery_factor),
     };
 
-    let trades: Vec<PyTrade> = result
-        .trades
-        .into_iter()
-        .map(|t| PyTrade {
-            id: t.id,
-            symbol: t.symbol,
-            entry_idx: t.entry_idx,
-            exit_idx: t.exit_idx,
-            entry_price: t.entry_price,
-            exit_price: t.exit_price,
-            size: t.size,
-            direction: t.direction as i32,
-            pnl: t.pnl,
-            return_pct: t.return_pct,
-            entry_time: t.entry_time,
-            exit_time: t.exit_time,
-            fees: t.fees,
-            exit_reason: format!("{:?}", t.exit_reason),
-        })
-        .collect();
+    let trades: Vec<PyTrade> = result.trades.into_iter().map(convert_trade).collect();
 
     PyBacktestResult {
         metrics,

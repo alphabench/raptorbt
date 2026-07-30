@@ -90,10 +90,7 @@ pub fn tick_momentum_exit(timestamps_ns: &[i64], eod_exit_time_ns: i64) -> Vec<b
     if eod_exit_time_ns == 0 {
         return vec![false; n];
     }
-    timestamps_ns
-        .iter()
-        .map(|&ts| ts >= eod_exit_time_ns)
-        .collect()
+    timestamps_ns.iter().map(|&ts| ts >= eod_exit_time_ns).collect()
 }
 
 #[cfg(test)]
