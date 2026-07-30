@@ -18,15 +18,20 @@ sys.path.insert(0, str(HERE / "golden"))
 from generate import (  # noqa: E402
     GoldenSma,
     config_variants,
-    make_data,
-    make_signals,
     result_digest,
+    thaw_inputs,
 )
 
 import raptorbt  # noqa: E402
 from raptorbt import PyBacktestConfig  # noqa: E402
 
 FIXTURES = json.loads((HERE / "golden" / "fixtures.json").read_text())
+
+# Replayed verbatim rather than rebuilt by make_data(). NumPy's vectorized
+# transcendentals are not correctly rounded and vary by build and CPU, so
+# regenerating the inputs here would let a NumPy upgrade fail this gate while
+# the engine is byte-identical -- see the module docstring in generate.py.
+INPUTS = FIXTURES["inputs"]
 
 
 def assert_digest_equal(actual: dict, expected: dict, name: str) -> None:
@@ -37,8 +42,7 @@ def assert_digest_equal(actual: dict, expected: dict, name: str) -> None:
 
 @pytest.mark.parametrize("variant", [v[0] for v in config_variants()])
 def test_single_path_matches_golden(variant):
-    ts, o, h, l, c, v = make_data()
-    entries, exits = make_signals(c)
+    ts, o, h, l, c, v, entries, exits = thaw_inputs(INPUTS["shared"])
     name, config, ic, direction = next(x for x in config_variants() if x[0] == variant)
     result = raptorbt.run_single_backtest(
         ts, o, h, l, c, v, entries, exits,
@@ -48,7 +52,7 @@ def test_single_path_matches_golden(variant):
 
 
 def test_class_path_matches_golden():
-    ts, o, h, l, c, v = make_data()
+    ts, o, h, l, c, v, _, _ = thaw_inputs(INPUTS["shared"])
     result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
     assert_digest_equal(result_digest(result), FIXTURES["class/sma_cross"], "class/sma_cross")
 
@@ -56,9 +60,9 @@ def test_class_path_matches_golden():
 def test_portfolio_shared_pool_matches_golden():
     instruments = []
     for seed in (11, 12, 13):
-        pts, po, ph, pl, pc, pv = make_data(300, seed=seed)
-        pe, px = make_signals(pc)
-        instruments.append((pts, po, ph, pl, pc, pv, pe, px, 1, 1.0, f"SYM{seed}"))
+        symbol = f"SYM{seed}"
+        pts, po, ph, pl, pc, pv, pe, px = thaw_inputs(INPUTS[symbol])
+        instruments.append((pts, po, ph, pl, pc, pv, pe, px, 1, 1.0, symbol))
     portfolio = raptorbt.run_portfolio_backtest(
         instruments, config=PyBacktestConfig(), allocation="equal_weight"
     )

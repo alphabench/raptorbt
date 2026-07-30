@@ -259,9 +259,9 @@ class TestCacheAndPortfolioView:
 
         here = Path(__file__).parent
         sys.path.insert(0, str(here / "golden"))
-        from generate import GoldenSma, make_data, result_digest
+        from generate import GoldenSma, result_digest, thaw_inputs
 
         fixtures = json.loads((here / "golden" / "fixtures.json").read_text())
-        ts, o, h, l, c, v = make_data()
+        ts, o, h, l, c, v, _, _ = thaw_inputs(fixtures["inputs"]["shared"])
         result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
         assert result_digest(result) == fixtures["class/sma_cross"]

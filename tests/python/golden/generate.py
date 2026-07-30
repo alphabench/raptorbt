@@ -9,6 +9,15 @@ array and class paths. ``test_golden.py`` replays the corpus and asserts
 equality, gating any refactor of the execution core. Regenerating fixtures
 is a deliberate act: it declares that numeric results are allowed to change
 and requires a version bump + changelog entry per the compatibility rules.
+
+**Inputs are frozen alongside the outputs.** ``make_data`` builds its series
+through ``np.exp``/``np.cumsum``, whose vectorized kernels are not correctly
+rounded -- they dispatch on CPU features and have changed between NumPy
+releases. Regenerating the inputs at test time therefore made the gate
+compare *NumPy composed with the engine*, so the same commit passed on one
+runner and failed by 1-2 ULP on another. The arrays are written into
+``fixtures.json`` as float hex and replayed verbatim, which is what confines
+the gate to the Rust core it exists to protect.
 """
 
 from __future__ import annotations
@@ -39,6 +48,34 @@ def make_data(n=400, seed=7):
     # Ns timestamps, one bar per minute.
     ts = (1_700_000_000_000_000_000 + np.arange(n) * 60_000_000_000).astype(np.int64)
     return ts, open_, high, low, close, volume
+
+
+def freeze_inputs(ts, o, h, l, c, v, entries, exits):
+    """Serialize one instrument's arrays exactly, for replay without NumPy."""
+    return {
+        "ts": [int(x) for x in ts],
+        "open": [float.hex(float(x)) for x in o],
+        "high": [float.hex(float(x)) for x in h],
+        "low": [float.hex(float(x)) for x in l],
+        "close": [float.hex(float(x)) for x in c],
+        "volume": [float.hex(float(x)) for x in v],
+        "entries": [bool(x) for x in entries],
+        "exits": [bool(x) for x in exits],
+    }
+
+
+def thaw_inputs(frozen):
+    """Rebuild the arrays written by :func:`freeze_inputs`, bit-for-bit."""
+    return (
+        np.array(frozen["ts"], dtype=np.int64),
+        np.array([float.fromhex(x) for x in frozen["open"]], dtype=np.float64),
+        np.array([float.fromhex(x) for x in frozen["high"]], dtype=np.float64),
+        np.array([float.fromhex(x) for x in frozen["low"]], dtype=np.float64),
+        np.array([float.fromhex(x) for x in frozen["close"]], dtype=np.float64),
+        np.array([float.fromhex(x) for x in frozen["volume"]], dtype=np.float64),
+        np.array(frozen["entries"], dtype=bool),
+        np.array(frozen["exits"], dtype=bool),
+    )
 
 
 def make_signals(close, fast=10, slow=30):
@@ -138,7 +175,7 @@ class GoldenSma(raptorbt.Strategy):
 def generate():
     ts, o, h, l, c, v = make_data()
     entries, exits = make_signals(c)
-    fixtures = {}
+    fixtures = {"inputs": {"shared": freeze_inputs(ts, o, h, l, c, v, entries, exits)}}
 
     for name, config, ic, direction in config_variants():
         result = raptorbt.run_single_backtest(
@@ -156,6 +193,9 @@ def generate():
     for seed in (11, 12, 13):
         pts, po, ph, pl, pc, pv = make_data(300, seed=seed)
         pe, px = make_signals(pc)
+        fixtures["inputs"][f"SYM{seed}"] = freeze_inputs(
+            pts, po, ph, pl, pc, pv, pe, px
+        )
         instruments.append((pts, po, ph, pl, pc, pv, pe, px, 1, 1.0, f"SYM{seed}"))
     portfolio = raptorbt.run_portfolio_backtest(
         instruments, config=PyBacktestConfig(), allocation="equal_weight"
