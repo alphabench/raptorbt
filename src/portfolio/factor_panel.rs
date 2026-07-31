@@ -256,10 +256,30 @@ pub struct RankIc {
     pub mean_ic: f64,
     /// Sample standard deviation of the per-date rank correlations.
     pub stdev_ic: f64,
-    /// `mean_ic / (stdev_ic / sqrt(n_dates_scored))`; 0 when undefined.
+    /// `mean_ic / (stdev_ic / sqrt(n_dates_scored))`. NAIVE: it assumes the
+    /// per-date ICs are independent, which daily dates over a multi-day
+    /// forward window are NOT. Reported for continuity and comparison; use
+    /// `t_stat_deflated` to decide anything.
     pub t_stat: f64,
-    /// Number of dates that produced an IC.
+    /// `t_stat / sqrt(horizon)` — the overlap-corrected statistic.
+    ///
+    /// Consecutive daily ICs measured over an `horizon`-day forward window
+    /// share `horizon - 1` of their `horizon` days, so `n_dates_scored`
+    /// overstates the independent sample by ~`horizon`x and the naive t-stat
+    /// is inflated by ~sqrt(horizon). This is not a theoretical worry: on the
+    /// Indian fund cross-section a naive t of +4.78 became +1.04 once
+    /// deflated, which is the difference between a factor that earns its
+    /// place and one that does not.
+    pub t_stat_deflated: f64,
+    /// Number of dates that produced an IC. Overlapping, so NOT the
+    /// independent sample size — see `n_independent`.
     pub n_dates_scored: usize,
+    /// `n_dates_scored / horizon`: roughly how many non-overlapping forward
+    /// windows the measurement actually rests on.
+    pub n_independent: f64,
+    /// The forward window the ICs were measured over, carried so a stored
+    /// result can be re-derived without knowing the call site's arguments.
+    pub overlap_days: usize,
     /// Mean number of paired names across the scored dates.
     pub mean_names: f64,
     /// The per-date ICs, NaN on dates that did not score.
@@ -361,7 +381,10 @@ pub fn rank_ic(
             mean_ic: f64::NAN,
             stdev_ic: f64::NAN,
             t_stat: f64::NAN,
+            t_stat_deflated: f64::NAN,
             n_dates_scored: 0,
+            n_independent: 0.0,
+            overlap_days: horizon,
             mean_names: f64::NAN,
             daily_ic,
         });
@@ -378,11 +401,18 @@ pub fn rank_ic(
     } else {
         f64::NAN
     };
+    // Overlap correction. Daily ICs over an `horizon`-day forward window
+    // share horizon-1 of their days, so the effective sample is ~n/horizon
+    // and the naive t is inflated by ~sqrt(horizon).
+    let deflator = (horizon.max(1) as f64).sqrt();
     Ok(RankIc {
         mean_ic,
         stdev_ic,
         t_stat,
+        t_stat_deflated: t_stat / deflator,
         n_dates_scored: n,
+        n_independent: n as f64 / horizon.max(1) as f64,
+        overlap_days: horizon,
         mean_names: names_total as f64 / n as f64,
         daily_ic,
     })
@@ -390,6 +420,24 @@ pub fn rank_ic(
 
 #[cfg(test)]
 mod tests {
+    /// A panel whose per-date IC varies, so `stdev_ic > 0` and the t-stat is
+    /// finite. A perfectly ordered factor gives IC = +1 on every date, zero
+    /// dispersion, and a NaN t — useless for testing the deflator.
+    fn noisy_panel(n_dates: usize, n_assets: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut prices = vec![0.0; n_dates * n_assets];
+        let mut factor = vec![0.0; n_dates * n_assets];
+        for d in 0..n_dates {
+            // Flip the factor's ordering every third date so some dates score
+            // +1 and others -1, producing genuine spread.
+            let flip = if d % 3 == 0 { -1.0 } else { 1.0 };
+            for a in 0..n_assets {
+                prices[d * n_assets + a] = 100.0 * (1.0 + 0.001 * (a as f64) * (d as f64));
+                factor[d * n_assets + a] = flip * a as f64;
+            }
+        }
+        (prices, factor)
+    }
+
     use super::*;
 
     #[test]
@@ -556,5 +604,63 @@ mod tests {
         let p = vec![1.0; 10];
         assert!(momentum_panel(&p, 10, 1, 0, 0).is_err());
         assert!(momentum_panel(&p, 10, 1, 5, 5).is_err());
+    }
+
+    #[test]
+    fn overlapping_windows_deflate_the_t_stat() {
+        // Daily ICs over an h-day forward window share h-1 of their days, so
+        // the naive t overstates significance by ~sqrt(h). On the Indian fund
+        // cross-section that correction turned +4.78 into +1.04 -- the
+        // difference between a factor that earns its place and one that does
+        // not. Both figures are reported so the inflation stays auditable.
+        let n_dates = 60usize;
+        let n_assets = 6usize;
+        let horizon = 21usize;
+        // Per-date IC must VARY, or stdev_ic is 0 and the t-stat is NaN by
+        // contract (a perfectly predictive factor has no dispersion to test).
+        // Alternating the sign of the drift every third date gives a real,
+        // finite spread of daily ICs.
+        let (prices, factor) = noisy_panel(n_dates, n_assets);
+
+        let out = rank_ic(&factor, &prices, n_dates, n_assets, horizon, 3).unwrap();
+
+        assert_eq!(out.overlap_days, horizon);
+        assert!((out.n_independent - out.n_dates_scored as f64 / horizon as f64).abs() < 1e-12);
+        // The deflated statistic is strictly the smaller claim.
+        assert!(out.t_stat_deflated.abs() < out.t_stat.abs());
+        assert!(
+            (out.t_stat_deflated - out.t_stat / (horizon as f64).sqrt()).abs() < 1e-9,
+            "deflated t must be the naive t over sqrt(horizon)"
+        );
+    }
+
+    #[test]
+    fn a_horizon_of_one_does_not_deflate() {
+        // Non-overlapping windows need no correction, and dividing by
+        // sqrt(1) must leave the statistic untouched rather than nudging it.
+        let n_dates = 40usize;
+        let n_assets = 5usize;
+        let (prices, factor) = noisy_panel(n_dates, n_assets);
+
+        let out = rank_ic(&factor, &prices, n_dates, n_assets, 1, 3).unwrap();
+
+        assert_eq!(out.overlap_days, 1);
+        assert!((out.t_stat_deflated - out.t_stat).abs() < 1e-12);
+        assert!((out.n_independent - out.n_dates_scored as f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_panel_that_scores_nothing_reports_zero_independent_observations() {
+        // NaN mean/t are already the contract; n_independent must be 0.0 and
+        // not NaN, so a caller can gate on sample size without an isnan dance.
+        let prices = vec![f64::NAN; 30 * 4];
+        let factor = vec![f64::NAN; 30 * 4];
+
+        let out = rank_ic(&factor, &prices, 30, 4, 21, 3).unwrap();
+
+        assert_eq!(out.n_dates_scored, 0);
+        assert_eq!(out.n_independent, 0.0);
+        assert_eq!(out.overlap_days, 21);
+        assert!(out.t_stat_deflated.is_nan());
     }
 }

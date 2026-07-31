@@ -7,6 +7,8 @@ error-surface tests assert refusal (ValueError), because for a financial
 library a plausible wrong number is strictly worse than an exception.
 """
 
+import re
+
 import numpy as np
 import pytest
 
@@ -285,3 +287,137 @@ class TestCostScheduleExport:
     def test_unknown_segment_refused_with_alternatives(self):
         with pytest.raises(ValueError, match="equity_delivery"):
             r.indian_cost_schedule("delivery")
+
+
+class TestRankIc:
+    """The measurement that licenses a factor being scored at all.
+
+    Shipped in 6f5aa2f with no Python test and no .pyi entry — the runtime
+    worked while type-checking did not, which is exactly the drift the stub
+    exists to prevent.
+    """
+
+    @staticmethod
+    def _panel(n_dates=60, n_assets=8, seed=3):
+        rng = np.random.default_rng(seed)
+        prices = 100.0 * np.cumprod(
+            1.0 + rng.normal(0.0004, 0.01, size=(n_dates, n_assets)), axis=0
+        )
+        return prices
+
+    def test_a_perfectly_predictive_factor_scores_ic_one(self):
+        """Factor == realised forward return ⇒ rank IC is exactly +1."""
+        prices = self._panel()
+        horizon = 5
+        fwd = np.full_like(prices, np.nan)
+        fwd[:-horizon] = prices[horizon:] / prices[:-horizon] - 1.0
+
+        out = r.rank_ic(fwd, prices, horizon, 3)
+
+        assert out.mean_ic == pytest.approx(1.0, abs=1e-9)
+        assert out.n_dates_scored > 0
+
+    def test_the_negated_factor_scores_ic_minus_one(self):
+        prices = self._panel()
+        horizon = 5
+        fwd = np.full_like(prices, np.nan)
+        fwd[:-horizon] = prices[horizon:] / prices[:-horizon] - 1.0
+
+        out = r.rank_ic(-fwd, prices, horizon, 3)
+
+        assert out.mean_ic == pytest.approx(-1.0, abs=1e-9)
+
+    def test_result_exposes_every_field_the_stub_declares(self):
+        prices = self._panel()
+        out = r.rank_ic(prices, prices, 5, 3)
+
+        assert isinstance(out.mean_ic, float)
+        assert isinstance(out.stdev_ic, float)
+        assert isinstance(out.t_stat, float)
+        assert isinstance(out.n_dates_scored, int)
+        assert isinstance(out.mean_names, float)
+        assert out.daily_ic().ndim == 1
+
+    def test_daily_ic_is_date_aligned_with_nan_where_unscored(self):
+        """One entry per INPUT date, NaN where no IC could be computed.
+
+        Same discipline as the rest of factor_panel: absence is NaN and is
+        never imputed. The last `horizon` dates have no forward window, so a
+        length equal to n_dates_scored would silently re-index the series
+        against the wrong dates.
+        """
+        n_dates, horizon = 60, 5
+        prices = self._panel(n_dates=n_dates)
+
+        out = r.rank_ic(prices, prices, horizon, 3)
+        daily = out.daily_ic()
+
+        assert daily.shape == (n_dates,)
+        assert out.n_dates_scored == n_dates - horizon
+        assert np.isnan(daily[-horizon:]).all()
+        assert np.isfinite(daily[: n_dates - horizon]).all()
+
+    def test_dates_below_min_names_are_skipped_not_zero_filled(self):
+        """A thin date must not contribute a fabricated zero IC."""
+        prices = self._panel(n_dates=40, n_assets=4)
+        factor = np.full_like(prices, np.nan)
+        factor[:, :2] = prices[:, :2]  # only 2 names ever paired
+
+        out = r.rank_ic(factor, prices, 5, 3)
+
+        assert out.n_dates_scored == 0
+
+    def test_shape_mismatch_is_refused(self):
+        with pytest.raises(ValueError, match="but prices is"):
+            r.rank_ic(np.full((10, 4), 1.0), np.full((10, 5), 100.0), 5, 3)
+
+
+class TestStubCompleteness:
+    """Every exported symbol must appear in the type stub.
+
+    rank_ic/PyRankIc shipped in 6f5aa2f registered in lib.rs and exported from
+    __init__, but absent from _raptorbt.pyi — runtime worked, type-checking
+    did not, and nothing noticed. This is the check that would have.
+    """
+
+    @staticmethod
+    def _stub_text() -> str:
+        from pathlib import Path
+
+        import raptorbt
+
+        stub = Path(raptorbt.__file__).with_name("_raptorbt.pyi")
+        assert stub.is_file(), f"type stub missing at {stub}"
+        return stub.read_text()
+
+    def test_every_native_symbol_is_declared_in_the_stub(self):
+        """Scoped to the COMPILED module.
+
+        `raptorbt.strategy` is pure Python and carries its own annotations;
+        _raptorbt.pyi types the extension only, so pulling in the whole
+        package __all__ would demand entries that correctly do not belong.
+        """
+        from raptorbt import _raptorbt
+
+        stub = self._stub_text()
+        native = [
+            name
+            for name in dir(_raptorbt)
+            if not name.startswith("_")
+        ]
+        assert native, "no native symbols found — the probe itself is broken"
+
+        # Three declaration forms: classes, functions, and module-level
+        # annotated constants (`SESSION_NSE: float`).
+        missing = [
+            name
+            for name in native
+            if f"class {name}" not in stub
+            and f"def {name}(" not in stub
+            and not re.search(rf"^{re.escape(name)}\s*:", stub, re.MULTILINE)
+        ]
+        assert not missing, (
+            "exported by the extension but absent from _raptorbt.pyi — add "
+            "them there in the same change that exports them: "
+            f"{sorted(missing)}"
+        )

@@ -297,6 +297,17 @@ class PyOptimizeItem:
         portfolio_value: float | None = ...,
     ) -> None: ...
 
+class PyRankIc:
+    mean_ic: float
+    stdev_ic: float
+    t_stat: float
+    t_stat_deflated: float
+    n_dates_scored: int
+    n_independent: float
+    overlap_days: int
+    mean_names: float
+    def daily_ic(self) -> _F64: ...
+
 class PyRebalanceSimResult:
     n_rebalances: int
     n_trades: int
@@ -334,6 +345,12 @@ def zscore_panel(values: _F64, min_names: int) -> _F64: ...
 def rank_panel(values: _F64, min_names: int) -> _F64: ...
 def momentum_panel(prices: _F64, lookback: int, skip: int) -> _F64: ...
 def composite_scores(factors: Sequence[_F64], weights: _F64) -> _F64: ...
+def rank_ic(
+    factor: _F64,
+    prices: _F64,
+    horizon: int,
+    min_names: int,
+) -> PyRankIc: ...
 def simulate_rebalance_policy(
     prices: _F64,
     target_weights: _F64,

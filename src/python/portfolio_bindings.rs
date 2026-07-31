@@ -507,7 +507,10 @@ pub struct PyRankIc {
     mean_ic: f64,
     stdev_ic: f64,
     t_stat: f64,
+    t_stat_deflated: f64,
     n_dates_scored: usize,
+    n_independent: f64,
+    overlap_days: usize,
     mean_names: f64,
     daily_ic: Vec<f64>,
 }
@@ -529,9 +532,26 @@ impl PyRankIc {
         self.t_stat
     }
 
+    /// Overlap-corrected t-stat. Decide on THIS, not `t_stat`.
+    #[getter]
+    fn t_stat_deflated(&self) -> f64 {
+        self.t_stat_deflated
+    }
+
     #[getter]
     fn n_dates_scored(&self) -> usize {
         self.n_dates_scored
+    }
+
+    /// Roughly how many non-overlapping forward windows back the measurement.
+    #[getter]
+    fn n_independent(&self) -> f64 {
+        self.n_independent
+    }
+
+    #[getter]
+    fn overlap_days(&self) -> usize {
+        self.overlap_days
     }
 
     #[getter]
@@ -569,7 +589,10 @@ pub fn rank_ic(
         mean_ic: out.mean_ic,
         stdev_ic: out.stdev_ic,
         t_stat: out.t_stat,
+        t_stat_deflated: out.t_stat_deflated,
         n_dates_scored: out.n_dates_scored,
+        n_independent: out.n_independent,
+        overlap_days: out.overlap_days,
         mean_names: out.mean_names,
         daily_ic: out.daily_ic,
     })
