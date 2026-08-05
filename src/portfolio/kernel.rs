@@ -11,7 +11,7 @@
 use crate::accounts::{AccountMode, MarginBook};
 use crate::core::types::{
     BacktestConfig, Direction, ExitReason, InstrumentConfig, OhlcvBar, Price, StopConfig,
-    TargetConfig, Trade,
+    TargetConfig, Timestamp, Trade,
 };
 use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
 use crate::execution::algos::AlgoEngine;
@@ -409,6 +409,55 @@ impl EngineKernel {
     #[inline]
     pub fn position_value(&self, close: Price) -> f64 {
         self.ledger.position_value(close)
+    }
+
+    /// Adopt a position the account already holds (broker-truth seeding).
+    ///
+    /// Holding-coverage deployments mirror shares a user already owns: the
+    /// strategy must start KNOWING it holds them, at the user's real average
+    /// cost, without fabricating an order, a fill, fees, or a trade record.
+    /// Cash is reduced by the cost basis so equity stays
+    /// `initial_cash + unrealized`, exactly like an account that bought
+    /// earlier. No `Entered` event is emitted and the trade counter is
+    /// untouched — nothing about the adoption may read as a trade.
+    ///
+    /// Cash accounts only: margin adoption would need a locked-margin story
+    /// nothing requires yet, so it is refused rather than guessed. Call
+    /// before the first pushed event, so the adopted position is in every
+    /// "before" snapshot and a position-diff signal translation never reads
+    /// it as a fresh entry.
+    pub fn adopt_position(
+        &mut self,
+        timestamp: Timestamp,
+        price: Price,
+        size: f64,
+    ) -> Result<u64, String> {
+        if !matches!(self.account, AccountMode::Cash) {
+            return Err("adopt_position supports cash accounts only".to_string());
+        }
+        if !(price > 0.0) || !(size > 0.0) {
+            return Err(format!(
+                "adopt_position needs positive price and size (got size {size} @ {price})"
+            ));
+        }
+        let id = self
+            .ledger
+            .open_position(
+                0,
+                timestamp,
+                price,
+                size,
+                Direction::Long,
+                None,
+                None,
+                0.0,
+                None,
+            )
+            .ok_or_else(|| {
+                "ledger refused adoption: a position is already open".to_string()
+            })?;
+        self.cash -= price * size * self.multiplier();
+        Ok(id)
     }
 
     /// Feed current equity to the drawdown kill-switch.

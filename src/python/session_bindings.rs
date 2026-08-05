@@ -551,6 +551,23 @@ impl PyPortfolioSession {
         Ok(())
     }
 
+    /// Adopt a pre-existing position (broker-truth seeding): the account
+    /// already holds `size` units at `price` average cost. No order, no
+    /// fill, no fees, no trade record — and it must be called before the
+    /// first pushed event so a position-diff signal translation never reads
+    /// the position as a fresh entry. Cash accounts only.
+    fn adopt_position(
+        &mut self,
+        instrument: usize,
+        timestamp_ns: i64,
+        price: f64,
+        size: f64,
+    ) -> PyResult<u64> {
+        self.session_mut()?
+            .adopt_position(instrument, timestamp_ns, price, size)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
     fn request_close(&mut self, instrument: usize, position_id: u64) -> PyResult<()> {
         self.session_mut()?.kernel_mut(instrument).request_close(position_id);
         Ok(())
