@@ -5,6 +5,218 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-08-06
+
+Two defects in position adoption, both on the path that seeds a strategy with
+shares a user already owns. Neither was firing in production — the supported
+entry point adopts before the run starts, and today's seeded strategies are
+long-only — but both were reachable.
+
+This release also teaches the portfolio optimizer to hold short
+positions — by explicit configuration only. Plain words: until now the
+optimizer could only say "buy, hold, trim, or sit in cash." With
+`short_cap > 0` it may also propose NEGATIVE weights: positions that
+profit when a price falls. Nothing changes for existing callers — the
+default (`short_cap = 0`) poses the byte-identical long-only problem it
+always has, pinned by test.
+
+### Added
+
+- **An update notice.** raptorbt now writes one `INFO` log line, at most once
+  a day, when the installed version is behind the newest release on PyPI:
+  `raptorbt 0.6.2 is behind the latest release 0.6.3. Install the latest
+  version: pip install -U raptorbt`. Plain words: it tells you to upgrade,
+  and does nothing else.
+
+  It cannot slow or break an import, and **it fails silently by design**: the
+  request runs on a daemon thread with a 2s timeout, every failure path is
+  swallowed at two independent layers plus a guard inside the thread body, and
+  the answer is cached on disk for 24h so a restarting fleet is not a burst of
+  requests. An unreachable PyPI is indistinguishable from the check never
+  running — no traceback, no stderr output, nothing on the log at all.
+
+  The notice is `INFO` rather than `WARNING` deliberately. With no logging
+  configured, Python's `logging.lastResort` prints `WARNING` and above to
+  stderr; `INFO` stays under that bar, so the line appears for anyone who asked
+  for INFO logs and is invisible to everyone else. A library telling you to
+  upgrade has not detected a problem with your program.
+
+  Set `RAPTORBT_NO_VERSION_CHECK=1` to disable it; continuous-integration
+  environments are skipped automatically, since a pinned wheel there is
+  deliberate. Versions that cannot be parsed as plain dotted releases — a
+  pre-release, a local build, or the `unknown` of a source checkout — produce
+  no message rather than a wrong one.
+
+- **Long/short mode on `optimize_portfolio`** (`PyOptimizerConfig`):
+  `short_cap` (per-name short bound, default 0 = long-only), `gross_max`
+  (`sum |w| <= gross_max` — the total size of all bets), and `net_min` /
+  `net_max` (bounds on `sum(w)` — the directional tilt; `net_min = net_max
+  = 0` is a dollar-neutral book). Gross exposure and the gross sector caps
+  are linearized with auxiliary variables (`u_i >= |w_i|`), the same
+  epigraph device the turnover term already uses; the variables and their
+  rows exist only when shorting is enabled.
+- **`gross_exposure` / `net_exposure` on `PyOptimizationResult`.** `cash`
+  remains `1 - sum(w)` (net-based) and is documented as such — for a
+  long/short book read the exposure fields, not the cash residual.
+- **`optimize_book`** as the honest name for the Rust entry point;
+  `optimize_long_only` remains as a delegating alias so existing callers
+  keep compiling.
+
+### Changed
+
+- **Sector caps are GROSS in long/short mode** (`sum_{i in k} |w_i| <=
+  cap`): a cap bounds the size of a sector's bets, not their direction.
+  For a long-only book the gross and signed sums coincide, so the two
+  modes agree exactly where they overlap.
+- A negative `w_current` is accepted when `short_cap > 0` (it is the
+  book being rebalanced); still refused in long-only mode.
+
+### Deferred, pinned
+
+- **Short position adoption stays refused** (`short_adoption_stays_refused_
+  by_construction`): posted broker collateral is not derivable from
+  quantity x average price, and no supported flow seeds a short. The
+  refusal is structural — adoption has no direction parameter.
+
+### Fixed
+
+- **A position adopted mid-run made the strategy look less risky than it was.**
+  The equity curve is written as the run proceeds, one sample per event,
+  against a running peak that starts at the initial capital. Adopting after the
+  run began left that curve flat for the stretch before the adoption, which
+  held the peak down, so the decline that followed was measured against a
+  high-water mark lower than the truth.
+
+  On a 6-bar 100→95 fixture adopting 100 shares at 90, a **0.495%** max
+  drawdown reported as **0.199%**. Total return and `open_trade_pnl` were
+  identical either way, so nothing in the headline numbers hinted at it — only
+  the risk metric moved, and it moved to look safer.
+
+  Because the samples are written as the run proceeds, they are already wrong
+  by the time metrics are computed; there is no repairing it afterwards. So
+  `adopt_position` now returns an error once any equity sample has been taken,
+  raising `ValueError` from Python.
+
+  The gate is the equity curve, not the event cursor: quote and depth events
+  advance the schedule without sampling equity (marking on a quote would append
+  a zero return per quote and distort annualized metrics by how chatty the feed
+  is), and a live feed routinely delivers quotes before the first trade print.
+  Adopting after one corrupts nothing and stays allowed.
+
+  `TickStrategyStream(initial_positions=...)` is unaffected — it adopts before
+  warmup replay and before the first push, which is why this never fired in
+  production. `EngineKernel::adopt_position` holds no equity curve and cannot
+  check this itself; a Rust consumer driving the kernel directly owns the
+  ordering, and its doc comment now says so.
+
+- **A seeded long/short strategy could not be deployed at all.** A short leg
+  only transacts as a short under a margin account — in cash mode its P&L never
+  reaches equity — so a strategy holding one runs under margin at leverage 1.0,
+  which keeps the book fully funded. Adoption refused margin outright, so the
+  seed and the short were mutually exclusive: construction raised and the
+  deploy died before it began.
+
+  Fully funded margin books (initial margin rate ≥ 1.0) are now adopted by
+  **locking** the cost basis as initial margin rather than debiting cash. That
+  is not a cosmetic difference: margin equity is `balance + unrealized`, with
+  no position-value term, so a cash-style debit would never be offset and would
+  understate equity by the cost basis for the entire run. Relaxing the account
+  check without fixing the funding arm would have replaced a loud failure with
+  a silent wrong number.
+
+  Leveraged books stay refused, and the original reasoning is why: the margin a
+  broker has already posted against a position it holds cannot be derived from
+  quantity and average price, and inventing a figure would misstate free
+  capital, which gates every later entry. At a rate of 1.0 the whole notional is
+  locked and the posted margin simply *is* the cost basis, so the objection
+  lapses there and only there.
+
+  **The error message changed** from `"adopt_position supports cash accounts
+  only"` to one naming the fully-funded requirement. Callers matching on that
+  string need updating.
+
+  The portfolio session now also reconciles the locked delta into its shared
+  account, where it previously passed a hardcoded zero. Left as it was, the
+  account would never learn about the adopted margin and portfolio free capital
+  would read high by the whole cost basis.
+
+  Adoption remains **long-only**: an existing short cannot be seeded. That is
+  separate scope — direction-aware cost basis, short proceeds, borrow — and is
+  stated here so the boundary is explicit rather than accidental.
+
+## [0.6.2] - 2026-08-05
+
+A strategy attached to a stock the user **already owns** can now start out
+knowing it holds those shares, at the price the user actually paid — without
+the engine pretending a buy happened.
+
+### Added
+
+- **Position adoption.** `EngineKernel::adopt_position` opens a ledger
+  position with no order, no fill, no fees, no trade record and no `Entered`
+  event; cash is reduced by the cost basis, so equity reads as
+  initial + unrealized exactly like an account that bought earlier. Without
+  this, seeding a holding meant faking an entry — which charged fees that were
+  never paid and left a phantom trade in the log.
+
+  `PortfolioSession::adopt_position` applies the same lend/drain pool
+  discipline as `apply_current`, so the cost basis comes out of the shared
+  cash pool rather than appearing from nowhere.
+
+  Exposed to Python as `PyPortfolioSession.adopt_position(...)` and as
+  `TickStrategyStream(initial_positions={symbol: {"quantity", "avg_price",
+  "timestamp_ns"?}})`. Adoption runs **before** warmup replay and before the
+  first push, so the position is present in every before-snapshot: a caller
+  diffing `positions()` around a push can never mistake it for a fresh entry.
+
+  Cash accounts only — margin adoption is **refused, not guessed**, since the
+  margin already posted against a broker-held position is not derivable from
+  quantity and average price. A seed with non-positive quantity or price is
+  rejected rather than silently skipped.
+
+  Design reference: NautilusTrader's position adoption in live-execution
+  reconciliation, where adopted state coexists with the order lifecycle
+  without synthetic fills. Ported as a design, not as code.
+
+## [0.6.1] - 2026-07-31
+
+The significance score on factor measurement was overstated, because
+overlapping test windows were counted as if they were independent. This
+release reports the corrected number alongside the old one.
+
+### Added
+
+- **Overlap-deflated rank-IC t-statistic.** `rank_ic` previously reported only
+  the naive IID t-stat, `mean / (stdev / sqrt(n))`. With a 21-day forward
+  window on daily dates, consecutive ICs share 20 of their 21 days, so
+  `n_dates_scored` overstates the independent sample by ~21× and inflates the
+  t-stat by ~sqrt(21).
+
+  Plain words: the same three weeks of market movement was being counted
+  twenty-one times over as if it were twenty-one separate pieces of evidence.
+
+  `RankIc` / `PyRankIc` gain three fields, all additive:
+
+  - `t_stat_deflated` — `t_stat / sqrt(horizon)`; **the number to decide on**
+  - `n_independent` — `n_dates_scored / horizon`; the sample actually behind it
+  - `overlap_days` — the window, so a stored result is self-describing
+
+  The naive `t_stat` is deliberately kept, so the inflation stays auditable
+  rather than being quietly corrected away. `n_independent` is `0.0` (not NaN)
+  on a panel that scores nothing, so callers can gate on sample size without an
+  `isnan` dance.
+
+  This is not theoretical. Measured on a live 2023-02..2026-07 vendor panel
+  (1045 names), momentum 12-1 scores IC +0.0386 with a naive t of **+7.15** and
+  a deflated t of **+1.56**, over 17.3 independent forward windows — real, but
+  a materially smaller claim than the naive figure suggests. The same
+  correction took the Indian fund cross-section from t=+4.78 to +1.04, which is
+  the measurement that retired funds from the equity model; reporting equities
+  on the naive statistic while funds were judged on the deflated one would have
+  been exactly that double standard.
+
+  Purely additive — no existing field changes meaning.
+
 ## [0.6.0] - 2026-07-25
 
 An order's `side` now decides the direction a position opens in, so a single
@@ -12,11 +224,79 @@ run can hold long and short legs and a leg can flip side once it is flat.
 This makes a cross-sectional long/short book — long the winners, short the
 losers, rebalanced — expressible in one run against one capital pool.
 
+This release also adds the portfolio-construction maths: how much risk a book
+carries, what weights to hold, and what rebalancing actually costs.
+
 ### Added
 
 - `Strategy.enter_long()` / `Strategy.enter_short()`, and `enter(side=...)`.
   Without `side`, `enter()` opens in the session's configured direction
   exactly as before.
+
+  `enter()` could previously open only in the session's configured direction,
+  so the sided order types were the only way to short — a nine-field kw-only
+  dataclass that is easy to fill wrong, and unreachable from a sandboxed
+  strategy at all. `enter_long()` / `enter_short()` take no side argument to
+  mis-spell. A sided entry passes an explicit `size_frac`, because omitting
+  both sizing kwargs means "close the whole position", which an opening order
+  refuses — a sided entry that silently rejected itself would be worse than no
+  feature.
+
+- **Covariance estimation** (`estimate_covariance` → `PyRiskModel`).
+  Ledoit-Wolf shrinkage against a constant-correlation target — plain words:
+  a covariance matrix estimated from a few hundred days of returns is mostly
+  noise, so it is pulled part-way toward a simpler, steadier matrix. Carries
+  `periods_per_year` and the asset ordering structurally, so a risk model
+  cannot be silently applied to a differently-ordered basket.
+
+- **Constrained portfolio optimizer** (`optimize_portfolio`,
+  `batch_optimize_portfolios` → `PyOptimizationResult`). Long-only quadratic
+  program via Clarabel (new dependency, pure Rust) with an L1 turnover
+  penalty, per-position and per-sector caps, and explicit cash. Post-solve, a
+  no-trade band and a minimum-trade-value rule snap tiny trades away.
+
+  If *all* trades snap away, the result is the status-quo book with turnover
+  0 — a legitimate "do nothing" answer. If only *some* snap, leaving weights
+  that no longer sum correctly, it **refuses with arithmetic** rather than
+  returning a book that does not add up. `batch_optimize_portfolios` runs via
+  Rayon and is deterministic: batch results are bit-identical to serial.
+
+- **Factor panels** (`winsorize_panel`, `zscore_panel`, `rank_panel`,
+  `momentum_panel`, `composite_scores`). Row-major panel transforms — trim
+  outliers, standardize, rank, compute past-return momentum, and blend several
+  signals into one score. `NaN` means *absent* and is handled; infinity is a
+  hard error, never a silent maximum. No factor list is hard-coded in Rust —
+  the caller decides what to score.
+
+- **Rank-IC factor validation** (`rank_ic` → `PyRankIc`). Per-date Spearman
+  rank correlation between a factor panel and forward returns at a chosen
+  horizon — plain words: does yesterday's ranking of stocks predict tomorrow's
+  ordering of returns? Returns the mean IC, the naive t-stat, and an
+  overlap-deflated t-stat (see 0.6.1, which added the deflated fields to the
+  Python surface). `PyRankIc` carries the panel span and name count, so the
+  number is reproducible rather than a constant with a citation.
+
+  First use caught a real artifact: fund momentum on 67 NSE funds read t=+4.78
+  naive but +1.04 deflated, and collapsed to +0.016 once the 25 precious-metal
+  funds were removed — a metal rally, not a factor. The fund ranking was
+  therefore not shipped.
+
+- **Risk contributions** (`compute_risk_contributions` →
+  `PyRiskContributions`). Euler decomposition of portfolio volatility, so
+  contributions sum exactly to sigma — it says which holdings the risk is
+  actually coming from, not merely which are largest.
+
+- **Rebalance policy simulation** (`simulate_rebalance_policy` →
+  `PyRebalanceSimResult`, and `indian_cost_schedule`). Simulates a rebalancing
+  policy on the Indian delivery settlement schedule, including the flat DP
+  sell charge — ₹15.34 per ISIN per day on any day with a sell. That flat fee
+  is the cost that dominates small books, and a percentage-only cost model
+  misses it entirely. Reports turnover, regulatory / brokerage / DP costs
+  separately, and annualized cost drag.
+
+- **Maintenance margin for fully funded positions** — a position covered
+  entirely by posted cash no longer contributes a maintenance requirement it
+  cannot breach.
 
 ### Changed
 

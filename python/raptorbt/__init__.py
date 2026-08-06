@@ -121,6 +121,13 @@ try:  # Python 3.8+
 except Exception:  # pragma: no cover - source checkout without install metadata
     __version__ = "unknown"
 
+# Tell the log, at most once a day, if this install is behind the latest
+# release. Runs on a daemon thread and swallows every failure, so it cannot
+# delay or break this import. Opt out with RAPTORBT_NO_VERSION_CHECK=1.
+from raptorbt.version_check import check_for_update as _check_for_update
+
+_check_for_update(__version__)
+
 __all__ = [
     # Session lengths
     "SESSION_NSE",

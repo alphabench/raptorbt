@@ -478,10 +478,23 @@ impl EventSession {
     }
 
     /// Adopt a pre-existing position on one instrument (broker-truth
-    /// seeding) — see [`EngineKernel::adopt_position`]. Same lend/drain
-    /// pool discipline as [`Self::apply_current`], so the cost basis comes
-    /// out of the shared cash pool with no fees, no fill, and no trade.
-    /// Call before the first pushed event.
+    /// seeding) — see [`EngineKernel::adopt_position`], which owns the
+    /// account-mode rules. Same lend/drain pool discipline as
+    /// [`Self::apply_current`], so the cost basis comes out of the shared
+    /// pool with no fees, no fill, and no trade: debited from the balance in
+    /// cash mode, locked as initial margin in a fully funded margin book.
+    ///
+    /// Must be called before the first equity sample, and this is enforced:
+    /// adopting mid-run leaves the curve flat for the pre-adoption stretch,
+    /// which holds the running peak down and makes the decline that follows
+    /// measure against the wrong high-water mark. Max drawdown then reads
+    /// *better* than reality — 0.199% for a decline that is really 0.495%.
+    /// The curve is written streaming, so this cannot be repaired later.
+    ///
+    /// The gate is the equity curve, not the event cursor: a quote or depth
+    /// snapshot advances the cursor without sampling equity, and a live feed
+    /// routinely delivers those before the first trade print. Adopting after
+    /// one corrupts nothing and stays allowed.
     pub fn adopt_position(
         &mut self,
         instrument: usize,
@@ -492,16 +505,30 @@ impl EventSession {
         if instrument >= self.kernels.len() {
             return Err(format!("unknown instrument index {instrument}"));
         }
-        if !matches!(self.account.mode(), AccountMode::Cash) {
-            return Err("adopt_position supports cash accounts only".to_string());
+        if !self.equity_curve.is_empty() {
+            return Err("adopt_position must be called before the first applied event".to_string());
         }
         let kernel = &mut self.kernels[instrument];
-        let injected = self.account.balance();
+        let locked_before = kernel.locked_margin();
+        // Same lend/drain discipline as `apply_current`: in margin mode the
+        // kernel computes free capital from its own cash less its own locks,
+        // so hand it the balance less every *other* kernel's locks.
+        let injected = match self.account.mode() {
+            AccountMode::Cash => self.account.balance(),
+            AccountMode::Margin { .. } => {
+                self.account.balance() - (self.account.locked() - locked_before)
+            }
+        };
         kernel.set_cash(injected);
         let result = kernel.adopt_position(timestamp, price, size);
         let delta_cash = kernel.cash() - injected;
+        // Carry the locked delta too. Leaving this at 0.0 would mean the
+        // shared account never learns about the adopted margin, so portfolio
+        // free capital would read high by the whole cost basis — a risk
+        // constraint silently weakened.
+        let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
-        self.account.reconcile(delta_cash, 0.0);
+        self.account.reconcile(delta_cash, delta_locked);
         result
     }
 

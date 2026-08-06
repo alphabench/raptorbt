@@ -1368,3 +1368,85 @@ fn a_leg_can_flip_side_within_one_run() {
         "the same leg reopened on the other side"
     );
 }
+
+fn adoption_kernel(mode: AccountMode) -> EngineKernel {
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_account_mode(mode)
+}
+
+#[test]
+fn fully_funded_margin_adoption_locks_the_cost_basis() {
+    // Margin funds an open by LOCKING the notional, not by debiting the
+    // balance (see `open_at`). Adoption must fund the same way: margin
+    // equity is `cash + unrealized`, with no position-value term, so a
+    // cash-style debit would never be offset and would understate equity by
+    // the cost basis for the entire run.
+    let mut kernel = adoption_kernel(AccountMode::Margin { leverage: 1.0 });
+    kernel.set_cash(100_000.0);
+
+    kernel.adopt_position(0, 90.0, 100.0).expect("fully funded adoption must be allowed");
+
+    assert_eq!(kernel.locked_margin(), 9_000.0, "the whole notional locks at leverage 1.0");
+    assert_eq!(kernel.cash(), 100_000.0, "margin must not debit the balance");
+    // Priced at the adoption price the holding is worth exactly what it cost,
+    // so equity is back to the starting capital.
+    assert_eq!(kernel.equity(90.0), 100_000.0);
+    assert_eq!(kernel.free_capital(), 91_000.0, "free capital drops by the cost basis");
+}
+
+#[test]
+fn cash_and_fully_funded_margin_adoption_agree() {
+    // A fully funded book is economically identical to cash for a long
+    // holding, so the two modes must report the same numbers. Divergence
+    // means the funding arm and the mode's equity formula disagree.
+    let mut cash = adoption_kernel(AccountMode::Cash);
+    cash.set_cash(100_000.0);
+    cash.adopt_position(0, 90.0, 100.0).unwrap();
+
+    let mut margin = adoption_kernel(AccountMode::Margin { leverage: 1.0 });
+    margin.set_cash(100_000.0);
+    margin.adopt_position(0, 90.0, 100.0).unwrap();
+
+    for close in [90.0, 95.0, 85.0] {
+        assert_eq!(cash.equity(close), margin.equity(close), "equity must agree at close {close}");
+    }
+    assert_eq!(cash.free_capital(), margin.free_capital());
+}
+
+#[test]
+fn short_adoption_stays_refused_by_construction() {
+    // Ratified deferral (2026-08-06): seeding a backtest with an existing
+    // SHORT position is not supported — the broker's posted collateral is
+    // not derivable from quantity x average price, and the cash arm of
+    // adoption debits price*size, which is wrong for a short. The API
+    // encodes the deferral structurally: there is no direction parameter,
+    // and a negative size (the only way to express a short here) is
+    // refused. If shorts are ever adopted, this test must be replaced by
+    // one that states the posted-margin convention.
+    let mut kernel = adoption_kernel(AccountMode::Cash);
+    kernel.set_cash(100_000.0);
+    assert!(kernel.adopt_position(0, 90.0, -100.0).is_err());
+    assert!(kernel.adopt_position(0, 90.0, 0.0).is_err());
+}
+
+#[test]
+fn leveraged_adoption_is_refused_not_guessed() {
+    // Above leverage 1.0 the broker's posted margin genuinely is not
+    // derivable from quantity and average price. Guessing would misstate
+    // free capital, which gates every later entry.
+    let mut kernel = adoption_kernel(AccountMode::Margin { leverage: 2.0 });
+    kernel.set_cash(100_000.0);
+
+    let err = kernel.adopt_position(0, 90.0, 100.0).unwrap_err();
+    assert!(err.contains("fully funded"), "expected a leverage refusal, got: {err}");
+}

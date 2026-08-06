@@ -56,7 +56,10 @@ class TickStrategyStream:
     record. Adoption happens before warmup replay and before the first push,
     so the position appears in every snapshot from the start — a caller
     diffing ``positions()`` before/after pushes will never see it as a fresh
-    entry. Cash accounts only; refused (never skipped) otherwise.
+    entry. Cash or fully funded margin accounts (``leverage=1.0``), long-only;
+    refused (never skipped) otherwise. Fully funded margin is supported
+    because a strategy holding a short must run under a margin account for
+    that short to transact at all, and such a book still needs seeding.
 
     Everything else — account type, leverage, risk limits, OMS type —
     behaves as in :func:`raptorbt.run_tick_strategy`.
