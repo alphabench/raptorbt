@@ -94,8 +94,30 @@ class PyInstrumentConfig:
     def set_atr_target(self, multiplier: float, period: int) -> None: ...
     def set_risk_reward_target(self, ratio: float) -> None: ...
 
-class PyStopConfig: ...
-class PyTargetConfig: ...
+class PyStopConfig:
+    stop_type: str
+    percent: float | None
+    multiplier: float | None
+    period: int | None
+    @staticmethod
+    def fixed(percent: float) -> PyStopConfig: ...
+    @staticmethod
+    def atr(multiplier: float, period: int) -> PyStopConfig: ...
+    @staticmethod
+    def trailing(percent: float) -> PyStopConfig: ...
+
+class PyTargetConfig:
+    target_type: str
+    percent: float | None
+    multiplier: float | None
+    period: int | None
+    ratio: float | None
+    @staticmethod
+    def fixed(percent: float) -> PyTargetConfig: ...
+    @staticmethod
+    def atr(multiplier: float, period: int) -> PyTargetConfig: ...
+    @staticmethod
+    def risk_reward(ratio: float) -> PyTargetConfig: ...
 
 class PyTrade:
     id: int
@@ -181,6 +203,10 @@ class PyPortfolioResult:
     metrics: PyBacktestMetrics
 
 class PyBatchSpreadItem:
+    strategy_id: str
+    spread_type: str
+    max_loss: float | None
+    target_profit: float | None
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
 def run_single_backtest(
@@ -399,7 +425,7 @@ def return_window(timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...) -
 def realized_vol_rolling(
     timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...
 ) -> _F64: ...
-def oi_position_pct(oi: _F64) -> _F64: ...
+def oi_position_pct(oi: _F64, oi_day_high: float, oi_day_low: float) -> _F64: ...
 def tick_velocity(timestamps_ns: _I64, window_seconds: float = ...) -> _F64: ...
 
 # --- Instrument market definitions ------------------------------------------
@@ -581,6 +607,27 @@ class PyPortfolioSession:
         self,
     ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None: ...
     def seal(self) -> None: ...
+    # Incremental (live) feed: append to the schedule tail in arrival order.
+    # Each seals first and is idempotent, so batch warmup data merges ahead of
+    # the first push. Drive appended events with current_event()/apply_current().
+    # push_tick returns how many events it appended (0-2): a trade print, plus
+    # a quote when ask > 0.
+    def push_tick(
+        self, instrument: int, timestamp: int, ltp: float,
+        bid: float = ..., ask: float = ...,
+        buy_qty_delta: float = ..., sell_qty_delta: float = ...,
+    ) -> int: ...
+    def push_bar(
+        self, instrument: int, timestamp: int, open: float, high: float,
+        low: float, close: float, volume: float,
+    ) -> None: ...
+    # bids/asks are (price, size) lists, best level first.
+    def push_depth(
+        self, instrument: int, timestamp: int,
+        bids: Sequence[tuple[float, float]], asks: Sequence[tuple[float, float]],
+    ) -> None: ...
+    # Events pushed or merged but not yet applied.
+    def remaining(self) -> int: ...
     def __len__(self) -> int: ...
     # Bar sessions only; returns None on a tick event.
     def current(self) -> tuple[int, int, int, float, float, float, float, float] | None: ...
@@ -603,6 +650,13 @@ class PyPortfolioSession:
         trigger_price: float | None = ...,
     ) -> bool: ...
     def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
+    # Adopt a position the account already holds (broker-truth seeding): no
+    # order, no fill, no fees, no trade record. Cash drops by the cost basis.
+    # Cash accounts only, long-only; call after seal() and before the first
+    # apply_current(). Returns the new position id.
+    def adopt_position(
+        self, instrument: int, timestamp_ns: int, price: float, size: float,
+    ) -> int: ...
     def request_close(self, instrument: int, position_id: int) -> None: ...
     def set_underlying_price(
         self, instrument: int, price: float | None = ...,

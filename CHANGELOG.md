@@ -5,6 +5,79 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-08-05
+
+A strategy attached to a stock the user **already owns** can now start out
+knowing it holds those shares, at the price the user actually paid — without
+the engine pretending a buy happened.
+
+### Added
+
+- **Position adoption.** `EngineKernel::adopt_position` opens a ledger
+  position with no order, no fill, no fees, no trade record and no `Entered`
+  event; cash is reduced by the cost basis, so equity reads as
+  initial + unrealized exactly like an account that bought earlier. Without
+  this, seeding a holding meant faking an entry — which charged fees that were
+  never paid and left a phantom trade in the log.
+
+  `PortfolioSession::adopt_position` applies the same lend/drain pool
+  discipline as `apply_current`, so the cost basis comes out of the shared
+  cash pool rather than appearing from nowhere.
+
+  Exposed to Python as `PyPortfolioSession.adopt_position(...)` and as
+  `TickStrategyStream(initial_positions={symbol: {"quantity", "avg_price",
+  "timestamp_ns"?}})`. Adoption runs **before** warmup replay and before the
+  first push, so the position is present in every before-snapshot: a caller
+  diffing `positions()` around a push can never mistake it for a fresh entry.
+
+  Cash accounts only — margin adoption is **refused, not guessed**, since the
+  margin already posted against a broker-held position is not derivable from
+  quantity and average price. A seed with non-positive quantity or price is
+  rejected rather than silently skipped.
+
+  Design reference: NautilusTrader's position adoption in live-execution
+  reconciliation, where adopted state coexists with the order lifecycle
+  without synthetic fills. Ported as a design, not as code.
+
+## [0.6.1] - 2026-07-31
+
+The significance score on factor measurement was overstated, because
+overlapping test windows were counted as if they were independent. This
+release reports the corrected number alongside the old one.
+
+### Added
+
+- **Overlap-deflated rank-IC t-statistic.** `rank_ic` previously reported only
+  the naive IID t-stat, `mean / (stdev / sqrt(n))`. With a 21-day forward
+  window on daily dates, consecutive ICs share 20 of their 21 days, so
+  `n_dates_scored` overstates the independent sample by ~21× and inflates the
+  t-stat by ~sqrt(21).
+
+  Plain words: the same three weeks of market movement was being counted
+  twenty-one times over as if it were twenty-one separate pieces of evidence.
+
+  `RankIc` / `PyRankIc` gain three fields, all additive:
+
+  - `t_stat_deflated` — `t_stat / sqrt(horizon)`; **the number to decide on**
+  - `n_independent` — `n_dates_scored / horizon`; the sample actually behind it
+  - `overlap_days` — the window, so a stored result is self-describing
+
+  The naive `t_stat` is deliberately kept, so the inflation stays auditable
+  rather than being quietly corrected away. `n_independent` is `0.0` (not NaN)
+  on a panel that scores nothing, so callers can gate on sample size without an
+  `isnan` dance.
+
+  This is not theoretical. Measured on a live 2023-02..2026-07 vendor panel
+  (1045 names), momentum 12-1 scores IC +0.0386 with a naive t of **+7.15** and
+  a deflated t of **+1.56**, over 17.3 independent forward windows — real, but
+  a materially smaller claim than the naive figure suggests. The same
+  correction took the Indian fund cross-section from t=+4.78 to +1.04, which is
+  the measurement that retired funds from the equity model; reporting equities
+  on the naive statistic while funds were judged on the deflated one would have
+  been exactly that double standard.
+
+  Purely additive — no existing field changes meaning.
+
 ## [0.6.0] - 2026-07-25
 
 An order's `side` now decides the direction a position opens in, so a single
@@ -12,11 +85,79 @@ run can hold long and short legs and a leg can flip side once it is flat.
 This makes a cross-sectional long/short book — long the winners, short the
 losers, rebalanced — expressible in one run against one capital pool.
 
+This release also adds the portfolio-construction maths: how much risk a book
+carries, what weights to hold, and what rebalancing actually costs.
+
 ### Added
 
 - `Strategy.enter_long()` / `Strategy.enter_short()`, and `enter(side=...)`.
   Without `side`, `enter()` opens in the session's configured direction
   exactly as before.
+
+  `enter()` could previously open only in the session's configured direction,
+  so the sided order types were the only way to short — a nine-field kw-only
+  dataclass that is easy to fill wrong, and unreachable from a sandboxed
+  strategy at all. `enter_long()` / `enter_short()` take no side argument to
+  mis-spell. A sided entry passes an explicit `size_frac`, because omitting
+  both sizing kwargs means "close the whole position", which an opening order
+  refuses — a sided entry that silently rejected itself would be worse than no
+  feature.
+
+- **Covariance estimation** (`estimate_covariance` → `PyRiskModel`).
+  Ledoit-Wolf shrinkage against a constant-correlation target — plain words:
+  a covariance matrix estimated from a few hundred days of returns is mostly
+  noise, so it is pulled part-way toward a simpler, steadier matrix. Carries
+  `periods_per_year` and the asset ordering structurally, so a risk model
+  cannot be silently applied to a differently-ordered basket.
+
+- **Constrained portfolio optimizer** (`optimize_portfolio`,
+  `batch_optimize_portfolios` → `PyOptimizationResult`). Long-only quadratic
+  program via Clarabel (new dependency, pure Rust) with an L1 turnover
+  penalty, per-position and per-sector caps, and explicit cash. Post-solve, a
+  no-trade band and a minimum-trade-value rule snap tiny trades away.
+
+  If *all* trades snap away, the result is the status-quo book with turnover
+  0 — a legitimate "do nothing" answer. If only *some* snap, leaving weights
+  that no longer sum correctly, it **refuses with arithmetic** rather than
+  returning a book that does not add up. `batch_optimize_portfolios` runs via
+  Rayon and is deterministic: batch results are bit-identical to serial.
+
+- **Factor panels** (`winsorize_panel`, `zscore_panel`, `rank_panel`,
+  `momentum_panel`, `composite_scores`). Row-major panel transforms — trim
+  outliers, standardize, rank, compute past-return momentum, and blend several
+  signals into one score. `NaN` means *absent* and is handled; infinity is a
+  hard error, never a silent maximum. No factor list is hard-coded in Rust —
+  the caller decides what to score.
+
+- **Rank-IC factor validation** (`rank_ic` → `PyRankIc`). Per-date Spearman
+  rank correlation between a factor panel and forward returns at a chosen
+  horizon — plain words: does yesterday's ranking of stocks predict tomorrow's
+  ordering of returns? Returns the mean IC, the naive t-stat, and an
+  overlap-deflated t-stat (see 0.6.1, which added the deflated fields to the
+  Python surface). `PyRankIc` carries the panel span and name count, so the
+  number is reproducible rather than a constant with a citation.
+
+  First use caught a real artifact: fund momentum on 67 NSE funds read t=+4.78
+  naive but +1.04 deflated, and collapsed to +0.016 once the 25 precious-metal
+  funds were removed — a metal rally, not a factor. The fund ranking was
+  therefore not shipped.
+
+- **Risk contributions** (`compute_risk_contributions` →
+  `PyRiskContributions`). Euler decomposition of portfolio volatility, so
+  contributions sum exactly to sigma — it says which holdings the risk is
+  actually coming from, not merely which are largest.
+
+- **Rebalance policy simulation** (`simulate_rebalance_policy` →
+  `PyRebalanceSimResult`, and `indian_cost_schedule`). Simulates a rebalancing
+  policy on the Indian delivery settlement schedule, including the flat DP
+  sell charge — ₹15.34 per ISIN per day on any day with a sell. That flat fee
+  is the cost that dominates small books, and a percentage-only cost model
+  misses it entirely. Reports turnover, regulatory / brokerage / DP costs
+  separately, and annualized cost drag.
+
+- **Maintenance margin for fully funded positions** — a position covered
+  entirely by posted cash no longer contributes a maintenance requirement it
+  cannot breach.
 
 ### Changed
 

@@ -90,9 +90,12 @@ numbers on your own hardware.
 
 ### Key Features
 
-- **7 Strategy Types**: Single instrument, basket/collective, pairs trading, options, spreads, multi-strategy, and tick-level
+- **8 Strategy Types**: Single instrument, basket/collective, pairs trading, options, spreads, multi-strategy, tick-level, and shared-capital portfolio
+- **Two ways to write a strategy**: precomputed signal arrays (the vectorized fast path), or a `Strategy` class with lifecycle hooks driven by bars, ticks, or a live feed
 - **Asset- and broker-agnostic**: Pass NumPy OHLCV or tick arrays from any source — equities, futures, FX, crypto, options — RaptorBT never assumes a market or data vendor
 - **Tick-Level Simulation**: Full tick resolution for intraday options momentum, scalping, and microstructure strategies
+- **Live-feed ready**: Push events as they arrive with `TickStrategyStream`, and seed a run with positions the account already holds via position adoption
+- **Portfolio Construction**: Ledoit-Wolf covariance, a constrained long-only optimizer, factor panels with rank-IC validation, risk contributions, and rebalance-cost simulation
 - **Batch Spread Backtesting**: Run multiple spread backtests in parallel via Rayon with GIL released
 - **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
 - **33 Metrics**: Sharpe, Sortino, Calmar, Omega, SQN, Payoff Ratio, Recovery Factor, and more
@@ -945,6 +948,111 @@ Three semantics to know:
   data legitimately differ there, since a bar can trigger a stop against a
   low that preceded the high which set the watermark.
 
+#### Live Feeds: `TickStrategyStream`
+
+`run_tick_strategy` replays a finite array. For an open-ended feed — a real
+broker socket, a replayer, anything where the next event has not happened yet
+— use `TickStrategyStream`. You construct it once, then push events as they
+arrive; every strategy hook a push triggers fires before that push returns.
+
+```python
+stream = raptorbt.TickStrategyStream(
+    Scalper(),
+    symbols=["RELIANCE", "INFY"],
+    config=raptorbt.PyBacktestConfig(initial_capital=100_000.0, fees=0.001),
+    warmup_bars={"RELIANCE": dict(timestamps=ts, open=o, high=h,
+                                  low=l, close=c, volume=v)},
+    primary_bars=(1, "m"),
+)
+
+# Feed it as the market moves. Hooks fire synchronously inside the push.
+stream.push_tick("RELIANCE", timestamp_ns, price)
+stream.push_bar("RELIANCE", timestamp_ns, o, h, l, c, v)
+stream.push_depth("RELIANCE", timestamp_ns, bid_prices, bid_sizes,
+                  ask_prices, ask_sizes)
+
+result = stream.finish()      # closes out and computes metrics
+```
+
+`warmup_bars` is replayed during construction, so indicators are primed before
+the first live push. Those bars **execute** — they match orders and mark
+equity — unlike bars aggregated from prints via `primary_bars`, which remain a
+view. Hand the stream a strategy that stays passive on history if that is not
+what you want.
+
+#### Position Adoption — Starting on Shares You Already Own
+
+New in 0.6.2. A strategy attached to a stock the user already holds must start
+out *knowing* it holds those shares, at the price actually paid. The naive
+workaround — submitting a fake buy at the average price — is wrong in three
+ways: it charges brokerage that was never paid, it writes a trade into the log
+that never happened, and it emits an entry event that any position-diffing
+consumer reads as a fresh signal.
+
+`initial_positions` adopts the holding instead: no order, no fill, no fees, no
+trade record, and no `Entered` event. Cash is reduced by the cost basis, so
+equity reads as initial + unrealized, exactly like an account that bought
+earlier.
+
+```python
+stream = raptorbt.TickStrategyStream(
+    MyStrategy(),
+    symbols=["RELIANCE"],
+    config=raptorbt.PyBacktestConfig(initial_capital=100_000.0, fees=0.001),
+    initial_positions={
+        # The broker says: 100 shares, average cost 90.00.
+        "RELIANCE": {"quantity": 100, "avg_price": 90.0},
+        # "timestamp_ns" is optional and defaults to 0.
+    },
+)
+
+pos = stream.ctx.position_for("RELIANCE")
+pos.size, pos.entry_price, pos.direction   # 100.0, 90.0, 1
+stream.ctx.equity                          # 91_000.0  = 100_000 - (90 x 100)
+```
+
+Adoption happens **before** warmup replay and before the first push, so the
+position is present in every before-snapshot. Code that diffs `positions()`
+around a push can never mistake it for a new entry — which is the whole point,
+since that diff is how a live deployment turns engine state into broker orders.
+
+The resulting metrics carry it as an open trade with no cost:
+`total_fees_paid` is `0.0`, `total_open_trades` is `1`, `total_closed_trades`
+is `0`, and `open_trade_pnl` marks against the current price.
+
+Four things it deliberately refuses rather than guesses:
+
+```python
+{"quantity": 0,  "avg_price": 90.0}   # ValueError: needs positive quantity and avg_price
+{"quantity": 10, "avg_price": 0}      # ValueError: same
+{"UNKNOWN": {...}}                    # ValueError: names unknown symbol 'UNKNOWN'
+account_type="margin"                 # ValueError: adopt_position supports cash accounts only
+```
+
+Margin adoption is refused because the margin already posted against a
+broker-held position is not derivable from quantity and average price —
+inventing a number there would misstate free capital. **Adoption is long-only**
+(`quantity` is a positive share count); an existing short cannot be seeded this
+way.
+
+For a session you drive yourself rather than through `TickStrategyStream`, the
+same primitive is on the portfolio session, taking positional arguments and
+returning the new position id:
+
+```python
+from raptorbt._raptorbt import PyPortfolioSession   # not re-exported at top level
+
+session = PyPortfolioSession(config=config, account_type="cash")
+i = session.add_instrument("RELIANCE", direction=1)
+session.set_bars(i, timestamps, o, h, l, c, v)
+session.seal()
+
+position_id = session.adopt_position(i, timestamp_ns, 90.0, 100.0)
+session.cash()      # 91_000.0
+```
+
+Call it after `seal()` and before the first `apply_current()`.
+
 #### Order Book and Queue-Position Fills
 
 Pass `depth=` to `run_tick_strategy` for five-level book snapshots, which
@@ -1419,6 +1527,61 @@ MIT License - see [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+Full release notes, including the 0.5.0 migration guide, live in
+[CHANGELOG.md](CHANGELOG.md). Recent releases in brief:
+
+### v0.6.2
+
+- **Position adoption** — seed a run with a position the account already holds,
+  at the real average cost, with no order, no fill, no fees and no trade
+  record. `TickStrategyStream(initial_positions=...)` and
+  `PyPortfolioSession.adopt_position(...)`. Cash accounts only, long-only;
+  margin adoption is refused rather than guessed. See
+  [Position Adoption](#position-adoption--starting-on-shares-you-already-own).
+
+### v0.6.1
+
+- **Overlap-deflated rank-IC t-statistic.** `rank_ic` reported only the naive
+  t-stat, which counts overlapping forward windows as independent evidence and
+  inflates significance by ~`sqrt(horizon)`. Adds `t_stat_deflated` (the number
+  to decide on), `n_independent`, and `overlap_days`; the naive `t_stat` is kept
+  so the inflation stays auditable.
+
+### v0.6.0
+
+- **An order's `side` now opens the position**, so one run can hold long and
+  short legs and a leg can flip once flat. Adds `enter_long()` / `enter_short()`
+  and `enter(side=...)`; `enter()` without `side` is unchanged.
+- **Portfolio construction maths**: `estimate_covariance` (Ledoit-Wolf
+  shrinkage), `optimize_portfolio` / `batch_optimize_portfolios` (long-only QP
+  with turnover penalty and caps), factor panels (`winsorize_panel`,
+  `zscore_panel`, `rank_panel`, `momentum_panel`, `composite_scores`),
+  `rank_ic`, `compute_risk_contributions`, and `simulate_rebalance_policy` with
+  the Indian cost schedule.
+- Every refused order now counts against `rejected_entries`; an order-path open
+  honors its ATR stop/target config instead of a hardcoded zero ATR.
+
+### v0.5.0
+
+- **Class-based strategy contract** (`Strategy` + `run_strategy_backtest`),
+  **tick-driven** (`run_tick_strategy`) and **live streaming**
+  (`TickStrategyStream`) variants, and **`run_portfolio_backtest`** — N
+  instruments against one shared cash pool.
+- **Correctness fixes that change reported numbers**: configured slippage was
+  silently ignored; Sharpe/Sortino were computed from different quantities per
+  runner; Calmar was meaningless on intraday data; undefined ratios crossed to
+  Python as `inf` and are now `Optional[float]`.
+- Order book with queue-position fills, TWAP schedules, Renko and signed-flow
+  bars, shared margin accounts, and itemized Indian transaction costs.
+
+**Upgrading from 0.4.x:** set `apply_slippage=False, legacy_annualization=True`
+to reproduce old results bit-identically. See
+[CHANGELOG.md](CHANGELOG.md#migrating-from-04x).
+
+### v0.4.1
+
+- Release chore; no behavior change.
 
 ### v0.4.0
 
