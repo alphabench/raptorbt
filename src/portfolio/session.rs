@@ -27,7 +27,9 @@
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::OhlcvBar;
 use crate::core::types::TickData;
-use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
+use crate::core::types::{
+    BacktestConfig, BacktestResult, Direction, InstrumentConfig, Timestamp, Trade,
+};
 use crate::data::{
     tick_data_to_events, DepthRef, DepthTick, EventFeed, EventPayload, MarketEvent, QuoteTick,
     TradeTick,
@@ -473,6 +475,34 @@ impl EventSession {
     /// position.
     pub fn cash(&self) -> f64 {
         self.account.balance()
+    }
+
+    /// Adopt a pre-existing position on one instrument (broker-truth
+    /// seeding) — see [`EngineKernel::adopt_position`]. Same lend/drain
+    /// pool discipline as [`Self::apply_current`], so the cost basis comes
+    /// out of the shared cash pool with no fees, no fill, and no trade.
+    /// Call before the first pushed event.
+    pub fn adopt_position(
+        &mut self,
+        instrument: usize,
+        timestamp: Timestamp,
+        price: f64,
+        size: f64,
+    ) -> Result<u64, String> {
+        if instrument >= self.kernels.len() {
+            return Err(format!("unknown instrument index {instrument}"));
+        }
+        if !matches!(self.account.mode(), AccountMode::Cash) {
+            return Err("adopt_position supports cash accounts only".to_string());
+        }
+        let kernel = &mut self.kernels[instrument];
+        let injected = self.account.balance();
+        kernel.set_cash(injected);
+        let result = kernel.adopt_position(timestamp, price, size);
+        let delta_cash = kernel.cash() - injected;
+        kernel.set_cash(0.0);
+        self.account.reconcile(delta_cash, 0.0);
+        result
     }
 
     /// Capital available to open new positions across all instruments.

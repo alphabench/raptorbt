@@ -49,6 +49,15 @@ class TickStrategyStream:
     live push. Warmup bars execute; hand the stream a strategy that stays
     passive on history if that is not wanted.
 
+    ``initial_positions`` maps symbol -> ``{"quantity", "avg_price",
+    "timestamp_ns"?}`` and ADOPTS a position the account already holds
+    (broker-truth seeding): the strategy starts knowing it is long that many
+    units at that average cost, with no order, no fill, no fees and no trade
+    record. Adoption happens before warmup replay and before the first push,
+    so the position appears in every snapshot from the start — a caller
+    diffing ``positions()`` before/after pushes will never see it as a fresh
+    entry. Cash accounts only; refused (never skipped) otherwise.
+
     Everything else — account type, leverage, risk limits, OMS type —
     behaves as in :func:`raptorbt.run_tick_strategy`.
     """
@@ -66,6 +75,7 @@ class TickStrategyStream:
         oms_type: str = "netting",
         account_type: str = "cash",
         leverage: float = 1.0,
+        initial_positions: dict[str, dict] | None = None,
     ):
         if isinstance(strategy, type):
             strategy = strategy()
@@ -105,6 +115,25 @@ class TickStrategyStream:
             )
             arrays[symbol] = a
         session.seal()
+
+        for symbol, seed in (initial_positions or {}).items():
+            if symbol not in self._index_of:
+                raise ValueError(
+                    f"initial_positions names unknown symbol {symbol!r}"
+                )
+            quantity = float(seed.get("quantity") or 0)
+            avg_price = float(seed.get("avg_price") or 0)
+            if quantity <= 0 or avg_price <= 0:
+                raise ValueError(
+                    f"initial_positions[{symbol!r}] needs positive quantity "
+                    f"and avg_price (got {quantity} @ {avg_price})"
+                )
+            session.adopt_position(
+                self._index_of[symbol],
+                int(seed.get("timestamp_ns") or 0),
+                avg_price,
+                quantity,
+            )
 
         self._session = session
         self.ctx = TickContext(session, self._symbols, arrays)
