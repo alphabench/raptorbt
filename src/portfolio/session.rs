@@ -478,9 +478,11 @@ impl EventSession {
     }
 
     /// Adopt a pre-existing position on one instrument (broker-truth
-    /// seeding) — see [`EngineKernel::adopt_position`]. Same lend/drain
-    /// pool discipline as [`Self::apply_current`], so the cost basis comes
-    /// out of the shared cash pool with no fees, no fill, and no trade.
+    /// seeding) — see [`EngineKernel::adopt_position`], which owns the
+    /// account-mode rules. Same lend/drain pool discipline as
+    /// [`Self::apply_current`], so the cost basis comes out of the shared
+    /// pool with no fees, no fill, and no trade: debited from the balance in
+    /// cash mode, locked as initial margin in a fully funded margin book.
     ///
     /// Must be called before the first equity sample, and this is enforced:
     /// adopting mid-run leaves the curve flat for the pre-adoption stretch,
@@ -508,16 +510,27 @@ impl EventSession {
                 "adopt_position must be called before the first applied event".to_string()
             );
         }
-        if !matches!(self.account.mode(), AccountMode::Cash) {
-            return Err("adopt_position supports cash accounts only".to_string());
-        }
         let kernel = &mut self.kernels[instrument];
-        let injected = self.account.balance();
+        let locked_before = kernel.locked_margin();
+        // Same lend/drain discipline as `apply_current`: in margin mode the
+        // kernel computes free capital from its own cash less its own locks,
+        // so hand it the balance less every *other* kernel's locks.
+        let injected = match self.account.mode() {
+            AccountMode::Cash => self.account.balance(),
+            AccountMode::Margin { .. } => {
+                self.account.balance() - (self.account.locked() - locked_before)
+            }
+        };
         kernel.set_cash(injected);
         let result = kernel.adopt_position(timestamp, price, size);
         let delta_cash = kernel.cash() - injected;
+        // Carry the locked delta too. Leaving this at 0.0 would mean the
+        // shared account never learns about the adopted margin, so portfolio
+        // free capital would read high by the whole cost basis — a risk
+        // constraint silently weakened.
+        let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
-        self.account.reconcile(delta_cash, 0.0);
+        self.account.reconcile(delta_cash, delta_locked);
         result
     }
 

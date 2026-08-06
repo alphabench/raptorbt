@@ -22,12 +22,24 @@ as initial + unrealized, exactly like an account that bought earlier.
 Each test below pins one of those properties. If one fails, the shortcut has
 crept back in and the failure names which of the three consequences returned.
 
-Deliberate refusals, also pinned here: adoption is cash-account-only and
-long-only, and a malformed seed is rejected rather than skipped. Margin
-adoption is refused because the margin already posted against a broker-held
-position cannot be derived from quantity and average price — inventing a
-figure there would misstate free capital, which is the number that decides
-whether the next entry is allowed.
+Ordering is enforced, not merely documented: adoption must happen before the
+first equity sample. Adopting mid-run leaves the curve flat for the
+pre-adoption stretch, which holds the running peak down and makes the later
+decline measure against the wrong high-water mark — a real 0.495% drawdown
+reporting as 0.199%. The curve is written streaming, so it cannot be repaired
+afterwards. Quote and depth events sample no equity, so adopting after one is
+still allowed; the gate is the equity curve, not the event cursor.
+
+Deliberate refusals, also pinned here: adoption is long-only, a malformed seed
+is rejected rather than skipped, and a LEVERAGED book is refused. Fully funded
+books (leverage 1.0) are supported and fund the holding by locking the notional
+rather than debiting cash, which is what the margin equity formula requires —
+that path is what lets a long/short strategy, which must run under a margin
+account for its short to transact at all, be seeded. Above leverage 1.0 the
+margin a broker has already posted against a position it holds cannot be
+derived from quantity and average price, and inventing a figure there would
+misstate free capital, the number that decides whether the next entry is
+allowed.
 """
 
 import numpy as np
@@ -77,9 +89,11 @@ def _bars(closes, start_ts=0):
     }
 
 
-def _sealed_session(closes, config=None, account_type="cash"):
+def _sealed_session(closes, config=None, account_type="cash", leverage=1.0):
     """A sealed one-instrument session, ready to adopt into."""
-    session = PyPortfolioSession(config=config or _config(), account_type=account_type)
+    session = PyPortfolioSession(
+        config=config or _config(), account_type=account_type, leverage=leverage
+    )
     instrument = session.add_instrument(SYMBOL, direction=1)
     bars = _bars(closes)
     session.set_bars(
@@ -183,17 +197,92 @@ def test_open_trade_pnl_marks_against_the_current_price():
 # --- Deliberate refusals ----------------------------------------------------
 
 
-def test_margin_adoption_is_refused_not_guessed():
-    """Margin posted against a broker-held position is not derivable here.
+def test_leveraged_adoption_is_refused_not_guessed():
+    """Under leverage the broker's posted margin is genuinely not derivable.
 
-    Guessing it would misstate free capital, which gates every later entry —
-    so this must stay a refusal rather than becoming a silent estimate.
+    Quantity and average price do not tell you what margin the broker has
+    already posted against a position it holds, and inventing a figure would
+    misstate free capital — the number that gates every later entry. So this
+    stays a refusal rather than becoming a silent estimate.
     """
     session, instrument = _sealed_session(
-        [100.0, 102.0], config=_config(), account_type="margin"
+        [100.0, 102.0], config=_config(), account_type="margin", leverage=2.0
     )
-    with pytest.raises(ValueError, match="cash accounts only"):
+    with pytest.raises(ValueError, match="fully funded"):
         session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+
+
+def test_fully_funded_margin_adoption_is_allowed():
+    """A leverage-1.0 book locks the whole notional, so margin IS the cost basis.
+
+    This is the case the old blanket cash-only refusal got wrong. A strategy
+    with any short leg must run under a margin account or the short's P&L
+    never reaches equity, so refusing margin outright meant a seeded
+    long/short book could not be deployed at all.
+    """
+    session, instrument = _sealed_session(
+        [AVG_PRICE, AVG_PRICE], config=_config(), account_type="margin", leverage=1.0
+    )
+
+    position_id = session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+
+    assert position_id == 0
+    snapshot = session.position(instrument)
+    assert snapshot.size == pytest.approx(QUANTITY)
+    assert snapshot.entry_price == pytest.approx(AVG_PRICE)
+
+
+def test_margin_adoption_locks_rather_than_debiting():
+    """Margin funds an open by locking the notional, not by debiting cash.
+
+    Margin equity is `balance + unrealized` — there is no position-value
+    term — so a cash-style debit would never be offset and would understate
+    equity by the cost basis for the whole run. Free capital must still fall
+    by the cost basis; if this ever reads the full initial capital, the
+    session stopped reconciling the locked delta and portfolio risk limits
+    are being computed against money that is not available.
+    """
+    session, instrument = _sealed_session(
+        [AVG_PRICE, AVG_PRICE], config=_config(), account_type="margin", leverage=1.0
+    )
+    session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+
+    # The balance is untouched — in margin mode cash() includes locked margin.
+    assert session.cash() == pytest.approx(INITIAL_CAPITAL)
+    # But the capital that can fund a new position has dropped.
+    assert session.free_capital() == pytest.approx(INITIAL_CAPITAL - COST_BASIS)
+
+
+def test_cash_and_fully_funded_margin_report_the_same_numbers():
+    """Fully funded margin is economically identical to cash for a long hold.
+
+    Any divergence means the funding arm and the mode's equity formula
+    disagree. Note this compares free_capital(), NOT cash(): in margin mode
+    cash() returns the balance including locked margin, so the two modes
+    legitimately differ there. That asymmetry is the design, and a test
+    asserting cash() equality would fail for the wrong reason.
+    """
+    results = {}
+    for mode in ("cash", "margin"):
+        session, instrument = _sealed_session(
+            FALLING_CLOSES, config=_config(), account_type=mode, leverage=1.0
+        )
+        session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+        free_capital = session.free_capital()
+        session.apply_current()
+        equity = session.equity()
+        result = _drain(session)
+        results[mode] = (free_capital, equity, result.metrics)
+
+    cash_free, cash_equity, cash_metrics = results["cash"]
+    margin_free, margin_equity, margin_metrics = results["margin"]
+
+    assert cash_free == pytest.approx(margin_free)
+    assert cash_equity == pytest.approx(margin_equity)
+    assert cash_metrics.open_trade_pnl == pytest.approx(margin_metrics.open_trade_pnl)
+    assert cash_metrics.total_fees_paid == pytest.approx(margin_metrics.total_fees_paid)
+    assert cash_metrics.total_closed_trades == margin_metrics.total_closed_trades
+    assert cash_metrics.max_drawdown_pct == pytest.approx(margin_metrics.max_drawdown_pct)
 
 
 @pytest.mark.parametrize(
@@ -371,8 +460,9 @@ def test_stream_refuses_an_unknown_symbol():
         )
 
 
-def test_stream_refuses_margin_adoption():
-    with pytest.raises(ValueError, match="cash accounts only"):
+def test_stream_refuses_leveraged_adoption():
+    """A leveraged book still cannot be seeded, and says why."""
+    with pytest.raises(ValueError, match="fully funded"):
         TickStrategyStream(
             Passive(),
             symbols=[SYMBOL],
@@ -381,3 +471,32 @@ def test_stream_refuses_margin_adoption():
             leverage=2.0,
             initial_positions={SYMBOL: {"quantity": QUANTITY, "avg_price": AVG_PRICE}},
         )
+
+
+def test_stream_seeds_a_long_short_book():
+    """The production scenario that could not deploy at all before.
+
+    A strategy with any short leg is given `account_type="margin"` (at
+    leverage 1.0, so the book stays fully funded), because a short only
+    transacts as a short under a margin account. Adoption used to refuse
+    margin outright, so a seeded long/short strategy raised at construction
+    and could never be deployed — the seed and the short were mutually
+    exclusive.
+    """
+    stream = TickStrategyStream(
+        Passive(),
+        symbols=["LONGSYM", "SHORTSYM"],
+        config=_config(),
+        directions={"LONGSYM": 1, "SHORTSYM": -1},
+        account_type="margin",
+        leverage=1.0,
+        initial_positions={"LONGSYM": {"quantity": QUANTITY, "avg_price": AVG_PRICE}},
+    )
+
+    seeded = stream.ctx.position_for("LONGSYM")
+    assert seeded is not None, "the seeded holding must exist before the first push"
+    assert seeded.size == pytest.approx(QUANTITY)
+    assert seeded.direction == 1
+    # The short leg is registered but flat: seeding one symbol must not
+    # fabricate a position on another.
+    assert stream.ctx.position_for("SHORTSYM") is None
