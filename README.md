@@ -1547,8 +1547,13 @@ pip install -U raptorbt (set RAPTORBT_NO_VERSION_CHECK=1 to silence this).
 ```
 
 The check runs on a daemon thread with a 2s timeout and is cached on disk for
-24 hours, so it never delays `import raptorbt` and an unreachable PyPI is
-silent rather than noisy. It cannot raise.
+24 hours, so it never delays `import raptorbt`.
+
+**It fails silently.** An unreachable PyPI, a proxy, a read-only cache
+directory, or a malformed response all produce no output whatsoever — no
+traceback, no stderr, nothing on the log. It cannot raise, and it cannot print.
+The notice itself is `INFO`, which keeps it below `logging.lastResort`'s
+`WARNING` threshold, so it is invisible unless you have asked for INFO logs.
 
 | Variable | Effect |
 | --- | --- |

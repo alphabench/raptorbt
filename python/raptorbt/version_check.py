@@ -150,6 +150,25 @@ def _should_skip() -> bool:
     return any(os.environ.get(name) for name in _CI_ENV_VARS)
 
 
+def _thread_body(installed: str) -> None:
+    """
+    What the worker thread actually runs. The last line of defence against noise.
+
+    _run already swallows everything, so in practice this never catches. It
+    exists because the failure it guards is the loudest one available: anything
+    escaping onto a thread is printed as a full traceback to stderr by Python's
+    default threading.excepthook, which no try/except at the call site can
+    intercept. One refactor inside _run that lets an exception through would put
+    a traceback in a production trading log. The cost of the guard is a function
+    call; the cost of not having it is the one outcome this module promises
+    cannot happen.
+    """
+    try:
+        _run(installed)
+    except BaseException:
+        pass
+
+
 def _run(installed: str) -> None:
     """The body of the check. Runs on the worker thread; never raises."""
     try:
@@ -194,7 +213,7 @@ def check_for_update(installed: str, blocking: bool = False) -> None:
         # A daemon thread cannot hold up interpreter shutdown, so a slow or
         # hung request can never delay the process exiting.
         threading.Thread(
-            target=_run,
+            target=_thread_body,
             args=(installed,),
             name="raptorbt-version-check",
             daemon=True,

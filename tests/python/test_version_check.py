@@ -14,6 +14,9 @@ because pypi.org is having a bad day.
 import json
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -160,6 +163,219 @@ def test_an_exploding_fetch_cannot_escape(monkeypatch, caplog):
         version_check._run("0.0.1")  # must not raise
 
     assert caplog.records == []
+
+
+def _run_in_subprocess(body: str, env_extra=None):
+    """
+    Run `body` in a fresh interpreter with NO logging configured, and return
+    its (stdout, stderr).
+
+    A subprocess is the only honest way to test silence. Inside pytest, caplog
+    attaches a handler to the root logger, which suppresses logging.lastResort
+    -- so a logger.warning() that WOULD print to stderr for a real user prints
+    nothing under test. Monkeypatching has the same problem at the thread
+    boundary: patching version_check._run leaves _thread_body resolving the
+    patched name, so the guard under test is never actually exercised.
+    """
+    env = dict(os.environ)
+    for name in version_check._CI_ENV_VARS:
+        env.pop(name, None)
+    env.pop("RAPTORBT_NO_VERSION_CHECK", None)
+    env["XDG_CACHE_HOME"] = tempfile.mkdtemp()
+    if env_extra:
+        env.update(env_extra)
+    completed = subprocess.run(
+        [sys.executable, "-c", body],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    return completed.stdout, completed.stderr
+
+
+def test_a_raise_on_the_thread_never_reaches_stderr():
+    """
+    An exception escaping onto the worker thread must not print a traceback.
+
+    This is the loudest failure available to this module, and the one no
+    try/except at the call site can catch: Python's default threading.excepthook
+    writes the full traceback to stderr itself. Only a guard inside the thread
+    body stops it.
+
+    _run's own catch-all is REPLACED here rather than worked around. That is
+    the scenario the thread guard exists for -- a future refactor that lets an
+    exception out of _run -- and it is the only way to reach the guard, since
+    an intact _run absorbs everything before the boundary. Substituting the
+    module-level name is sound because _thread_body resolves _run at call time,
+    which is exactly the coupling under test.
+    """
+    stdout, stderr = _run_in_subprocess(
+        """
+import raptorbt.version_check as vc
+
+# Simulate a future refactor that lets an exception out of _run. The thread
+# body is the only thing standing between this and a traceback on stderr.
+def leaky_run(installed):
+    raise RuntimeError("boom on thread")
+
+vc._run = leaky_run
+vc._has_started = False
+vc.check_for_update("0.0.1")
+for t in __import__("threading").enumerate():
+    if t.name == "raptorbt-version-check":
+        t.join(timeout=10)
+print("done")
+"""
+    )
+    assert "done" in stdout
+    assert "Traceback" not in stderr, stderr
+    assert "boom on thread" not in stderr, stderr
+    assert stderr == "", stderr
+
+
+def test_the_thread_runs_through_the_guarded_body():
+    """
+    The thread's target must be _thread_body, not _run directly.
+
+    Pointing the thread at _run removes the last line of defence while every
+    behavioural test still passes, because _run is well-behaved today. This
+    asserts the wiring itself, since the property it protects is unobservable
+    until the day something breaks.
+    """
+    captured = {}
+    real_thread = threading.Thread
+
+    def capture(*args, **kwargs):
+        captured["target"] = kwargs.get("target")
+        return real_thread(*args, **kwargs)
+
+    monkeypatch_target = version_check.threading.Thread
+    version_check.threading.Thread = capture
+    try:
+        version_check._has_started = False
+        os.environ.pop("RAPTORBT_NO_VERSION_CHECK", None)
+        saved = {n: os.environ.pop(n, None) for n in version_check._CI_ENV_VARS}
+        try:
+            version_check.check_for_update("0.0.1")
+        finally:
+            for name, value in saved.items():
+                if value is not None:
+                    os.environ[name] = value
+    finally:
+        version_check.threading.Thread = monkeypatch_target
+
+    assert captured["target"] is version_check._thread_body, (
+        "the worker must run inside _thread_body's catch-all, not _run directly"
+    )
+    for thread in threading.enumerate():
+        if thread.name == "raptorbt-version-check":
+            thread.join(timeout=5)
+
+
+def test_a_raising_fetch_is_contained_before_the_thread_boundary():
+    """
+    _run absorbs a fetch that raises, so the thread guard is never needed.
+
+    Defence in depth only counts if each layer is checked on its own. This
+    pins the inner layer against a fetch that raises rather than returning
+    None -- the realistic form of a urllib change or a proxy returning junk.
+    """
+    stdout, stderr = _run_in_subprocess(
+        """
+import raptorbt.version_check as vc
+vc._read_cache = lambda: None
+
+def exploding_fetch():
+    raise RuntimeError("urllib exploded")
+
+vc._fetch_latest = exploding_fetch
+vc._run("0.0.1")   # must return normally, printing nothing
+print("done")
+"""
+    )
+    assert "done" in stdout
+    assert stderr == "", stderr
+
+
+def test_nothing_reaches_stderr_with_no_logging_configured():
+    """
+    The default case for a library: no logging configured, PyPI unreachable.
+
+    With no handler installed, logging.lastResort prints WARNING and above to
+    stderr. The notice is INFO precisely so it stays under that bar. If any
+    path here logged at WARNING or ERROR -- including the success notice being
+    raised to WARNING -- every user with default logging would see it on stderr.
+
+    Must run in a subprocess: caplog would install a handler and mask exactly
+    the behaviour being tested.
+    """
+    stdout, stderr = _run_in_subprocess(
+        """
+import socket
+socket.socket = lambda *a, **k: (_ for _ in ()).throw(OSError("no network"))
+import raptorbt.version_check as vc
+vc._run("0.0.1")
+print("done")
+"""
+    )
+    assert "done" in stdout
+    assert stderr == "", stderr
+
+
+def test_the_success_notice_is_quiet_under_default_logging():
+    """
+    Even the notice itself must not hit stderr for a user who configured nothing.
+
+    It is genuinely useful information, but it is not a warning -- a library
+    telling you to upgrade has not detected a problem with your program. INFO
+    keeps it under logging.lastResort's WARNING bar, so it appears for anyone
+    who asked for INFO logs and stays invisible to everyone else.
+    """
+    stdout, stderr = _run_in_subprocess(
+        """
+import raptorbt.version_check as vc
+vc._read_cache = lambda: "99.99.99"
+vc._run("0.0.1")
+print("done")
+"""
+    )
+    assert "done" in stdout
+    assert stderr == "", stderr
+
+    # ...and the same call IS visible once INFO is asked for.
+    stdout, stderr = _run_in_subprocess(
+        """
+import logging, sys
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+import raptorbt.version_check as vc
+vc._read_cache = lambda: "99.99.99"
+vc._run("0.0.1")
+print("done")
+"""
+    )
+    assert "done" in stdout
+    assert "99.99.99" in stderr and "pip install -U raptorbt" in stderr
+
+
+def test_import_is_silent_when_the_network_is_dead():
+    """
+    `import raptorbt` with no network and no logging must print absolutely
+    nothing, and must still succeed. This is the shape of a locked-down
+    production host.
+    """
+    stdout, stderr = _run_in_subprocess(
+        """
+import socket
+socket.socket = lambda *a, **k: (_ for _ in ()).throw(OSError("no network"))
+import time
+import raptorbt
+time.sleep(1.0)
+print("version:", raptorbt.__version__)
+"""
+    )
+    assert "version:" in stdout
+    assert stderr == "", stderr
 
 
 def test_the_outer_guard_holds_independently(monkeypatch):

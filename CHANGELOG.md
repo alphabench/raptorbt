@@ -28,10 +28,18 @@ always has, pinned by test.
   version: pip install -U raptorbt`. Plain words: it tells you to upgrade,
   and does nothing else.
 
-  It cannot slow or break an import. The request runs on a daemon thread with
-  a 2s timeout, every failure path is swallowed, and the answer is cached on
-  disk for 24h so a restarting fleet is not a burst of requests. An
-  unreachable PyPI is indistinguishable from the check never running.
+  It cannot slow or break an import, and **it fails silently by design**: the
+  request runs on a daemon thread with a 2s timeout, every failure path is
+  swallowed at two independent layers plus a guard inside the thread body, and
+  the answer is cached on disk for 24h so a restarting fleet is not a burst of
+  requests. An unreachable PyPI is indistinguishable from the check never
+  running — no traceback, no stderr output, nothing on the log at all.
+
+  The notice is `INFO` rather than `WARNING` deliberately. With no logging
+  configured, Python's `logging.lastResort` prints `WARNING` and above to
+  stderr; `INFO` stays under that bar, so the line appears for anyone who asked
+  for INFO logs and is invisible to everyone else. A library telling you to
+  upgrade has not detected a problem with your program.
 
   Set `RAPTORBT_NO_VERSION_CHECK=1` to disable it; continuous-integration
   environments are skipped automatically, since a pinned wheel there is
