@@ -506,9 +506,7 @@ impl EventSession {
             return Err(format!("unknown instrument index {instrument}"));
         }
         if !self.equity_curve.is_empty() {
-            return Err(
-                "adopt_position must be called before the first applied event".to_string()
-            );
+            return Err("adopt_position must be called before the first applied event".to_string());
         }
         let kernel = &mut self.kernels[instrument];
         let locked_before = kernel.locked_margin();

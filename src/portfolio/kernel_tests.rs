@@ -1418,11 +1418,7 @@ fn cash_and_fully_funded_margin_adoption_agree() {
     margin.adopt_position(0, 90.0, 100.0).unwrap();
 
     for close in [90.0, 95.0, 85.0] {
-        assert_eq!(
-            cash.equity(close),
-            margin.equity(close),
-            "equity must agree at close {close}"
-        );
+        assert_eq!(cash.equity(close), margin.equity(close), "equity must agree at close {close}");
     }
     assert_eq!(cash.free_capital(), margin.free_capital());
 }

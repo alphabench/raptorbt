@@ -764,12 +764,8 @@ mod tests {
         // of the release.
         let m = model(vec![0.04, 0.01, 0.01, 0.08], 2);
         let old = OptimizerConfig { turnover_penalty: 0.05, ..base_cfg(2) };
-        let with_inert_fields = OptimizerConfig {
-            gross_max: 5.0,
-            net_min: -3.0,
-            net_max: 3.0,
-            ..old.clone()
-        };
+        let with_inert_fields =
+            OptimizerConfig { gross_max: 5.0, net_min: -3.0, net_max: 3.0, ..old.clone() };
         let a = optimize_book(&m, &[0.3, 0.1], &[0.6, 0.4], &old).unwrap();
         let b = optimize_book(&m, &[0.3, 0.1], &[0.6, 0.4], &with_inert_fields).unwrap();
         assert_eq!(a.weights, b.weights);
@@ -804,11 +800,7 @@ mod tests {
             ..ls_cfg(2)
         };
         let r = optimize_book(&m, &[5.0, -5.0], &[0.0, 0.0], &cfg).unwrap();
-        assert!(
-            r.gross_exposure <= 0.5 + 1e-5,
-            "gross {} exceeds budget",
-            r.gross_exposure
-        );
+        assert!(r.gross_exposure <= 0.5 + 1e-5, "gross {} exceeds budget", r.gross_exposure);
         assert!(r.gross_exposure > 0.45, "budget should be ~fully used: {}", r.gross_exposure);
         assert!(r.weights[0] > 0.0 && r.weights[1] < 0.0, "{:?}", r.weights);
     }
@@ -818,11 +810,7 @@ mod tests {
         // net_min = net_max = 0 pins a dollar-neutral book: longs equal
         // shorts to within tolerance, whatever the alphas say.
         let m = model(vec![0.04, 0.0, 0.0, 0.04], 2);
-        let cfg = OptimizerConfig {
-            net_min: 0.0,
-            net_max: 0.0,
-            ..ls_cfg(2)
-        };
+        let cfg = OptimizerConfig { net_min: 0.0, net_max: 0.0, ..ls_cfg(2) };
         let r = optimize_book(&m, &[3.0, -1.0], &[0.0, 0.0], &cfg).unwrap();
         assert!(r.net_exposure.abs() < 1e-5, "net {} not neutral", r.net_exposure);
         assert!(r.weights[0] > 1e-3 && r.weights[1] < -1e-3, "{:?}", r.weights);
@@ -835,11 +823,8 @@ mod tests {
         // sum must respect the cap — a cap is about concentration, not
         // direction.
         let m = model(vec![0.04, 0.0, 0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.04], 3);
-        let cfg = OptimizerConfig {
-            sector_ids: vec![0, 0, 1],
-            sector_caps: vec![0.3, 1.0],
-            ..ls_cfg(3)
-        };
+        let cfg =
+            OptimizerConfig { sector_ids: vec![0, 0, 1], sector_caps: vec![0.3, 1.0], ..ls_cfg(3) };
         let r = optimize_book(&m, &[5.0, -5.0, 0.1], &[0.0; 3], &cfg).unwrap();
         let sector0_gross = r.weights[0].abs() + r.weights[1].abs();
         assert!(sector0_gross <= 0.3 + 1e-5, "gross sector sum {sector0_gross} breaches cap");
