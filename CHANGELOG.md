@@ -12,6 +12,47 @@ shares a user already owns. Neither was firing in production — the supported
 entry point adopts before the run starts, and today's seeded strategies are
 long-only — but both were reachable.
 
+This release also teaches the portfolio optimizer to hold short
+positions — by explicit configuration only. Plain words: until now the
+optimizer could only say "buy, hold, trim, or sit in cash." With
+`short_cap > 0` it may also propose NEGATIVE weights: positions that
+profit when a price falls. Nothing changes for existing callers — the
+default (`short_cap = 0`) poses the byte-identical long-only problem it
+always has, pinned by test.
+
+### Added
+
+- **Long/short mode on `optimize_portfolio`** (`PyOptimizerConfig`):
+  `short_cap` (per-name short bound, default 0 = long-only), `gross_max`
+  (`sum |w| <= gross_max` — the total size of all bets), and `net_min` /
+  `net_max` (bounds on `sum(w)` — the directional tilt; `net_min = net_max
+  = 0` is a dollar-neutral book). Gross exposure and the gross sector caps
+  are linearized with auxiliary variables (`u_i >= |w_i|`), the same
+  epigraph device the turnover term already uses; the variables and their
+  rows exist only when shorting is enabled.
+- **`gross_exposure` / `net_exposure` on `PyOptimizationResult`.** `cash`
+  remains `1 - sum(w)` (net-based) and is documented as such — for a
+  long/short book read the exposure fields, not the cash residual.
+- **`optimize_book`** as the honest name for the Rust entry point;
+  `optimize_long_only` remains as a delegating alias so existing callers
+  keep compiling.
+
+### Changed
+
+- **Sector caps are GROSS in long/short mode** (`sum_{i in k} |w_i| <=
+  cap`): a cap bounds the size of a sector's bets, not their direction.
+  For a long-only book the gross and signed sums coincide, so the two
+  modes agree exactly where they overlap.
+- A negative `w_current` is accepted when `short_cap > 0` (it is the
+  book being rebalanced); still refused in long-only mode.
+
+### Deferred, pinned
+
+- **Short position adoption stays refused** (`short_adoption_stays_refused_
+  by_construction`): posted broker collateral is not derivable from
+  quantity x average price, and no supported flow seeds a short. The
+  refusal is structural — adoption has no direction parameter.
+
 ### Fixed
 
 - **A position adopted mid-run made the strategy look less risky than it was.**

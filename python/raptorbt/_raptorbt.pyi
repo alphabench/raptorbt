@@ -282,6 +282,14 @@ class PyOptimizerConfig:
     cash_max: float
     max_iter: int
     tolerance: float
+    # Long/short mode: short_cap > 0 enables w_i in [-short_cap,
+    # position_cap], sum|w| <= gross_max, net_min <= sum(w) <= net_max, and
+    # GROSS sector caps. Defaults (short_cap=0) are exactly the historical
+    # long-only problem; the other three fields are inert then.
+    short_cap: float
+    gross_max: float
+    net_min: float
+    net_max: float
     def __init__(
         self,
         risk_aversion: float,
@@ -295,11 +303,19 @@ class PyOptimizerConfig:
         cash_max: float = ...,
         max_iter: int = ...,
         tolerance: float = ...,
+        short_cap: float = ...,
+        gross_max: float = ...,
+        net_min: float = ...,
+        net_max: float = ...,
     ) -> None: ...
 
 class PyOptimizationResult:
     snapped: list[bool]
+    # cash is 1 - sum(w) (net-based); for a long/short book read the
+    # exposure fields instead of inferring from cash.
     cash: float
+    gross_exposure: float
+    net_exposure: float
     turnover: float
     objective: float
     vol_annualized: float

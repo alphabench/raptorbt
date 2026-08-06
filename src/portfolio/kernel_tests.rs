@@ -1428,6 +1428,22 @@ fn cash_and_fully_funded_margin_adoption_agree() {
 }
 
 #[test]
+fn short_adoption_stays_refused_by_construction() {
+    // Ratified deferral (2026-08-06): seeding a backtest with an existing
+    // SHORT position is not supported — the broker's posted collateral is
+    // not derivable from quantity x average price, and the cash arm of
+    // adoption debits price*size, which is wrong for a short. The API
+    // encodes the deferral structurally: there is no direction parameter,
+    // and a negative size (the only way to express a short here) is
+    // refused. If shorts are ever adopted, this test must be replaced by
+    // one that states the posted-margin convention.
+    let mut kernel = adoption_kernel(AccountMode::Cash);
+    kernel.set_cash(100_000.0);
+    assert!(kernel.adopt_position(0, 90.0, -100.0).is_err());
+    assert!(kernel.adopt_position(0, 90.0, 0.0).is_err());
+}
+
+#[test]
 fn leveraged_adoption_is_refused_not_guessed() {
     // Above leverage 1.0 the broker's posted margin genuinely is not
     // derivable from quantity and average price. Guessing would misstate

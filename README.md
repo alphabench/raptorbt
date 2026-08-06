@@ -95,7 +95,7 @@ numbers on your own hardware.
 - **Asset- and broker-agnostic**: Pass NumPy OHLCV or tick arrays from any source — equities, futures, FX, crypto, options — RaptorBT never assumes a market or data vendor
 - **Tick-Level Simulation**: Full tick resolution for intraday options momentum, scalping, and microstructure strategies
 - **Live-feed ready**: Push events as they arrive with `TickStrategyStream`, and seed a run with positions the account already holds via position adoption
-- **Portfolio Construction**: Ledoit-Wolf covariance, a constrained long-only optimizer, factor panels with rank-IC validation, risk contributions, and rebalance-cost simulation
+- **Portfolio Construction**: Ledoit-Wolf covariance, a constrained optimizer — long-only by default, long/short with gross and net exposure budgets (v0.6.3) — factor panels with rank-IC validation, risk contributions, and rebalance-cost simulation
 - **Batch Spread Backtesting**: Run multiple spread backtests in parallel via Rayon with GIL released
 - **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
 - **33 Metrics**: Sharpe, Sortino, Calmar, Omega, SQN, Payoff Ratio, Recovery Factor, and more
@@ -1549,6 +1549,14 @@ Full release notes, including the 0.5.0 migration guide, live in
 
 ### v0.6.3
 
+- **The portfolio optimizer learns long/short — by explicit configuration
+  only.** `PyOptimizerConfig` gains `short_cap` (per-name short bound,
+  default 0 = long-only, byte-identical to the historical problem),
+  `gross_max` (total size of all bets, `sum |w|`), and `net_min`/`net_max`
+  (directional tilt, `sum(w)`; both 0 pins a dollar-neutral book). Sector
+  caps become GROSS in long/short mode — concentration, not direction.
+  `PyOptimizationResult` gains `gross_exposure`/`net_exposure`. Short
+  position adoption remains refused, pinned by test.
 - **Fixed: adopting a position mid-run understated max drawdown.** The equity
   curve is written as the run proceeds, so a position adopted after it started
   left the curve flat beforehand, holding the running peak down — a real 0.495%

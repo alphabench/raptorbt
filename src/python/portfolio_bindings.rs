@@ -137,6 +137,14 @@ pub struct PyOptimizerConfig {
     pub max_iter: u32,
     #[pyo3(get, set)]
     pub tolerance: f64,
+    #[pyo3(get, set)]
+    pub short_cap: f64,
+    #[pyo3(get, set)]
+    pub gross_max: f64,
+    #[pyo3(get, set)]
+    pub net_min: f64,
+    #[pyo3(get, set)]
+    pub net_max: f64,
 }
 
 #[pymethods]
@@ -154,6 +162,10 @@ impl PyOptimizerConfig {
         cash_max=0.0,
         max_iter=200,
         tolerance=1e-8,
+        short_cap=0.0,
+        gross_max=1.0,
+        net_min=0.0,
+        net_max=1.0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -168,6 +180,10 @@ impl PyOptimizerConfig {
         cash_max: f64,
         max_iter: u32,
         tolerance: f64,
+        short_cap: f64,
+        gross_max: f64,
+        net_min: f64,
+        net_max: f64,
     ) -> Self {
         Self {
             risk_aversion,
@@ -181,6 +197,10 @@ impl PyOptimizerConfig {
             cash_max,
             max_iter,
             tolerance,
+            short_cap,
+            gross_max,
+            net_min,
+            net_max,
         }
     }
 }
@@ -199,6 +219,10 @@ impl PyOptimizerConfig {
             cash_max: self.cash_max,
             max_iter: self.max_iter,
             tolerance: self.tolerance,
+            short_cap: self.short_cap,
+            gross_max: self.gross_max,
+            net_min: self.net_min,
+            net_max: self.net_max,
         }
     }
 }
@@ -228,6 +252,16 @@ impl PyOptimizationResult {
     #[getter]
     fn cash(&self) -> f64 {
         self.inner.cash
+    }
+
+    #[getter]
+    fn gross_exposure(&self) -> f64 {
+        self.inner.gross_exposure
+    }
+
+    #[getter]
+    fn net_exposure(&self) -> f64 {
+        self.inner.net_exposure
     }
 
     #[getter]

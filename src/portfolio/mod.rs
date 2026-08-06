@@ -27,7 +27,7 @@ pub use factor_panel::{
 pub use kernel::{EngineEvent, EngineKernel, KernelBar, PositionSnapshot, StepInput};
 pub use ledger::{ManagedPosition, PositionLedger, PositionPolicy};
 pub use monte_carlo::{simulate_portfolio_forward, MonteCarloConfig, MonteCarloResult};
-pub use optimize::{optimize_long_only, OptimizationResult, OptimizerConfig};
+pub use optimize::{optimize_book, optimize_long_only, OptimizationResult, OptimizerConfig};
 pub use position::PositionManager;
 pub use rebalance::{
     simulate_rebalance_policy, RebalanceConfig, RebalancePolicy, RebalanceSimResult,
