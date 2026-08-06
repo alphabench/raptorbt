@@ -1536,6 +1536,27 @@ print(f"Sharpe Ratio: {result.metrics.sharpe_ratio:.4f}")       # -0.9086
 
 ---
 
+## Update Notice
+
+raptorbt writes a single `INFO` log line when the installed version is behind
+the newest release on PyPI:
+
+```
+raptorbt 0.6.2 is behind the latest release 0.6.3. Install the latest version:
+pip install -U raptorbt (set RAPTORBT_NO_VERSION_CHECK=1 to silence this).
+```
+
+The check runs on a daemon thread with a 2s timeout and is cached on disk for
+24 hours, so it never delays `import raptorbt` and an unreachable PyPI is
+silent rather than noisy. It cannot raise.
+
+| Variable | Effect |
+| --- | --- |
+| `RAPTORBT_NO_VERSION_CHECK=1` | Disable the check entirely; no request is made. |
+
+Continuous-integration environments (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`,
+`JENKINS_URL`, `BUILDKITE`) are skipped automatically.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

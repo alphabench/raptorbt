@@ -22,6 +22,23 @@ always has, pinned by test.
 
 ### Added
 
+- **An update notice.** raptorbt now writes one `INFO` log line, at most once
+  a day, when the installed version is behind the newest release on PyPI:
+  `raptorbt 0.6.2 is behind the latest release 0.6.3. Install the latest
+  version: pip install -U raptorbt`. Plain words: it tells you to upgrade,
+  and does nothing else.
+
+  It cannot slow or break an import. The request runs on a daemon thread with
+  a 2s timeout, every failure path is swallowed, and the answer is cached on
+  disk for 24h so a restarting fleet is not a burst of requests. An
+  unreachable PyPI is indistinguishable from the check never running.
+
+  Set `RAPTORBT_NO_VERSION_CHECK=1` to disable it; continuous-integration
+  environments are skipped automatically, since a pinned wheel there is
+  deliberate. Versions that cannot be parsed as plain dotted releases — a
+  pre-release, a local build, or the `unknown` of a source checkout — produce
+  no message rather than a wrong one.
+
 - **Long/short mode on `optimize_portfolio`** (`PyOptimizerConfig`):
   `short_cap` (per-name short bound, default 0 = long-only), `gross_max`
   (`sum |w| <= gross_max` — the total size of all bets), and `net_min` /
