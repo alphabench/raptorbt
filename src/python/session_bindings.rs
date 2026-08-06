@@ -555,7 +555,9 @@ impl PyPortfolioSession {
     /// already holds `size` units at `price` average cost. No order, no
     /// fill, no fees, no trade record — and it must be called before the
     /// first equity sample so a position-diff signal translation never reads
-    /// the position as a fresh entry. Cash accounts only.
+    /// the position as a fresh entry. Cash or fully funded margin accounts
+    /// (leverage 1.0), long-only; a leveraged book is refused because the
+    /// broker's posted margin is not derivable from quantity and price.
     ///
     /// Raises `ValueError` if any event has already been applied: adopting
     /// mid-run understates max drawdown, because the flat stretch before the

@@ -651,9 +651,11 @@ class PyPortfolioSession:
     ) -> bool: ...
     def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
     # Adopt a position the account already holds (broker-truth seeding): no
-    # order, no fill, no fees, no trade record. Cash drops by the cost basis.
-    # Cash accounts only, long-only; call after seal() and before the first
-    # apply_current(). Returns the new position id.
+    # order, no fill, no fees, no trade record. Cash mode debits the cost
+    # basis; a fully funded margin book locks it instead. Cash or leverage-1.0
+    # margin, long-only. Must be called after seal() and before the first
+    # apply_current() — enforced, since adopting mid-run understates max
+    # drawdown. Returns the new position id.
     def adopt_position(
         self, instrument: int, timestamp_ns: int, price: float, size: float,
     ) -> int: ...

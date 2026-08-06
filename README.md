@@ -1020,20 +1020,36 @@ The resulting metrics carry it as an open trade with no cost:
 `total_fees_paid` is `0.0`, `total_open_trades` is `1`, `total_closed_trades`
 is `0`, and `open_trade_pnl` marks against the current price.
 
-Four things it deliberately refuses rather than guesses:
+Things it deliberately refuses rather than guesses:
 
 ```python
 {"quantity": 0,  "avg_price": 90.0}   # ValueError: needs positive quantity and avg_price
 {"quantity": 10, "avg_price": 0}      # ValueError: same
 {"UNKNOWN": {...}}                    # ValueError: names unknown symbol 'UNKNOWN'
-account_type="margin"                 # ValueError: adopt_position supports cash accounts only
+account_type="margin", leverage=2.0   # ValueError: requires a cash or fully funded account
 ```
 
-Margin adoption is refused because the margin already posted against a
-broker-held position is not derivable from quantity and average price —
-inventing a number there would misstate free capital. **Adoption is long-only**
-(`quantity` is a positive share count); an existing short cannot be seeded this
-way.
+**Cash and fully funded margin books are both supported.** In cash mode the
+cost basis is debited from the balance; under margin it is locked as initial
+margin instead, which is what that mode's equity formula requires. Fully funded
+matters in practice: a strategy holding a short must run under a margin account
+for the short to transact at all, and such a book still needs seeding.
+
+Above leverage 1.0 it is refused, because the margin a broker has already
+posted against a position it holds is not derivable from quantity and average
+price — inventing a number there would misstate free capital, which gates every
+later entry.
+
+**Adoption is long-only** (`quantity` is a positive share count); an existing
+short cannot be seeded this way.
+
+Adoption must also happen **before the first equity sample**, and this is
+enforced. Adopting mid-run leaves the equity curve flat for the pre-adoption
+stretch, which holds the running peak down and makes the later decline measure
+against the wrong high-water mark — a real 0.495% max drawdown reporting as
+0.199%. The curve is written as the run proceeds, so it cannot be corrected
+afterwards. Quotes and depth snapshots sample no equity, so adopting after one
+is still allowed.
 
 For a session you drive yourself rather than through `TickStrategyStream`, the
 same primitive is on the portfolio session, taking positional arguments and
@@ -1530,6 +1546,21 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 Full release notes, including the 0.5.0 migration guide, live in
 [CHANGELOG.md](CHANGELOG.md). Recent releases in brief:
+
+### v0.6.3
+
+- **Fixed: adopting a position mid-run understated max drawdown.** The equity
+  curve is written as the run proceeds, so a position adopted after it started
+  left the curve flat beforehand, holding the running peak down — a real 0.495%
+  drawdown reported as 0.199%, with total return and open PnL unchanged.
+  Adoption is now refused once any equity sample has been taken. Quotes and
+  depth snapshots sample no equity, so adopting after one still works.
+- **Fixed: a seeded long/short strategy could not be deployed at all.** Such a
+  book must run under a margin account for its short to transact, and adoption
+  refused margin outright. Fully funded margin books (leverage 1.0) now adopt by
+  locking the cost basis as initial margin rather than debiting cash, which is
+  what that mode's equity formula requires. Leveraged books stay refused. The
+  error message changed from `"adopt_position supports cash accounts only"`.
 
 ### v0.6.2
 

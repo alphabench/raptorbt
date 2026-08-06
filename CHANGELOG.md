@@ -5,6 +5,79 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-08-06
+
+Two defects in position adoption, both on the path that seeds a strategy with
+shares a user already owns. Neither was firing in production — the supported
+entry point adopts before the run starts, and today's seeded strategies are
+long-only — but both were reachable.
+
+### Fixed
+
+- **A position adopted mid-run made the strategy look less risky than it was.**
+  The equity curve is written as the run proceeds, one sample per event,
+  against a running peak that starts at the initial capital. Adopting after the
+  run began left that curve flat for the stretch before the adoption, which
+  held the peak down, so the decline that followed was measured against a
+  high-water mark lower than the truth.
+
+  On a 6-bar 100→95 fixture adopting 100 shares at 90, a **0.495%** max
+  drawdown reported as **0.199%**. Total return and `open_trade_pnl` were
+  identical either way, so nothing in the headline numbers hinted at it — only
+  the risk metric moved, and it moved to look safer.
+
+  Because the samples are written as the run proceeds, they are already wrong
+  by the time metrics are computed; there is no repairing it afterwards. So
+  `adopt_position` now returns an error once any equity sample has been taken,
+  raising `ValueError` from Python.
+
+  The gate is the equity curve, not the event cursor: quote and depth events
+  advance the schedule without sampling equity (marking on a quote would append
+  a zero return per quote and distort annualized metrics by how chatty the feed
+  is), and a live feed routinely delivers quotes before the first trade print.
+  Adopting after one corrupts nothing and stays allowed.
+
+  `TickStrategyStream(initial_positions=...)` is unaffected — it adopts before
+  warmup replay and before the first push, which is why this never fired in
+  production. `EngineKernel::adopt_position` holds no equity curve and cannot
+  check this itself; a Rust consumer driving the kernel directly owns the
+  ordering, and its doc comment now says so.
+
+- **A seeded long/short strategy could not be deployed at all.** A short leg
+  only transacts as a short under a margin account — in cash mode its P&L never
+  reaches equity — so a strategy holding one runs under margin at leverage 1.0,
+  which keeps the book fully funded. Adoption refused margin outright, so the
+  seed and the short were mutually exclusive: construction raised and the
+  deploy died before it began.
+
+  Fully funded margin books (initial margin rate ≥ 1.0) are now adopted by
+  **locking** the cost basis as initial margin rather than debiting cash. That
+  is not a cosmetic difference: margin equity is `balance + unrealized`, with
+  no position-value term, so a cash-style debit would never be offset and would
+  understate equity by the cost basis for the entire run. Relaxing the account
+  check without fixing the funding arm would have replaced a loud failure with
+  a silent wrong number.
+
+  Leveraged books stay refused, and the original reasoning is why: the margin a
+  broker has already posted against a position it holds cannot be derived from
+  quantity and average price, and inventing a figure would misstate free
+  capital, which gates every later entry. At a rate of 1.0 the whole notional is
+  locked and the posted margin simply *is* the cost basis, so the objection
+  lapses there and only there.
+
+  **The error message changed** from `"adopt_position supports cash accounts
+  only"` to one naming the fully-funded requirement. Callers matching on that
+  string need updating.
+
+  The portfolio session now also reconciles the locked delta into its shared
+  account, where it previously passed a hardcoded zero. Left as it was, the
+  account would never learn about the adopted margin and portfolio free capital
+  would read high by the whole cost basis.
+
+  Adoption remains **long-only**: an existing short cannot be seeded. That is
+  separate scope — direction-aware cost basis, short proceeds, borrow — and is
+  stated here so the boundary is explicit rather than accidental.
+
 ## [0.6.2] - 2026-08-05
 
 A strategy attached to a stock the user **already owns** can now start out
