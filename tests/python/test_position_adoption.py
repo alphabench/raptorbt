@@ -43,6 +43,10 @@ INITIAL_CAPITAL = 100_000.0
 COST_BASIS = QUANTITY * AVG_PRICE  # 9_000.0
 DAY_NS = 86_400_000_000_000
 
+# A steadily falling market, so the equity curve has a real peak-to-trough
+# decline to measure. Adopted pre-run this reports a 0.495% max drawdown.
+FALLING_CLOSES = [100.0, 99.0, 98.0, 97.0, 96.0, 95.0]
+
 
 class Passive(Strategy):
     """Never trades, so anything in the results came from adoption alone."""
@@ -225,19 +229,68 @@ def test_adopting_over_an_existing_position_is_refused():
         session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
 
 
-def test_adoption_ordering_is_a_convention_not_an_enforced_guard():
-    """Documents a real gap: adopting mid-run is ALLOWED, and should not be.
+def test_adoption_after_the_first_event_is_refused():
+    """Adopting mid-run understates max drawdown, in the flattering direction.
 
-    Callers are told to adopt after seal() and before the first
-    apply_current(), because a position adopted mid-run is priced into an
-    equity curve that already ran without it. The engine does not enforce
-    that ordering today — this test pins the current permissive behaviour so
-    the gap stays visible rather than being mistaken for a guarantee.
+    The equity curve is written streaming, one sample per applied event,
+    against a running peak seeded to the initial capital. A position adopted
+    after the run started leaves that curve FLAT for the pre-adoption
+    stretch, which holds the peak down; the decline that follows is then
+    measured against a high-water mark lower than the truth.
 
-    If adoption is later restricted to pre-run only, this test SHOULD fail:
-    replace it with a `pytest.raises` assertion at that point.
+    Measured on the falling fixture below (6 bars 100 -> 95, adopting 100
+    shares at 90): adopting pre-run reports a 0.495% max drawdown, adopting
+    after three applied events reports 0.199%. Total return and
+    open_trade_pnl are IDENTICAL in both — only the risk number moves, and it
+    moves to look safer than reality, which is the worst direction for a risk
+    metric to be wrong in.
+
+    Because the curve is written streaming, the samples are already wrong by
+    the time metrics are computed; there is no repairing it afterwards. So
+    the bad ordering is refused instead.
     """
-    session, instrument = _sealed_session([100.0, 102.0, 104.0])
+    session, instrument = _sealed_session(FALLING_CLOSES)
+    session.apply_current()
+
+    with pytest.raises(ValueError, match="before the first applied event"):
+        session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+
+
+def test_pre_run_adoption_reports_the_true_drawdown():
+    """Pins the correct number, not merely the refusal.
+
+    Without this, the ordering guard could be removed and no test would
+    notice max drawdown drifting. This is what makes that guard load-bearing
+    rather than decorative.
+    """
+    session, instrument = _sealed_session(FALLING_CLOSES)
+    session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)
+    result = _drain(session)
+
+    assert result.metrics.max_drawdown_pct == pytest.approx(0.495, abs=0.002)
+
+
+def test_adoption_is_still_allowed_after_a_quote_only_event():
+    """The gate is the equity curve, not the event cursor.
+
+    A quote (and a depth snapshot) advances the schedule cursor but samples
+    NO equity — deliberately, since marking on a quote would append a zero
+    return per quote and distort annualized metrics by how chatty the feed
+    is. A live feed routinely delivers quotes before the first trade print,
+    and a broker's holdings callback can easily return after them.
+
+    So adopting once a quote has been applied corrupts nothing and must keep
+    working. Gating on the cursor instead would reject this valid sequence —
+    this test is the regression a future refactor is most likely to
+    reintroduce.
+    """
+    session = PyPortfolioSession(config=_config())
+    instrument = session.add_instrument(SYMBOL, direction=1)
+    session.seal()
+
+    # ltp = 0 means "no trade print": this pushes a quote and nothing else.
+    appended = session.push_tick(instrument, 1_000, 0.0, 99.0, 101.0)
+    assert appended == 1, "expected exactly one quote event"
     session.apply_current()
 
     position_id = session.adopt_position(instrument, 0, AVG_PRICE, QUANTITY)

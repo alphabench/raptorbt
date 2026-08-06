@@ -422,10 +422,17 @@ impl EngineKernel {
     /// untouched — nothing about the adoption may read as a trade.
     ///
     /// Cash accounts only: margin adoption would need a locked-margin story
-    /// nothing requires yet, so it is refused rather than guessed. Call
-    /// before the first pushed event, so the adopted position is in every
-    /// "before" snapshot and a position-diff signal translation never reads
-    /// it as a fresh entry.
+    /// nothing requires yet, so it is refused rather than guessed.
+    ///
+    /// Call before the first stepped event, so the adopted position is in
+    /// every "before" snapshot and a position-diff signal translation never
+    /// reads it as a fresh entry. The kernel holds no equity curve and so
+    /// cannot check this itself: [`EventSession::adopt_position`] enforces it
+    /// for every caller that reaches adoption through a session, which is
+    /// every caller reachable from Python. A consumer driving this kernel
+    /// directly owns the ordering — adopt after stepping and the equity curve
+    /// you build will understate max drawdown, because the flat pre-adoption
+    /// stretch holds the running peak below where it belongs.
     pub fn adopt_position(
         &mut self,
         timestamp: Timestamp,

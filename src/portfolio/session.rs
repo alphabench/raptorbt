@@ -481,7 +481,18 @@ impl EventSession {
     /// seeding) — see [`EngineKernel::adopt_position`]. Same lend/drain
     /// pool discipline as [`Self::apply_current`], so the cost basis comes
     /// out of the shared cash pool with no fees, no fill, and no trade.
-    /// Call before the first pushed event.
+    ///
+    /// Must be called before the first equity sample, and this is enforced:
+    /// adopting mid-run leaves the curve flat for the pre-adoption stretch,
+    /// which holds the running peak down and makes the decline that follows
+    /// measure against the wrong high-water mark. Max drawdown then reads
+    /// *better* than reality — 0.199% for a decline that is really 0.495%.
+    /// The curve is written streaming, so this cannot be repaired later.
+    ///
+    /// The gate is the equity curve, not the event cursor: a quote or depth
+    /// snapshot advances the cursor without sampling equity, and a live feed
+    /// routinely delivers those before the first trade print. Adopting after
+    /// one corrupts nothing and stays allowed.
     pub fn adopt_position(
         &mut self,
         instrument: usize,
@@ -491,6 +502,11 @@ impl EventSession {
     ) -> Result<u64, String> {
         if instrument >= self.kernels.len() {
             return Err(format!("unknown instrument index {instrument}"));
+        }
+        if !self.equity_curve.is_empty() {
+            return Err(
+                "adopt_position must be called before the first applied event".to_string()
+            );
         }
         if !matches!(self.account.mode(), AccountMode::Cash) {
             return Err("adopt_position supports cash accounts only".to_string());

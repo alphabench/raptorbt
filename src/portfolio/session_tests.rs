@@ -890,3 +890,48 @@ fn remaining_counts_unapplied_events() {
     );
     assert_eq!(session.remaining(), 1);
 }
+
+#[test]
+fn adoption_after_an_applied_event_is_refused() {
+    // Adopting mid-run understates max drawdown and understates it in the
+    // flattering direction: the equity curve is written streaming, so the
+    // flat pre-adoption stretch holds the running peak below where it
+    // belongs and the later decline measures against the wrong high-water
+    // mark. On a 6-bar 100->95 fixture, a real 0.495% drawdown reports as
+    // 0.199%. The samples are already wrong by the time metrics run, so the
+    // ordering is refused rather than repaired.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_bars(a, bars(0, &[100.0, 99.0, 98.0]));
+    session.seal();
+    session.apply_current(StepInput::default());
+
+    let err = session.adopt_position(a, 0, 90.0, 100.0).unwrap_err();
+    assert!(
+        err.contains("before the first applied event"),
+        "expected an ordering refusal, got: {err}"
+    );
+}
+
+#[test]
+fn adoption_survives_a_quote_only_event() {
+    // The gate is the equity curve, not the event cursor. A quote advances
+    // the cursor but samples no equity (marking on one would append a zero
+    // return per quote and distort annualized metrics by how chatty the feed
+    // is), so adopting after a quote corrupts nothing. Live feeds routinely
+    // deliver quotes before the first print, and a broker holdings callback
+    // can return after them — gating on the cursor would break that.
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let mut session = EventSession::new(config);
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.seal();
+    // ltp = 0.0 means "no trade print", so this appends only the quote.
+    assert_eq!(session.push_tick(a, 1_000, 0.0, 99.0, 101.0, 0.0, 0.0), 1);
+    session.apply_current(StepInput::default());
+
+    assert!(
+        session.adopt_position(a, 0, 90.0, 100.0).is_ok(),
+        "a quote samples no equity, so adoption after one must still be allowed"
+    );
+}

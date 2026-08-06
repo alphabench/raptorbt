@@ -554,8 +554,13 @@ impl PyPortfolioSession {
     /// Adopt a pre-existing position (broker-truth seeding): the account
     /// already holds `size` units at `price` average cost. No order, no
     /// fill, no fees, no trade record — and it must be called before the
-    /// first pushed event so a position-diff signal translation never reads
+    /// first equity sample so a position-diff signal translation never reads
     /// the position as a fresh entry. Cash accounts only.
+    ///
+    /// Raises `ValueError` if any event has already been applied: adopting
+    /// mid-run understates max drawdown, because the flat stretch before the
+    /// adoption holds the running peak down. Quote- and depth-only events
+    /// sample no equity, so adopting after one is still allowed.
     fn adopt_position(
         &mut self,
         instrument: usize,
