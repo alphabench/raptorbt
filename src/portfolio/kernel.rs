@@ -442,20 +442,8 @@ impl EngineKernel {
         }
         let id = self
             .ledger
-            .open_position(
-                0,
-                timestamp,
-                price,
-                size,
-                Direction::Long,
-                None,
-                None,
-                0.0,
-                None,
-            )
-            .ok_or_else(|| {
-                "ledger refused adoption: a position is already open".to_string()
-            })?;
+            .open_position(0, timestamp, price, size, Direction::Long, None, None, 0.0, None)
+            .ok_or_else(|| "ledger refused adoption: a position is already open".to_string())?;
         self.cash -= price * size * self.multiplier();
         Ok(id)
     }
