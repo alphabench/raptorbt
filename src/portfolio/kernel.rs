@@ -421,8 +421,14 @@ impl EngineKernel {
     /// earlier. No `Entered` event is emitted and the trade counter is
     /// untouched — nothing about the adoption may read as a trade.
     ///
-    /// Cash accounts only: margin adoption would need a locked-margin story
-    /// nothing requires yet, so it is refused rather than guessed.
+    /// Cash and fully funded margin accounts only. Under leverage the margin
+    /// a broker has already posted against a position it holds cannot be
+    /// derived from quantity and average price, so it is refused rather than
+    /// guessed — inventing a figure would misstate free capital, which gates
+    /// every later entry. At an initial margin rate of 1.0 the whole notional
+    /// is locked and the posted margin simply IS the cost basis, so the
+    /// objection lapses and adoption locks that amount instead of debiting
+    /// cash. Adoption remains long-only.
     ///
     /// Call before the first stepped event, so the adopted position is in
     /// every "before" snapshot and a position-diff signal translation never
@@ -439,19 +445,42 @@ impl EngineKernel {
         price: Price,
         size: f64,
     ) -> Result<u64, String> {
-        if !matches!(self.account, AccountMode::Cash) {
-            return Err("adopt_position supports cash accounts only".to_string());
-        }
         if !(price > 0.0) || !(size > 0.0) {
             return Err(format!(
                 "adopt_position needs positive price and size (got size {size} @ {price})"
             ));
         }
+        // A leveraged book is still refused: the margin a broker has already
+        // posted against a position it holds cannot be derived from quantity
+        // and average price, and inventing a figure would misstate free
+        // capital — the number that gates every later entry. Fully funded
+        // (rate >= 1.0) is the one case where it IS derivable, because the
+        // whole notional is locked and the posted margin is the cost basis.
+        let margin_rate = self.margin_rate();
+        if let Some(rate) = margin_rate {
+            if rate < 1.0 {
+                return Err(format!(
+                    "adopt_position requires a cash or fully funded account \
+                     (initial margin rate {rate} < 1.0); posted margin on a \
+                     broker-held position is not derivable under leverage"
+                ));
+            }
+        }
         let id = self
             .ledger
             .open_position(0, timestamp, price, size, Direction::Long, None, None, 0.0, None)
             .ok_or_else(|| "ledger refused adoption: a position is already open".to_string())?;
-        self.cash -= price * size * self.multiplier();
+        // Fund it the way the mode funds an ordinary open (see `open_at`):
+        // cash mode debits the balance, margin mode locks the notional and
+        // leaves the balance alone. Getting this wrong is not cosmetic —
+        // margin equity is `balance + unrealized`, with no position-value
+        // term, so a cash-style debit here would never be offset and would
+        // understate equity by the cost basis for the whole run. No fee term
+        // in either arm: an adoption is not a trade and charges nothing.
+        match margin_rate {
+            None => self.cash -= price * size * self.multiplier(),
+            Some(rate) => self.margin.lock(id, price * size * self.multiplier() * rate),
+        }
         Ok(id)
     }
 
