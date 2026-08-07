@@ -30,3 +30,12 @@ target
 *.dSYM/
 __pycache__/
 *.py[cod]
+
+# Machine-local Claude Code settings (permissions are per-machine).
+.claude/settings.local.json
+
+# Vendored third-party skill pack (leonardomso/rust-skills, MIT, 1.2MB).
+# Re-installable with a clone, so it lives on disk without entering history.
+# The hand-written .claude/skills/pyo3-interop/ IS tracked — it is this
+# repo's own incident record, not a dependency.
+.claude/skills/rust-skills/
