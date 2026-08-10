@@ -139,12 +139,22 @@ impl LegPosition {
 
     /// Calculate unrealized P&L for this leg.
     fn unrealized_pnl(&self) -> f64 {
-        // For short positions: profit when premium decreases
-        // For long positions: profit when premium increases
+        // No negation here, deliberately. `LegConfig.quantity` is ALREADY
+        // signed (+1 long, -1 short -- see its doc comment, and `is_short()`,
+        // which is literally `quantity < 0`), so the direction convention is
+        // applied exactly once, by that sign:
+        //
+        //   short (-1) + premium falls (-30) -> (-1) * (-30) * 75 = +2250 gain
+        //   long  (+1) + premium falls (-30) -> (+1) * (-30) * 75 = -2250 loss
+        //
+        // A leading minus applies the same convention a second time and
+        // negates every result. It shipped through 0.6.3 and inverted `pnl`,
+        // the equity curve, and -- worse -- the `max_loss` / `target_profit`
+        // triggers, which closed winning structures on a stop.
         let premium_change = self.current_premium - self.entry_premium;
         let quantity = self.config.quantity as f64;
         let lot_size = self.config.lot_size as f64;
-        -quantity * premium_change * lot_size
+        quantity * premium_change * lot_size
     }
 }
 
@@ -604,14 +614,26 @@ mod tests {
         let result = backtest.run(&timestamps, &underlying, &legs_premiums, &entries, &exits);
 
         assert_eq!(result.trades.len(), 1);
+        // Every leg holds a flat premium for the whole run, so the structure
+        // neither gains nor loses and the four legs must sum to exactly zero
+        // before costs. This pins the multi-leg summation path in
+        // `total_unrealized_pnl`, which the single-leg tests below cannot
+        // reach: a per-leg sign error that happened to cancel across a
+        // symmetric condor would still surface here as a non-zero gross.
+        let gross = result.trades[0].pnl + result.trades[0].fees;
+        assert_eq!(gross, 0.0);
+        // Costs are real, though, so the booked P&L is a small loss.
+        assert!(result.trades[0].fees > 0.0);
+        assert!(result.trades[0].pnl < 0.0);
     }
+
     // ---------------------------------------------------------------------
-    // Signed P&L characterisation.
+    // Signed P&L regression pins.
     //
-    // These pin the CURRENT, WRONG behaviour of `LegPosition::unrealized_pnl`
-    // so the sign fix that follows is a reviewable diff rather than a claim.
-    // Every `// BUG:` assertion below is inverted from the correct answer and
-    // is expected to flip in the same commit that removes the stray negation.
+    // Through 0.6.3 `LegPosition::unrealized_pnl` carried a stray leading
+    // minus that negated every spread result. These assert the correct signed
+    // answer for all four short/long x win/lose cases, plus the two exit
+    // triggers that read the same figure.
     //
     // Fees are zeroed so the numbers are exact integers. The design -- assert
     // precise values on a full deterministic engine run instead of reaching
@@ -680,35 +702,35 @@ mod tests {
     const RISING: [f64; 6] = [60.0, 70.0, 80.0, 90.0, 100.0, 100.0];
 
     #[test]
-    fn short_leg_that_gained_is_reported_negative() {
+    fn a_short_leg_that_gained_reports_a_profit() {
         let result = single_leg(&FALLING, -1);
 
-        // BUG: sold at 90, bought back at 60 -- a 2250 gain reported as a loss.
-        assert_eq!(result.trades[0].pnl, -2250.0);
+        // Sold at 90, bought back at 60: a 2250 gain, reported as a gain.
+        assert_eq!(result.trades[0].pnl, 2250.0);
     }
 
     #[test]
-    fn short_leg_that_lost_is_reported_positive() {
+    fn a_short_leg_that_lost_reports_a_loss() {
         let result = single_leg(&RISING, -1);
 
-        // BUG: sold at 70, bought back at 100 -- a 2250 loss reported as a gain.
-        assert_eq!(result.trades[0].pnl, 2250.0);
-    }
-
-    #[test]
-    fn long_leg_that_gained_is_reported_negative() {
-        let result = single_leg(&RISING, 1);
-
-        // BUG: bought at 70, sold at 100 -- a 2250 gain reported as a loss.
+        // Sold at 70, bought back at 100: a 2250 loss, reported as a loss.
         assert_eq!(result.trades[0].pnl, -2250.0);
     }
 
     #[test]
-    fn long_leg_that_lost_is_reported_positive() {
+    fn a_long_leg_that_gained_reports_a_profit() {
+        let result = single_leg(&RISING, 1);
+
+        // Bought at 70, sold at 100: a 2250 gain, reported as a gain.
+        assert_eq!(result.trades[0].pnl, 2250.0);
+    }
+
+    #[test]
+    fn a_long_leg_that_lost_reports_a_loss() {
         let result = single_leg(&FALLING, 1);
 
-        // BUG: bought at 90, sold at 60 -- a 2250 loss reported as a gain.
-        assert_eq!(result.trades[0].pnl, 2250.0);
+        // Bought at 90, sold at 60: a 2250 loss, reported as a loss.
+        assert_eq!(result.trades[0].pnl, -2250.0);
     }
 
     #[test]
@@ -728,24 +750,48 @@ mod tests {
         assert_eq!(trade.entry_price / -90.0, 75.0);
     }
 
+    // The four trigger tests below are the reason the sign fix needed its own
+    // pins rather than riding along on the P&L assertions. `check_max_loss`
+    // and `check_target_profit` both read `total_unrealized_pnl`, so inverting
+    // it did not merely misreport a number -- it decided when a position
+    // closed. Each test drops the exit signal entirely, leaving the threshold
+    // as the only way out, so `exit_reason` is the assertion. With no trigger
+    // reached the position runs to the end-of-data close, which records no
+    // trade -- hence the empty-trades assertions.
+
     #[test]
-    fn max_loss_currently_fires_on_a_winner() {
-        // No exit signal at all: a threshold is the only way this position
-        // can close, so the exit reason is the trigger under test.
+    fn max_loss_does_not_fire_on_a_winner() {
         let result = single_leg_with(&FALLING, -1, Some(1000.0), None, false);
 
-        // BUG: this leg gained 2250. The stop reads the negated P&L as -2250,
-        // trips the 1000 max-loss threshold, and closes a winning structure.
+        // This leg gained 2250. Through 0.6.3 the stop read it as -2250 and
+        // closed the position: a max-loss stop firing on a winner, which is
+        // the most damaging half of the sign bug.
+        assert!(result.trades.is_empty());
+    }
+
+    #[test]
+    fn max_loss_fires_on_a_real_loser() {
+        let result = single_leg_with(&RISING, -1, Some(1000.0), None, false);
+
+        // Sold at 70, premium ran to 100: a 2250 loss, past the 1000
+        // threshold. The stop must still work.
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::StopLoss);
     }
 
     #[test]
-    fn target_profit_currently_fires_on_a_loser() {
+    fn target_profit_does_not_fire_on_a_loser() {
         let result = single_leg_with(&RISING, -1, None, Some(1000.0), false);
 
-        // BUG: this leg lost 2250. The target reads the negated P&L as +2250
-        // and books a "profit" on a structure that lost money.
+        // This leg lost 2250. Through 0.6.3 the target read it as +2250 and
+        // booked a "profit" on it.
+        assert!(result.trades.is_empty());
+    }
+
+    #[test]
+    fn target_profit_fires_on_a_real_winner() {
+        let result = single_leg_with(&FALLING, -1, None, Some(1000.0), false);
+
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::TakeProfit);
     }
