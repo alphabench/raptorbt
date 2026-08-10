@@ -139,12 +139,22 @@ impl LegPosition {
 
     /// Calculate unrealized P&L for this leg.
     fn unrealized_pnl(&self) -> f64 {
-        // For short positions: profit when premium decreases
-        // For long positions: profit when premium increases
+        // No negation here, deliberately. `LegConfig.quantity` is ALREADY
+        // signed (+1 long, -1 short -- see its doc comment, and `is_short()`,
+        // which is literally `quantity < 0`), so the direction convention is
+        // applied exactly once, by that sign:
+        //
+        //   short (-1) + premium falls (-30) -> (-1) * (-30) * 75 = +2250 gain
+        //   long  (+1) + premium falls (-30) -> (+1) * (-30) * 75 = -2250 loss
+        //
+        // A leading minus applies the same convention a second time and
+        // negates every result. It shipped through 0.6.3 and inverted `pnl`,
+        // the equity curve, and -- worse -- the `max_loss` / `target_profit`
+        // triggers, which closed winning structures on a stop.
         let premium_change = self.current_premium - self.entry_premium;
         let quantity = self.config.quantity as f64;
         let lot_size = self.config.lot_size as f64;
-        -quantity * premium_change * lot_size
+        quantity * premium_change * lot_size
     }
 }
 
@@ -604,5 +614,185 @@ mod tests {
         let result = backtest.run(&timestamps, &underlying, &legs_premiums, &entries, &exits);
 
         assert_eq!(result.trades.len(), 1);
+        // Every leg holds a flat premium for the whole run, so the structure
+        // neither gains nor loses and the four legs must sum to exactly zero
+        // before costs. This pins the multi-leg summation path in
+        // `total_unrealized_pnl`, which the single-leg tests below cannot
+        // reach: a per-leg sign error that happened to cancel across a
+        // symmetric condor would still surface here as a non-zero gross.
+        let gross = result.trades[0].pnl + result.trades[0].fees;
+        assert_eq!(gross, 0.0);
+        // Costs are real, though, so the booked P&L is a small loss.
+        assert!(result.trades[0].fees > 0.0);
+        assert!(result.trades[0].pnl < 0.0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Signed P&L regression pins.
+    //
+    // Through 0.6.3 `LegPosition::unrealized_pnl` carried a stray leading
+    // minus that negated every spread result. These assert the correct signed
+    // answer for all four short/long x win/lose cases, plus the two exit
+    // triggers that read the same figure.
+    //
+    // Fees are zeroed so the numbers are exact integers. The design -- assert
+    // precise values on a full deterministic engine run instead of reaching
+    // for a snapshot library -- follows nautilus's acceptance tests
+    // (tests/acceptance_tests/test_backtest.py). Read, not copied.
+    // ---------------------------------------------------------------------
+
+    /// One CE leg, lot 75, entered on bar 1 and exited on bar 4.
+    ///
+    /// Mirrors the Python guard in the backend
+    /// (tests/guards/test_spread_backtest_pnl_sign.py) so both sides describe
+    /// the same trade. Premiums move thirty points across a 75 lot, so every
+    /// correct answer below is 2250.
+    fn single_leg(premiums: &[f64], quantity: i32) -> BacktestResult {
+        single_leg_with(premiums, quantity, None, None, true)
+    }
+
+    /// As `single_leg`, but lets a test set the max-loss / target-profit
+    /// thresholds and drop the exit signal so a trigger is the only way out.
+    fn single_leg_with(
+        premiums: &[f64],
+        quantity: i32,
+        max_loss: Option<f64>,
+        target_profit: Option<f64>,
+        exit_on_bar_4: bool,
+    ) -> BacktestResult {
+        let n = premiums.len();
+        let timestamps: Vec<i64> = (0..n as i64).map(|i| i * 300_000_000_000).collect();
+        let underlying = vec![24_550.0; n];
+
+        let mut entries = vec![false; n];
+        entries[1] = true;
+        let mut exits = vec![false; n];
+        if exit_on_bar_4 {
+            exits[4] = true;
+        }
+
+        let config = SpreadConfig {
+            base: BacktestConfig {
+                initial_capital: 500_000.0,
+                // Zeroed so assertions are exact: with the default rate the
+                // true 2250 arrives as 2259, which hides sign-adjacent slips.
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
+            spread_type: SpreadType::Custom,
+            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, quantity, 75)],
+            max_loss,
+            target_profit,
+            ..Default::default()
+        };
+
+        SpreadBacktest::new(config).run(
+            &timestamps,
+            &underlying,
+            &vec![premiums.to_vec()],
+            &entries,
+            &exits,
+        )
+    }
+
+    /// Premium falls 100 -> 60. Entered at bar 1 (90), exited at bar 4 (60).
+    const FALLING: [f64; 6] = [100.0, 90.0, 80.0, 70.0, 60.0, 60.0];
+    /// The mirror: premium rises, entered at 70, exited at 100.
+    const RISING: [f64; 6] = [60.0, 70.0, 80.0, 90.0, 100.0, 100.0];
+
+    #[test]
+    fn a_short_leg_that_gained_reports_a_profit() {
+        let result = single_leg(&FALLING, -1);
+
+        // Sold at 90, bought back at 60: a 2250 gain, reported as a gain.
+        assert_eq!(result.trades[0].pnl, 2250.0);
+    }
+
+    #[test]
+    fn a_short_leg_that_lost_reports_a_loss() {
+        let result = single_leg(&RISING, -1);
+
+        // Sold at 70, bought back at 100: a 2250 loss, reported as a loss.
+        assert_eq!(result.trades[0].pnl, -2250.0);
+    }
+
+    #[test]
+    fn a_long_leg_that_gained_reports_a_profit() {
+        let result = single_leg(&RISING, 1);
+
+        // Bought at 70, sold at 100: a 2250 gain, reported as a gain.
+        assert_eq!(result.trades[0].pnl, 2250.0);
+    }
+
+    #[test]
+    fn a_long_leg_that_lost_reports_a_loss() {
+        let result = single_leg(&FALLING, 1);
+
+        // Bought at 90, sold at 60: a 2250 loss, reported as a loss.
+        assert_eq!(result.trades[0].pnl, -2250.0);
+    }
+
+    #[test]
+    fn net_premium_signs_are_already_correct() {
+        let result = single_leg(&FALLING, -1);
+        let trade = &result.trades[0];
+
+        // Not a bug, and deliberately pinned: `entry_price` / `exit_price` are
+        // computed independently of `unrealized_pnl` and are already right, so
+        // the trade record carries the correct answer next to the wrong one.
+        // The sign fix must not disturb these -- that is what makes it a pure
+        // sign flip rather than a repricing.
+        assert_eq!(trade.entry_price, -6750.0); // -90 * 75, a credit
+        assert_eq!(trade.exit_price, -4500.0); // -60 * 75
+        assert_eq!(trade.exit_price - trade.entry_price, 2250.0);
+        // And the leg is sized off its stated 75 lot, not some other number.
+        assert_eq!(trade.entry_price / -90.0, 75.0);
+    }
+
+    // The four trigger tests below are the reason the sign fix needed its own
+    // pins rather than riding along on the P&L assertions. `check_max_loss`
+    // and `check_target_profit` both read `total_unrealized_pnl`, so inverting
+    // it did not merely misreport a number -- it decided when a position
+    // closed. Each test drops the exit signal entirely, leaving the threshold
+    // as the only way out, so `exit_reason` is the assertion. With no trigger
+    // reached the position runs to the end-of-data close, which records no
+    // trade -- hence the empty-trades assertions.
+
+    #[test]
+    fn max_loss_does_not_fire_on_a_winner() {
+        let result = single_leg_with(&FALLING, -1, Some(1000.0), None, false);
+
+        // This leg gained 2250. Through 0.6.3 the stop read it as -2250 and
+        // closed the position: a max-loss stop firing on a winner, which is
+        // the most damaging half of the sign bug.
+        assert!(result.trades.is_empty());
+    }
+
+    #[test]
+    fn max_loss_fires_on_a_real_loser() {
+        let result = single_leg_with(&RISING, -1, Some(1000.0), None, false);
+
+        // Sold at 70, premium ran to 100: a 2250 loss, past the 1000
+        // threshold. The stop must still work.
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].exit_reason, ExitReason::StopLoss);
+    }
+
+    #[test]
+    fn target_profit_does_not_fire_on_a_loser() {
+        let result = single_leg_with(&RISING, -1, None, Some(1000.0), false);
+
+        // This leg lost 2250. Through 0.6.3 the target read it as +2250 and
+        // booked a "profit" on it.
+        assert!(result.trades.is_empty());
+    }
+
+    #[test]
+    fn target_profit_fires_on_a_real_winner() {
+        let result = single_leg_with(&FALLING, -1, None, Some(1000.0), false);
+
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].exit_reason, ExitReason::TakeProfit);
     }
 }

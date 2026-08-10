@@ -5,6 +5,62 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-08-10
+
+One defect, one character, and it inverted every multi-leg options backtest.
+
+Plain words: if you backtested a spread — any structure with more than one
+option leg, like a credit spread, a straddle, or an iron condor — the result
+was reported backwards. A structure that made money showed a loss, and one
+that lost money showed a profit. Worse than the wrong number: the automatic
+stop-loss read the same backwards figure, so it closed positions that were
+*winning*, and the profit target closed positions that were *losing*.
+
+Nothing that trades real money was affected. Paper and live deployments price
+their leg groups through a different code path entirely, which was always
+correct and is pinned by test. The damage was to research: a user could have
+discarded a profitable strategy or deployed a losing one on the strength of an
+inverted backtest.
+
+### Fixed
+
+- **Spread P&L is no longer negated.** `LegPosition::unrealized_pnl` computed
+  `-quantity * premium_change * lot_size`. `LegConfig.quantity` is already
+  signed (`+1` long, `-1` short), so the leading minus applied the direction
+  convention a second time and flipped the result:
+
+      short (-1) + premium falls (-30) -> (-1) * (-30) * 75 = +2250, a gain
+      long  (+1) + premium falls (-30) -> (+1) * (-30) * 75 = -2250, a loss
+
+  Everything downstream reads that one function, so `pnl`, the equity curve,
+  the drawdown curve, and every derived metric — `sharpe_ratio`,
+  `profit_factor`, `win_rate`, `expectancy`, `best_trade_pct` — inherit the
+  correction.
+
+- **`max_loss` and `target_profit` fire on the right side now.** Both compare
+  against the same figure, so through 0.6.3 a max-loss threshold closed
+  structures that had gained and a target-profit booked wins on structures
+  that had lost. This changes *when positions close*, so a backtest re-run
+  under 0.6.4 with either threshold set will differ from its 0.6.3 result by
+  more than a sign.
+
+### Upgrading
+
+**Any stored spread backtest produced by 0.6.3 or earlier is wrong and should
+be re-run.** `pnl` and every metric derived from it are inverted. Results with
+`max_loss` or `target_profit` set differ further, because the exit timing
+itself was wrong. Single-leg backtests are unaffected — they never went
+through this code path.
+
+### Added
+
+- Nine Rust regression tests covering all four short/long x win/lose cases and
+  all four stop/target x winner/loser cases, plus a Python behavior suite
+  (`tests/python/test_spread_backtest.py`) exercising the same contract
+  against the built wheel. The defect survived because neither existed: the
+  Rust tests asserted only that a trade was recorded, and no Python test
+  called `run_spread_backtest` at all.
+
 ## [0.6.3] - 2026-08-06
 
 Two defects in position adoption, both on the path that seeds a strategy with
