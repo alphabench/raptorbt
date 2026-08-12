@@ -297,6 +297,13 @@ def _install_extension_shim() -> None:
 
     PyO3 builds the extension as a plain module object, which has no class-level
     ``__getattr__`` to override, so the module-level hook is installed here.
+
+    ``__dir__`` is installed alongside it. A name that resolves but does not
+    appear in ``dir()`` is invisible to tooling: the consuming backend has a
+    guard comparing ``_raptorbt.pyi`` against ``dir(_raptorbt)``, and the stub's
+    alias block looked to it like 21 declarations for symbols the engine had
+    dropped -- the exact "type-checks clean, AttributeError in prod" shape that
+    guard exists to catch. The aliases are real, so they should be listed.
     """
     from raptorbt import _raptorbt
 
@@ -309,7 +316,13 @@ def _install_extension_shim() -> None:
         _warn_renamed(_raptorbt.__name__, name, new_name)
         return getattr(_raptorbt, new_name)
 
+    _base_dir = sorted(vars(_raptorbt))
+
+    def _ext_dir() -> list[str]:
+        return sorted({*_base_dir, *_RENAMED})
+
     _raptorbt.__getattr__ = _ext_getattr
+    _raptorbt.__dir__ = _ext_dir
 
 
 _install_extension_shim()
