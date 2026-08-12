@@ -5,6 +5,33 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-12
+
+Patch. The 0.7.0 deprecated names resolved but could not be enumerated.
+
+### Fixed
+
+- **Deprecated `Py*` names now appear in `dir(raptorbt._raptorbt)`.** They
+  resolved through `__getattr__` in 0.7.0, but never showed up in `dir()`, so
+  they were invisible to autocomplete and to any tool that enumerates a module.
+
+  That is not merely cosmetic. A consumer guard comparing `_raptorbt.pyi`
+  against `dir(_raptorbt)` read the stub's alias block as 21 declarations for
+  symbols the engine had dropped -- precisely the "type-checks clean,
+  `AttributeError` in production" drift such a guard exists to catch. The
+  aliases are real, so they are listed.
+
+- **The stub-completeness test in this repo had two blind spots** and so never
+  flagged the above. It recognised `class X`, `def X(` and `X:` but not the
+  `X = Y` alias form; and it matched declarations by substring, so `class Foo`
+  matched `class FooBar` and a renamed-away class left the guard green. Both
+  are anchored now, verified by deletion.
+
+### Upgrading
+
+No API change. If you consume the stub in CI, this is the release that makes
+the 0.7.0 alias block agree with the runtime module.
+
 ## [0.7.0] - 2026-08-12
 
 Two things: the public class names lose a prefix that never belonged in Python,
