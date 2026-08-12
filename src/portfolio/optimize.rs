@@ -377,24 +377,24 @@ pub fn optimize_book(
         row += 1;
     }
     // w_i - t_i <= w_current_i   and   -w_i - t_i <= -w_current_i
-    for i in 0..n {
+    for (i, &w_cur_i) in w_current.iter().enumerate().take(n) {
         a_i.push(row);
         a_j.push(i);
         a_v.push(1.0);
         a_i.push(row);
         a_j.push(n + i);
         a_v.push(-1.0);
-        b.push(w_current[i]);
+        b.push(w_cur_i);
         row += 1;
     }
-    for i in 0..n {
+    for (i, &w_cur_i) in w_current.iter().enumerate().take(n) {
         a_i.push(row);
         a_j.push(i);
         a_v.push(-1.0);
         a_i.push(row);
         a_j.push(n + i);
         a_v.push(-1.0);
-        b.push(-w_current[i]);
+        b.push(-w_cur_i);
         row += 1;
     }
     if ls {
@@ -532,14 +532,12 @@ pub fn optimize_book(
     let turnover = 0.5 * trades.iter().map(|t| t.abs()).sum::<f64>();
 
     // Annualized vol of the final book.
-    let mut variance = 0.0;
-    for i in 0..n {
-        let mut acc = 0.0;
-        for j in 0..n {
-            acc += model.cov[i * n + j] * weights[j];
-        }
-        variance += weights[i] * acc;
-    }
+    let variance: f64 = model
+        .cov
+        .chunks_exact(n)
+        .zip(weights.iter())
+        .map(|(row, wi)| wi * row.iter().zip(weights.iter()).map(|(c, wj)| c * wj).sum::<f64>())
+        .sum();
     let vol_annualized = variance.max(0.0).sqrt() * model.periods_per_year.sqrt();
 
     let gross_exposure: f64 = weights.iter().map(|w| w.abs()).sum();

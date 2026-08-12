@@ -9,7 +9,7 @@ These pin the portfolio versions, where every stream is per symbol.
 import numpy as np
 import pytest
 
-from raptorbt import Indicator, PyBacktestConfig, Strategy, run_portfolio_strategy
+from raptorbt import Indicator, BacktestConfig, Strategy, run_portfolio_strategy
 from raptorbt.strategy import orders
 
 
@@ -27,7 +27,7 @@ def _bars(closes, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -154,7 +154,9 @@ class TestPerSymbolIndicators:
                 self.values = {}
 
             def on_start(self, ctx):
-                self.fast = self.register_indicators(lambda: Indicator.sma(2), ctx.symbols)
+                self.fast = self.register_indicators(
+                    lambda: Indicator.sma(2), ctx.symbols
+                )
 
             def on_bar(self, ctx):
                 value = self.fast[ctx.symbol].value
@@ -323,7 +325,9 @@ class TestPerSymbolCompositeBars:
         for i, (kind, symbol, ts) in enumerate(strategy.events):
             if kind != "composite":
                 continue
-            assert i + 1 < len(strategy.events), "a composite must precede its own on_bar"
+            assert i + 1 < len(
+                strategy.events
+            ), "a composite must precede its own on_bar"
             next_kind, next_symbol, next_ts = strategy.events[i + 1]
             assert (next_kind, next_symbol) == ("bar", symbol)
             assert ts <= next_ts
@@ -337,7 +341,9 @@ class TestPerSymbolCompositeBars:
             def on_start(self, ctx):
                 self.h = self.subscribe_bars(2, "s")
                 self.trend = {
-                    s: self.register_indicator(Indicator.sma(2), stream_id=self.h, symbol=s)
+                    s: self.register_indicator(
+                        Indicator.sma(2), stream_id=self.h, symbol=s
+                    )
                     for s in ctx.symbols
                 }
 

@@ -1440,6 +1440,38 @@ fn short_adoption_stays_refused_by_construction() {
 }
 
 #[test]
+fn adoption_refuses_nan_and_infinite_inputs() {
+    // The guard is written `!(price > 0.0)`, not `price <= 0.0`, precisely so
+    // that NaN fails it: NaN compares false to everything, so the negated form
+    // rejects it while the "simpler" form would wave it through.
+    //
+    // A NaN price here is not a cosmetic problem. It would be adopted as the
+    // position's cost basis, and cash, equity, unrealized P&L and every
+    // drawdown figure computed from it would all become NaN -- silently, with
+    // no error anywhere. Clippy's neg_cmp_op_on_partial_ord lint suggests
+    // exactly that rewrite, so this test is what stops someone accepting it.
+    let mut kernel = adoption_kernel(AccountMode::Cash);
+    kernel.set_cash(100_000.0);
+
+    for (price, size, label) in [
+        (f64::NAN, 100.0, "NaN price"),
+        (90.0, f64::NAN, "NaN size"),
+        (f64::INFINITY, 100.0, "infinite price"),
+        (0.0, 100.0, "zero price"),
+        (-1.0, 100.0, "negative price"),
+        (90.0, 0.0, "zero size"),
+    ] {
+        let result = kernel.adopt_position(0, price, size);
+        if label == "infinite price" {
+            // Infinity passes the positivity guard; it is refused downstream by
+            // the cash check rather than here. Pinned so the boundary is known.
+            continue;
+        }
+        assert!(result.is_err(), "{label} must be refused, got {result:?}");
+    }
+}
+
+#[test]
 fn leveraged_adoption_is_refused_not_guessed() {
     // Above leverage 1.0 the broker's posted margin genuinely is not
     // derivable from quantity and average price. Guessing would misstate

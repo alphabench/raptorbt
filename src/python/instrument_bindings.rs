@@ -17,6 +17,9 @@ pub struct PyInstrumentSpec {
     pub(crate) inner: InstrumentSpec,
 }
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 fn apply_common(
     mut spec: InstrumentSpec,
     price_increment: f64,

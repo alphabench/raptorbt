@@ -6,7 +6,7 @@ emit order intents (:meth:`Strategy.enter`, :meth:`Strategy.close_position`).
 The engine simulates fills and routes resulting events back into the hooks.
 
 Run one with :func:`run_strategy_backtest`, which returns the same
-``PyBacktestResult`` as the array-based runners.
+``BacktestResult`` as the array-based runners.
 """
 
 from raptorbt.strategy.base import Strategy

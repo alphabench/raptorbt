@@ -3,9 +3,10 @@
 use crate::core::types::{Direction, OhlcvBar, Price};
 
 /// Fill price model determining at what price orders are executed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FillPrice {
     /// Execute at close price (end of bar).
+    #[default]
     Close,
     /// Execute at open price (start of next bar).
     Open,
@@ -19,12 +20,6 @@ pub enum FillPrice {
     Worst,
     /// Execute at best price (low for buys, high for sells).
     Best,
-}
-
-impl Default for FillPrice {
-    fn default() -> Self {
-        FillPrice::Close
-    }
 }
 
 impl FillPrice {

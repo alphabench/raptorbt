@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from raptorbt import InstrumentSpec, PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import InstrumentSpec, BacktestConfig, Strategy, run_strategy_backtest
 from raptorbt.strategy import orders
 
 
@@ -12,8 +12,12 @@ def _bars(closes, lows=None, highs=None, opens=None, start_ts=0, step=1):
     n = len(closes)
     return {
         "timestamps": np.arange(start_ts, start_ts + n * step, step, dtype=np.int64),
-        "open": np.asarray(opens, dtype=np.float64) if opens is not None else closes.copy(),
-        "high": np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0,
+        "open": (
+            np.asarray(opens, dtype=np.float64) if opens is not None else closes.copy()
+        ),
+        "high": (
+            np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0
+        ),
         "low": np.asarray(lows, dtype=np.float64) if lows is not None else closes - 1.0,
         "close": closes,
         "volume": np.full(n, 1_000.0),
@@ -21,7 +25,7 @@ def _bars(closes, lows=None, highs=None, opens=None, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -43,7 +47,9 @@ class TestNewOrderKinds:
         class S(EventLog):
             def on_bar(self, ctx):
                 if ctx.idx == 0:
-                    self.submit_order(orders.MarketIfTouched(side="buy", trigger=98.0, units=10.0))
+                    self.submit_order(
+                        orders.MarketIfTouched(side="buy", trigger=98.0, units=10.0)
+                    )
 
         data = _bars([100.0, 100.0, 98.5], lows=[99.5, 99.0, 97.5])
         strategy = S()
@@ -56,7 +62,9 @@ class TestNewOrderKinds:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.submit_order(
-                        orders.LimitIfTouched(side="buy", trigger=98.0, price=97.5, units=10.0)
+                        orders.LimitIfTouched(
+                            side="buy", trigger=98.0, price=97.5, units=10.0
+                        )
                     )
 
         data = _bars(
@@ -83,7 +91,9 @@ class TestNewOrderKinds:
         class S(EventLog):
             def on_bar(self, ctx):
                 if ctx.idx == 0:
-                    self.submit_order(orders.Market(side="buy", units=10.0, tif="at_open"))
+                    self.submit_order(
+                        orders.Market(side="buy", units=10.0, tif="at_open")
+                    )
                 if ctx.idx == 2 and ctx.position is not None:
                     self.close_position()
 
@@ -99,7 +109,9 @@ class TestNewOrderKinds:
                     self.enter()
                     # Protect with a 200bp trailing sell stop order.
                     self.submit_order(
-                        orders.TrailingStopMarket(side="sell", offset=200.0, offset_kind="bps")
+                        orders.TrailingStopMarket(
+                            side="sell", offset=200.0, offset_kind="bps"
+                        )
                     )
 
         # Rally to 110 then dip below 110*(1-2%)=107.8. Opens stay above the
@@ -121,7 +133,9 @@ class TestNewOrderKinds:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.submit_order(
-                        orders.TrailingStopMarket(side="sell", offset=4.0, offset_kind="ticks")
+                        orders.TrailingStopMarket(
+                            side="sell", offset=4.0, offset_kind="ticks"
+                        )
                     )
 
         data = _bars([100.0, 101.0])
@@ -139,7 +153,9 @@ class TestFlags:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.submit_order(
-                        orders.Limit(side="buy", price=101.0, units=10.0, post_only=True)
+                        orders.Limit(
+                            side="buy", price=101.0, units=10.0, post_only=True
+                        )
                     )
 
         data = _bars([100.0, 100.5, 100.0], opens=[100.0, 100.2, 100.0])
@@ -158,7 +174,9 @@ class TestFlags:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.submit_order(
-                        orders.Limit(side="buy", price=99.0, units=10.0, reduce_only=True)
+                        orders.Limit(
+                            side="buy", price=99.0, units=10.0, reduce_only=True
+                        )
                     )
 
             def on_order_rejected(self, ctx, event):

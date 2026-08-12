@@ -39,6 +39,8 @@ use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
+// Used by `session_tests.rs` via `use super::*`.
+#[cfg(test)]
 use crate::portfolio::risk::RejectReason;
 
 /// The market data one schedule entry carries.

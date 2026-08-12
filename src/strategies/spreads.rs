@@ -46,12 +46,30 @@ pub enum OptionType {
 }
 
 impl OptionType {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse a broker option-type code (`CE`/`CALL`/`C`, `PE`/`PUT`/`P`).
+    ///
+    /// Case-insensitive. Returns `None` for anything else rather than
+    /// guessing, because defaulting an unrecognised code to `Call` would
+    /// price a put as a call.
+    pub fn from_code(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "CE" | "CALL" | "C" => Some(OptionType::Call),
             "PE" | "PUT" | "P" => Some(OptionType::Put),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for OptionType {
+    type Err = ();
+
+    /// Enables `"CE".parse::<OptionType>()`.
+    ///
+    /// Previously an inherent `from_str` shadowed this trait method, so
+    /// `.parse()` did not work while `OptionType::from_str` did -- the kind of
+    /// asymmetry that reads as a bug at the call site.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_code(s).ok_or(())
     }
 }
 
@@ -270,10 +288,11 @@ impl SpreadBacktest {
             let unrealized_pnl = position.as_ref().map(|p| p.total_unrealized_pnl()).unwrap_or(0.0);
 
             // Check if any leg has expired at this bar
-            let is_expiry = position.is_some()
-                && self.config.leg_expiry_timestamps.as_ref().map_or(false, |expiries| {
-                    expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts)
-                });
+            let is_expiry =
+                position.is_some()
+                    && self.config.leg_expiry_timestamps.as_ref().is_some_and(|expiries| {
+                        expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts)
+                    });
 
             // Check for exit signals or conditions
             let should_exit = position.is_some()
@@ -340,10 +359,11 @@ impl SpreadBacktest {
             }
 
             // Check for entry signals (don't re-enter after all legs expired)
-            let all_expired =
-                self.config.leg_expiry_timestamps.as_ref().map_or(false, |expiries| {
-                    expiries.iter().all(|&exp_ts| timestamps[i] >= exp_ts)
-                });
+            let all_expired = self
+                .config
+                .leg_expiry_timestamps
+                .as_ref()
+                .is_some_and(|expiries| expiries.iter().all(|&exp_ts| timestamps[i] >= exp_ts));
             if position.is_none() && entries[i] && !all_expired {
                 let legs: Vec<LegPosition> = self
                     .config
@@ -532,7 +552,10 @@ mod tests {
     use crate::core::types::StopConfig;
     use crate::core::types::TargetConfig;
 
-    fn sample_data() -> (Vec<i64>, Vec<f64>, Vec<Vec<f64>>, Vec<bool>, Vec<bool>) {
+    /// `(timestamps, underlying, per-leg premiums, entries, exits)`.
+    type SampleData = (Vec<i64>, Vec<f64>, Vec<Vec<f64>>, Vec<bool>, Vec<bool>);
+
+    fn sample_data() -> SampleData {
         let n = 20;
         let timestamps: Vec<i64> = (0..n as i64).collect();
         let underlying: Vec<f64> = (100..120).map(|x| x as f64).collect();
@@ -690,7 +713,7 @@ mod tests {
         SpreadBacktest::new(config).run(
             &timestamps,
             &underlying,
-            &vec![premiums.to_vec()],
+            &[premiums.to_vec()],
             &entries,
             &exits,
         )

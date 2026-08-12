@@ -130,9 +130,11 @@ pub fn macd(
         // Calculate initial signal using SMA of first signal_period MACD values
         let mut sum = 0.0;
         let mut count = 0;
-        for i in (slow_period - 1)..=(slow_period - 1 + signal_period - 1) {
-            if i < n && !macd_line[i].is_nan() {
-                sum += macd_line[i];
+        for value in
+            macd_line.iter().take((slow_period - 1 + signal_period).min(n)).skip(slow_period - 1)
+        {
+            if !value.is_nan() {
+                sum += value;
                 count += 1;
             }
         }
@@ -229,18 +231,18 @@ pub fn stochastic(
     // Calculate %D (SMA of %K)
     let d_start = k_period - 1 + d_period - 1;
     if d_start < n {
-        for i in d_start..n {
+        for (i, d_slot) in d.iter_mut().enumerate().take(n).skip(d_start) {
             let start = i + 1 - d_period;
             let mut sum = 0.0;
             let mut count = 0;
-            for j in start..=i {
-                if !k[j].is_nan() {
-                    sum += k[j];
+            for value in k.iter().take(i + 1).skip(start) {
+                if !value.is_nan() {
+                    sum += value;
                     count += 1;
                 }
             }
             if count == d_period {
-                d[i] = sum / d_period as f64;
+                *d_slot = sum / d_period as f64;
             }
         }
     }

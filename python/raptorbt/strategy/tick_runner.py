@@ -23,10 +23,10 @@ import numpy as np
 
 from raptorbt._raptorbt import (
     BarAggregator,
-    PyBacktestConfig,
-    PyInstrumentConfig,
-    PyPortfolioResult,
-    PyPortfolioSession,
+    BacktestConfig,
+    InstrumentConfig,
+    PortfolioResult,
+    PortfolioSession,
 )
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import Bar, BookSnapshot, QuoteTick, TradeTick
@@ -138,7 +138,9 @@ def setup_tick_strategy(strategy, ctx, symbols, primary_bars):
     return clocks, streams, primary
 
 
-def drive_tick_events(strategy, ctx, session, symbols, clocks, streams, primary, apply_commands):
+def drive_tick_events(
+    strategy, ctx, session, symbols, clocks, streams, primary, apply_commands
+):
     """Drain every pending schedule event through the strategy's hooks.
 
     Shared by the batch tick runner and the live stream: both produce the
@@ -228,16 +230,16 @@ def drive_tick_events(strategy, ctx, session, symbols, clocks, streams, primary,
 def run_tick_strategy(
     strategy: Strategy | type[Strategy],
     ticks: dict[str, dict],
-    config: PyBacktestConfig | None = None,
+    config: BacktestConfig | None = None,
     primary_bars: tuple[int, str] | None = None,
     depth: dict[str, dict] | None = None,
     directions: dict[str, int] | None = None,
     instruments: dict | None = None,
-    instrument_configs: dict[str, PyInstrumentConfig] | None = None,
+    instrument_configs: dict[str, InstrumentConfig] | None = None,
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
-) -> PyPortfolioResult:
+) -> PortfolioResult:
     """Run one strategy over N instruments' tick streams.
 
     ``ticks`` maps symbol -> dict of arrays: ``timestamps`` and ``ltp`` are
@@ -266,7 +268,7 @@ def run_tick_strategy(
     symbols = list(ticks.keys())
     arrays = {symbol: _as_tick_arrays(ticks[symbol]) for symbol in symbols}
 
-    session = PyPortfolioSession(
+    session = PortfolioSession(
         config=config, account_type=account_type, leverage=leverage
     )
     for symbol in symbols:

@@ -44,10 +44,7 @@ fn cholesky(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, &'static str> {
 
     for i in 0..n {
         for j in 0..=i {
-            let mut sum = 0.0;
-            for k in 0..j {
-                sum += l[i][k] * l[j][k];
-            }
+            let sum: f64 = l[i][..j].iter().zip(&l[j][..j]).map(|(a, b)| a * b).sum();
 
             if i == j {
                 let diag = matrix[i][i] - sum;
@@ -175,8 +172,8 @@ pub fn simulate_portfolio_forward(
     let chol = cholesky(correlation_matrix).unwrap_or_else(|_| {
         // Fallback: identity matrix (independent assets)
         let mut identity = vec![vec![0.0; n_assets]; n_assets];
-        for i in 0..n_assets {
-            identity[i][i] = 1.0;
+        for (i, row) in identity.iter_mut().enumerate() {
+            row[i] = 1.0;
         }
         identity
     });
@@ -184,7 +181,7 @@ pub fn simulate_portfolio_forward(
     // Prepare a base RNG and create per-chunk seeds via jumping
     let mut base_rng = Xoshiro256::new(config.seed);
     let n_chunks = rayon::current_num_threads().max(1);
-    let chunk_size = (config.n_simulations + n_chunks - 1) / n_chunks;
+    let chunk_size = config.n_simulations.div_ceil(n_chunks);
 
     let chunk_rngs: Vec<Xoshiro256> = (0..n_chunks)
         .map(|_| {

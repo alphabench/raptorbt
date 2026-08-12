@@ -544,7 +544,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn day_expiry_follows_the_trading_date_not_the_utc_date() {
         // A session running past 05:30 IST crosses UTC midnight while the
         // IST trading date is unchanged. Under UTC-only expiry a DAY order
@@ -608,6 +607,7 @@ mod tests {
         assert!(expired(&order, expire_ns, IST));
     }
 
+    #[test]
     fn day_expires_on_utc_date_rollover() {
         let (mut engine, id) =
             engine_with(OrderKind::Limit { price: 90.0 }, OrderSide::Buy, TimeInForce::Day);

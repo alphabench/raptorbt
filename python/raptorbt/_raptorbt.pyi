@@ -14,7 +14,7 @@ _F64 = npt.NDArray[np.float64]
 _I64 = npt.NDArray[np.int64]
 _Bool = npt.NDArray[np.bool_]
 
-# Trading minutes per session, for PyBacktestConfig(session_minutes=...).
+# Trading minutes per session, for BacktestConfig(session_minutes=...).
 SESSION_NSE: float
 SESSION_MCX: float
 SESSION_CDS: float
@@ -25,7 +25,7 @@ IST_OFFSET_NS: int
 # (timestamps, open, high, low, close, volume, entries, exits, direction, weight, symbol)
 _Instrument = tuple[_I64, _F64, _F64, _F64, _F64, _F64, _Bool, _Bool, int, float, str]
 
-class PyBacktestConfig:
+class BacktestConfig:
     initial_capital: float
     fees: float
     slippage: float
@@ -74,7 +74,7 @@ class PyBacktestConfig:
     def set_risk_reward_target(self, ratio: float) -> None: ...
     def set_session_config(self, *args: Any, **kwargs: Any) -> None: ...
 
-class PyInstrumentConfig:
+class InstrumentConfig:
     lot_size: float | None
     alloted_capital: float | None
     existing_qty: float | None
@@ -94,32 +94,32 @@ class PyInstrumentConfig:
     def set_atr_target(self, multiplier: float, period: int) -> None: ...
     def set_risk_reward_target(self, ratio: float) -> None: ...
 
-class PyStopConfig:
+class StopConfig:
     stop_type: str
     percent: float | None
     multiplier: float | None
     period: int | None
     @staticmethod
-    def fixed(percent: float) -> PyStopConfig: ...
+    def fixed(percent: float) -> StopConfig: ...
     @staticmethod
-    def atr(multiplier: float, period: int) -> PyStopConfig: ...
+    def atr(multiplier: float, period: int) -> StopConfig: ...
     @staticmethod
-    def trailing(percent: float) -> PyStopConfig: ...
+    def trailing(percent: float) -> StopConfig: ...
 
-class PyTargetConfig:
+class TargetConfig:
     target_type: str
     percent: float | None
     multiplier: float | None
     period: int | None
     ratio: float | None
     @staticmethod
-    def fixed(percent: float) -> PyTargetConfig: ...
+    def fixed(percent: float) -> TargetConfig: ...
     @staticmethod
-    def atr(multiplier: float, period: int) -> PyTargetConfig: ...
+    def atr(multiplier: float, period: int) -> TargetConfig: ...
     @staticmethod
-    def risk_reward(ratio: float) -> PyTargetConfig: ...
+    def risk_reward(ratio: float) -> TargetConfig: ...
 
-class PyTrade:
+class Trade:
     id: int
     symbol: str
     entry_idx: int
@@ -138,7 +138,7 @@ class PyTrade:
     fee_breakdown: dict[str, float] | None
     exit_reason: str
 
-class PyBacktestMetrics:
+class BacktestMetrics:
     total_return_pct: float
     sharpe_ratio: float
     max_drawdown_pct: float
@@ -178,31 +178,31 @@ class PyBacktestMetrics:
 
     def to_dict(self) -> dict[str, Any]: ...
 
-class PyBacktestResult:
-    metrics: PyBacktestMetrics
+class BacktestResult:
+    metrics: BacktestMetrics
 
     def equity_curve(self) -> list[float]: ...
     def drawdown_curve(self) -> list[float]: ...
-    def trades(self) -> list[PyTrade]: ...
+    def trades(self) -> list[Trade]: ...
     def returns(self) -> list[float]: ...
 
-class PyInstrumentSummary:
+class InstrumentSummary:
     symbol: str
     trades: int
     pnl: float
     rejected_entries: int
 
-class PyPortfolioResult:
-    result: PyBacktestResult
-    per_instrument: list[PyInstrumentSummary]
+class PortfolioResult:
+    result: BacktestResult
+    per_instrument: list[InstrumentSummary]
     rejected_entries: int
     halted: bool
     # Bar index in array runs; a schedule-event ordinal in session runs
     # (``run_portfolio_strategy``), which interleaves N instrument streams.
     halted_at: int | None
-    metrics: PyBacktestMetrics
+    metrics: BacktestMetrics
 
-class PyBatchSpreadItem:
+class BatchSpreadItem:
     strategy_id: str
     spread_type: str
     max_loss: float | None
@@ -221,22 +221,22 @@ def run_single_backtest(
     direction: int = ...,
     weight: float = ...,
     symbol: str = ...,
-    config: PyBacktestConfig | None = ...,
+    config: BacktestConfig | None = ...,
     position_sizes: _F64 | None = ...,
-    instrument_config: PyInstrumentConfig | None = ...,
-) -> PyBacktestResult: ...
+    instrument_config: InstrumentConfig | None = ...,
+) -> BacktestResult: ...
 def run_basket_backtest(
     instruments: Sequence[_Instrument],
-    config: PyBacktestConfig | None = ...,
+    config: BacktestConfig | None = ...,
     sync_mode: str = ...,
-    instrument_configs: dict[str, PyInstrumentConfig] | None = ...,
-) -> PyBacktestResult: ...
+    instrument_configs: dict[str, InstrumentConfig] | None = ...,
+) -> BacktestResult: ...
 def run_portfolio_backtest(
     instruments: Sequence[_Instrument],
-    config: PyBacktestConfig | None = ...,
+    config: BacktestConfig | None = ...,
     allocation: str = ...,
-    instrument_configs: dict[str, PyInstrumentConfig] | None = ...,
-) -> PyPortfolioResult:
+    instrument_configs: dict[str, InstrumentConfig] | None = ...,
+) -> PortfolioResult:
     """Simulate instruments against one shared capital pool.
 
     Unlike summing independent per-symbol runs, capital is shared, so
@@ -244,12 +244,12 @@ def run_portfolio_backtest(
     `allocation` is "equal_weight" or "full".
     """
 
-def run_options_backtest(*args: Any, **kwargs: Any) -> PyBacktestResult: ...
-def run_pairs_backtest(*args: Any, **kwargs: Any) -> PyBacktestResult: ...
-def run_multi_backtest(*args: Any, **kwargs: Any) -> PyBacktestResult: ...
-def run_spread_backtest(*args: Any, **kwargs: Any) -> PyBacktestResult: ...
-def run_tick_backtest(*args: Any, **kwargs: Any) -> PyBacktestResult: ...
-def batch_spread_backtest(*args: Any, **kwargs: Any) -> list[PyBacktestResult]: ...
+def run_options_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_pairs_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_multi_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_spread_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_tick_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def batch_spread_backtest(*args: Any, **kwargs: Any) -> list[BacktestResult]: ...
 def simulate_portfolio_mc(
     returns: _F64,
     weights: _F64,
@@ -270,7 +270,7 @@ class RiskModel:
     n_obs: int
     def cov(self) -> _F64: ...
 
-class PyOptimizerConfig:
+class OptimizerConfig:
     risk_aversion: float
     turnover_penalty: float
     position_cap: float
@@ -309,7 +309,7 @@ class PyOptimizerConfig:
         net_max: float = ...,
     ) -> None: ...
 
-class PyOptimizationResult:
+class OptimizationResult:
     snapped: list[bool]
     # cash is 1 - sum(w) (net-based); for a long/short book read the
     # exposure fields instead of inferring from cash.
@@ -324,13 +324,13 @@ class PyOptimizationResult:
     def weights(self) -> _F64: ...
     def trades(self) -> _F64: ...
 
-class PyRiskContributions:
+class RiskContributions:
     total_vol_annualized: float
     def marginal(self) -> _F64: ...
     def contribution(self) -> _F64: ...
     def pct_contribution(self) -> _F64: ...
 
-class PyOptimizeItem:
+class OptimizeItem:
     def __init__(
         self,
         item_id: str,
@@ -339,7 +339,7 @@ class PyOptimizeItem:
         portfolio_value: float | None = ...,
     ) -> None: ...
 
-class PyRankIc:
+class RankIC:
     mean_ic: float
     stdev_ic: float
     t_stat: float
@@ -350,7 +350,7 @@ class PyRankIc:
     mean_names: float
     def daily_ic(self) -> _F64: ...
 
-class PyRebalanceSimResult:
+class RebalanceSimResult:
     n_rebalances: int
     n_trades: int
     total_cost_drag_annualized: float
@@ -370,18 +370,18 @@ def optimize_portfolio(
     alpha: _F64,
     w_current: _F64,
     asset_ids: Sequence[str],
-    config: PyOptimizerConfig,
-) -> PyOptimizationResult: ...
+    config: OptimizerConfig,
+) -> OptimizationResult: ...
 def batch_optimize_portfolios(
     model: RiskModel,
-    items: Sequence[PyOptimizeItem],
-    config: PyOptimizerConfig,
-) -> list[tuple[str, PyOptimizationResult]]: ...
+    items: Sequence[OptimizeItem],
+    config: OptimizerConfig,
+) -> list[tuple[str, OptimizationResult]]: ...
 def compute_risk_contributions(
     model: RiskModel,
     weights: _F64,
     asset_ids: Sequence[str],
-) -> PyRiskContributions: ...
+) -> RiskContributions: ...
 def winsorize_panel(values: _F64, pct: float) -> _F64: ...
 def zscore_panel(values: _F64, min_names: int) -> _F64: ...
 def rank_panel(values: _F64, min_names: int) -> _F64: ...
@@ -392,7 +392,7 @@ def rank_ic(
     prices: _F64,
     horizon: int,
     min_names: int,
-) -> PyRankIc: ...
+) -> RankIC: ...
 def simulate_rebalance_policy(
     prices: _F64,
     target_weights: _F64,
@@ -403,7 +403,7 @@ def simulate_rebalance_policy(
     min_trade_value: float = ...,
     dp_charge_per_isin: float = ...,
     periods_per_year: float = ...,
-) -> PyRebalanceSimResult: ...
+) -> RebalanceSimResult: ...
 def indian_cost_schedule(segment: str) -> dict[str, float]: ...
 
 # --- Indicators -------------------------------------------------------------
@@ -437,7 +437,9 @@ def compute_tick_exit_signals(
 ) -> _Bool: ...
 def tick_spread_pct(bid: _F64, ask: _F64) -> _F64: ...
 def buy_sell_imbalance_delta(buy_qty_delta: _F64, sell_qty_delta: _F64) -> _F64: ...
-def return_window(timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...) -> _F64: ...
+def return_window(
+    timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...
+) -> _F64: ...
 def realized_vol_rolling(
     timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...
 ) -> _F64: ...
@@ -561,7 +563,9 @@ class Indicator:
     def bollinger(period: int, k: float = ...) -> Indicator: ...
     @staticmethod
     def macd(fast: int = ..., slow: int = ..., signal: int = ...) -> Indicator: ...
-    def update_bar(self, open: float, high: float, low: float, close: float) -> Any | None: ...
+    def update_bar(
+        self, open: float, high: float, low: float, close: float
+    ) -> Any | None: ...
     def reset(self) -> None: ...
 
 # --- Bar aggregation ---------------------------------------------------------
@@ -572,52 +576,98 @@ class BarAggregator:
     step: int
     unit: str
     def __init__(
-        self, step: int, unit: str, tz_offset_ns: int = ...,
+        self,
+        step: int,
+        unit: str,
+        tz_offset_ns: int = ...,
         brick_size: float = ...,
     ) -> None: ...
     def push_bar(
-        self, timestamp: int, open: float, high: float, low: float,
-        close: float, volume: float,
+        self,
+        timestamp: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
     ) -> tuple[int, float, float, float, float, float] | None: ...
     def push_trade(
-        self, timestamp: int, price: float, size: float, signed_size: float = ...,
+        self,
+        timestamp: int,
+        price: float,
+        size: float,
+        signed_size: float = ...,
     ) -> tuple[int, float, float, float, float, float] | None: ...
     # Renko completes several bricks at once; drain after every push.
     def next_pending(self) -> tuple[int, float, float, float, float, float] | None: ...
     def flush(self) -> tuple[int, float, float, float, float, float] | None: ...
 
 def aggregate_bars(
-    timestamps: _I64, open: _F64, high: _F64, low: _F64, close: _F64,
-    volume: _F64, step: int, unit: str, tz_offset_ns: int = ...,
+    timestamps: _I64,
+    open: _F64,
+    high: _F64,
+    low: _F64,
+    close: _F64,
+    volume: _F64,
+    step: int,
+    unit: str,
+    tz_offset_ns: int = ...,
     brick_size: float = ...,
 ) -> _BarArrays: ...
 def bars_from_ticks(
-    timestamps: _I64, ltp: _F64, buy_qty_delta: _F64, sell_qty_delta: _F64,
-    step: int, unit: str, tz_offset_ns: int = ..., brick_size: float = ...,
+    timestamps: _I64,
+    ltp: _F64,
+    buy_qty_delta: _F64,
+    sell_qty_delta: _F64,
+    step: int,
+    unit: str,
+    tz_offset_ns: int = ...,
+    brick_size: float = ...,
 ) -> _BarArrays: ...
 
-class PyPortfolioSession:
+class PortfolioSession:
     def __init__(
-        self, config: PyBacktestConfig | None = ...,
-        account_type: str = ..., leverage: float = ...,
+        self,
+        config: BacktestConfig | None = ...,
+        account_type: str = ...,
+        leverage: float = ...,
     ) -> None: ...
     def add_instrument(
-        self, symbol: str, direction: int = ...,
-        instrument_config: PyInstrumentConfig | None = ...,
-        instrument: InstrumentSpec | None = ..., oms_type: str = ...,
+        self,
+        symbol: str,
+        direction: int = ...,
+        instrument_config: InstrumentConfig | None = ...,
+        instrument: InstrumentSpec | None = ...,
+        oms_type: str = ...,
     ) -> int: ...
     def set_bars(
-        self, instrument: int, timestamps: _I64, open: _F64, high: _F64,
-        low: _F64, close: _F64, volume: _F64,
+        self,
+        instrument: int,
+        timestamps: _I64,
+        open: _F64,
+        high: _F64,
+        low: _F64,
+        close: _F64,
+        volume: _F64,
     ) -> None: ...
     def set_ticks(
-        self, instrument: int, timestamps: _I64, ltp: _F64,
-        bid: _F64 | None = ..., ask: _F64 | None = ...,
-        buy_qty_delta: _F64 | None = ..., sell_qty_delta: _F64 | None = ...,
+        self,
+        instrument: int,
+        timestamps: _I64,
+        ltp: _F64,
+        bid: _F64 | None = ...,
+        ask: _F64 | None = ...,
+        buy_qty_delta: _F64 | None = ...,
+        sell_qty_delta: _F64 | None = ...,
     ) -> None: ...
     def set_depth(
-        self, instrument: int, timestamps: _I64,
-        bid_prices: Any, bid_sizes: Any, ask_prices: Any, ask_sizes: Any,
+        self,
+        instrument: int,
+        timestamps: _I64,
+        bid_prices: Any,
+        bid_sizes: Any,
+        ask_prices: Any,
+        ask_sizes: Any,
     ) -> None: ...
     def current_depth(
         self,
@@ -629,40 +679,64 @@ class PyPortfolioSession:
     # push_tick returns how many events it appended (0-2): a trade print, plus
     # a quote when ask > 0.
     def push_tick(
-        self, instrument: int, timestamp: int, ltp: float,
-        bid: float = ..., ask: float = ...,
-        buy_qty_delta: float = ..., sell_qty_delta: float = ...,
+        self,
+        instrument: int,
+        timestamp: int,
+        ltp: float,
+        bid: float = ...,
+        ask: float = ...,
+        buy_qty_delta: float = ...,
+        sell_qty_delta: float = ...,
     ) -> int: ...
     def push_bar(
-        self, instrument: int, timestamp: int, open: float, high: float,
-        low: float, close: float, volume: float,
+        self,
+        instrument: int,
+        timestamp: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
     ) -> None: ...
     # bids/asks are (price, size) lists, best level first.
     def push_depth(
-        self, instrument: int, timestamp: int,
-        bids: Sequence[tuple[float, float]], asks: Sequence[tuple[float, float]],
+        self,
+        instrument: int,
+        timestamp: int,
+        bids: Sequence[tuple[float, float]],
+        asks: Sequence[tuple[float, float]],
     ) -> None: ...
     # Events pushed or merged but not yet applied.
     def remaining(self) -> int: ...
     def __len__(self) -> int: ...
     # Bar sessions only; returns None on a tick event.
-    def current(self) -> tuple[int, int, int, float, float, float, float, float] | None: ...
+    def current(
+        self,
+    ) -> tuple[int, int, int, float, float, float, float, float] | None: ...
     # (kind, instrument, local_idx, ts, a, b, c, d, e); kind is
     # "bar" (o/h/l/c/v), "trade" (price, size, ...) or "quote" (bid, ask, ...).
     def current_event(
         self,
     ) -> tuple[str, int, int, int, float, float, float, float, float] | None: ...
     def apply_current(
-        self, entry: bool = ..., exit: bool = ..., atr: float = ...,
-        size_mult: float | None = ..., stop_price: float | None = ...,
+        self,
+        entry: bool = ...,
+        exit: bool = ...,
+        atr: float = ...,
+        size_mult: float | None = ...,
+        stop_price: float | None = ...,
         target_price: float | None = ...,
-    ) -> list[PyEngineEvent]: ...
+    ) -> list[EngineEvent]: ...
     def submit_order(self, instrument: int, *args: Any, **kwargs: Any) -> int: ...
     def cancel_order(self, instrument: int, idx: int, order_id: int) -> bool: ...
     def cancel_all_orders(self, instrument: int, idx: int) -> list[int]: ...
     def modify_order(
-        self, instrument: int, order_id: int, units: float | None = ...,
-        size_frac: float | None = ..., limit_price: float | None = ...,
+        self,
+        instrument: int,
+        order_id: int,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
         trigger_price: float | None = ...,
     ) -> bool: ...
     def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
@@ -673,34 +747,40 @@ class PyPortfolioSession:
     # apply_current() — enforced, since adopting mid-run understates max
     # drawdown. Returns the new position id.
     def adopt_position(
-        self, instrument: int, timestamp_ns: int, price: float, size: float,
+        self,
+        instrument: int,
+        timestamp_ns: int,
+        price: float,
+        size: float,
     ) -> int: ...
     def request_close(self, instrument: int, position_id: int) -> None: ...
     def set_underlying_price(
-        self, instrument: int, price: float | None = ...,
+        self,
+        instrument: int,
+        price: float | None = ...,
     ) -> None: ...
-    def positions(self, instrument: int) -> list[PyPositionSnapshot]: ...
-    def position(self, instrument: int) -> PyPositionSnapshot | None: ...
+    def positions(self, instrument: int) -> list[PositionSnapshot]: ...
+    def position(self, instrument: int) -> PositionSnapshot | None: ...
     def equity(self) -> float: ...
     def cash(self) -> float: ...
     def free_capital(self) -> float: ...
     def is_halted(self) -> bool: ...
-    def finish(self) -> PyPortfolioResult: ...
+    def finish(self) -> PortfolioResult: ...
 
 # --- Per-bar strategy session (class-based strategy contract) ---------------
 
-class PyEngineEvent:
+class EngineEvent:
     kind: str
     idx: int
     price: float | None
     size: float | None
     direction: int | None
-    trade: PyTrade | None
+    trade: Trade | None
     reject_reason: str | None
     order_id: int | None
     client_order_id: str | None
 
-class PyPositionSnapshot:
+class PositionSnapshot:
     position_id: int
     entry_idx: int
     entry_price: float
@@ -709,13 +789,13 @@ class PyPositionSnapshot:
     stop_price: float | None
     target_price: float | None
 
-class PyKernelSession:
+class KernelSession:
     def __init__(
         self,
         symbol: str = ...,
         direction: int = ...,
-        config: PyBacktestConfig | None = ...,
-        instrument_config: PyInstrumentConfig | None = ...,
+        config: BacktestConfig | None = ...,
+        instrument_config: InstrumentConfig | None = ...,
         instrument: InstrumentSpec | None = ...,
         oms_type: str = ...,
         account_type: str = ...,
@@ -736,7 +816,7 @@ class PyKernelSession:
         size_mult: float | None = ...,
         stop_price: float | None = ...,
         target_price: float | None = ...,
-    ) -> list[PyEngineEvent]: ...
+    ) -> list[EngineEvent]: ...
     def submit_order(
         self,
         side: str,
@@ -763,8 +843,14 @@ class PyKernelSession:
     def cancel_order(self, idx: int, order_id: int) -> bool: ...
     def cancel_all_orders(self, idx: int) -> list[int]: ...
     def submit_twap(
-        self, units: float, side: str, slices: int, interval_ns: int,
-        submitted_idx: int, submitted_ts: int, client_id: str,
+        self,
+        units: float,
+        side: str,
+        slices: int,
+        interval_ns: int,
+        submitted_idx: int,
+        submitted_ts: int,
+        client_id: str,
         reduce_only: bool = ...,
     ) -> int: ...
     def cancel_twap(self, algo_id: int, idx: int) -> bool: ...
@@ -778,26 +864,50 @@ class PyKernelSession:
         trigger_price: float | None = ...,
     ) -> bool: ...
     def open_order_ids(self) -> list[int]: ...
-    def positions(self) -> list[PyPositionSnapshot]: ...
+    def positions(self) -> list[PositionSnapshot]: ...
     def request_close(self, position_id: int) -> None: ...
     def free_capital(self) -> float: ...
-    def set_stop_price(self, price: float | None, position_id: int | None = ...) -> None: ...
-    def set_target_price(self, price: float | None, position_id: int | None = ...) -> None: ...
+    def set_stop_price(
+        self, price: float | None, position_id: int | None = ...
+    ) -> None: ...
+    def set_target_price(
+        self, price: float | None, position_id: int | None = ...
+    ) -> None: ...
     def equity(self) -> float: ...
     def cash(self) -> float: ...
     def is_in_position(self) -> bool: ...
-    def position(self) -> PyPositionSnapshot | None: ...
-    def finish(self) -> PyBacktestResult: ...
+    def position(self) -> PositionSnapshot | None: ...
+    def finish(self) -> BacktestResult: ...
 
 def resolve_atr_period(
-    config: PyBacktestConfig | None = ...,
-    instrument_config: PyInstrumentConfig | None = ...,
+    config: BacktestConfig | None = ...,
+    instrument_config: InstrumentConfig | None = ...,
 ) -> int | None: ...
 
 # --- Deprecated aliases ------------------------------------------------------
 # The ``Py`` prefix is a Rust-side disambiguator (the crate has its own
-# ``RiskModel``, ``Trade``, ``BacktestConfig`` in ``src/core``); it was never
-# meant to reach Python. These aliases keep old code type-checking while it
-# migrates. Resolved at runtime by ``raptorbt.__getattr__`` with a
+# ``BacktestConfig``, ``Trade`` and ``BacktestResult`` in ``src/core``); it was
+# never meant to reach Python. These aliases keep old code type-checking while
+# it migrates. Resolved at runtime by ``raptorbt.__getattr__`` with a
 # DeprecationWarning. Removed in 0.8.0.
+PyBacktestConfig = BacktestConfig
+PyBacktestMetrics = BacktestMetrics
+PyBacktestResult = BacktestResult
+PyBatchSpreadItem = BatchSpreadItem
+PyEngineEvent = EngineEvent
+PyInstrumentConfig = InstrumentConfig
+PyInstrumentSummary = InstrumentSummary
+PyKernelSession = KernelSession
+PyOptimizationResult = OptimizationResult
+PyOptimizeItem = OptimizeItem
+PyOptimizerConfig = OptimizerConfig
+PyPortfolioResult = PortfolioResult
+PyPortfolioSession = PortfolioSession
+PyPositionSnapshot = PositionSnapshot
+PyRankIc = RankIC
+PyRebalanceSimResult = RebalanceSimResult
+PyRiskContributions = RiskContributions
 PyRiskModel = RiskModel
+PyStopConfig = StopConfig
+PyTargetConfig = TargetConfig
+PyTrade = Trade

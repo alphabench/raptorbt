@@ -34,10 +34,10 @@ import warnings
 import numpy as np
 
 from raptorbt._raptorbt import (
-    PyBacktestConfig,
-    PyInstrumentConfig,
-    PyPortfolioResult,
-    PyPortfolioSession,
+    BacktestConfig,
+    InstrumentConfig,
+    PortfolioResult,
+    PortfolioSession,
 )
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import Bar
@@ -49,7 +49,7 @@ from raptorbt.strategy.streams import StreamState
 class PortfolioContext:
     """Read/query surface handed to strategy hooks in portfolio runs."""
 
-    def __init__(self, session: PyPortfolioSession, symbols: list[str], data: dict):
+    def __init__(self, session: PortfolioSession, symbols: list[str], data: dict):
         self._session = session
         self._symbols = symbols
         self._index_of = {s: i for i, s in enumerate(symbols)}
@@ -100,7 +100,9 @@ class PortfolioContext:
         """All open positions of a symbol, in opening order."""
         return self._session.positions(self._index_of[symbol or self.symbol])
 
-    def set_underlying_price(self, price: float | None, symbol: str | None = None) -> None:
+    def set_underlying_price(
+        self, price: float | None, symbol: str | None = None
+    ) -> None:
         """Price a symbol's options settle against at expiry.
 
         Routes to the current symbol by default, so a strategy tracking an
@@ -191,7 +193,6 @@ def drain_intents(strategy, symbol: str, idx: int) -> dict:
     }
 
 
-
 def apply_commands_on(strategy, session, ctx, symbols, id_map):
     """Build the command applier shared by the bar and tick runners.
 
@@ -270,22 +271,23 @@ def apply_commands_on(strategy, session, ctx, symbols, id_map):
 
     return apply_commands
 
+
 def run_portfolio_strategy(
     strategy: Strategy | type[Strategy],
     data: dict[str, dict],
-    config: PyBacktestConfig | None = None,
+    config: BacktestConfig | None = None,
     directions: dict[str, int] | None = None,
     instruments: dict | None = None,
-    instrument_configs: dict[str, PyInstrumentConfig] | None = None,
+    instrument_configs: dict[str, InstrumentConfig] | None = None,
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
-) -> PyPortfolioResult:
+) -> PortfolioResult:
     """Run one strategy over N instruments sharing a capital pool.
 
     ``data`` maps symbol -> dict of OHLCV arrays (``timestamps``/``open``/
     ``high``/``low``/``close``/``volume``). ``instruments`` optionally maps
-    symbol -> :class:`InstrumentSpec`. Returns a ``PyPortfolioResult``:
+    symbol -> :class:`InstrumentSpec`. Returns a ``PortfolioResult``:
     portfolio-level curves/metrics plus per-instrument summaries.
 
     ``account_type`` is ``"cash"`` (fully funded, the default) or
@@ -313,7 +315,7 @@ def run_portfolio_strategy(
     symbols = list(data.keys())
     arrays = {symbol: _as_arrays(data[symbol]) for symbol in symbols}
 
-    session = PyPortfolioSession(
+    session = PortfolioSession(
         config=config, account_type=account_type, leverage=leverage
     )
     for symbol in symbols:
@@ -383,9 +385,7 @@ def run_portfolio_strategy(
         strategy.on_bar(ctx)
         apply_commands(instrument, local_idx, ts)
 
-        events = session.apply_current(
-            **drain_intents(strategy, ctx.symbol, local_idx)
-        )
+        events = session.apply_current(**drain_intents(strategy, ctx.symbol, local_idx))
         dispatch_events(strategy, ctx, events)
 
     strategy.on_stop(ctx)

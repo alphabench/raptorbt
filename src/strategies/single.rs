@@ -64,6 +64,9 @@ impl SingleBacktest {
     ///
     /// # Returns
     /// Backtest result
+    // The OHLCV arrays are the Python call signature; a struct here would
+    // just be unpacked again at the binding boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_from_arrays(
         &self,
         timestamps: &[i64],

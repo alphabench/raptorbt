@@ -516,9 +516,9 @@ mod tests {
         let n_dates = 300;
         let prices: Vec<f64> = (0..n_dates).map(|t| 1.01f64.powi(t as i32)).collect();
         let out = momentum_panel(&prices, n_dates, 1, 252, 21).unwrap();
-        for d in 252..n_dates {
+        for (d, got) in out.iter().enumerate().take(n_dates).skip(252) {
             let expect = 1.01f64.powi((d - 21) as i32) / 1.01f64.powi((d - 252) as i32) - 1.0;
-            assert!((out[d] - expect).abs() < 1e-10);
+            assert!((got - expect).abs() < 1e-10);
         }
         assert!(out[251].is_nan());
     }

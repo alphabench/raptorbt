@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from raptorbt import PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import BacktestConfig, Strategy, run_strategy_backtest
 from raptorbt.strategy import orders
 
 
@@ -13,7 +13,9 @@ def _bars(closes, lows=None, highs=None, start_ts=0, step=1):
     return {
         "timestamps": np.arange(start_ts, start_ts + n * step, step, dtype=np.int64),
         "open": closes.copy(),
-        "high": np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0,
+        "high": (
+            np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0
+        ),
         "low": np.asarray(lows, dtype=np.float64) if lows is not None else closes - 1.0,
         "close": closes,
         "volume": np.full(n, 1_000.0),
@@ -21,7 +23,7 @@ def _bars(closes, lows=None, highs=None, start_ts=0, step=1):
 
 
 def _zero_fee_config():
-    config = PyBacktestConfig()
+    config = BacktestConfig()
     config.fees = 0.0
     return config
 
@@ -199,7 +201,9 @@ class TestOrderFlow:
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.submit_order(
-                        orders.StopLimit(side="buy", trigger=102.0, price=101.5, units=10.0)
+                        orders.StopLimit(
+                            side="buy", trigger=102.0, price=101.5, units=10.0
+                        )
                     )
 
         data = _bars(
@@ -218,8 +222,12 @@ class TestOrderFlow:
         class S(EventLog):
             def on_bar(self, ctx):
                 if ctx.idx == 0:
-                    self.a = self.submit_order(orders.Limit(side="buy", price=90.0, units=1.0))
-                    self.b = self.submit_order(orders.Limit(side="buy", price=91.0, units=1.0))
+                    self.a = self.submit_order(
+                        orders.Limit(side="buy", price=90.0, units=1.0)
+                    )
+                    self.b = self.submit_order(
+                        orders.Limit(side="buy", price=91.0, units=1.0)
+                    )
 
         data = _bars([100.0, 100.0])
         strategy = S()

@@ -39,7 +39,9 @@ def _run(premiums, quantity, *, max_loss=None, target_profit=None, exit_on_bar_4
     how the trigger tests make ``exit_reason`` the assertion.
     """
     n = len(premiums)
-    timestamps = np.arange(n, dtype=np.int64) * 300_000_000_000 + 1_786_000_000_000_000_000
+    timestamps = (
+        np.arange(n, dtype=np.int64) * 300_000_000_000 + 1_786_000_000_000_000_000
+    )
     entries = np.zeros(n, dtype=bool)
     entries[1] = True
     exits = np.zeros(n, dtype=bool)
@@ -59,7 +61,7 @@ def _run(premiums, quantity, *, max_loss=None, target_profit=None, exit_on_bar_4
         leg_configs=[("CE", STRIKE, quantity, LOT)],
         entries=entries,
         exits=exits,
-        config=r.PyBacktestConfig(initial_capital=500_000.0),
+        config=r.BacktestConfig(initial_capital=500_000.0),
         spread_type="custom",
         **kwargs,
     )

@@ -80,6 +80,8 @@ impl PositionManager {
     ///
     /// # Returns
     /// True if position was opened, false if already in position
+    // Mirrors `Position::open` deliberately -- see the note there.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_position(
         &mut self,
         idx: usize,

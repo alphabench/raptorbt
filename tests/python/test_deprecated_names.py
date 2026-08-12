@@ -76,6 +76,43 @@ def test_unknown_attribute_still_raises_attribute_error():
         raptorbt.NoSuchThing
 
 
+@pytest.mark.parametrize("old_name", sorted(raptorbt._RENAMED))
+def test_deep_import_from_extension_module_still_works(old_name):
+    """``from raptorbt._raptorbt import PyX`` keeps working, and warns.
+
+    Not hypothetical, and not merely defensive: ``PortfolioSession`` was never
+    re-exported at top level before 0.7.0, so reaching into the compiled module
+    was the *only* way to obtain it. Anyone who did that had no supported
+    alternative, so their import must survive the same window as the public
+    ones. Caught by tests/python/test_position_adoption.py, which broke on the
+    first pass of this rename.
+    """
+    from raptorbt import _raptorbt
+
+    new_name = raptorbt._RENAMED[old_name]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        old_obj = getattr(_raptorbt, old_name)
+
+    assert len(caught) == 1
+    assert issubclass(caught[0].category, DeprecationWarning)
+    assert old_obj is getattr(_raptorbt, new_name)
+
+
+@pytest.mark.parametrize("new_name", sorted(raptorbt._RENAMED.values()))
+def test_warning_names_a_target_that_actually_resolves(new_name):
+    """Whatever the warning tells people to write must exist.
+
+    The warning says "use raptorbt.X". If ``X`` is not importable from the
+    top-level package, we have told users to migrate to something that does not
+    exist. This is exactly what happened to ``PortfolioSession`` mid-rename.
+    """
+    assert hasattr(
+        raptorbt, new_name
+    ), f"deprecation warnings point at raptorbt.{new_name}, which does not resolve"
+
+
 def test_removal_is_scheduled():
     """Fails when 0.8.0 is cut. That failure is the instruction to finish the job.
 

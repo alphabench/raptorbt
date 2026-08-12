@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 import raptorbt
-from raptorbt import PyBacktestConfig, PyInstrumentConfig
+from raptorbt import BacktestConfig, InstrumentConfig
 
 HERE = Path(__file__).parent
 
@@ -117,38 +117,38 @@ def config_variants():
     """(name, config, instrument_config, direction) corpus for the single path."""
     variants = []
 
-    variants.append(("default_long", PyBacktestConfig(), None, 1))
-    variants.append(("default_short", PyBacktestConfig(), None, -1))
+    variants.append(("default_long", BacktestConfig(), None, 1))
+    variants.append(("default_short", BacktestConfig(), None, -1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.set_fixed_stop(0.03)
     c.set_fixed_target(0.06)
     variants.append(("fixed_stop_target", c, None, 1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.set_trailing_stop(0.04)
     variants.append(("trailing_stop", c, None, 1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.set_atr_stop(2.0, 14)
     c.set_risk_reward_target(2.0)
     variants.append(("atr_stop_rr_target", c, None, 1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.fee_segment = "NFO-FUT"
     variants.append(("indian_fees_nfo", c, None, 1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.slippage = 0.001
     variants.append(("slippage_pct", c, None, 1))
 
-    c = PyBacktestConfig()
+    c = BacktestConfig()
     c.max_positions = 1
     c.max_drawdown_pct = 15.0
     variants.append(("risk_gated", c, None, 1))
 
-    ic = PyInstrumentConfig(lot_size=50.0, alloted_capital=60_000.0)
-    variants.append(("lots_and_cap", PyBacktestConfig(), ic, 1))
+    ic = InstrumentConfig(lot_size=50.0, alloted_capital=60_000.0)
+    variants.append(("lots_and_cap", BacktestConfig(), ic, 1))
 
     return variants
 
@@ -179,8 +179,17 @@ def generate():
 
     for name, config, ic, direction in config_variants():
         result = raptorbt.run_single_backtest(
-            ts, o, h, l, c, v, entries, exits,
-            direction=direction, config=config, instrument_config=ic,
+            ts,
+            o,
+            h,
+            l,
+            c,
+            v,
+            entries,
+            exits,
+            direction=direction,
+            config=config,
+            instrument_config=ic,
         )
         fixtures[f"single/{name}"] = result_digest(result)
 
@@ -198,7 +207,7 @@ def generate():
         )
         instruments.append((pts, po, ph, pl, pc, pv, pe, px, 1, 1.0, f"SYM{seed}"))
     portfolio = raptorbt.run_portfolio_backtest(
-        instruments, config=PyBacktestConfig(), allocation="equal_weight"
+        instruments, config=BacktestConfig(), allocation="equal_weight"
     )
     fixtures["portfolio/shared_pool"] = {
         "equity_curve": [float.hex(float(x)) for x in portfolio.result.equity_curve()],

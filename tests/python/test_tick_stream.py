@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from raptorbt import (
-    PyBacktestConfig,
+    BacktestConfig,
     Strategy,
     TickStrategyStream,
     run_strategy_backtest,
@@ -32,7 +32,7 @@ def _ticks(prices, bids=None, asks=None, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -153,7 +153,9 @@ class TestWarmupBars:
                 "volume": np.ones(2),
             }
         }
-        stream = TickStrategyStream(S(), ["AAA"], config=_zero_fee_config(), warmup_bars=warmup)
+        stream = TickStrategyStream(
+            S(), ["AAA"], config=_zero_fee_config(), warmup_bars=warmup
+        )
         assert stream.positions("AAA"), "a warmup bar carried the entry"
 
 
@@ -170,8 +172,8 @@ class SmaCross(Strategy):
         self.closes.append(ctx.bar.close)
         if len(self.closes) < self.SLOW:
             return
-        fast = sum(self.closes[-self.FAST:]) / self.FAST
-        slow = sum(self.closes[-self.SLOW:]) / self.SLOW
+        fast = sum(self.closes[-self.FAST :]) / self.FAST
+        slow = sum(self.closes[-self.SLOW :]) / self.SLOW
         if fast > slow and ctx.position is None:
             self.enter(size_frac=0.5)
         elif fast < slow and ctx.position is not None:
@@ -186,8 +188,26 @@ class TestContextParity:
     live stream, so a bar-style strategy silently never entered.
     """
 
-    CLOSES = [100.0, 101.0, 99.0, 98.0, 97.0, 99.0, 103.0, 106.0, 108.0,
-              107.0, 104.0, 100.0, 97.0, 96.0, 98.0, 102.0, 105.0, 107.0]
+    CLOSES = [
+        100.0,
+        101.0,
+        99.0,
+        98.0,
+        97.0,
+        99.0,
+        103.0,
+        106.0,
+        108.0,
+        107.0,
+        104.0,
+        100.0,
+        97.0,
+        96.0,
+        98.0,
+        102.0,
+        105.0,
+        107.0,
+    ]
 
     def _bars(self):
         closes = np.asarray(self.CLOSES, dtype=np.float64)
@@ -204,8 +224,12 @@ class TestContextParity:
         bars = self._bars()
         batch = run_strategy_backtest(
             SmaCross(),
-            bars["timestamps"], bars["open"], bars["high"], bars["low"],
-            bars["close"], bars["volume"],
+            bars["timestamps"],
+            bars["open"],
+            bars["high"],
+            bars["low"],
+            bars["close"],
+            bars["volume"],
             symbol="AAA",
             config=_zero_fee_config(),
         )
@@ -213,17 +237,21 @@ class TestContextParity:
         stream = TickStrategyStream(SmaCross(), ["AAA"], config=_zero_fee_config())
         for i in range(len(bars["timestamps"])):
             stream.push_bar(
-                "AAA", int(bars["timestamps"][i]), bars["open"][i],
-                bars["high"][i], bars["low"][i], bars["close"][i],
+                "AAA",
+                int(bars["timestamps"][i]),
+                bars["open"][i],
+                bars["high"][i],
+                bars["low"][i],
+                bars["close"][i],
                 bars["volume"][i],
             )
         streamed = stream.finish()
 
         batch_trades = batch.trades()
         stream_trades = streamed.result.trades()
-        assert len(batch_trades) == len(stream_trades) > 0, (
-            "bar-style strategy must trade on the live stream too"
-        )
+        assert (
+            len(batch_trades) == len(stream_trades) > 0
+        ), "bar-style strategy must trade on the live stream too"
         for bt, st in zip(batch_trades, stream_trades):
             assert bt.entry_idx == st.entry_idx
             assert bt.entry_price == st.entry_price

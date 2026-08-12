@@ -8,7 +8,7 @@ gate, so a limit of N allowed N positions *per symbol*.
 
 import numpy as np
 
-from raptorbt import PyBacktestConfig, Strategy, run_portfolio_strategy
+from raptorbt import BacktestConfig, Strategy, run_portfolio_strategy
 
 
 def _bars(closes, start_ts=0, step=1):
@@ -25,7 +25,7 @@ def _bars(closes, start_ts=0, step=1):
 
 
 def _config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -42,7 +42,9 @@ class _EnterEverything(Strategy):
     def on_bar(self, ctx):
         self.enter(size_frac=self.size_frac)
         open_now = sum(
-            1 for symbol in ("AAA", "BBB", "CCC") if ctx.position_for(symbol) is not None
+            1
+            for symbol in ("AAA", "BBB", "CCC")
+            if ctx.position_for(symbol) is not None
         )
         self.max_concurrent = max(self.max_concurrent, open_now)
 
@@ -65,9 +67,9 @@ class TestPortfolioMaxPositions:
             strategy, _three_symbols(), config=_config(max_positions=2)
         )
 
-        assert strategy.max_concurrent <= 2, (
-            "max_positions=2 must cap concurrent positions across all symbols"
-        )
+        assert (
+            strategy.max_concurrent <= 2
+        ), "max_positions=2 must cap concurrent positions across all symbols"
         assert result.rejected_entries > 0
         assert result.rejected_entries == sum(
             s.rejected_entries for s in result.per_instrument

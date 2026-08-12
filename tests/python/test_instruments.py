@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import raptorbt
-from raptorbt import InstrumentSpec, PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import InstrumentSpec, BacktestConfig, Strategy, run_strategy_backtest
 
 
 def _bars(closes, start_ts=0, step=1):
@@ -36,7 +36,7 @@ class EnterEveryBar(Strategy):
 
 
 def _zero_fee_config():
-    config = PyBacktestConfig()
+    config = BacktestConfig()
     config.fees = 0.0
     return config
 
@@ -74,11 +74,15 @@ class TestConstructors:
 
     def test_option_rejects_bad_right(self):
         with pytest.raises(ValueError, match="right"):
-            InstrumentSpec.option("X", strike=100.0, right="straddle", expiration_ns=1, lot_size=1.0)
+            InstrumentSpec.option(
+                "X", strike=100.0, right="straddle", expiration_ns=1, lot_size=1.0
+            )
 
     def test_rejects_inverted_activation_expiry(self):
         with pytest.raises(ValueError, match="expiration_ns"):
-            InstrumentSpec.futures_contract("X", expiration_ns=5, lot_size=1.0, activation_ns=10)
+            InstrumentSpec.futures_contract(
+                "X", expiration_ns=5, lot_size=1.0, activation_ns=10
+            )
 
     def test_index_not_tradable_in_session(self):
         spec = InstrumentSpec.index("NIFTY 50")
@@ -154,7 +158,11 @@ class TestKernelIntegration:
     def test_pre_activation_entry_rejected(self):
         data = _bars([100.0, 101.0, 102.0, 103.0])
         spec = InstrumentSpec.futures_contract(
-            "FUT", expiration_ns=1_000, lot_size=1.0, activation_ns=2, price_increment=0.0
+            "FUT",
+            expiration_ns=1_000,
+            lot_size=1.0,
+            activation_ns=2,
+            price_increment=0.0,
         )
         result = run_strategy_backtest(
             EnterEveryBar, **data, config=_zero_fee_config(), instrument=spec

@@ -45,10 +45,14 @@ class StreamState:
 
         # (symbol, stream_id) -> aggregator. One per symbol per subscription,
         # so a symbol's composite bars are built from its bars alone.
-        self._aggregators: dict[str | None, list[tuple[int, int, str, BarAggregator]]] = {
+        self._aggregators: dict[
+            str | None, list[tuple[int, int, str, BarAggregator]]
+        ] = {
             key: [
                 (stream_id, step, unit, BarAggregator(step, unit, brick_size=brick))
-                for stream_id, (step, unit, brick) in enumerate_subscriptions(subscriptions)
+                for stream_id, (step, unit, brick) in enumerate_subscriptions(
+                    subscriptions
+                )
             ]
             for key in keys
         }
@@ -62,7 +66,11 @@ class StreamState:
                 self._unrouted = True
             # An unrouted registration listens on every symbol; see
             # `Strategy.register_indicator` for why that is rarely wanted.
-            if symbols is not None and symbol is not None and symbol not in self._primary:
+            if (
+                symbols is not None
+                and symbol is not None
+                and symbol not in self._primary
+            ):
                 known = ", ".join(str(k) for k in keys)
                 raise ValueError(
                     f"register_indicator(symbol={symbol!r}) names a symbol that is "
@@ -84,7 +92,9 @@ class StreamState:
         """Indicators listening on a symbol's primary stream."""
         return self._primary.get(symbol, ())
 
-    def push_trade(self, strategy, ctx, ts, price, size, symbol: str | None = None) -> None:
+    def push_trade(
+        self, strategy, ctx, ts, price, size, symbol: str | None = None
+    ) -> None:
         """Feed one trade print into the symbol's composite aggregators.
 
         The trade-driven twin of :meth:`push`. Primary-stream indicators are
@@ -93,7 +103,9 @@ class StreamState:
         """
         for stream_id, step, unit, aggregator in self._aggregators[symbol]:
             completed = aggregator.push_trade(ts, price, size)
-            self._dispatch(strategy, ctx, aggregator, completed, stream_id, step, unit, symbol)
+            self._dispatch(
+                strategy, ctx, aggregator, completed, stream_id, step, unit, symbol
+            )
 
     def _dispatch(
         self, strategy, ctx, aggregator, completed, stream_id, step, unit, symbol
@@ -118,7 +130,9 @@ class StreamState:
         """
         for stream_id, step, unit, aggregator in self._aggregators[symbol]:
             completed = aggregator.push_bar(ts, o, h, l, c, v)
-            self._dispatch(strategy, ctx, aggregator, completed, stream_id, step, unit, symbol)
+            self._dispatch(
+                strategy, ctx, aggregator, completed, stream_id, step, unit, symbol
+            )
 
         # Primary-registered indicators update before on_bar sees the bar.
         for indicator in self._primary[symbol]:

@@ -284,7 +284,7 @@ impl PairsBacktest {
         }
 
         let beta = (n * sum_xy - sum_x * sum_y) / denominator;
-        beta.max(0.1).min(10.0) // Constrain to reasonable range
+        beta.clamp(0.1, 10.0) // Constrain to reasonable range
     }
 
     /// Close position and calculate P&L.

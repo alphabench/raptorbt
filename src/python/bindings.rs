@@ -1,6 +1,7 @@
 //! PyO3 function bindings for RaptorBT.
 
 use numpy::{PyArray1, PyReadonlyArray1};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use std::collections::HashMap;
@@ -18,6 +19,28 @@ use crate::strategies::options::{
 };
 use crate::strategies::pairs::{PairsBacktest, PairsConfig};
 use crate::strategies::single::SingleBacktest;
+
+/// One instrument's arrays as Python hands them to `run_basket_backtest`:
+/// `(timestamps, open, high, low, close, volume, entries, exits, direction,
+/// weight, symbol)`.
+type PyInstrumentArrays<'py> = (
+    PyReadonlyArray1<'py, i64>,
+    PyReadonlyArray1<'py, f64>,
+    PyReadonlyArray1<'py, f64>,
+    PyReadonlyArray1<'py, f64>,
+    PyReadonlyArray1<'py, f64>,
+    PyReadonlyArray1<'py, f64>,
+    PyReadonlyArray1<'py, bool>,
+    PyReadonlyArray1<'py, bool>,
+    i32,
+    f64,
+    String,
+);
+
+/// One strategy's signals for `run_multi_backtest`:
+/// `(entries, exits, direction, weight, name)`.
+type PyStrategySignals<'py> =
+    (PyReadonlyArray1<'py, bool>, PyReadonlyArray1<'py, bool>, i32, f64, String);
 use crate::strategies::spreads::{
     LegConfig, OptionType as SpreadOptionType, SpreadBacktest, SpreadConfig, SpreadType,
 };
@@ -30,7 +53,7 @@ use super::numpy_bridge::*;
 // ============================================================================
 
 /// Python-exposed backtest configuration.
-#[pyclass]
+#[pyclass(name = "BacktestConfig")]
 #[derive(Debug, Clone)]
 pub struct PyBacktestConfig {
     #[pyo3(get, set)]
@@ -236,7 +259,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
 }
 
 /// Python-exposed per-instrument configuration.
-#[pyclass]
+#[pyclass(name = "InstrumentConfig")]
 #[derive(Debug, Clone)]
 pub struct PyInstrumentConfig {
     #[pyo3(get, set)]
@@ -323,7 +346,7 @@ impl From<&PyInstrumentConfig> for InstrumentConfig {
 }
 
 /// Python-exposed stop configuration.
-#[pyclass]
+#[pyclass(name = "StopConfig")]
 #[derive(Debug, Clone)]
 pub struct PyStopConfig {
     #[pyo3(get, set)]
@@ -375,7 +398,7 @@ impl PyStopConfig {
 }
 
 /// Python-exposed target configuration.
-#[pyclass]
+#[pyclass(name = "TargetConfig")]
 #[derive(Debug, Clone)]
 pub struct PyTargetConfig {
     #[pyo3(get, set)]
@@ -442,7 +465,7 @@ impl PyTargetConfig {
 // ============================================================================
 
 /// Python-exposed trade.
-#[pyclass]
+#[pyclass(name = "Trade")]
 #[derive(Debug, Clone)]
 pub struct PyTrade {
     #[pyo3(get)]
@@ -492,7 +515,7 @@ impl PyTrade {
 }
 
 /// Python-exposed backtest metrics.
-#[pyclass]
+#[pyclass(name = "BacktestMetrics")]
 #[derive(Debug, Clone)]
 pub struct PyBacktestMetrics {
     #[pyo3(get)]
@@ -604,7 +627,7 @@ impl PyBacktestMetrics {
 }
 
 /// Python-exposed backtest result.
-#[pyclass]
+#[pyclass(name = "BacktestResult")]
 #[derive(Debug, Clone)]
 pub struct PyBacktestResult {
     #[pyo3(get)]
@@ -649,6 +672,9 @@ impl PyBacktestResult {
 // Backtest Functions
 // ============================================================================
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run single instrument backtest.
 ///
 /// Note: the array-based runners (precomputed boolean entry/exit signals)
@@ -695,7 +721,7 @@ pub fn run_single_backtest<'py>(
         weight,
     };
 
-    let rust_config = config.map(|c| BacktestConfig::from(c)).unwrap_or_default();
+    let rust_config = config.map(BacktestConfig::from).unwrap_or_default();
     let inst_config = instrument_config.map(InstrumentConfig::from);
 
     let backtest = SingleBacktest::new(rust_config);
@@ -709,19 +735,7 @@ pub fn run_single_backtest<'py>(
 #[pyo3(signature = (instruments, config=None, sync_mode="all", instrument_configs=None))]
 pub fn run_basket_backtest<'py>(
     _py: Python<'py>,
-    instruments: Vec<(
-        PyReadonlyArray1<i64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<bool>,
-        PyReadonlyArray1<bool>,
-        i32,
-        f64,
-        String,
-    )>,
+    instruments: Vec<PyInstrumentArrays<'py>>,
     config: Option<&PyBacktestConfig>,
     sync_mode: &str,
     instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
@@ -757,7 +771,7 @@ pub fn run_basket_backtest<'py>(
     };
 
     let basket_config = BasketConfig {
-        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
         sync_mode: mode,
         ..Default::default()
     };
@@ -776,7 +790,7 @@ pub fn run_basket_backtest<'py>(
 }
 
 /// Per-instrument attribution from a portfolio backtest.
-#[pyclass]
+#[pyclass(name = "InstrumentSummary")]
 #[derive(Debug, Clone)]
 pub struct PyInstrumentSummary {
     #[pyo3(get)]
@@ -801,7 +815,7 @@ impl PyInstrumentSummary {
 }
 
 /// Result of a shared-capital portfolio backtest.
-#[pyclass]
+#[pyclass(name = "PortfolioResult")]
 #[derive(Debug, Clone)]
 pub struct PyPortfolioResult {
     #[pyo3(get)]
@@ -854,19 +868,7 @@ impl PyPortfolioResult {
 #[allow(clippy::type_complexity)]
 pub fn run_portfolio_backtest<'py>(
     _py: Python<'py>,
-    instruments: Vec<(
-        PyReadonlyArray1<i64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<f64>,
-        PyReadonlyArray1<bool>,
-        PyReadonlyArray1<bool>,
-        i32,
-        f64,
-        String,
-    )>,
+    instruments: Vec<PyInstrumentArrays<'py>>,
     config: Option<&PyBacktestConfig>,
     allocation: &str,
     instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
@@ -955,6 +957,9 @@ pub fn run_portfolio_backtest<'py>(
     })
 }
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run options backtest.
 #[pyfunction]
 #[pyo3(signature = (timestamps, open, high, low, close, volume, option_prices, entries, exits, direction=1, symbol="OPTION", config=None, option_type="call", strike_selection="atm", size_type="percent", size_value=1.0, lot_size=1, strike_interval=50.0))]
@@ -1022,7 +1027,7 @@ pub fn run_options_backtest<'py>(
     };
 
     let options_config = OptionsConfig {
-        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
         option_type: opt_type,
         strike_selection: strike_sel,
         size_type: size,
@@ -1037,6 +1042,9 @@ pub fn run_options_backtest<'py>(
     Ok(convert_result(result))
 }
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run pairs trading backtest.
 #[pyfunction]
 #[pyo3(signature = (leg1_timestamps, leg1_open, leg1_high, leg1_low, leg1_close, leg1_volume, leg2_timestamps, leg2_open, leg2_high, leg2_low, leg2_close, leg2_volume, entries, exits, direction=1, symbol="PAIR", config=None, hedge_ratio=1.0, dynamic_hedge=false))]
@@ -1092,7 +1100,7 @@ pub fn run_pairs_backtest<'py>(
     };
 
     let pairs_config = PairsConfig {
-        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
         hedge_ratio,
         dynamic_hedge,
         ..Default::default()
@@ -1104,6 +1112,9 @@ pub fn run_pairs_backtest<'py>(
     Ok(convert_result(result))
 }
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run spread backtest (multi-leg options).
 #[pyfunction]
 #[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None, leg_expiry_timestamps=None))]
@@ -1132,7 +1143,7 @@ pub fn run_spread_backtest<'py>(
         .into_iter()
         .map(|(opt_type, strike, quantity, lot_size)| {
             let option_type =
-                SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
+                SpreadOptionType::from_code(&opt_type).unwrap_or(SpreadOptionType::Call);
             LegConfig::new(option_type, strike, quantity, lot_size)
         })
         .collect();
@@ -1157,7 +1168,7 @@ pub fn run_spread_backtest<'py>(
     };
 
     let spread_config = SpreadConfig {
-        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
         spread_type: spread_type_enum,
         leg_configs: rust_leg_configs,
         max_loss,
@@ -1173,7 +1184,7 @@ pub fn run_spread_backtest<'py>(
 }
 
 /// A single spread backtest item for batch execution.
-#[pyclass]
+#[pyclass(name = "BatchSpreadItem")]
 #[derive(Clone)]
 pub struct PyBatchSpreadItem {
     #[pyo3(get, set)]
@@ -1195,6 +1206,9 @@ impl PyBatchSpreadItem {
     #[new]
     #[pyo3(signature = (strategy_id, legs_premiums, leg_configs, entries, exits,
         spread_type="custom", max_loss=None, target_profit=None))]
+    // The argument list IS the Python signature; collapsing it into a
+    // struct would change the public API for no reader benefit.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         strategy_id: String,
         legs_premiums: Vec<PyReadonlyArray1<f64>>,
@@ -1238,7 +1252,7 @@ pub fn batch_spread_backtest(
     // Convert shared data while holding GIL
     let ts = numpy_to_vec_i64(timestamps);
     let underlying = numpy_to_vec_f64(underlying_close);
-    let base_config = config.map(|c| BacktestConfig::from(c)).unwrap_or_default();
+    let base_config = config.map(BacktestConfig::from).unwrap_or_default();
 
     // Prepare each item into a self-contained struct for parallel execution
     struct PreparedItem {
@@ -1257,7 +1271,7 @@ pub fn batch_spread_backtest(
                 .into_iter()
                 .map(|(opt_type, strike, quantity, lot_size)| {
                     let option_type =
-                        SpreadOptionType::from_str(&opt_type).unwrap_or(SpreadOptionType::Call);
+                        SpreadOptionType::from_code(&opt_type).unwrap_or(SpreadOptionType::Call);
                     LegConfig::new(option_type, strike, quantity, lot_size)
                 })
                 .collect();
@@ -1317,6 +1331,9 @@ pub fn batch_spread_backtest(
     Ok(results.into_iter().map(|(id, result)| (id, convert_result(result))).collect())
 }
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run multi-strategy backtest.
 #[pyfunction]
 #[pyo3(signature = (timestamps, open, high, low, close, volume, strategies, config=None, combine_mode="any"))]
@@ -1328,7 +1345,7 @@ pub fn run_multi_backtest<'py>(
     low: PyReadonlyArray1<f64>,
     close: PyReadonlyArray1<f64>,
     volume: PyReadonlyArray1<f64>,
-    strategies: Vec<(PyReadonlyArray1<bool>, PyReadonlyArray1<bool>, i32, f64, String)>,
+    strategies: Vec<PyStrategySignals<'_>>,
     config: Option<&PyBacktestConfig>,
     combine_mode: &str,
 ) -> PyResult<PyBacktestResult> {
@@ -1362,7 +1379,7 @@ pub fn run_multi_backtest<'py>(
     };
 
     let multi_config = MultiStrategyConfig {
-        base: config.map(|c| BacktestConfig::from(c)).unwrap_or_default(),
+        base: config.map(BacktestConfig::from).unwrap_or_default(),
         combine_mode: mode,
         ..Default::default()
     };
@@ -1402,6 +1419,9 @@ pub fn run_multi_backtest<'py>(
     entry_cooldown_ticks = 10_usize,
     max_trades = 50_usize,
 ))]
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 pub fn run_tick_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1488,6 +1508,9 @@ pub fn run_tick_backtest<'py>(
     return_direction = 1_i8,
     cooldown_ticks = 10_usize,
 ))]
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_tick_entry_signals<'py>(
     py: Python<'py>,
     spread_pct: PyReadonlyArray1<f64>,
@@ -1858,6 +1881,9 @@ pub fn rolling_max<'py>(
 // Monte Carlo Forward Simulation
 // ============================================================================
 
+// The argument list IS the Python signature; collapsing it into a
+// struct would change the public API for no reader benefit.
+#[allow(clippy::too_many_arguments)]
 /// Run Monte Carlo forward simulation for a portfolio.
 ///
 /// Uses Geometric Brownian Motion with Cholesky-decomposed correlated random
@@ -1893,6 +1919,28 @@ pub fn simulate_portfolio_mc(
 
     let rust_corr: Vec<Vec<f64>> =
         correlation_matrix.iter().map(|arr| arr.as_slice().unwrap().to_vec()).collect();
+
+    // Refuse mismatched shapes here rather than indexing past the end inside a
+    // Rayon worker. A panic on a worker thread crosses PyO3 as PanicException,
+    // which is neither catchable as ValueError nor traceable to the argument
+    // that was wrong -- and the caller most likely passed an (n_obs, n_assets)
+    // matrix where a per-asset list of series was expected.
+    let n_assets = rust_returns.len();
+    if n_assets == 0 {
+        return Err(PyValueError::new_err("returns must contain at least one asset series"));
+    }
+    if rust_weights.len() != n_assets {
+        return Err(PyValueError::new_err(format!(
+            "weights has {} entries but returns has {n_assets} asset series; \
+             returns is a list of per-asset series, not an (n_obs, n_assets) matrix",
+            rust_weights.len()
+        )));
+    }
+    if rust_corr.len() != n_assets || rust_corr.iter().any(|row| row.len() != n_assets) {
+        return Err(PyValueError::new_err(format!(
+            "correlation_matrix must be {n_assets}x{n_assets} to match the {n_assets} asset series"
+        )));
+    }
 
     let config = MonteCarloConfig { n_simulations, horizon_days, seed };
 

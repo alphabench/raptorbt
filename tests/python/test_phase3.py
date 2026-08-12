@@ -4,7 +4,7 @@ adaptive bar-path model (0.5.0)."""
 import numpy as np
 import pytest
 
-from raptorbt import InstrumentSpec, PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import InstrumentSpec, BacktestConfig, Strategy, run_strategy_backtest
 from raptorbt.strategy import orders
 
 
@@ -13,8 +13,12 @@ def _bars(closes, lows=None, highs=None, opens=None, start_ts=0, step=1):
     n = len(closes)
     return {
         "timestamps": np.arange(start_ts, start_ts + n * step, step, dtype=np.int64),
-        "open": np.asarray(opens, dtype=np.float64) if opens is not None else closes.copy(),
-        "high": np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0,
+        "open": (
+            np.asarray(opens, dtype=np.float64) if opens is not None else closes.copy()
+        ),
+        "high": (
+            np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0
+        ),
         "low": np.asarray(lows, dtype=np.float64) if lows is not None else closes - 1.0,
         "close": closes,
         "volume": np.full(n, 1_000.0),
@@ -22,7 +26,7 @@ def _bars(closes, lows=None, highs=None, opens=None, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -39,7 +43,9 @@ class TestHedging:
                     self.submit_order(orders.Market(side="buy", units=10.0))
                     self.submit_order(orders.Market(side="sell", units=5.0))
                 if ctx.idx == 1:
-                    self.seen = [(p.position_id, p.direction, p.size) for p in ctx.positions]
+                    self.seen = [
+                        (p.position_id, p.direction, p.size) for p in ctx.positions
+                    ]
                     # Close only the short.
                     short = next(p for p in ctx.positions if p.direction == -1)
                     self.close_position(short.position_id)
@@ -114,8 +120,11 @@ class TestMarginAccount:
         data = _bars([100.0, 101.0, 102.0])
         cash = run_strategy_backtest(EnterOnce, **data, config=_zero_fee_config())
         levered = run_strategy_backtest(
-            EnterOnce, **data, config=_zero_fee_config(),
-            account_type="margin", leverage=5.0,
+            EnterOnce,
+            **data,
+            config=_zero_fee_config(),
+            account_type="margin",
+            leverage=5.0,
         )
         # 5x leverage sizes ~5x the units of the fully-funded account.
         ratio = levered.trades()[0].size / cash.trades()[0].size
@@ -138,8 +147,12 @@ class TestMarginAccount:
         data = _bars([100.0, 90.0, 80.0])
         strategy = ShortOnce()
         run_strategy_backtest(
-            strategy, **data, direction=-1, config=_zero_fee_config(),
-            account_type="margin", leverage=1.0,
+            strategy,
+            **data,
+            direction=-1,
+            config=_zero_fee_config(),
+            account_type="margin",
+            leverage=1.0,
         )
         assert strategy.marks[-1] > strategy.marks[0] > 100_000.0 * 0.999
 
@@ -168,8 +181,11 @@ class TestMarginAccount:
         data = _bars([100.0, 95.0, 85.0, 85.0, 85.0])
         strategy = S()
         run_strategy_backtest(
-            strategy, **data, config=_zero_fee_config(),
-            account_type="margin", leverage=10.0,
+            strategy,
+            **data,
+            config=_zero_fee_config(),
+            account_type="margin",
+            leverage=10.0,
         )
         assert strategy.margin_calls == 1
         assert "MarginCall" in strategy.rejects

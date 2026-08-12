@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import raptorbt
-from raptorbt import Indicator, PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import Indicator, BacktestConfig, Strategy, run_strategy_backtest
 from raptorbt.strategy import orders
 
 MIN_NS = 60_000_000_000
@@ -17,7 +17,9 @@ def _bars(closes, lows=None, highs=None, step_ns=MIN_NS):
     return {
         "timestamps": np.arange(n, dtype=np.int64) * step_ns,
         "open": closes.copy(),
-        "high": np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0,
+        "high": (
+            np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0
+        ),
         "low": np.asarray(lows, dtype=np.float64) if lows is not None else closes - 1.0,
         "close": closes,
         "volume": np.full(n, 1_000.0),
@@ -25,7 +27,7 @@ def _bars(closes, lows=None, highs=None, step_ns=MIN_NS):
 
 
 def _zero_fee_config():
-    config = PyBacktestConfig()
+    config = BacktestConfig()
     config.fees = 0.0
     return config
 
@@ -202,7 +204,9 @@ class TestCacheAndPortfolioView:
                 if ctx.idx == 3:
                     self.checks["filled"] = self.cache.order(self.oid).status
                     self.checks["canceled"] = self.cache.order(self.kid).status
-                    self.checks["open"] = [o.client_id for o in self.cache.orders_open()]
+                    self.checks["open"] = [
+                        o.client_id for o in self.cache.orders_open()
+                    ]
 
         data = _bars([100.0, 100.0, 98.5, 99.5])
         strategy = S()
@@ -242,7 +246,12 @@ class TestCacheAndPortfolioView:
                     self.submit_order(orders.Market(side="sell", units=4.0))
                 if ctx.idx == 1:
                     self.views.append(
-                        (ctx.net_position, ctx.is_net_long, ctx.is_net_short, ctx.is_flat)
+                        (
+                            ctx.net_position,
+                            ctx.is_net_long,
+                            ctx.is_net_short,
+                            ctx.is_flat,
+                        )
                     )
 
         data = _bars([100.0, 101.0, 102.0])

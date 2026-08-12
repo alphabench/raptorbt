@@ -211,7 +211,7 @@ impl AlgoEngine {
     pub fn drain_completed(&mut self) -> Vec<u64> {
         let done: Vec<u64> =
             self.schedules.iter().filter(|s| s.is_complete() || !s.active).map(|s| s.id).collect();
-        self.schedules.retain(|s| !(s.is_complete() || !s.active));
+        self.schedules.retain(|s| !s.is_complete() && s.active);
         done
     }
 }

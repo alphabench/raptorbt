@@ -27,10 +27,10 @@ from __future__ import annotations
 import numpy as np
 
 from raptorbt._raptorbt import (
-    PyBacktestConfig,
-    PyInstrumentConfig,
-    PyPortfolioResult,
-    PyPortfolioSession,
+    BacktestConfig,
+    InstrumentConfig,
+    PortfolioResult,
+    PortfolioSession,
 )
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.portfolio_runner import apply_commands_on
@@ -69,12 +69,12 @@ class TickStrategyStream:
         self,
         strategy: Strategy | type[Strategy],
         symbols: list[str],
-        config: PyBacktestConfig | None = None,
+        config: BacktestConfig | None = None,
         primary_bars: tuple[int, str] | None = None,
         warmup_bars: dict[str, dict] | None = None,
         directions: dict[str, int] | None = None,
         instruments: dict | None = None,
-        instrument_configs: dict[str, PyInstrumentConfig] | None = None,
+        instrument_configs: dict[str, InstrumentConfig] | None = None,
         oms_type: str = "netting",
         account_type: str = "cash",
         leverage: float = 1.0,
@@ -94,7 +94,7 @@ class TickStrategyStream:
         self._index_of = {s: i for i, s in enumerate(self._symbols)}
         self._finished = False
 
-        session = PyPortfolioSession(
+        session = PortfolioSession(
             config=config, account_type=account_type, leverage=leverage
         )
         for symbol in self._symbols:
@@ -114,16 +114,20 @@ class TickStrategyStream:
             for key in ("open", "high", "low", "close", "volume"):
                 a[key] = np.ascontiguousarray(bars[key], dtype=np.float64)
             session.set_bars(
-                i, a["timestamps"], a["open"], a["high"], a["low"], a["close"], a["volume"]
+                i,
+                a["timestamps"],
+                a["open"],
+                a["high"],
+                a["low"],
+                a["close"],
+                a["volume"],
             )
             arrays[symbol] = a
         session.seal()
 
         for symbol, seed in (initial_positions or {}).items():
             if symbol not in self._index_of:
-                raise ValueError(
-                    f"initial_positions names unknown symbol {symbol!r}"
-                )
+                raise ValueError(f"initial_positions names unknown symbol {symbol!r}")
             quantity = float(seed.get("quantity") or 0)
             avg_price = float(seed.get("avg_price") or 0)
             if quantity <= 0 or avg_price <= 0:
@@ -170,7 +174,13 @@ class TickStrategyStream:
         """
         self._check_open()
         appended = self._session.push_tick(
-            self._index_of[symbol], timestamp, ltp, bid, ask, buy_qty_delta, sell_qty_delta
+            self._index_of[symbol],
+            timestamp,
+            ltp,
+            bid,
+            ask,
+            buy_qty_delta,
+            sell_qty_delta,
         )
         if appended:
             self._drain()
@@ -223,7 +233,7 @@ class TickStrategyStream:
     def positions(self, symbol: str):
         return self._session.positions(self._index_of[symbol])
 
-    def finish(self) -> PyPortfolioResult:
+    def finish(self) -> PortfolioResult:
         """Close out and compute metrics; the stream is unusable after."""
         self._check_open()
         self._finished = True

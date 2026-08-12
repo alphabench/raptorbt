@@ -87,7 +87,7 @@ def sma_crossover(ohlcv, fast=10, slow=30):
 
 
 def run(ohlcv, entries, exits, **cfg_kwargs):
-    cfg = raptorbt.PyBacktestConfig(**cfg_kwargs)
+    cfg = raptorbt.BacktestConfig(**cfg_kwargs)
     return raptorbt.run_single_backtest(
         ohlcv["timestamps"],
         ohlcv["open"],
@@ -110,18 +110,24 @@ def run(ohlcv, entries, exits, **cfg_kwargs):
 def test_slippage_changes_results(daily):
     """config.slippage never reached the engine before 0.5.0."""
     entries, exits = sma_crossover(daily)
-    base = run(daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.0)
-    slipped = run(daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.002)
+    base = run(
+        daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.0
+    )
+    slipped = run(
+        daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.002
+    )
 
     assert list(base.equity_curve()) != list(slipped.equity_curve())
-    assert slipped.metrics.total_return_pct < base.metrics.total_return_pct, (
-        "slippage is a cost; it must reduce returns"
-    )
+    assert (
+        slipped.metrics.total_return_pct < base.metrics.total_return_pct
+    ), "slippage is a cost; it must reduce returns"
 
 
 def test_apply_slippage_false_restores_legacy(daily):
     entries, exits = sma_crossover(daily)
-    zero = run(daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.0)
+    zero = run(
+        daily, entries, exits, initial_capital=100_000.0, fees=0.001, slippage=0.0
+    )
     off = run(
         daily,
         entries,
@@ -144,7 +150,12 @@ def test_daily_annualization_is_unchanged(daily):
     entries, exits = sma_crossover(daily)
     inferred = run(daily, entries, exits, initial_capital=100_000.0, fees=0.001)
     explicit = run(
-        daily, entries, exits, initial_capital=100_000.0, fees=0.001, periods_per_year=365.0
+        daily,
+        entries,
+        exits,
+        initial_capital=100_000.0,
+        fees=0.001,
+        periods_per_year=365.0,
     )
     assert inferred.metrics.sharpe_ratio == pytest.approx(explicit.metrics.sharpe_ratio)
 
@@ -154,7 +165,12 @@ def test_intraday_sharpe_uses_session_count(intraday):
     entries, exits = sma_crossover(intraday)
     correct = run(intraday, entries, exits, initial_capital=500_000.0, fees=0.0003)
     as_daily = run(
-        intraday, entries, exits, initial_capital=500_000.0, fees=0.0003, periods_per_year=365.0
+        intraday,
+        entries,
+        exits,
+        initial_capital=500_000.0,
+        fees=0.0003,
+        periods_per_year=365.0,
     )
     ratio = abs(correct.metrics.sharpe_ratio / as_daily.metrics.sharpe_ratio)
     assert ratio == pytest.approx(math.sqrt(94_500.0 / 365.0), rel=0.01)
@@ -248,7 +264,12 @@ def test_gst_is_not_levied_on_taxes(daily):
     """GST applies to brokerage/exchange/SEBI, never to STT or stamp duty."""
     entries, exits = sma_crossover(daily)
     r = run(
-        daily, entries, exits, initial_capital=1_000_000.0, fees=0.001, fee_segment="NSE-DELIVERY"
+        daily,
+        entries,
+        exits,
+        initial_capital=1_000_000.0,
+        fees=0.001,
+        fee_segment="NSE-DELIVERY",
     )
     b = r.trades()[0].fee_breakdown
     expected = 0.18 * (b["brokerage"] + b["exchange_txn"] + b["sebi_fee"])
@@ -295,22 +316,25 @@ def test_portfolio_shares_one_capital_pool():
     """Summing independent per-symbol runs deploys N times the account."""
     instruments = _portfolio_inputs()
     capital = 300_000.0
-    cfg = raptorbt.PyBacktestConfig(initial_capital=capital, fees=0.001)
+    cfg = raptorbt.BacktestConfig(initial_capital=capital, fees=0.001)
     out = raptorbt.run_portfolio_backtest(instruments, config=cfg)
 
     peak = max(out.result.equity_curve())
-    assert peak < capital * 2.0, (
-        f"equity peaked at {peak:,.0f} on a {capital:,.0f} pool; capital is not shared"
-    )
+    assert (
+        peak < capital * 2.0
+    ), f"equity peaked at {peak:,.0f} on a {capital:,.0f} pool; capital is not shared"
 
 
 def test_max_positions_is_enforced():
     instruments = _portfolio_inputs()
-    cfg = raptorbt.PyBacktestConfig(initial_capital=300_000.0, fees=0.001, max_positions=1)
+    cfg = raptorbt.BacktestConfig(
+        initial_capital=300_000.0, fees=0.001, max_positions=1
+    )
     constrained = raptorbt.run_portfolio_backtest(instruments, config=cfg)
 
     unconstrained = raptorbt.run_portfolio_backtest(
-        instruments, config=raptorbt.PyBacktestConfig(initial_capital=300_000.0, fees=0.001)
+        instruments,
+        config=raptorbt.BacktestConfig(initial_capital=300_000.0, fees=0.001),
     )
 
     assert len(constrained.result.trades()) < len(unconstrained.result.trades())
@@ -321,7 +345,10 @@ def test_max_positions_is_enforced():
 
 
 def test_portfolio_rejects_mismatched_bar_counts():
-    a, b = _portfolio_inputs(n=300, seeds=(7,))[0], _portfolio_inputs(n=200, seeds=(23,))[0]
+    a, b = (
+        _portfolio_inputs(n=300, seeds=(7,))[0],
+        _portfolio_inputs(n=200, seeds=(23,))[0],
+    )
     with pytest.raises(ValueError, match="same number of bars"):
         raptorbt.run_portfolio_backtest([a, b])
 

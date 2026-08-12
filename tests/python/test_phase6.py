@@ -6,7 +6,7 @@ import pytest
 
 import raptorbt
 from raptorbt import (
-    PyBacktestConfig,
+    BacktestConfig,
     Strategy,
     run_portfolio_strategy,
 )
@@ -17,7 +17,7 @@ HOUR_NS = 3_600_000_000_000
 
 
 def _zero_fee_config():
-    config = PyBacktestConfig()
+    config = BacktestConfig()
     config.fees = 0.0
     return config
 
@@ -44,12 +44,22 @@ class TestCalendarAndSessionBars:
         )
         closes = np.array([100.0, 101.0, 102.0])
         data = {
-            "timestamps": ts, "open": closes, "high": closes + 1,
-            "low": closes - 1, "close": closes, "volume": np.full(3, 10.0),
+            "timestamps": ts,
+            "open": closes,
+            "high": closes + 1,
+            "low": closes - 1,
+            "close": closes,
+            "volume": np.full(3, 10.0),
         }
         bts, o, h, l, c, v = raptorbt.aggregate_bars(
-            data["timestamps"], data["open"], data["high"], data["low"],
-            data["close"], data["volume"], 1, "month",
+            data["timestamps"],
+            data["open"],
+            data["high"],
+            data["low"],
+            data["close"],
+            data["volume"],
+            1,
+            "month",
         )
         assert len(bts) == 2
         # January's bar is stamped at the start of February.
