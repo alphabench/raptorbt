@@ -397,15 +397,24 @@ class TestStubCompleteness:
         native = [name for name in dir(_raptorbt) if not name.startswith("_")]
         assert native, "no native symbols found — the probe itself is broken"
 
-        # Three declaration forms: classes, functions, and module-level
-        # annotated constants (`SESSION_NSE: float`).
-        missing = [
-            name
-            for name in native
-            if f"class {name}" not in stub
-            and f"def {name}(" not in stub
-            and not re.search(rf"^{re.escape(name)}\s*:", stub, re.MULTILINE)
-        ]
+        # Four declaration forms: classes, functions, module-level annotated
+        # constants (`SESSION_NSE: float`), and plain aliases (`PyTrade = Trade`,
+        # the 0.7.0 deprecation block). Miss a form and the guard reports
+        # correctly-declared symbols as absent, which trains readers to ignore
+        # it -- that is how the alias block first tripped this test.
+        # Anchored, not substring: `class Foo` is a prefix of `class FooBar`,
+        # so a plain `in stub` check reports a renamed-away class as still
+        # present. Verified by deletion -- renaming one declaration must make
+        # this fail.
+        def declared(name: str) -> bool:
+            esc = re.escape(name)
+            return bool(
+                re.search(rf"^class {esc}\b", stub, re.MULTILINE)
+                or re.search(rf"^def {esc}\(", stub, re.MULTILINE)
+                or re.search(rf"^{esc}\s*[:=]", stub, re.MULTILINE)
+            )
+
+        missing = [name for name in native if not declared(name)]
         assert not missing, (
             "exported by the extension but absent from _raptorbt.pyi — add "
             "them there in the same change that exports them: "

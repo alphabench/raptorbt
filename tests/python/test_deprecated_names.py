@@ -113,6 +113,33 @@ def test_warning_names_a_target_that_actually_resolves(new_name):
     ), f"deprecation warnings point at raptorbt.{new_name}, which does not resolve"
 
 
+@pytest.mark.parametrize("old_name", sorted(raptorbt._RENAMED))
+def test_deprecated_names_are_discoverable_on_the_extension(old_name):
+    """A name that resolves must also appear in ``dir()``.
+
+    Resolving via ``__getattr__`` alone is invisible to tooling. The consuming
+    backend has a guard that compares ``_raptorbt.pyi`` against
+    ``dir(_raptorbt)``; with the aliases missing from ``dir()`` the stub's alias
+    block read as 21 declarations for symbols the engine had dropped -- the
+    precise "type-checks clean, AttributeError in prod" failure that guard
+    exists to catch. The aliases are real, so they are listed.
+    """
+    from raptorbt import _raptorbt
+
+    listed = dir(_raptorbt)
+    assert old_name in listed
+    assert raptorbt._RENAMED[old_name] in listed
+
+
+def test_extension_dir_still_lists_the_real_exports():
+    """The custom ``__dir__`` must not shadow what the extension really has."""
+    from raptorbt import _raptorbt
+
+    listed = set(dir(_raptorbt))
+    missing = {n for n in vars(_raptorbt) if not n.startswith("_")} - listed
+    assert not missing, f"__dir__ hid real exports: {sorted(missing)}"
+
+
 def test_removal_is_scheduled():
     """Fails when 0.8.0 is cut. That failure is the instruction to finish the job.
 
