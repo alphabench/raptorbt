@@ -10,6 +10,8 @@ production quantitative trading:
 - Full tick-level simulation (no bar resampling required)
 """
 
+import warnings
+
 from raptorbt._raptorbt import (
     # Session lengths (minutes) for PyBacktestConfig(session_minutes=...)
     SESSION_NSE,
@@ -44,7 +46,7 @@ from raptorbt._raptorbt import (
     simulate_portfolio_mc,
     # Portfolio math (covariance, optimizer, factor panels, risk
     # contributions, rebalance simulation, cost schedule)
-    PyRiskModel,
+    RiskModel,
     PyOptimizerConfig,
     PyOptimizationResult,
     PyRiskContributions,
@@ -159,7 +161,7 @@ __all__ = [
     "PyBatchSpreadItem",
     "batch_spread_backtest",
     # Portfolio math
-    "PyRiskModel",
+    "RiskModel",
     "PyOptimizerConfig",
     "PyOptimizationResult",
     "PyRiskContributions",
@@ -226,3 +228,36 @@ __all__ = [
     "TickStrategyStream",
     "run_strategy_backtest",
 ]
+
+
+# --- Deprecated names --------------------------------------------------------
+# Every class below was exposed to Python with a ``Py`` prefix. That prefix is a
+# Rust-side disambiguator -- the crate has its own ``RiskModel``, ``Trade`` and
+# ``BacktestConfig`` in ``src/core`` and two Rust types cannot share a name --
+# and it was never meant to cross into Python, where "the Python one" describes
+# every object in the library. The clean name is canonical from 0.7.0; the old
+# one keeps working for this minor version and is removed in 0.8.0.
+#
+# Deliberately absent from ``__all__``: old names still resolve, but they are no
+# longer advertised. Pinned by tests/python/test_deprecated_names.py.
+_RENAMED = {
+    "PyRiskModel": "RiskModel",
+}
+
+
+def __getattr__(name: str):
+    """Resolve a pre-0.7.0 ``Py``-prefixed name, warning that it is going away."""
+    new_name = _RENAMED.get(name)
+    if new_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    warnings.warn(
+        f"raptorbt.{name} is deprecated; use raptorbt.{new_name}. "
+        f"The old name is removed in 0.8.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return globals()[new_name]
+
+
+def __dir__() -> list[str]:
+    return sorted([*__all__, *_RENAMED])

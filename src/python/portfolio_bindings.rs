@@ -62,7 +62,7 @@ fn parse_segment(segment: &str) -> PyResult<Segment> {
 /// Carries `periods_per_year` and `asset_ids` so annualization and asset
 /// ordering travel with the matrix; consumers validate against them instead
 /// of trusting the caller.
-#[pyclass]
+#[pyclass(name = "RiskModel")]
 #[derive(Debug, Clone)]
 pub struct PyRiskModel {
     pub(crate) inner: RiskModel,

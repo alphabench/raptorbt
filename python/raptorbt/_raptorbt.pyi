@@ -262,7 +262,7 @@ def simulate_portfolio_mc(
 
 # --- Portfolio math ----------------------------------------------------------
 
-class PyRiskModel:
+class RiskModel:
     asset_ids: list[str]
     n_assets: int
     periods_per_year: float
@@ -364,21 +364,21 @@ def estimate_covariance(
     returns: _F64,
     asset_ids: Sequence[str],
     periods_per_year: float,
-) -> PyRiskModel: ...
+) -> RiskModel: ...
 def optimize_portfolio(
-    model: PyRiskModel,
+    model: RiskModel,
     alpha: _F64,
     w_current: _F64,
     asset_ids: Sequence[str],
     config: PyOptimizerConfig,
 ) -> PyOptimizationResult: ...
 def batch_optimize_portfolios(
-    model: PyRiskModel,
+    model: RiskModel,
     items: Sequence[PyOptimizeItem],
     config: PyOptimizerConfig,
 ) -> list[tuple[str, PyOptimizationResult]]: ...
 def compute_risk_contributions(
-    model: PyRiskModel,
+    model: RiskModel,
     weights: _F64,
     asset_ids: Sequence[str],
 ) -> PyRiskContributions: ...
@@ -793,3 +793,11 @@ def resolve_atr_period(
     config: PyBacktestConfig | None = ...,
     instrument_config: PyInstrumentConfig | None = ...,
 ) -> int | None: ...
+
+# --- Deprecated aliases ------------------------------------------------------
+# The ``Py`` prefix is a Rust-side disambiguator (the crate has its own
+# ``RiskModel``, ``Trade``, ``BacktestConfig`` in ``src/core``); it was never
+# meant to reach Python. These aliases keep old code type-checking while it
+# migrates. Resolved at runtime by ``raptorbt.__getattr__`` with a
+# DeprecationWarning. Removed in 0.8.0.
+PyRiskModel = RiskModel
