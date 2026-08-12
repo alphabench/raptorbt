@@ -248,7 +248,29 @@ def run_options_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_pairs_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_multi_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_spread_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
-def run_tick_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_tick_backtest(
+    timestamps: _I64,
+    ltp: _F64,
+    bid: _F64,
+    ask: _F64,
+    buy_qty_delta: _F64,
+    sell_qty_delta: _F64,
+    oi: _F64,
+    entries: _Bool,
+    exits: _Bool,
+    symbol: str = ...,
+    initial_capital: float = ...,
+    fees: float = ...,
+    slippage: float = ...,
+    stop_loss_pct: float = ...,
+    take_profit_pct: float = ...,
+    max_hold_seconds: int = ...,
+    entry_cooldown_ticks: int = ...,
+    # Hard early exit, not a filter: the run stops after this many trades and
+    # reports as if the input ended there. Unlimited by default since 0.7.0
+    # (was 50, which silently truncated long tapes).
+    max_trades: int = ...,
+) -> BacktestResult: ...
 def batch_spread_backtest(*args: Any, **kwargs: Any) -> list[BacktestResult]: ...
 def simulate_portfolio_mc(
     returns: _F64,

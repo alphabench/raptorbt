@@ -893,13 +893,20 @@ result = raptorbt.run_tick_backtest(
     take_profit_pct=10.0,
     max_hold_seconds=1800,          # 30-minute maximum hold
     entry_cooldown_ticks=10,        # minimum ticks between entries
-    max_trades=50,
 )
 
 print(f"trades: {result.metrics.total_trades}")
 print(f"profit_factor: {result.metrics.profit_factor:.2f}")
 print(f"win_rate: {result.metrics.win_rate_pct:.1f}%")
 ```
+
+> **`max_trades` is a hard early exit, not a filter.** Set it and the run stops
+> after that many trades, reporting as if the tape ended there — so the metrics
+> describe a prefix of your data, not your data. It is unlimited by default from
+> 0.7.0; through 0.6.4 it defaulted to `50`, which on a million-tick input meant
+> a backtest that silently covered 0.8% of the ticks and understated max
+> drawdown by more than a hundredfold. Pass it only when you actually want a
+> truncated run.
 
 #### Class-Contract Tick Strategies
 

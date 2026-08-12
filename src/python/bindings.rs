@@ -39,6 +39,21 @@ type PyInstrumentArrays<'py> = (
 
 /// One strategy's signals for `run_multi_backtest`:
 /// `(entries, exits, direction, weight, name)`.
+/// Parse a `direction` argument, refusing anything that is not `1` or `-1`.
+///
+/// Through 0.6.4 every call site did `Direction::from_int(d).unwrap_or(Long)`.
+/// A book encoded `0`/`1` instead of `-1`/`1` -- a natural "flat or long"
+/// convention -- therefore backtested entirely long, flipping the sign of the
+/// P&L on every short with a perfectly well-formed equity curve to show for it.
+/// For the basket and portfolio runners the parse happens per instrument, so a
+/// single bad row silently turned one leg of a market-neutral book into a
+/// doubled long.
+fn parse_direction(direction: i32) -> PyResult<Direction> {
+    Direction::from_int(direction).ok_or_else(|| {
+        PyValueError::new_err(format!("direction must be 1 (long) or -1 (short), got {direction}"))
+    })
+}
+
 type PyStrategySignals<'py> =
     (PyReadonlyArray1<'py, bool>, PyReadonlyArray1<'py, bool>, i32, f64, String);
 use crate::strategies::spreads::{
@@ -710,7 +725,7 @@ pub fn run_single_backtest<'py>(
         volume: numpy_to_vec_f64(volume),
     };
 
-    let dir = Direction::from_int(direction).unwrap_or(Direction::Long);
+    let dir = parse_direction(direction)?;
 
     let signals = CompiledSignals {
         symbol: symbol.to_string(),
@@ -756,12 +771,12 @@ pub fn run_basket_backtest<'py>(
                 entries: numpy_to_vec_bool(entries),
                 exits: numpy_to_vec_bool(exits),
                 position_sizes: None,
-                direction: Direction::from_int(dir).unwrap_or(Direction::Long),
+                direction: parse_direction(dir)?,
                 weight,
             };
-            (ohlcv, signals)
+            Ok((ohlcv, signals))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     let mode = match sync_mode {
         "any" => SyncMode::Any,
@@ -899,12 +914,12 @@ pub fn run_portfolio_backtest<'py>(
                 entries: numpy_to_vec_bool(entries),
                 exits: numpy_to_vec_bool(exits),
                 position_sizes: None,
-                direction: Direction::from_int(dir).unwrap_or(Direction::Long),
+                direction: parse_direction(dir)?,
                 weight,
             };
-            (ohlcv, signals)
+            Ok((ohlcv, signals))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     let n_bars = rust_instruments[0].0.len();
     if let Some((idx, _)) =
@@ -995,7 +1010,7 @@ pub fn run_options_backtest<'py>(
 
     let opt_prices = numpy_to_vec_f64(option_prices);
 
-    let dir = Direction::from_int(direction).unwrap_or(Direction::Long);
+    let dir = parse_direction(direction)?;
 
     let signals = CompiledSignals {
         symbol: symbol.to_string(),
@@ -1006,24 +1021,44 @@ pub fn run_options_backtest<'py>(
         weight: 1.0,
     };
 
-    let opt_type = match option_type {
-        "put" => OptionType::Put,
-        _ => OptionType::Call,
+    // These three parsed with a catch-all `_` arm through 0.6.4, so any string
+    // the match did not recognise silently selected the first variant. The
+    // sharpest case: `option_type="PUT"` (or "PE", or "Put") backtested a long
+    // CALL -- roughly the mirror image of the intended payoff -- while the same
+    // string is accepted by `run_spread_backtest`. Unknown input is refused now.
+    let opt_type = match option_type.to_lowercase().as_str() {
+        "call" | "ce" | "c" => OptionType::Call,
+        "put" | "pe" | "p" => OptionType::Put,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown option_type {other:?}; expected call/ce/c or put/pe/p"
+            )))
+        }
     };
 
-    let strike_sel = match strike_selection {
+    let strike_sel = match strike_selection.to_lowercase().as_str() {
+        "atm" => StrikeSelection::Atm,
         "otm1" => StrikeSelection::Otm(1),
         "otm2" => StrikeSelection::Otm(2),
         "itm1" => StrikeSelection::Itm(1),
         "itm2" => StrikeSelection::Itm(2),
-        _ => StrikeSelection::Atm,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown strike_selection {other:?}; expected atm, otm1, otm2, itm1 or itm2"
+            )))
+        }
     };
 
-    let size = match size_type {
+    let size = match size_type.to_lowercase().as_str() {
+        "percent" => SizeType::Percent(size_value),
         "contracts" => SizeType::Contracts(size_value as usize),
         "notional" => SizeType::Notional(size_value),
         "risk" => SizeType::RiskPercent(size_value),
-        _ => SizeType::Percent(size_value),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown size_type {other:?}; expected percent, contracts, notional or risk"
+            )))
+        }
     };
 
     let options_config = OptionsConfig {
@@ -1088,7 +1123,7 @@ pub fn run_pairs_backtest<'py>(
         volume: numpy_to_vec_f64(leg2_volume),
     };
 
-    let dir = Direction::from_int(direction).unwrap_or(Direction::Long);
+    let dir = parse_direction(direction)?;
 
     let signals = CompiledSignals {
         symbol: symbol.to_string(),
@@ -1142,11 +1177,16 @@ pub fn run_spread_backtest<'py>(
     let rust_leg_configs: Vec<LegConfig> = leg_configs
         .into_iter()
         .map(|(opt_type, strike, quantity, lot_size)| {
-            let option_type =
-                SpreadOptionType::from_code(&opt_type).unwrap_or(SpreadOptionType::Call);
-            LegConfig::new(option_type, strike, quantity, lot_size)
+            let option_type = SpreadOptionType::from_code(&opt_type).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown option type {opt_type:?} for the leg at strike {strike}; \
+                     expected one of CE/CALL/C or PE/PUT/P (case-insensitive). \
+                     Defaulting would price a put as a call."
+                ))
+            })?;
+            Ok(LegConfig::new(option_type, strike, quantity, lot_size))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     // Parse spread type
     let spread_type_enum = match spread_type.to_lowercase().as_str() {
@@ -1270,11 +1310,16 @@ pub fn batch_spread_backtest(
                 .leg_configs
                 .into_iter()
                 .map(|(opt_type, strike, quantity, lot_size)| {
-                    let option_type =
-                        SpreadOptionType::from_code(&opt_type).unwrap_or(SpreadOptionType::Call);
-                    LegConfig::new(option_type, strike, quantity, lot_size)
+                    let option_type = SpreadOptionType::from_code(&opt_type).ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "unknown option type {opt_type:?} for the leg at strike \
+                                 {strike}; expected CE/CALL/C or PE/PUT/P \
+                                 (case-insensitive)."
+                        ))
+                    })?;
+                    Ok(LegConfig::new(option_type, strike, quantity, lot_size))
                 })
-                .collect();
+                .collect::<PyResult<_>>()?;
 
             let spread_type_enum = match item.spread_type.to_lowercase().as_str() {
                 "straddle" => SpreadType::Straddle,
@@ -1304,15 +1349,15 @@ pub fn batch_spread_backtest(
                 leg_expiry_timestamps: None,
             };
 
-            PreparedItem {
+            Ok(PreparedItem {
                 strategy_id: item.strategy_id,
                 premiums: item.legs_premiums,
                 entries: item.entries,
                 exits: item.exits,
                 spread_config,
-            }
+            })
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     // Release GIL and run all backtests in parallel via Rayon
     let results: Vec<(String, crate::core::types::BacktestResult)> = py.allow_threads(|| {
@@ -1360,15 +1405,17 @@ pub fn run_multi_backtest<'py>(
 
     let rust_strategies: Vec<CompiledSignals> = strategies
         .into_iter()
-        .map(|(entries, exits, dir, weight, symbol)| CompiledSignals {
-            symbol,
-            entries: numpy_to_vec_bool(entries),
-            exits: numpy_to_vec_bool(exits),
-            position_sizes: None,
-            direction: Direction::from_int(dir).unwrap_or(Direction::Long),
-            weight,
+        .map(|(entries, exits, dir, weight, symbol)| {
+            Ok(CompiledSignals {
+                symbol,
+                entries: numpy_to_vec_bool(entries),
+                exits: numpy_to_vec_bool(exits),
+                position_sizes: None,
+                direction: parse_direction(dir)?,
+                weight,
+            })
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     let mode = match combine_mode {
         "all" => CombineMode::All,
@@ -1417,7 +1464,7 @@ pub fn run_multi_backtest<'py>(
     take_profit_pct = 10.0,
     max_hold_seconds = 1800_u64,
     entry_cooldown_ticks = 10_usize,
-    max_trades = 50_usize,
+    max_trades = usize::MAX,
 ))]
 // The argument list IS the Python signature; collapsing it into a
 // struct would change the public API for no reader benefit.
@@ -1945,9 +1992,17 @@ pub fn simulate_portfolio_mc(
     let config = MonteCarloConfig { n_simulations, horizon_days, seed };
 
     // Run simulation (releases GIL for Rayon parallelism)
-    let result = py.allow_threads(|| {
-        simulate_portfolio_forward(&rust_returns, &rust_weights, &rust_corr, initial_value, &config)
-    });
+    let result = py
+        .allow_threads(|| {
+            simulate_portfolio_forward(
+                &rust_returns,
+                &rust_weights,
+                &rust_corr,
+                initial_value,
+                &config,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
 
     // Build Python dict result
     let dict = pyo3::types::PyDict::new(py);
