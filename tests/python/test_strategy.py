@@ -168,9 +168,9 @@ def test_class_matches_array_no_stops(daily):
 def test_class_matches_array_fixed_stop(daily):
     entries, exits = sma_crossover_signals(daily)
 
-    cfg_a = raptorbt.PyBacktestConfig()
+    cfg_a = raptorbt.BacktestConfig()
     cfg_a.set_fixed_stop(0.03)
-    cfg_b = raptorbt.PyBacktestConfig()
+    cfg_b = raptorbt.BacktestConfig()
     cfg_b.set_fixed_stop(0.03)
 
     res_array = _run_array(daily, entries, exits, config=cfg_a)
@@ -182,10 +182,10 @@ def test_class_matches_array_atr_stop(daily):
     """Pins the runner's ATR precompute against the engine's."""
     entries, exits = sma_crossover_signals(daily)
 
-    cfg_a = raptorbt.PyBacktestConfig()
+    cfg_a = raptorbt.BacktestConfig()
     cfg_a.set_atr_stop(2.0, 14)
     cfg_a.set_atr_target(3.0, 14)
-    cfg_b = raptorbt.PyBacktestConfig()
+    cfg_b = raptorbt.BacktestConfig()
     cfg_b.set_atr_stop(2.0, 14)
     cfg_b.set_atr_target(3.0, 14)
 
@@ -347,7 +347,7 @@ def test_conflicting_intents_raise(daily):
 
 
 def test_double_finish_raises(daily):
-    session = raptorbt.PyKernelSession(symbol="TEST")
+    session = raptorbt.KernelSession(symbol="TEST")
     session.step(0, 0, 100.0, 101.0, 99.0, 100.0, 1000.0)
     session.finish()
     with pytest.raises(ValueError, match="finished"):
@@ -358,7 +358,7 @@ def test_double_finish_raises(daily):
 
 def test_invalid_direction_raises():
     with pytest.raises(ValueError, match="direction"):
-        raptorbt.PyKernelSession(symbol="TEST", direction=2)
+        raptorbt.KernelSession(symbol="TEST", direction=2)
 
 
 def test_mismatched_lengths_raise(daily):
@@ -418,7 +418,7 @@ def test_zero_size_entry_fires_on_order_rejected(daily):
         def on_order_rejected(self, ctx, event):
             rejections.append(event.reject_reason)
 
-    inst = raptorbt.PyInstrumentConfig(lot_size=100.0)
+    inst = raptorbt.InstrumentConfig(lot_size=100.0)
     res = run_strategy_backtest(
         TinySize(),
         daily["timestamps"],

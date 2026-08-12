@@ -19,7 +19,7 @@ def _flat_bars(n, price=100.0, step=1):
 
 
 def _config(**kwargs):
-    config = raptorbt.PyBacktestConfig(**kwargs)
+    config = raptorbt.BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -261,9 +261,7 @@ class TestLimitSlippage:
 
             def on_bar(self, ctx):
                 if ctx.idx == 0:
-                    self.submit_order(
-                        orders.Limit(side="buy", price=99.0, units=10.0)
-                    )
+                    self.submit_order(orders.Limit(side="buy", price=99.0, units=10.0))
 
         config = _config()
         config.limit_slippage = limit_slippage
@@ -299,7 +297,10 @@ class TestOptionSettlement:
         px = np.array([7.0, 6.0, 0.5, 0.5])
         bars = {
             "timestamps": np.arange(4, dtype=np.int64),
-            "open": px, "high": px, "low": px, "close": px,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px,
             "volume": np.ones(4),
         }
         result = raptorbt.run_strategy_backtest(
@@ -333,7 +334,10 @@ class TestOptionSettlement:
         px = np.array([7.0, 6.0, 0.5, 0.5])
         opt = {
             "timestamps": np.arange(4, dtype=np.int64),
-            "open": px, "high": px, "low": px, "close": px,
+            "open": px,
+            "high": px,
+            "low": px,
+            "close": px,
             "volume": np.ones(4),
         }
         result = raptorbt.run_portfolio_strategy(

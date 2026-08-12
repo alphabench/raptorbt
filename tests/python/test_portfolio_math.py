@@ -99,7 +99,7 @@ def _cfg(**overrides):
         cash_max=0.0,
     )
     base.update(overrides)
-    return r.PyOptimizerConfig(**base)
+    return r.OptimizerConfig(**base)
 
 
 class TestOptimizePortfolio:
@@ -160,12 +160,10 @@ class TestOptimizePortfolio:
         cfg = _cfg(turnover_penalty=0.01)
         alphas = [np.array([0.1, 0.0, -0.1, 0.05]), np.array([-0.2, 0.1, 0.0, 0.0])]
         w_cur = np.full(4, 0.25)
-        serial = [
-            r.optimize_portfolio(model, a, w_cur, IDS4, cfg) for a in alphas
-        ]
+        serial = [r.optimize_portfolio(model, a, w_cur, IDS4, cfg) for a in alphas]
         batch = r.batch_optimize_portfolios(
             model,
-            [r.PyOptimizeItem(f"u{i}", a, w_cur) for i, a in enumerate(alphas)],
+            [r.OptimizeItem(f"u{i}", a, w_cur) for i, a in enumerate(alphas)],
             cfg,
         )
         assert [item_id for item_id, _ in batch] == ["u0", "u1"]
@@ -178,8 +176,8 @@ class TestOptimizePortfolio:
             r.batch_optimize_portfolios(
                 model,
                 [
-                    r.PyOptimizeItem("ok", np.zeros(4), np.full(4, 0.25)),
-                    r.PyOptimizeItem("bad", np.full(4, np.nan), np.full(4, 0.25)),
+                    r.OptimizeItem("ok", np.zeros(4), np.full(4, 0.25)),
+                    r.OptimizeItem("bad", np.full(4, np.nan), np.full(4, 0.25)),
                 ],
                 _cfg(),
             )
@@ -244,9 +242,7 @@ class TestRebalanceSim:
     def test_dp_charged_per_sold_isin(self):
         prices = np.full((2, 3), 100.0)
         targets = np.array([[0.3, 0.3, 0.3], [0.0, 0.0, 0.9]])
-        res = r.simulate_rebalance_policy(
-            prices, targets, 1_000_000.0, "calendar", 1.0
-        )
+        res = r.simulate_rebalance_policy(prices, targets, 1_000_000.0, "calendar", 1.0)
         dp = res.cost_dp()
         assert abs(dp[1] - 2 * 15.34) < 1e-9  # two ISINs sold on day 1
         assert dp[0] == 0.0  # buy-only day has no DP charge
@@ -256,9 +252,7 @@ class TestRebalanceSim:
         n = 10
         prices = np.full((2, n), 100.0)
         targets = np.vstack([np.full(n, 0.1), np.zeros(n)])
-        res = r.simulate_rebalance_policy(
-            prices, targets, 50_000.0, "calendar", 1.0
-        )
+        res = r.simulate_rebalance_policy(prices, targets, 50_000.0, "calendar", 1.0)
         assert res.cost_dp()[1] > res.cost_regulatory()[1]
 
     def test_refuses_shape_mismatch_and_bad_policy(self):
@@ -375,7 +369,7 @@ class TestRankIc:
 class TestStubCompleteness:
     """Every exported symbol must appear in the type stub.
 
-    rank_ic/PyRankIc shipped in 6f5aa2f registered in lib.rs and exported from
+    rank_ic/RankIC shipped in 6f5aa2f registered in lib.rs and exported from
     __init__, but absent from _raptorbt.pyi — runtime worked, type-checking
     did not, and nothing noticed. This is the check that would have.
     """
@@ -400,11 +394,7 @@ class TestStubCompleteness:
         from raptorbt import _raptorbt
 
         stub = self._stub_text()
-        native = [
-            name
-            for name in dir(_raptorbt)
-            if not name.startswith("_")
-        ]
+        native = [name for name in dir(_raptorbt) if not name.startswith("_")]
         assert native, "no native symbols found — the probe itself is broken"
 
         # Three declaration forms: classes, functions, and module-level
@@ -421,3 +411,60 @@ class TestStubCompleteness:
             "them there in the same change that exports them: "
             f"{sorted(missing)}"
         )
+
+
+class TestMonteCarloShapeValidation:
+    """Shape mismatches must refuse, not panic.
+
+    Before 0.7.0 ``simulate_portfolio_mc`` did no dimension checking. It derives
+    ``n_assets`` from ``len(returns)`` and then indexes ``weights[i]`` with it,
+    so passing an ``(n_obs, n_assets)`` matrix -- the natural mistake, since
+    every other function here takes exactly that -- indexed past the end of
+    ``weights`` inside a Rayon worker thread.
+
+    That surfaced in Python as ``PanicException``: not an ``Exception``
+    subclass anyone catches, thrown from a thread with no line of user code in
+    the traceback. For a financial library the rule is refuse loudly and name
+    the argument, so a caller can fix it.
+    """
+
+    def _per_asset(self, n=4, n_obs=200, seed=3):
+        rng = np.random.default_rng(seed)
+        return [rng.normal(0.0, 0.01, n_obs) for _ in range(n)]
+
+    def test_matrix_instead_of_per_asset_series_is_a_value_error(self):
+        rng = np.random.default_rng(3)
+        n = 4
+        matrix = rng.normal(0.0, 0.01, (200, n))  # the wrong shape
+        with pytest.raises(ValueError, match="per-asset series"):
+            r.simulate_portfolio_mc(
+                matrix, np.full(n, 1 / n), np.eye(n), 1e6, 100, 50, 42
+            )
+
+    def test_weight_count_mismatch_is_a_value_error(self):
+        returns = self._per_asset(n=4)
+        with pytest.raises(ValueError, match="weights has 3 entries"):
+            r.simulate_portfolio_mc(
+                returns, np.full(3, 1 / 3), np.eye(4), 1e6, 100, 50, 42
+            )
+
+    def test_correlation_matrix_shape_mismatch_is_a_value_error(self):
+        returns = self._per_asset(n=4)
+        with pytest.raises(ValueError, match="must be 4x4"):
+            r.simulate_portfolio_mc(
+                returns, np.full(4, 0.25), np.eye(3), 1e6, 100, 50, 42
+            )
+
+    def test_empty_returns_is_a_value_error(self):
+        with pytest.raises(ValueError, match="at least one asset series"):
+            r.simulate_portfolio_mc(
+                [], np.array([]), np.empty((0, 0)), 1e6, 100, 50, 42
+            )
+
+    def test_correctly_shaped_input_still_runs(self):
+        returns = self._per_asset(n=4)
+        out = r.simulate_portfolio_mc(
+            returns, np.full(4, 0.25), np.eye(4), 1_000_000.0, 100, 50, 42
+        )
+        assert set(out) >= {"expected_return", "probability_of_loss", "final_values"}
+        assert len(out["final_values"]) == 100

@@ -4,7 +4,7 @@
 //! Split out of `kernel.rs` to keep that file reviewable; this is the same
 //! `impl EngineKernel`, not a separate type.
 
-use crate::core::types::{Direction, ExitReason, Price, Trade};
+use crate::core::types::{Direction, ExitReason, Price};
 use crate::execution::algos::{AlgoError, ExecAlgorithm};
 use crate::execution::orders::{
     MatchOutcome, Order, OrderEngine, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce,
@@ -253,11 +253,6 @@ impl EngineKernel {
     pub fn open_orders(&self) -> Vec<&Order> {
         self.orders.working().collect()
     }
-    /// A `Fill` outcome is a *marketable* order, not a done deal: position
-    /// state may still refuse it (opening while a position is open, closing
-    /// while flat), in which case the order rejects. A NaN fill price marks
-    /// a market order, priced here by the fill-price model.
-
     /// Queue verdict for a resting limit, or `None` when the queue model is
     /// off or cannot see enough to judge — the caller then falls back to
     /// `fill_prob_limit`.

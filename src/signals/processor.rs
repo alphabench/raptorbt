@@ -250,9 +250,7 @@ pub fn shift_signals(signals: &[bool], n: usize) -> Vec<bool> {
         return result;
     }
 
-    for i in n..len {
-        result[i] = signals[i - n];
-    }
+    result[n..len].copy_from_slice(&signals[..len - n]);
 
     result
 }

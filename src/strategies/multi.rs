@@ -9,9 +9,10 @@ use crate::execution::FeeModel;
 use crate::metrics::streaming::StreamingMetrics;
 
 /// Strategy combination mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CombineMode {
     /// Enter when any strategy signals.
+    #[default]
     Any,
     /// Enter when all strategies signal.
     All,
@@ -21,12 +22,6 @@ pub enum CombineMode {
     Independent,
     /// Vote-weighted combination.
     Weighted,
-}
-
-impl Default for CombineMode {
-    fn default() -> Self {
-        CombineMode::Any
-    }
 }
 
 /// Multi-strategy configuration.

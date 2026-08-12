@@ -10,7 +10,7 @@ import pytest
 
 from raptorbt import (
     Indicator,
-    PyBacktestConfig,
+    BacktestConfig,
     Strategy,
     run_portfolio_strategy,
     run_tick_strategy,
@@ -33,7 +33,7 @@ def _ticks(prices, bids=None, asks=None, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 
@@ -75,7 +75,13 @@ class TestTickDispatch:
             def on_trade_tick(self, ctx, tick):
                 self.observed.append(ctx.best_bid)
 
-        data = {"AAA": _ticks([100.0, 105.0, 110.0], bids=[99.0, 104.0, 109.0], asks=[101.0, 106.0, 111.0])}
+        data = {
+            "AAA": _ticks(
+                [100.0, 105.0, 110.0],
+                bids=[99.0, 104.0, 109.0],
+                asks=[101.0, 106.0, 111.0],
+            )
+        }
         strategy = S()
         run_tick_strategy(strategy, data, config=_zero_fee_config())
 
@@ -96,7 +102,11 @@ class TestTickDispatch:
                 self.quotes += 1
 
         # Only the middle row carries both sides of the book.
-        data = {"AAA": _ticks([100.0, 101.0, 102.0], bids=[0.0, 100.0, 0.0], asks=[0.0, 102.0, 0.0])}
+        data = {
+            "AAA": _ticks(
+                [100.0, 101.0, 102.0], bids=[0.0, 100.0, 0.0], asks=[0.0, 102.0, 0.0]
+            )
+        }
         strategy = S()
         run_tick_strategy(strategy, data, config=_zero_fee_config())
 

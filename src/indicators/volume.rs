@@ -199,23 +199,23 @@ pub fn mfi(
     }
 
     // Calculate MFI for each period
-    for i in period..n {
+    for (i, out) in result.iter_mut().enumerate().take(n).skip(period) {
         let mut positive_flow = 0.0;
         let mut negative_flow = 0.0;
 
-        for j in (i - period + 1)..=i {
+        for (j, flow) in raw_money_flow.iter().enumerate().take(i + 1).skip(i - period + 1) {
             if typical_price[j] > typical_price[j - 1] {
-                positive_flow += raw_money_flow[j];
+                positive_flow += flow;
             } else if typical_price[j] < typical_price[j - 1] {
-                negative_flow += raw_money_flow[j];
+                negative_flow += flow;
             }
         }
 
         if negative_flow == 0.0 {
-            result[i] = 100.0;
+            *out = 100.0;
         } else {
             let money_ratio = positive_flow / negative_flow;
-            result[i] = 100.0 - (100.0 / (1.0 + money_ratio));
+            *out = 100.0 - (100.0 / (1.0 + money_ratio));
         }
     }
 

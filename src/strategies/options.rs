@@ -16,9 +16,10 @@ pub enum OptionType {
 }
 
 /// Strike selection mode.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum StrikeSelection {
     /// At-the-money (closest to spot).
+    #[default]
     Atm,
     /// In-the-money by N strikes.
     Itm(usize),
@@ -28,12 +29,6 @@ pub enum StrikeSelection {
     PercentOffset(f64),
     /// Delta-based selection.
     Delta(f64),
-}
-
-impl Default for StrikeSelection {
-    fn default() -> Self {
-        StrikeSelection::Atm
-    }
 }
 
 /// Position size type for options.

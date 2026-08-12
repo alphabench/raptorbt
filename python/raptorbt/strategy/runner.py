@@ -6,10 +6,10 @@ import numpy as np
 
 from raptorbt._raptorbt import (
     InstrumentSpec,
-    PyBacktestConfig,
-    PyBacktestResult,
-    PyInstrumentConfig,
-    PyKernelSession,
+    BacktestConfig,
+    BacktestResult,
+    InstrumentConfig,
+    KernelSession,
     atr as _atr,
     resolve_atr_period,
 )
@@ -78,13 +78,13 @@ def run_strategy_backtest(
     volume,
     direction: int = 1,
     symbol: str = "ASSET",
-    config: PyBacktestConfig | None = None,
-    instrument_config: PyInstrumentConfig | None = None,
+    config: BacktestConfig | None = None,
+    instrument_config: InstrumentConfig | None = None,
     instrument: InstrumentSpec | None = None,
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
-) -> PyBacktestResult:
+) -> BacktestResult:
     """Run a class-based strategy over OHLCV arrays.
 
     ``instrument`` optionally attaches a market definition
@@ -94,7 +94,7 @@ def run_strategy_backtest(
     the explicit config wins.
 
     Accepts a :class:`Strategy` instance or class (instantiated with no
-    arguments). Returns the same ``PyBacktestResult`` as
+    arguments). Returns the same ``BacktestResult`` as
     ``run_single_backtest``, so downstream result handling is identical for
     both paths.
 
@@ -131,11 +131,13 @@ def run_strategy_backtest(
         ("volume", volume),
     ):
         if len(arr) != n:
-            raise ValueError(f"{name} has length {len(arr)}, expected {n} (same as timestamps)")
+            raise ValueError(
+                f"{name} has length {len(arr)}, expected {n} (same as timestamps)"
+            )
     if n == 0:
         raise ValueError("cannot backtest zero bars")
 
-    session = PyKernelSession(
+    session = KernelSession(
         symbol=symbol,
         direction=direction,
         config=config,

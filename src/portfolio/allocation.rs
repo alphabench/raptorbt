@@ -1,9 +1,10 @@
 //! Capital allocation strategies for portfolio management.
 
 /// Allocation strategy for distributing capital across instruments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum AllocationStrategy {
     /// Equal weight across all instruments.
+    #[default]
     EqualWeight,
     /// Fixed weight for each instrument.
     FixedWeight(Vec<f64>),
@@ -15,12 +16,6 @@ pub enum AllocationStrategy {
     MaxWeight(f64),
     /// Custom weights.
     Custom(Vec<(String, f64)>),
-}
-
-impl Default for AllocationStrategy {
-    fn default() -> Self {
-        AllocationStrategy::EqualWeight
-    }
 }
 
 /// Capital allocator for managing position sizing and capital distribution.

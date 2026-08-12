@@ -221,6 +221,9 @@ impl SessionTracker {
     /// Update session state for a new bar.
     ///
     /// Returns tuple of (is_new_session, is_squareoff_time, is_session_end).
+    // A bar is 6 values plus its neighbours; bundling them into a struct at
+    // this call rate would allocate per bar for no reader benefit.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         idx: usize,

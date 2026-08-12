@@ -10,24 +10,26 @@ production quantitative trading:
 - Full tick-level simulation (no bar resampling required)
 """
 
+import warnings
+
 from raptorbt._raptorbt import (
-    # Session lengths (minutes) for PyBacktestConfig(session_minutes=...)
+    # Session lengths (minutes) for BacktestConfig(session_minutes=...)
     SESSION_NSE,
     SESSION_MCX,
     SESSION_CDS,
     SESSION_CONTINUOUS,
     IST_OFFSET_NS,
     # Config classes
-    PyBacktestConfig,
-    PyInstrumentConfig,
-    PyStopConfig,
-    PyTargetConfig,
+    BacktestConfig,
+    InstrumentConfig,
+    StopConfig,
+    TargetConfig,
     # Result classes
-    PyBacktestResult,
-    PyBacktestMetrics,
-    PyTrade,
-    PyPortfolioResult,
-    PyInstrumentSummary,
+    BacktestResult,
+    BacktestMetrics,
+    Trade,
+    PortfolioResult,
+    InstrumentSummary,
     # Backtest functions
     run_single_backtest,
     run_basket_backtest,
@@ -38,19 +40,19 @@ from raptorbt._raptorbt import (
     run_spread_backtest,
     run_tick_backtest,
     # Batch backtest
-    PyBatchSpreadItem,
+    BatchSpreadItem,
     batch_spread_backtest,
     # Monte Carlo simulation
     simulate_portfolio_mc,
     # Portfolio math (covariance, optimizer, factor panels, risk
     # contributions, rebalance simulation, cost schedule)
-    PyRiskModel,
-    PyOptimizerConfig,
-    PyOptimizationResult,
-    PyRiskContributions,
-    PyOptimizeItem,
-    PyRebalanceSimResult,
-    PyRankIc,
+    RiskModel,
+    OptimizerConfig,
+    OptimizationResult,
+    RiskContributions,
+    OptimizeItem,
+    RebalanceSimResult,
+    RankIC,
     estimate_covariance,
     optimize_portfolio,
     batch_optimize_portfolios,
@@ -95,9 +97,10 @@ from raptorbt._raptorbt import (
     aggregate_bars,
     bars_from_ticks,
     # Per-bar strategy session (class-based strategy contract)
-    PyKernelSession,
-    PyEngineEvent,
-    PyPositionSnapshot,
+    KernelSession,
+    PortfolioSession,
+    EngineEvent,
+    PositionSnapshot,
     resolve_atr_period,
 )
 from raptorbt.strategy import (
@@ -136,16 +139,16 @@ __all__ = [
     "SESSION_CONTINUOUS",
     "IST_OFFSET_NS",
     # Config classes
-    "PyBacktestConfig",
-    "PyInstrumentConfig",
-    "PyStopConfig",
-    "PyTargetConfig",
+    "BacktestConfig",
+    "InstrumentConfig",
+    "StopConfig",
+    "TargetConfig",
     # Result classes
-    "PyPortfolioResult",
-    "PyInstrumentSummary",
-    "PyBacktestResult",
-    "PyBacktestMetrics",
-    "PyTrade",
+    "PortfolioResult",
+    "InstrumentSummary",
+    "BacktestResult",
+    "BacktestMetrics",
+    "Trade",
     # Backtest functions
     "run_single_backtest",
     "run_basket_backtest",
@@ -156,16 +159,16 @@ __all__ = [
     "run_spread_backtest",
     "run_tick_backtest",
     # Batch backtest
-    "PyBatchSpreadItem",
+    "BatchSpreadItem",
     "batch_spread_backtest",
     # Portfolio math
-    "PyRiskModel",
-    "PyOptimizerConfig",
-    "PyOptimizationResult",
-    "PyRiskContributions",
-    "PyOptimizeItem",
-    "PyRebalanceSimResult",
-    "PyRankIc",
+    "RiskModel",
+    "OptimizerConfig",
+    "OptimizationResult",
+    "RiskContributions",
+    "OptimizeItem",
+    "RebalanceSimResult",
+    "RankIC",
     "estimate_covariance",
     "optimize_portfolio",
     "batch_optimize_portfolios",
@@ -209,9 +212,10 @@ __all__ = [
     "BarAggregator",
     "aggregate_bars",
     "bars_from_ticks",
-    "PyKernelSession",
-    "PyEngineEvent",
-    "PyPositionSnapshot",
+    "KernelSession",
+    "PortfolioSession",
+    "EngineEvent",
+    "PositionSnapshot",
     "resolve_atr_period",
     # Class-based strategy contract
     "Bar",
@@ -226,3 +230,90 @@ __all__ = [
     "TickStrategyStream",
     "run_strategy_backtest",
 ]
+
+
+# --- Deprecated names --------------------------------------------------------
+# Every class below was exposed to Python with a ``Py`` prefix. That prefix is a
+# Rust-side disambiguator -- the crate has its own ``BacktestConfig``, ``Trade``
+# and ``BacktestResult`` in ``src/core`` and two Rust types cannot share a name
+# -- and it was never meant to cross into Python, where "the Python one"
+# describes every object in the library. The clean name is canonical from
+# 0.7.0; the old one keeps working for this minor version, and is removed in
+# 0.8.0.
+#
+# Deliberately absent from ``__all__``: old names still resolve, but they are no
+# longer advertised. Pinned by tests/python/test_deprecated_names.py.
+_RENAMED = {
+    "PyBacktestConfig": "BacktestConfig",
+    "PyBacktestMetrics": "BacktestMetrics",
+    "PyBacktestResult": "BacktestResult",
+    "PyBatchSpreadItem": "BatchSpreadItem",
+    "PyEngineEvent": "EngineEvent",
+    "PyInstrumentConfig": "InstrumentConfig",
+    "PyInstrumentSummary": "InstrumentSummary",
+    "PyKernelSession": "KernelSession",
+    "PyOptimizationResult": "OptimizationResult",
+    "PyOptimizeItem": "OptimizeItem",
+    "PyOptimizerConfig": "OptimizerConfig",
+    "PyPortfolioResult": "PortfolioResult",
+    "PyPortfolioSession": "PortfolioSession",
+    "PyPositionSnapshot": "PositionSnapshot",
+    "PyRankIc": "RankIC",
+    "PyRebalanceSimResult": "RebalanceSimResult",
+    "PyRiskContributions": "RiskContributions",
+    "PyRiskModel": "RiskModel",
+    "PyStopConfig": "StopConfig",
+    "PyTargetConfig": "TargetConfig",
+    "PyTrade": "Trade",
+}
+
+
+def _warn_renamed(module: str, name: str, new_name: str) -> None:
+    warnings.warn(
+        f"{module}.{name} is deprecated; use raptorbt.{new_name}. "
+        f"The old name is removed in 0.8.0.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def __getattr__(name: str):
+    """Resolve a pre-0.7.0 ``Py``-prefixed name, warning that it is going away."""
+    new_name = _RENAMED.get(name)
+    if new_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _warn_renamed(__name__, name, new_name)
+    return globals()[new_name]
+
+
+def _install_extension_shim() -> None:
+    """Extend the deprecation shim to ``raptorbt._raptorbt``.
+
+    Some code reaches past the package into the compiled module -- notably for
+    ``PortfolioSession``, which has never been re-exported at top level, so a
+    deep import was the *only* way to get it. Those imports must keep working
+    for the same window as the public ones, or the rename breaks people who had
+    no supported alternative.
+
+    PyO3 builds the extension as a plain module object, which has no class-level
+    ``__getattr__`` to override, so the module-level hook is installed here.
+    """
+    from raptorbt import _raptorbt
+
+    def _ext_getattr(name: str):
+        new_name = _RENAMED.get(name)
+        if new_name is None:
+            raise AttributeError(
+                f"module {_raptorbt.__name__!r} has no attribute {name!r}"
+            )
+        _warn_renamed(_raptorbt.__name__, name, new_name)
+        return getattr(_raptorbt, new_name)
+
+    _raptorbt.__getattr__ = _ext_getattr
+
+
+_install_extension_shim()
+
+
+def __dir__() -> list[str]:
+    return sorted([*__all__, *_RENAMED])

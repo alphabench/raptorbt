@@ -27,7 +27,15 @@ pub struct TickBacktestConfig {
     pub max_hold_seconds: u64,
     /// Minimum ticks between entries (cooldown). Prevents overlapping positions.
     pub entry_cooldown_ticks: usize,
-    /// Maximum trades to simulate (bounds runtime for large windows).
+    /// Stop the run after this many trades. Defaults to [`usize::MAX`], i.e.
+    /// no cap.
+    ///
+    /// This is a hard early exit, not a filter: the tick loop `break`s and the
+    /// result is reported as if the input ended there. Through 0.6.4 this
+    /// defaulted to 50, so a million-tick backtest silently described the
+    /// first 0.8% of the tape -- one measured case reported a 0.124% max
+    /// drawdown where the true figure over the full input was 14.13%. Leave it
+    /// unset unless you specifically want a truncated run.
     pub max_trades: usize,
 }
 
@@ -39,7 +47,7 @@ impl Default for TickBacktestConfig {
             take_profit_pct: 10.0,
             max_hold_seconds: 1800,
             entry_cooldown_ticks: 10,
-            max_trades: 50,
+            max_trades: usize::MAX,
         }
     }
 }
@@ -315,6 +323,53 @@ mod tests {
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::StopLoss);
         assert!(result.trades[0].pnl < 0.0);
+    }
+
+    #[test]
+    fn default_config_does_not_cap_trades() {
+        // Through 0.6.4 `max_trades` defaulted to 50 and the tick loop `break`s
+        // when it is reached, returning a normal-looking BacktestResult that
+        // silently described only the leading slice of the tape. Measured on a
+        // 1,000,000-tick input: 50 trades covering 0.81% of the ticks, total
+        // return -0.12% where the true figure was -14.13%, and a max drawdown
+        // of 0.124% against a true 14.13% -- a 114x understatement of the
+        // single number a risk check reads.
+        //
+        // The cap remains available for callers who explicitly want a
+        // truncated run; it is simply no longer the default.
+        assert_eq!(TickBacktestConfig::default().max_trades, usize::MAX);
+    }
+
+    #[test]
+    fn an_explicit_cap_still_truncates() {
+        // The knob has to keep working, or the default change is a removal.
+        let ticks = make_ticks(4_000, 100.0, 0.02);
+        let mut entries = vec![false; 4_000];
+        let mut exits = vec![false; 4_000];
+        for i in (0..4_000).step_by(40) {
+            entries[i] = true;
+            if i + 20 < 4_000 {
+                exits[i + 20] = true;
+            }
+        }
+
+        let capped = TickBacktest::new(TickBacktestConfig {
+            max_trades: 5,
+            entry_cooldown_ticks: 1,
+            ..Default::default()
+        })
+        .run(&ticks, &entries, &exits, "T");
+        assert_eq!(capped.trades.len(), 5, "explicit cap must still bound the run");
+
+        let uncapped =
+            TickBacktest::new(TickBacktestConfig { entry_cooldown_ticks: 1, ..Default::default() })
+                .run(&ticks, &entries, &exits, "T");
+        assert!(
+            uncapped.trades.len() > capped.trades.len(),
+            "default must not truncate: got {} trades uncapped vs {} capped",
+            uncapped.trades.len(),
+            capped.trades.len()
+        );
     }
 
     #[test]

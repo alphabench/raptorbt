@@ -134,16 +134,12 @@ impl TimeSeries<f64> {
         if n >= 0 {
             let n = n as usize;
             if n < len {
-                for i in n..len {
-                    result[i] = self.values[i - n];
-                }
+                result[n..len].copy_from_slice(&self.values[..len - n]);
             }
         } else {
             let n = (-n) as usize;
             if n < len {
-                for i in 0..len - n {
-                    result[i] = self.values[i + n];
-                }
+                result[..len - n].copy_from_slice(&self.values[n..len]);
             }
         }
 
@@ -153,9 +149,9 @@ impl TimeSeries<f64> {
     /// Calculate difference from previous value.
     pub fn diff(&self) -> Self {
         let mut result = vec![f64::NAN; self.values.len()];
-        for i in 1..self.values.len() {
-            if !self.values[i].is_nan() && !self.values[i - 1].is_nan() {
-                result[i] = self.values[i] - self.values[i - 1];
+        for (out, pair) in result.iter_mut().skip(1).zip(self.values.windows(2)) {
+            if !pair[1].is_nan() && !pair[0].is_nan() {
+                *out = pair[1] - pair[0];
             }
         }
         Self { timestamps: self.timestamps.clone(), values: result }
@@ -164,10 +160,10 @@ impl TimeSeries<f64> {
     /// Calculate percentage change from previous value.
     pub fn pct_change(&self) -> Self {
         let mut result = vec![f64::NAN; self.values.len()];
-        for i in 1..self.values.len() {
-            if !self.values[i].is_nan() && !self.values[i - 1].is_nan() && self.values[i - 1] != 0.0
-            {
-                result[i] = (self.values[i] - self.values[i - 1]) / self.values[i - 1];
+        for (out, pair) in result.iter_mut().skip(1).zip(self.values.windows(2)) {
+            let (prev, cur) = (pair[0], pair[1]);
+            if !cur.is_nan() && !prev.is_nan() && prev != 0.0 {
+                *out = (cur - prev) / prev;
             }
         }
         Self { timestamps: self.timestamps.clone(), values: result }
@@ -183,9 +179,8 @@ impl TimeSeries<f64> {
             return Self { timestamps: self.timestamps.clone(), values: result };
         }
 
-        for i in (window - 1)..self.values.len() {
-            let slice = &self.values[i + 1 - window..=i];
-            result[i] = f(slice);
+        for (out, slice) in result.iter_mut().skip(window - 1).zip(self.values.windows(window)) {
+            *out = f(slice);
         }
 
         Self { timestamps: self.timestamps.clone(), values: result }

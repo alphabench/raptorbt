@@ -35,7 +35,7 @@ fn book_levels(book: &DepthTick, side: BookSide) -> &[BookLevel] {
 ///
 /// Protocol: `add_instrument` + `set_bars` per symbol, `seal()`, then loop
 /// `current()` / `apply_current(...)` to completion and `finish()`.
-#[pyclass]
+#[pyclass(name = "PortfolioSession")]
 pub struct PyPortfolioSession {
     session: Option<EventSession>,
 }

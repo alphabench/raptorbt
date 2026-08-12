@@ -4,22 +4,26 @@ import numpy as np
 import pytest
 
 import raptorbt
-from raptorbt import PyBacktestConfig, Strategy, run_strategy_backtest
+from raptorbt import BacktestConfig, Strategy, run_strategy_backtest
 
 MIN_NS = 60_000_000_000
 
 
 def _minute_bars(n, start_price=100.0, drift=0.1):
     """n one-minute bars with a gentle drift, ns timestamps."""
-    ts = (np.arange(n, dtype=np.int64) * MIN_NS)
+    ts = np.arange(n, dtype=np.int64) * MIN_NS
     close = start_price + drift * np.arange(n)
     open_ = np.concatenate([[start_price], close[:-1]])
     high = np.maximum(open_, close) + 0.5
     low = np.minimum(open_, close) - 0.5
     volume = np.full(n, 100.0)
     return {
-        "timestamps": ts, "open": open_, "high": high, "low": low,
-        "close": close, "volume": volume,
+        "timestamps": ts,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
     }
 
 
@@ -27,8 +31,14 @@ class TestAggregateBars:
     def test_five_minute_from_one_minute(self):
         data = _minute_bars(10)
         ts, o, h, l, c, v = raptorbt.aggregate_bars(
-            data["timestamps"], data["open"], data["high"], data["low"],
-            data["close"], data["volume"], 5, "m",
+            data["timestamps"],
+            data["open"],
+            data["high"],
+            data["low"],
+            data["close"],
+            data["volume"],
+            5,
+            "m",
         )
         assert len(ts) == 2
         # Window-end stamps: bars 0-4 close the window ending at 5min.
@@ -44,8 +54,14 @@ class TestAggregateBars:
     def test_tick_count_unit(self):
         data = _minute_bars(9)
         ts, o, h, l, c, v = raptorbt.aggregate_bars(
-            data["timestamps"], data["open"], data["high"], data["low"],
-            data["close"], data["volume"], 3, "tick",
+            data["timestamps"],
+            data["open"],
+            data["high"],
+            data["low"],
+            data["close"],
+            data["volume"],
+            3,
+            "tick",
         )
         assert len(ts) == 3
         assert v[0] == pytest.approx(300.0)
@@ -54,16 +70,28 @@ class TestAggregateBars:
         data = _minute_bars(4)
         with pytest.raises(ValueError, match="unknown aggregation unit"):
             raptorbt.aggregate_bars(
-                data["timestamps"], data["open"], data["high"], data["low"],
-                data["close"], data["volume"], 1, "fortnight",
+                data["timestamps"],
+                data["open"],
+                data["high"],
+                data["low"],
+                data["close"],
+                data["volume"],
+                1,
+                "fortnight",
             )
 
     def test_length_mismatch_raises(self):
         data = _minute_bars(4)
         with pytest.raises(ValueError, match="length"):
             raptorbt.aggregate_bars(
-                data["timestamps"], data["open"][:2], data["high"], data["low"],
-                data["close"], data["volume"], 5, "m",
+                data["timestamps"],
+                data["open"][:2],
+                data["high"],
+                data["low"],
+                data["close"],
+                data["volume"],
+                5,
+                "m",
             )
 
 
@@ -74,7 +102,9 @@ class TestBarsFromTicks:
         ltp[5] = 0.0  # missing print: skipped
         buys = np.full(10, 3.0)
         sells = np.full(10, 2.0)
-        bts, o, h, l, c, v = raptorbt.bars_from_ticks(ts, ltp, buys, sells, 10, "volume")
+        bts, o, h, l, c, v = raptorbt.bars_from_ticks(
+            ts, ltp, buys, sells, 10, "volume"
+        )
         # 9 valid trades of size 5: thresholds at 10 -> bars of 2 trades each.
         assert len(bts) >= 4
         assert v[0] == pytest.approx(10.0)
@@ -96,9 +126,12 @@ class TestStreamingAggregator:
         streamed = []
         for i in range(23):
             done = agg.push_bar(
-                int(data["timestamps"][i]), float(data["open"][i]),
-                float(data["high"][i]), float(data["low"][i]),
-                float(data["close"][i]), float(data["volume"][i]),
+                int(data["timestamps"][i]),
+                float(data["open"][i]),
+                float(data["high"][i]),
+                float(data["low"][i]),
+                float(data["close"][i]),
+                float(data["volume"][i]),
             )
             if done is not None:
                 streamed.append(done)
@@ -107,8 +140,14 @@ class TestStreamingAggregator:
             streamed.append(tail)
 
         ts, o, h, l, c, v = raptorbt.aggregate_bars(
-            data["timestamps"], data["open"], data["high"], data["low"],
-            data["close"], data["volume"], 5, "m",
+            data["timestamps"],
+            data["open"],
+            data["high"],
+            data["low"],
+            data["close"],
+            data["volume"],
+            5,
+            "m",
         )
         assert len(streamed) == len(ts)
         for i, bar in enumerate(streamed):
@@ -130,7 +169,7 @@ class TestMultiTimeframeStrategy:
                 events.append(("bar", ctx.idx))
 
         data = _minute_bars(12)
-        config = PyBacktestConfig()
+        config = BacktestConfig()
         config.fees = 0.0
         run_strategy_backtest(S, **data, config=config)
 
@@ -140,7 +179,10 @@ class TestMultiTimeframeStrategy:
         # Each composite dispatches before that bar index's own on_bar.
         for kind, idx, *_rest in composites:
             position = events.index(("composite", idx, *_rest))
-            assert events[position + 1] == ("bar", idx) or ("bar", idx) in events[position:]
+            assert (
+                events[position + 1] == ("bar", idx)
+                or ("bar", idx) in events[position:]
+            )
 
     def test_trend_filter_gates_entries(self):
         """The capability test: a 5-minute trend filter gating 1-minute entries."""
@@ -163,12 +205,14 @@ class TestMultiTimeframeStrategy:
         close = np.concatenate([100 - 0.5 * np.arange(10), 95 + 0.8 * np.arange(10)])
         open_ = np.concatenate([[100.0], close[:-1]])
         data = {
-            "timestamps": ts, "open": open_,
+            "timestamps": ts,
+            "open": open_,
             "high": np.maximum(open_, close) + 0.2,
             "low": np.minimum(open_, close) - 0.2,
-            "close": close, "volume": np.full(n, 100.0),
+            "close": close,
+            "volume": np.full(n, 100.0),
         }
-        config = PyBacktestConfig()
+        config = BacktestConfig()
         config.fees = 0.0
         result = run_strategy_backtest(S, **data, config=config)
         trades = result.trades()
@@ -237,6 +281,55 @@ class TestRenkoBars:
         while first is not None:
             streamed.append(first)
             first = agg.next_pending()
+
+        assert [b[4] for b in streamed] == list(batch[4])
+
+    def test_aggregator_honours_brick_size_when_it_differs_from_step(self):
+        """BarAggregator must use the brick_size it was given, not the step.
+
+        Regression test. ``BarAggregator.__init__`` accepted ``brick_size`` in
+        its PyO3 signature but called a helper that hard-coded ``0.0``, and
+        ``resolved_brick`` treats a non-positive brick as "fall back to step".
+        So a user asking for 5-point bricks silently got ``step``-point bricks:
+        a 10-point move produced 10 bars instead of 2, and every Renko backtest
+        built through the streaming aggregator was wrong.
+
+        Every pre-existing test used ``step=1, brick_size=1.0``, where the
+        fallback returns the same number the caller asked for and the bug is
+        invisible. This one separates them on purpose.
+        """
+        agg = raptorbt.BarAggregator(1, "renko", brick_size=5.0)
+        closed = []
+        for i, price in enumerate(range(100, 111)):
+            bar = agg.push_bar(
+                i, float(price), float(price), float(price), float(price), 1.0
+            )
+            while bar is not None:
+                closed.append(bar)
+                bar = agg.next_pending()
+
+        # 100 -> 110 is two whole 5-point bricks.
+        assert [b[4] for b in closed] == [105.0, 110.0]
+
+    def test_aggregator_matches_batch_for_a_non_unit_brick(self):
+        """Streaming and batch Renko agree when brick_size != step.
+
+        The existing parity test pins ``step=1, brick_size=1.0``, where the two
+        paths agreed even while the streaming one ignored its argument.
+        """
+        ts = np.arange(11, dtype=np.int64)
+        px = np.arange(100.0, 111.0)
+        batch = raptorbt.aggregate_bars(
+            ts, px, px, px, px, np.ones(11), 1, "renko", brick_size=5.0
+        )
+
+        agg = raptorbt.BarAggregator(1, "renko", brick_size=5.0)
+        streamed = []
+        for i in range(11):
+            bar = agg.push_bar(int(ts[i]), px[i], px[i], px[i], px[i], 1.0)
+            while bar is not None:
+                streamed.append(bar)
+                bar = agg.next_pending()
 
         assert [b[4] for b in streamed] == list(batch[4])
 

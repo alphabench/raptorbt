@@ -9,19 +9,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::core::types::{OhlcvBar, TickData};
-use crate::data::{
-    builder_for, builder_for_with, AggregationUnit, BarBuilder, BarSpec, SourceRecord,
-};
+use crate::data::{builder_for_with, AggregationUnit, BarBuilder, BarSpec, SourceRecord};
 
 use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64, vec_to_numpy_f64, vec_to_numpy_i64};
 
 fn parse_spec(step: u32, unit: &str) -> PyResult<BarSpec> {
     let unit = AggregationUnit::parse(unit).map_err(|e| PyValueError::new_err(e.to_string()))?;
     BarSpec::new(step, unit).map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-fn make_builder(step: u32, unit: &str, tz_offset_ns: i64) -> PyResult<Box<dyn BarBuilder + Send>> {
-    make_builder_with(step, unit, tz_offset_ns, 0.0)
 }
 
 fn make_builder_with(
@@ -61,7 +55,11 @@ impl PyBarAggregator {
     #[new]
     #[pyo3(signature = (step, unit, tz_offset_ns=0, brick_size=0.0))]
     fn new(step: u32, unit: &str, tz_offset_ns: i64, brick_size: f64) -> PyResult<Self> {
-        Ok(Self { builder: make_builder(step, unit, tz_offset_ns)?, step, unit: unit.to_string() })
+        Ok(Self {
+            builder: make_builder_with(step, unit, tz_offset_ns, brick_size)?,
+            step,
+            unit: unit.to_string(),
+        })
     }
 
     /// Push one bar; returns the completed coarser bar, if any.

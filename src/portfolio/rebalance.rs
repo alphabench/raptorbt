@@ -117,7 +117,7 @@ pub fn simulate_rebalance_policy(
         )));
     }
     match cfg.policy {
-        RebalancePolicy::Calendar { every_n } if every_n == 0 => {
+        RebalancePolicy::Calendar { every_n: 0 } => {
             return Err(PortfolioMathError::DegenerateInput(
                 "Calendar every_n must be >= 1".into(),
             ));

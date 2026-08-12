@@ -22,6 +22,14 @@ RaptorBT is a high-performance backtesting engine written in Rust with Python bi
 pip install raptorbt
 ```
 
+> **Upgrading from 0.6.x?** Public classes dropped their `Py` prefix in 0.7.0 —
+> `PyBacktestConfig` is now `BacktestConfig`, `PyTrade` is `Trade`, and so on.
+> Old names still work and warn; **they are removed in 0.8.0.** Two behaviour
+> fixes in the same release change results: `BarAggregator` now honours
+> `brick_size` (Renko backtests through it were wrong), and tick backtests no
+> longer stop after 50 trades by default. See the
+> [CHANGELOG](CHANGELOG.md#070---2026-08-12).
+
 ### 30-Second Example
 
 ```python
@@ -29,7 +37,7 @@ import numpy as np
 import raptorbt
 
 # Configure
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
+config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001)
 
 # Run backtest
 result = raptorbt.run_single_backtest(
@@ -110,25 +118,49 @@ numbers on your own hardware.
 
 ### Benchmark Results
 
-Measured on an Apple M4 (raptorbt 0.4.0, Python 3.11) with random-walk price
-data and an SMA-crossover strategy. Each figure is the fastest of several
-hundred repetitions of `run_single_backtest` (so it reflects engine time, not
-scheduler noise):
+Measured on an Apple M4 (10 cores, raptorbt 0.7.0, Python 3.11) with
+random-walk price data and an SMA-crossover strategy. Each figure is the fastest
+of several hundred `run_single_backtest` repetitions, so it reflects engine time
+rather than scheduler noise. Reproduce any row with `uv run python
+benches/python/run_all.py` — the harness is in the repo precisely so these are
+checkable.
 
-```
-┌─────────────┬───────────┐
-│ Data Size   │ RaptorBT  │
-├─────────────┼───────────┤
-│ 1,000 bars  │ 0.03 ms   │
-│ 5,000 bars  │ 0.13 ms   │
-│ 10,000 bars │ 0.25 ms   │
-│ 50,000 bars │ 1.37 ms   │
-└─────────────┴───────────┘
-```
+| Data size          | Time     | Throughput    |
+| ------------------ | -------- | ------------- |
+| 1,000 bars         | 0.069 ms | 15M bars/sec  |
+| 5,000 bars         | 0.36 ms  | 14M bars/sec  |
+| 10,000 bars        | 0.72 ms  | 14M bars/sec  |
+| 50,000 bars        | 3.59 ms  | 14M bars/sec  |
+| 93,750 bars        | 6.90 ms  | 14M bars/sec  |
+| 1,875,000 bars     | 156 ms   | 12M bars/sec  |
+| 25,000,000 bars    | 1.82 s   | 14M bars/sec  |
 
-Timings scale roughly linearly with bar count and will vary with your CPU,
-data, and signal density. Reproduce them with the [Verification Test](#verification-test)
-below, swapping in your own array sizes.
+The 1,875,000-bar row is the one worth dwelling on: that is roughly **twenty
+years of Indian one-minute intraday data**, backtested in about a sixth of a
+second. Throughput stays essentially flat from a thousand bars to twenty-five
+million, so scaling is linear — the engine does not fall off a cliff when the
+data stops fitting in cache.
+
+Other paths, measured the same way:
+
+| Path | Result |
+| ---- | ------ |
+| Tick engine | 175–242M ticks/sec, every tick traversed to the end of the array |
+| 500 option spreads in parallel | 42,848/sec, 6.9x faster than serial, bit-for-bit identical to it |
+| 190-combo parameter sweep over a year of minute bars | 1.47 s wall, 67 MB peak RSS |
+| Determinism | 20 runs across 3 processes → one SHA-256 |
+| Compiled engine | 1.59 MB |
+| Metrics per backtest | 33 attributes (24 in `to_dict()`) |
+
+> **These numbers are not comparable to the 0.6.4 ones published earlier.** They
+> come from a different harness, not a slower engine — the 0.6.4 figures were
+> produced by a one-off script that was not kept. Running the published 0.6.4
+> wheel and this 0.7.0 build side by side on the harness now in `benches/`, on
+> identical inputs, gives 71.0 µs and 70.5 µs respectively for 1,000 bars with
+> identical results. 0.7.0 is marginally faster. Compare within one harness
+> only; that is why the harness now ships with the code.
+
+Timings will vary with your CPU, data, and signal density.
 
 ### Determinism
 
@@ -185,7 +217,7 @@ class SmaCross(raptorbt.Strategy):
 
 result = raptorbt.run_strategy_backtest(
     SmaCross(), timestamps, open_, high, low, close, volume,
-    symbol="EXAMPLE", config=raptorbt.PyBacktestConfig(fees=0.001),
+    symbol="EXAMPLE", config=raptorbt.BacktestConfig(fees=0.001),
 )
 print(result.metrics.total_return_pct, len(result.trades()))
 ```
@@ -197,10 +229,10 @@ Hooks: `on_start`, `on_bar`, `on_stop`, `on_order_filled`,
 programmatic exits. Decision logic must only read array values at `ctx.idx`
 or earlier — indexing past the current bar reads the future.
 
-Engine-level stop/target/sizing configuration (`PyBacktestConfig`,
-`PyInstrumentConfig`) applies to both paths. `run_strategy_backtest` returns
-the same `PyBacktestResult` as `run_single_backtest`. For advanced drivers
-(live feeds, custom loops), `PyKernelSession` exposes the per-bar engine
+Engine-level stop/target/sizing configuration (`BacktestConfig`,
+`InstrumentConfig`) applies to both paths. `run_strategy_backtest` returns
+the same `BacktestResult` as `run_single_backtest`. For advanced drivers
+(live feeds, custom loops), `KernelSession` exposes the per-bar engine
 step directly.
 
 Note: one Python hook call per bar makes the class path slower than the
@@ -211,9 +243,9 @@ parameter sweeps.
 
 New in 0.5.0: `InstrumentSpec` describes the market being traded — tick
 size, lot size, contract multiplier, expiry — separately from the per-run
-allocation knobs in `PyInstrumentConfig`. Attach one to a class-based run
+allocation knobs in `InstrumentConfig`. Attach one to a class-based run
 via `run_strategy_backtest(..., instrument=...)` (or directly on
-`PyKernelSession`):
+`KernelSession`):
 
 ```python
 import raptorbt
@@ -242,7 +274,7 @@ the engine:
   value-based fees charge on `price * size * multiplier`, while
   per-share/per-contract fee models keep charging per contract;
 - floors sizes to `lot_size` / `size_increment` (an explicit
-  `PyInstrumentConfig.lot_size` still wins — it is the per-run override);
+  `InstrumentConfig.lot_size` still wins — it is the per-run override);
 - rounds engine-derived stop/target prices onto the `price_increment` grid,
   conservatively (never in the strategy's favor);
 - force-settles open positions at expiry (`Settlement` exit reason) and
@@ -633,12 +665,12 @@ a committed golden-fixture suite enforces this):
   maintenance requirement (`margin_maint`, else half initial) fires
   `on_margin_call` and halts new entries — no forced liquidation.
   `ctx.free_capital` reports unlocked cash.
-- **Stochastic fills** — `PyBacktestConfig(fill_prob_limit=0.9,
+- **Stochastic fills** — `BacktestConfig(fill_prob_limit=0.9,
   fill_prob_slippage=0.1, fill_seed=42)`: a marketable resting limit may be
   passed over (it stays working and retries), and stop/market fills may
   slip one tick against the trader (needs an instrument `price_increment`).
   Seeded and fully deterministic: same seed, same fills.
-- **Adaptive bar path** — `PyBacktestConfig(bar_path_adaptive=True)`: when
+- **Adaptive bar path** — `BacktestConfig(bar_path_adaptive=True)`: when
   a stop and target are both touched inside one bar, infer the traversal
   from candle geometry (up-candle: open→low→high→close) instead of the
   conservative stop-first default.
@@ -669,7 +701,7 @@ sma_slow = df["close"].rolling(20).mean()
 entries = (sma_fast > sma_slow) & (sma_fast.shift(1) <= sma_slow.shift(1))
 exits = (sma_fast < sma_slow) & (sma_fast.shift(1) >= sma_slow.shift(1))
 
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001, slippage=0.0005)
+config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001, slippage=0.0005)
 config.set_fixed_stop(0.02)    # optional 2% stop-loss
 config.set_fixed_target(0.04)  # optional 4% take-profit
 
@@ -686,7 +718,7 @@ result = raptorbt.run_single_backtest(
     weight=1.0,
     symbol="AAPL",
     config=config,
-    instrument_config=raptorbt.PyInstrumentConfig(lot_size=1.0),  # optional: lot rounding, capital cap
+    instrument_config=raptorbt.InstrumentConfig(lot_size=1.0),  # optional: lot rounding, capital cap
 )
 
 print(f"Return {result.metrics.total_return_pct:.2f}%  "
@@ -695,7 +727,7 @@ print(f"Return {result.metrics.total_return_pct:.2f}%  "
       f"Trades {result.metrics.total_trades}")
 
 equity = result.equity_curve()  # np.ndarray
-trades = result.trades()        # list[PyTrade]
+trades = result.trades()        # list[Trade]
 ```
 
 ### 2. Basket/Collective
@@ -711,9 +743,9 @@ instruments = [
 
 # Optional: Per-instrument configs for lot_size and capital allocation
 instrument_configs = {
-    "AAPL": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=33000),
-    "GOOGL": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=33000),
-    "MSFT": raptorbt.PyInstrumentConfig(lot_size=1.0, alloted_capital=34000),
+    "AAPL": raptorbt.InstrumentConfig(lot_size=1.0, alloted_capital=33000),
+    "GOOGL": raptorbt.InstrumentConfig(lot_size=1.0, alloted_capital=33000),
+    "MSFT": raptorbt.InstrumentConfig(lot_size=1.0, alloted_capital=34000),
 }
 
 result = raptorbt.run_basket_backtest(
@@ -829,11 +861,11 @@ Run multiple spread backtests in parallel. Shared data (timestamps, underlying c
 import numpy as np
 import raptorbt
 
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
+config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001)
 
 # Create batch items — one per strategy variation
 items = [
-    raptorbt.PyBatchSpreadItem(
+    raptorbt.BatchSpreadItem(
         strategy_id="straddle_24000",
         legs_premiums=[call_24000_premiums, put_24000_premiums],
         leg_configs=[("CE", 24000.0, -1, 50), ("PE", 24000.0, -1, 50)],
@@ -843,7 +875,7 @@ items = [
         max_loss=5000.0,
         target_profit=3000.0,
     ),
-    raptorbt.PyBatchSpreadItem(
+    raptorbt.BatchSpreadItem(
         strategy_id="strangle_23500_24500",
         legs_premiums=[call_24500_premiums, put_23500_premiums],
         leg_configs=[("CE", 24500.0, -1, 50), ("PE", 23500.0, -1, 50)],
@@ -893,13 +925,20 @@ result = raptorbt.run_tick_backtest(
     take_profit_pct=10.0,
     max_hold_seconds=1800,          # 30-minute maximum hold
     entry_cooldown_ticks=10,        # minimum ticks between entries
-    max_trades=50,
 )
 
 print(f"trades: {result.metrics.total_trades}")
 print(f"profit_factor: {result.metrics.profit_factor:.2f}")
 print(f"win_rate: {result.metrics.win_rate_pct:.1f}%")
 ```
+
+> **`max_trades` is a hard early exit, not a filter.** Set it and the run stops
+> after that many trades, reporting as if the tape ended there — so the metrics
+> describe a prefix of your data, not your data. It is unlimited by default from
+> 0.7.0; through 0.6.4 it defaulted to `50`, which on a million-tick input meant
+> a backtest that silently covered 0.8% of the ticks and understated max
+> drawdown by more than a hundredfold. Pass it only when you actually want a
+> truncated run.
 
 #### Class-Contract Tick Strategies
 
@@ -959,7 +998,7 @@ arrive; every strategy hook a push triggers fires before that push returns.
 stream = raptorbt.TickStrategyStream(
     Scalper(),
     symbols=["RELIANCE", "INFY"],
-    config=raptorbt.PyBacktestConfig(initial_capital=100_000.0, fees=0.001),
+    config=raptorbt.BacktestConfig(initial_capital=100_000.0, fees=0.001),
     warmup_bars={"RELIANCE": dict(timestamps=ts, open=o, high=h,
                                   low=l, close=c, volume=v)},
     primary_bars=(1, "m"),
@@ -998,7 +1037,7 @@ earlier.
 stream = raptorbt.TickStrategyStream(
     MyStrategy(),
     symbols=["RELIANCE"],
-    config=raptorbt.PyBacktestConfig(initial_capital=100_000.0, fees=0.001),
+    config=raptorbt.BacktestConfig(initial_capital=100_000.0, fees=0.001),
     initial_positions={
         # The broker says: 100 shares, average cost 90.00.
         "RELIANCE": {"quantity": 100, "avg_price": 90.0},
@@ -1056,9 +1095,9 @@ same primitive is on the portfolio session, taking positional arguments and
 returning the new position id:
 
 ```python
-from raptorbt._raptorbt import PyPortfolioSession   # not re-exported at top level
+from raptorbt import PortfolioSession
 
-session = PyPortfolioSession(config=config, account_type="cash")
+session = PortfolioSession(config=config, account_type="cash")
 i = session.add_instrument("RELIANCE", direction=1)
 session.set_bars(i, timestamps, o, h, l, c, v)
 session.seal()
@@ -1142,8 +1181,8 @@ velocity = raptorbt.tick_velocity(ts_ns, 60.0)              # ticks/min over las
 
 ## Metrics
 
-Every backtest returns a `PyBacktestMetrics` object exposing **33 metric fields**
-(listed in full under [PyBacktestMetrics](#pybacktestmetrics)). `metrics.to_dict()`
+Every backtest returns a `BacktestMetrics` object exposing **33 metric fields**
+(listed in full under [BacktestMetrics](#pybacktestmetrics)). `metrics.to_dict()`
 returns a subset of 24 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
 `"Total Return [%]"`) for quick display; read fields directly off the object to
 access all 33. The most useful are grouped below.
@@ -1262,7 +1301,7 @@ tick-level work (`tick_spread_pct`, `buy_sell_imbalance_delta`, `return_window`,
 ### Fixed Percentage
 
 ```python
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
+config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001)
 config.set_fixed_stop(0.02)    # 2% stop-loss
 config.set_fixed_target(0.04)  # 4% take-profit
 ```
@@ -1352,10 +1391,10 @@ final_values = result['final_values']  # numpy array, length = n_simulations
 
 ## API Reference
 
-### PyBacktestConfig
+### BacktestConfig
 
 ```python
-config = raptorbt.PyBacktestConfig(
+config = raptorbt.BacktestConfig(
     initial_capital: float = 100000.0,
     fees: float = 0.001,
     slippage: float = 0.0,
@@ -1373,12 +1412,12 @@ config.set_atr_target(multiplier: float, period: int)
 config.set_risk_reward_target(ratio: float)
 ```
 
-### PyInstrumentConfig
+### InstrumentConfig
 
 Per-instrument configuration for position sizing and risk management.
 
 ```python
-inst_config = raptorbt.PyInstrumentConfig(
+inst_config = raptorbt.InstrumentConfig(
     lot_size=1.0,              # Min tradeable quantity (1 for equity, 50 for NIFTY F&O)
     alloted_capital=50000.0,   # Capital allocated to this instrument (optional)
     existing_qty=None,         # Existing position quantity (future use)
@@ -1397,10 +1436,10 @@ inst_config.set_fixed_target(0.05)
 - `alloted_capital` - Per-instrument capital cap (capped at available cash).
 - `existing_qty` / `avg_price` - Reserved for future live-to-backtest transitions.
 
-### PyBatchSpreadItem
+### BatchSpreadItem
 
 ```python
-item = raptorbt.PyBatchSpreadItem(
+item = raptorbt.BatchSpreadItem(
     strategy_id: str,                    # Unique identifier for this backtest
     legs_premiums: List[np.ndarray],     # Premium series per leg
     leg_configs: List[Tuple[str, float, int, int]],  # (option_type, strike, quantity, lot_size)
@@ -1418,9 +1457,9 @@ item = raptorbt.PyBatchSpreadItem(
 results = raptorbt.batch_spread_backtest(
     timestamps: np.ndarray,              # int64 nanosecond timestamps (shared)
     underlying_close: np.ndarray,        # Underlying close prices (shared)
-    items: List[PyBatchSpreadItem],      # List of spread backtest items
-    config: PyBacktestConfig = None,     # Optional shared config
-) -> List[Tuple[str, PyBacktestResult]]  # (strategy_id, result) pairs
+    items: List[BatchSpreadItem],      # List of spread backtest items
+    config: BacktestConfig = None,     # Optional shared config
+) -> List[Tuple[str, BacktestResult]]  # (strategy_id, result) pairs
 ```
 
 Runs all spread backtests in parallel via Rayon. Timestamps and underlying close are shared across all items and converted once. The GIL is released during execution for maximum Python concurrency.
@@ -1441,22 +1480,22 @@ result = raptorbt.simulate_portfolio_mc(
 
 Returns a dictionary with keys: `expected_return`, `probability_of_loss`, `var_95`, `cvar_95`, `percentile_paths`, `final_values`.
 
-### PyBacktestResult
+### BacktestResult
 
 ```python
 result = raptorbt.run_single_backtest(...)
 
 # Attributes
-result.metrics        # PyBacktestMetrics object
+result.metrics        # BacktestMetrics object
 
 # Methods
 result.equity_curve()    # numpy.ndarray
 result.drawdown_curve()  # numpy.ndarray
 result.returns()         # numpy.ndarray
-result.trades()          # List[PyTrade]
+result.trades()          # List[Trade]
 ```
 
-### PyBacktestMetrics
+### BacktestMetrics
 
 33 read-only fields — see the [Metrics](#metrics) section for the full table with
 descriptions. `metrics.to_dict()` returns 24 of them under human-readable labels
@@ -1469,7 +1508,7 @@ m.total_return_pct, m.sharpe_ratio, m.max_drawdown_pct   # etc. — 33 fields to
 stats = m.to_dict()
 ```
 
-### PyTrade
+### Trade
 
 ```python
 for trade in result.trades():
@@ -1515,7 +1554,7 @@ close = np.cumprod(1 + np.random.randn(n) * 0.02) * 100
 entries = np.zeros(n, dtype=bool); entries[::20] = True
 exits = np.zeros(n, dtype=bool);  exits[10::20] = True
 
-config = raptorbt.PyBacktestConfig(initial_capital=100000, fees=0.001)
+config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001)
 result = raptorbt.run_single_backtest(
     timestamps=np.arange(n, dtype=np.int64),
     open=close,
@@ -1576,12 +1615,12 @@ Full release notes, including the 0.5.0 migration guide, live in
 ### v0.6.3
 
 - **The portfolio optimizer learns long/short — by explicit configuration
-  only.** `PyOptimizerConfig` gains `short_cap` (per-name short bound,
+  only.** `OptimizerConfig` gains `short_cap` (per-name short bound,
   default 0 = long-only, byte-identical to the historical problem),
   `gross_max` (total size of all bets, `sum |w|`), and `net_min`/`net_max`
   (directional tilt, `sum(w)`; both 0 pins a dollar-neutral book). Sector
   caps become GROSS in long/short mode — concentration, not direction.
-  `PyOptimizationResult` gains `gross_exposure`/`net_exposure`. Short
+  `OptimizationResult` gains `gross_exposure`/`net_exposure`. Short
   position adoption remains refused, pinned by test.
 - **Fixed: adopting a position mid-run understated max drawdown.** The equity
   curve is written as the run proceeds, so a position adopted after it started
@@ -1601,7 +1640,7 @@ Full release notes, including the 0.5.0 migration guide, live in
 - **Position adoption** — seed a run with a position the account already holds,
   at the real average cost, with no order, no fill, no fees and no trade
   record. `TickStrategyStream(initial_positions=...)` and
-  `PyPortfolioSession.adopt_position(...)`. Cash accounts only, long-only;
+  `PortfolioSession.adopt_position(...)`. Cash accounts only, long-only;
   margin adoption is refused rather than guessed. See
   [Position Adoption](#position-adoption--starting-on-shares-you-already-own).
 
@@ -1654,7 +1693,7 @@ to reproduce old results bit-identically. See
 
 - Add `TickData` struct — parallel arrays of `timestamps`, `ltp`, `bid`, `ask`, `buy_qty_delta`, `sell_qty_delta`, `oi` (one element per tick). Callers must pre-convert Zerodha cumulative session totals to per-tick deltas before passing.
 - Add `ExitReason::TimeExit` — max hold-time exceeded exit for tick strategies.
-- Add `run_tick_backtest` — tick-native simulation engine. Entry fills at ask+slippage; stop/target checked against ltp on every tick (not OHLC approximation); max-hold-seconds time exit; configurable cooldown between entries. Returns the same `PyBacktestResult` / `PyBacktestMetrics` (33 fields) as all other strategy types.
+- Add `run_tick_backtest` — tick-native simulation engine. Entry fills at ask+slippage; stop/target checked against ltp on every tick (not OHLC approximation); max-hold-seconds time exit; configurable cooldown between entries. Returns the same `BacktestResult` / `BacktestMetrics` (33 fields) as all other strategy types.
 - Add `compute_tick_entry_signals` — compute momentum entry bool array from precomputed feature arrays (spread gate, delta BSI gate, 1-min return gate, cooldown enforcement). O(N) single pass.
 - Add `compute_tick_exit_signals` — time-based (EOD) exit bool array from tick timestamps.
 - Add `tick_spread_pct` — per-tick bid/ask spread as percentage of mid price.
@@ -1676,18 +1715,18 @@ to reproduce old results bit-identically. See
 ### v0.3.3
 
 - Add `batch_spread_backtest` function for running multiple spread backtests in parallel via Rayon
-- Add `PyBatchSpreadItem` class for defining individual items in a batch spread backtest
+- Add `BatchSpreadItem` class for defining individual items in a batch spread backtest
 - Shared data (timestamps, underlying close) is converted once and reused across all items
 - GIL released during parallel execution for maximum Python concurrency
 - Each item carries its own `strategy_id`, leg configs, signals, spread type, and optional max loss / target profit
-- Returns a list of `(strategy_id, PyBacktestResult)` tuples preserving result-to-input mapping
+- Returns a list of `(strategy_id, BacktestResult)` tuples preserving result-to-input mapping
 
 ### v0.3.2
 
 - Add `payoff_ratio` metric to `BacktestMetrics` — average winning trade return divided by average losing trade return (absolute), measures risk/reward per trade
 - Add `recovery_factor` metric to `BacktestMetrics` — net profit divided by maximum drawdown in absolute terms, measures how many times over the strategy recovered from its worst drawdown
 - Both metrics computed in `StreamingMetrics::finalize()` (single-instrument backtest) and `PortfolioEngine` (multi-strategy aggregation)
-- Both metrics exposed via PyO3 as `#[pyo3(get)]` attributes on `PyBacktestMetrics`
+- Both metrics exposed via PyO3 as `#[pyo3(get)]` attributes on `BacktestMetrics`
 - Handles edge cases: returns `f64::INFINITY` when denominator is zero with positive numerator, `0.0` otherwise
 
 ### v0.3.1
@@ -1700,7 +1739,7 @@ to reproduce old results bit-identically. See
 
 ### v0.3.0
 
-- Per-instrument configuration via `PyInstrumentConfig` (lot_size, alloted_capital, stop/target overrides)
+- Per-instrument configuration via `InstrumentConfig` (lot_size, alloted_capital, stop/target overrides)
 - Position sizes now correctly rounded to lot_size multiples
 - Support for per-instrument capital allocation in basket backtests
 - Future-ready fields: existing_qty, avg_price for live-to-backtest transitions

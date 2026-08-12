@@ -62,7 +62,7 @@ pub(crate) fn parse_account_mode(
 /// `"order_filled"`, `"order_canceled"`, `"order_expired"`,
 /// `"order_rejected"`); the optional fields are populated according to the
 /// kind.
-#[pyclass]
+#[pyclass(name = "EngineEvent")]
 #[derive(Debug, Clone)]
 pub struct PyEngineEvent {
     #[pyo3(get)]
@@ -209,7 +209,7 @@ impl From<EngineEvent> for PyEngineEvent {
 }
 
 /// Read-only view of the session's open position.
-#[pyclass]
+#[pyclass(name = "PositionSnapshot")]
 #[derive(Debug, Clone)]
 pub struct PyPositionSnapshot {
     /// Ledger position id, unique within a session.
@@ -246,7 +246,7 @@ impl PyPositionSnapshot {
 /// order, then [`PyKernelSession::finish`] to obtain the standard backtest
 /// result. Scalars cross the boundary per bar, so a Python driver loop pays
 /// one FFI call per bar with no array allocation.
-#[pyclass]
+#[pyclass(name = "KernelSession")]
 pub struct PyKernelSession {
     runner: Option<SingleRunner>,
 }

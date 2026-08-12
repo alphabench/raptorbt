@@ -216,18 +216,18 @@ pub fn drawdown_periods(equity_curve: &[f64]) -> Vec<(usize, usize, f64)> {
     let mut dd_start = 0;
     let mut max_dd = 0.0;
 
-    for i in 1..n {
-        if equity_curve[i] > peak {
+    for (i, &equity) in equity_curve.iter().enumerate().take(n).skip(1) {
+        if equity > peak {
             if in_dd {
                 // End of drawdown period
                 periods.push((dd_start, i - 1, max_dd));
                 in_dd = false;
                 max_dd = 0.0;
             }
-            peak = equity_curve[i];
+            peak = equity;
             peak_idx = i;
         } else if peak > 0.0 {
-            let dd = (peak - equity_curve[i]) / peak * 100.0;
+            let dd = (peak - equity) / peak * 100.0;
             if !in_dd && dd > 0.0 {
                 in_dd = true;
                 dd_start = peak_idx;

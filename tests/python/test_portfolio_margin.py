@@ -9,7 +9,7 @@ direction-aware, and a margin call halts every instrument at once.
 import numpy as np
 import pytest
 
-from raptorbt import PyBacktestConfig, Strategy, run_portfolio_strategy
+from raptorbt import BacktestConfig, Strategy, run_portfolio_strategy
 
 
 def _bars(closes, start_ts=0, step=1):
@@ -26,7 +26,7 @@ def _bars(closes, start_ts=0, step=1):
 
 
 def _zero_fee_config(**kwargs):
-    config = PyBacktestConfig(**kwargs)
+    config = BacktestConfig(**kwargs)
     config.fees = 0.0
     return config
 

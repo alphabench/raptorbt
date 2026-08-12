@@ -214,7 +214,9 @@ class Strategy:
             side="sell",
         )
 
-    def close_position(self, position_id: int | None = None, symbol: str | None = None) -> None:
+    def close_position(
+        self, position_id: int | None = None, symbol: str | None = None
+    ) -> None:
         """Queue a close of the open position for this bar.
 
         With ``position_id`` (from ``ctx.positions``), closes that specific
@@ -287,7 +289,9 @@ class Strategy:
         self._indicators.append((indicator, stream_id, symbol))
         return indicator
 
-    def register_indicators(self, factory, symbols, stream_id: int | None = None) -> dict:
+    def register_indicators(
+        self, factory, symbols, stream_id: int | None = None
+    ) -> dict:
         """Register one indicator per symbol, built by ``factory()``.
 
         Returns ``symbol -> indicator``::
@@ -297,7 +301,9 @@ class Strategy:
             )
         """
         return {
-            symbol: self.register_indicator(factory(), stream_id=stream_id, symbol=symbol)
+            symbol: self.register_indicator(
+                factory(), stream_id=stream_id, symbol=symbol
+            )
             for symbol in symbols
         }
 

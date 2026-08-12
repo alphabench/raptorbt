@@ -16,9 +16,11 @@ use crate::core::types::{
 use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
 use crate::execution::algos::AlgoEngine;
 use crate::execution::fill::FillRng;
-use crate::execution::orders::{
-    MatchOutcome, Order, OrderEngine, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce,
-};
+use crate::execution::orders::{MatchOutcome, OrderEngine, OrderKind, OrderStatus, TimeInForce};
+// Re-exported for `kernel_tests.rs`, which pulls this module in with `use
+// super::*`; the kernel itself does not name these types.
+#[cfg(test)]
+use crate::execution::orders::{OrderSide, QtySpec};
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::instruments::InstrumentSpec;
@@ -445,6 +447,12 @@ impl EngineKernel {
         price: Price,
         size: f64,
     ) -> Result<u64, String> {
+        // `!(x > 0.0)` rather than `x <= 0.0`, deliberately: the negated form
+        // is also false for NaN, so NaN is refused here. Clippy's
+        // `neg_cmp_op_on_partial_ord` suggestion would let a NaN price through
+        // and adopt a position priced at NaN, which then poisons cash, equity
+        // and every drawdown figure downstream.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(price > 0.0) || !(size > 0.0) {
             return Err(format!(
                 "adopt_position needs positive price and size (got size {size} @ {price})"
@@ -916,9 +924,6 @@ impl EngineKernel {
 
         events
     }
-
-    /// Apply one matching outcome to position/cash state.
-    ///
 
     /// Exit path for one position: stop-loss, then take-profit, then signal.
     fn try_exit_position(

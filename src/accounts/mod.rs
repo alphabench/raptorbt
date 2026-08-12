@@ -13,21 +13,16 @@
 use std::collections::HashMap;
 
 /// How the account funds positions.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AccountMode {
     /// Fully funded: notional debited on entry (historical behavior).
+    #[default]
     Cash,
     /// Leveraged: initial margin locked per position.
     ///
     /// The per-position margin rate is the instrument's `margin_init` when
     /// set, else `1 / leverage`.
     Margin { leverage: f64 },
-}
-
-impl Default for AccountMode {
-    fn default() -> Self {
-        AccountMode::Cash
-    }
 }
 
 /// Per-position margin bookkeeping for [`AccountMode::Margin`].

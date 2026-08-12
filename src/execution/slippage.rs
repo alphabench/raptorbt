@@ -3,9 +3,10 @@
 use crate::core::types::{Direction, Price};
 
 /// Slippage model for simulating execution price deviation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum SlippageModel {
     /// No slippage.
+    #[default]
     None,
     /// Fixed percentage slippage.
     Percentage(f64),
@@ -15,12 +16,6 @@ pub enum SlippageModel {
     VolumeBased { base: f64, volume_factor: f64 },
     /// Spread-based slippage (uses bid-ask spread).
     SpreadBased { half_spread: f64 },
-}
-
-impl Default for SlippageModel {
-    fn default() -> Self {
-        SlippageModel::None
-    }
 }
 
 impl SlippageModel {

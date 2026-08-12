@@ -62,7 +62,7 @@ fn parse_segment(segment: &str) -> PyResult<Segment> {
 /// Carries `periods_per_year` and `asset_ids` so annualization and asset
 /// ordering travel with the matrix; consumers validate against them instead
 /// of trusting the caller.
-#[pyclass]
+#[pyclass(name = "RiskModel")]
 #[derive(Debug, Clone)]
 pub struct PyRiskModel {
     pub(crate) inner: RiskModel,
@@ -112,7 +112,7 @@ impl PyRiskModel {
 }
 
 /// Constraint and objective configuration for the long-only optimizer.
-#[pyclass]
+#[pyclass(name = "OptimizerConfig")]
 #[derive(Debug, Clone)]
 pub struct PyOptimizerConfig {
     #[pyo3(get, set)]
@@ -228,7 +228,7 @@ impl PyOptimizerConfig {
 }
 
 /// Result of one optimization.
-#[pyclass]
+#[pyclass(name = "OptimizationResult")]
 #[derive(Debug, Clone)]
 pub struct PyOptimizationResult {
     inner: OptimizationResult,
@@ -301,7 +301,7 @@ impl PyOptimizationResult {
 }
 
 /// Euler decomposition of portfolio volatility.
-#[pyclass]
+#[pyclass(name = "RiskContributions")]
 #[derive(Debug, Clone)]
 pub struct PyRiskContributions {
     total_vol_annualized: f64,
@@ -335,7 +335,7 @@ impl PyRiskContributions {
 /// Eagerly copies arrays under the GIL at construction so the item is `Send`
 /// and the batch loop can release the GIL (same pattern as
 /// `PyBatchSpreadItem`).
-#[pyclass]
+#[pyclass(name = "OptimizeItem")]
 #[derive(Debug, Clone)]
 pub struct PyOptimizeItem {
     item_id: String,
@@ -535,7 +535,7 @@ pub fn composite_scores<'py>(
 }
 
 /// Measured rank IC of a factor against forward returns.
-#[pyclass]
+#[pyclass(name = "RankIC")]
 #[derive(Debug, Clone)]
 pub struct PyRankIc {
     mean_ic: f64,
@@ -633,7 +633,7 @@ pub fn rank_ic(
 }
 
 /// Result of a rebalance-policy simulation.
-#[pyclass]
+#[pyclass(name = "RebalanceSimResult")]
 #[derive(Debug, Clone)]
 pub struct PyRebalanceSimResult {
     equity_curve: Vec<f64>,

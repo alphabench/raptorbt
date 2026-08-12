@@ -265,9 +265,9 @@ def test_the_thread_runs_through_the_guarded_body():
     finally:
         version_check.threading.Thread = monkeypatch_target
 
-    assert captured["target"] is version_check._thread_body, (
-        "the worker must run inside _thread_body's catch-all, not _run directly"
-    )
+    assert (
+        captured["target"] is version_check._thread_body
+    ), "the worker must run inside _thread_body's catch-all, not _run directly"
     for thread in threading.enumerate():
         if thread.name == "raptorbt-version-check":
             thread.join(timeout=5)

@@ -6,7 +6,10 @@ use raptorbt::indicators::trend::{ema, sma, supertrend};
 use raptorbt::indicators::volatility::{atr, bollinger_bands};
 use raptorbt::indicators::volume::vwap;
 
-fn sample_ohlcv() -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+/// `(open, high, low, close, volume)`.
+type SampleOhlcv = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+fn sample_ohlcv() -> SampleOhlcv {
     // Create sample OHLCV data with 50 bars
     let n = 50;
     let mut close: Vec<f64> = vec![100.0];
@@ -72,7 +75,7 @@ fn test_rsi_range() {
     for (i, &value) in result.iter().enumerate() {
         if !value.is_nan() {
             assert!(
-                value >= 0.0 && value <= 100.0,
+                (0.0..=100.0).contains(&value),
                 "RSI at index {} is out of range: {}",
                 i,
                 value
@@ -103,13 +106,13 @@ fn test_stochastic_range() {
     // %K and %D should be in [0, 100]
     for (i, &k) in result.k.iter().enumerate() {
         if !k.is_nan() {
-            assert!(k >= 0.0 && k <= 100.0, "%K at index {} is out of range: {}", i, k);
+            assert!((0.0..=100.0).contains(&k), "%K at index {} is out of range: {}", i, k);
         }
     }
 
     for (i, &d) in result.d.iter().enumerate() {
         if !d.is_nan() {
-            assert!(d >= 0.0 && d <= 100.0, "%D at index {} is out of range: {}", i, d);
+            assert!((0.0..=100.0).contains(&d), "%D at index {} is out of range: {}", i, d);
         }
     }
 }
@@ -158,7 +161,7 @@ fn test_adx_range() {
     for (i, &value) in result.iter().enumerate() {
         if !value.is_nan() {
             assert!(
-                value >= 0.0 && value <= 100.0,
+                (0.0..=100.0).contains(&value),
                 "ADX at index {} is out of range: {}",
                 i,
                 value

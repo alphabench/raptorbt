@@ -37,32 +37,48 @@ pub struct MonteCarloResult {
 }
 
 /// Cholesky decomposition of a symmetric positive-definite matrix.
-/// Returns lower-triangular matrix L such that A = L * L^T.
-fn cholesky(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, &'static str> {
+///
+/// Returns lower-triangular `L` such that `A = L * L^T`, or an error naming the
+/// asset index where the matrix stopped being positive definite.
+///
+/// **Refuses rather than repairs.** Through 0.6.4 a negative pivot was silently
+/// replaced by `sqrt(|diag|)` and a ~zero pivot by `0.0`, so the function always
+/// returned `Ok` and the simulation ran against a correlation structure that was
+/// not the one requested. Nothing downstream could tell. Measured on an
+/// indefinite 3-asset matrix (smallest eigenvalue -0.8), the repaired
+/// decomposition produced `var_95 = 0` and `probability_of_loss = 0` -- a risk
+/// model reporting no risk at all, from inputs it should have rejected.
+///
+/// A correlation matrix that is not positive definite is a broken estimate,
+/// usually from overlapping or too-short return windows. The caller needs to
+/// know that, not receive smooth numbers computed from a different matrix.
+fn cholesky(matrix: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = matrix.len();
     let mut l = vec![vec![0.0; n]; n];
 
     for i in 0..n {
         for j in 0..=i {
-            let mut sum = 0.0;
-            for k in 0..j {
-                sum += l[i][k] * l[j][k];
-            }
+            let sum: f64 = l[i][..j].iter().zip(&l[j][..j]).map(|(a, b)| a * b).sum();
 
             if i == j {
                 let diag = matrix[i][i] - sum;
                 if diag <= 0.0 {
-                    // Matrix is not positive definite; use a small epsilon
-                    l[i][j] = (diag.abs().max(1e-10)).sqrt();
-                } else {
-                    l[i][j] = diag.sqrt();
+                    return Err(format!(
+                        "correlation matrix is not positive definite (non-positive pivot \
+                         {diag:.3e} at asset {i}); it cannot be decomposed, and simulating \
+                         through a repaired version would report risk figures for a \
+                         correlation structure you did not supply"
+                    ));
                 }
+                l[i][j] = diag.sqrt();
             } else {
                 if l[j][j].abs() < 1e-15 {
-                    l[i][j] = 0.0;
-                } else {
-                    l[i][j] = (matrix[i][j] - sum) / l[j][j];
+                    return Err(format!(
+                        "correlation matrix is singular (zero pivot at asset {j}); assets \
+                         {i} and {j} are perfectly collinear or a row is all zeros"
+                    ));
                 }
+                l[i][j] = (matrix[i][j] - sum) / l[j][j];
             }
         }
     }
@@ -154,7 +170,7 @@ pub fn simulate_portfolio_forward(
     correlation_matrix: &[Vec<f64>],
     initial_value: f64,
     config: &MonteCarloConfig,
-) -> MonteCarloResult {
+) -> Result<MonteCarloResult, String> {
     let n_assets = returns.len();
     let dt = 1.0; // daily time step
 
@@ -172,19 +188,15 @@ pub fn simulate_portfolio_forward(
     }
 
     // Cholesky decomposition of correlation matrix
-    let chol = cholesky(correlation_matrix).unwrap_or_else(|_| {
-        // Fallback: identity matrix (independent assets)
-        let mut identity = vec![vec![0.0; n_assets]; n_assets];
-        for i in 0..n_assets {
-            identity[i][i] = 1.0;
-        }
-        identity
-    });
+    // No identity-matrix fallback here. Substituting one would silently make
+    // every asset independent, which is the single most optimistic assumption a
+    // risk model can make -- diversification the portfolio does not have.
+    let chol = cholesky(correlation_matrix)?;
 
     // Prepare a base RNG and create per-chunk seeds via jumping
     let mut base_rng = Xoshiro256::new(config.seed);
     let n_chunks = rayon::current_num_threads().max(1);
-    let chunk_size = (config.n_simulations + n_chunks - 1) / n_chunks;
+    let chunk_size = config.n_simulations.div_ceil(n_chunks);
 
     let chunk_rngs: Vec<Xoshiro256> = (0..n_chunks)
         .map(|_| {
@@ -291,14 +303,14 @@ pub fn simulate_portfolio_forward(
         ((initial_value - avg_tail) / initial_value * 100.0).max(0.0)
     };
 
-    MonteCarloResult {
+    Ok(MonteCarloResult {
         percentile_paths,
         final_values,
         expected_return,
         probability_of_loss,
         var_95,
         cvar_95,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -336,7 +348,8 @@ mod tests {
         let corr = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let config = MonteCarloConfig { n_simulations: 100, horizon_days: 10, seed: 42 };
 
-        let result = simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config);
+        let result =
+            simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config).unwrap();
 
         assert_eq!(result.final_values.len(), 100);
         assert_eq!(result.percentile_paths.len(), 5);
@@ -351,8 +364,8 @@ mod tests {
         let corr = vec![vec![1.0, -0.3], vec![-0.3, 1.0]];
         let config = MonteCarloConfig { n_simulations: 50, horizon_days: 20, seed: 123 };
 
-        let r1 = simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config);
-        let r2 = simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config);
+        let r1 = simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config).unwrap();
+        let r2 = simulate_portfolio_forward(&returns, &weights, &corr, 100000.0, &config).unwrap();
 
         // Same seed should produce same final values (single-threaded determinism)
         // Note: with rayon, parallelism may affect order but not values

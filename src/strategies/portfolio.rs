@@ -408,7 +408,7 @@ mod tests {
     const DAY: i64 = 86_400_000_000_000;
 
     /// Flat-priced instrument, so P&L never obscures capital accounting.
-    fn flat_instrument(symbol: &str, price: f64, n: usize) -> OhlcvData {
+    fn flat_instrument(_symbol: &str, price: f64, n: usize) -> OhlcvData {
         OhlcvData {
             timestamps: (0..n as i64).map(|i| i * DAY).collect(),
             open: vec![price; n],

@@ -5,6 +5,143 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-12
+
+Two things: the public class names lose a prefix that never belonged in Python,
+and five places where the engine quietly guessed now refuse instead.
+
+Plain words on the second half, because it matters more. When raptorbt was
+handed something it could not interpret -- an option type it could not parse, a
+direction that was neither long nor short, a correlation matrix that is not
+mathematically valid -- it picked a default and returned numbers that looked
+completely normal. Not a crash, not an obviously silly figure: a smooth,
+well-formed result computed from something other than what you asked for. No
+metric, equity curve, or risk check downstream could tell.
+
+### Changed
+
+- **Every public class drops its `Py` prefix.** `PyBacktestConfig` is now
+  `BacktestConfig`, `PyTrade` is `Trade`, `PyRiskModel` is `RiskModel`, and so
+  on for 21 classes. The old spellings still work and emit a
+  `DeprecationWarning` naming the replacement; **they are removed in 0.8.0.**
+
+  The prefix was a Rust-side disambiguator -- the crate has its own
+  `BacktestConfig`, `Trade` and `BacktestResult` in `src/core`, and two Rust
+  types cannot share a name -- that was never stripped on the way out.
+  `BarAggregator`, `Indicator` and `InstrumentSpec` already reached Python
+  clean; this finishes the other 21. Rust struct names are unchanged.
+
+  Deep imports keep working too: `from raptorbt._raptorbt import PyX` warns and
+  resolves, because `PortfolioSession` had never been re-exported at top level
+  and a deep import was the only way to reach it. It is exported properly now.
+
+- **`max_trades` no longer defaults to 50.** It defaults to unlimited. This is
+  a **behaviour change to existing tick backtests**: any run that relied on the
+  implicit cap will now return different -- correct -- numbers.
+
+  `max_trades` is a hard early exit, not a filter. The tick loop `break`s and
+  the result is reported as if the tape ended there. On a 1,000,000-tick input
+  the old default produced 50 trades covering **0.81% of the data**: a total
+  return of -0.12% where the true figure was -14.13%, and a max drawdown of
+  0.124% against a true 14.13%. That is a 114-fold understatement of the single
+  number a risk check reads. The knob remains for anyone who explicitly wants a
+  truncated run.
+
+- **`run_options_backtest` string arguments are case-insensitive and closed.**
+  `option_type`, `strike_selection` and `size_type` used a catch-all match arm,
+  so `option_type="PUT"` selected a long **call** -- the mirror image of the
+  intended payoff -- while the identical string was accepted by
+  `run_spread_backtest`. The same call meant two different things depending on
+  which function you entered through. Unknown values now raise `ValueError`;
+  the documented defaults are unchanged.
+
+### Fixed
+
+- **`BarAggregator` ignored `brick_size`.** The constructor accepted the
+  argument and then called a helper that hard-coded `0.0`, which
+  `resolved_brick` reads as "fall back to `step`". Asking for 5-point Renko
+  bricks gave you `step`-point bricks -- a 10-point move produced 10 bars
+  instead of 2. **Every Renko backtest built through the streaming aggregator
+  was wrong; re-run any stored Renko results.** The batch `aggregate_bars` path
+  was always correct. Every pre-existing test used `step=1, brick_size=1.0`,
+  where the fallback returns the number you asked for and the bug is invisible.
+
+- **A correlation matrix that is not positive definite is refused, not
+  repaired.** Cholesky patched a negative pivot with `sqrt(|diag|)` and a zero
+  pivot with `0.0`, then returned success. On an indefinite 3-asset matrix
+  (smallest eigenvalue -0.8) `simulate_portfolio_mc` returned `var_95 = 0` and
+  `probability_of_loss = 0` -- a risk model reporting no risk at all, from
+  input it should have rejected. The identity-matrix fallback beneath it was
+  dead code and is gone; substituting one would have made every asset
+  independent, the most optimistic assumption available to a risk model.
+
+- **An unparseable option-type code no longer becomes a Call.**
+  `OptionType::from_code` documents that "defaulting an unrecognised code to
+  Call would price a put as a call", and both PyO3 call sites did exactly that.
+  An iron condor whose put legs failed to parse became a four-leg call
+  structure. `batch_spread_backtest` multiplied it across an entire sweep.
+
+- **`direction` must be 1 or -1.** Six call sites fell back to long, so a book
+  encoded `0`/`1` instead of `-1`/`1` backtested entirely long, flipping the
+  sign of the P&L on every short behind a well-formed equity curve. In the
+  basket and portfolio runners the parse runs per instrument, so one bad row
+  turned a leg of a market-neutral book into a doubled long.
+
+- **`simulate_portfolio_mc` validates its shapes.** Passing an
+  `(n_obs, n_assets)` matrix where a per-asset list of series was expected
+  indexed past the end of `weights` inside a Rayon worker, surfacing as
+  `PanicException` -- not catchable as `ValueError`, thrown from a thread with
+  no user code in the traceback. It now raises a `ValueError` naming the
+  mistake.
+
+- **A test that never ran now runs.** A duplicated `#[test]` attribute left the
+  following function without one, so `day_expires_on_utc_date_rollover` --
+  DAY-order expiry across UTC midnight -- silently never executed. It passes.
+
+### Internal
+
+- Build and lint are silent: `cargo clippy --all-targets -- -D warnings` passes
+  and the library build emits no warnings, down from 89 diagnostics. Not by
+  suppression -- 8 manual `Default` impls became derives, shift loops became
+  `copy_from_slice`, the `w'Σw` quadratic form was deduplicated between the
+  optimizer and risk contributions, and `OptionType::from_str` (which shadowed
+  the `FromStr` trait, so `"CE".parse()` did not work) became `from_code` with
+  a real `FromStr` impl beside it.
+
+  Six `#[allow]`s remain, each with its reasoning in a comment. The load-bearing
+  one is `adopt_position`, which guards with `!(price > 0.0)` rather than
+  `price <= 0.0` because the negated form is also false for NaN. Clippy's
+  suggestion would let a NaN price become a position's cost basis, turning
+  cash, equity and every drawdown figure into NaN with no error raised.
+
+  The optimizer index-math refactors were verified against a captured baseline
+  of 18 numeric surfaces -- covariance, optimizer weights, risk contributions,
+  MACD/RSI/ADX/VWAP, Monte Carlo, and a full backtest's metrics, equity curve
+  and drawdown curve. Bit-identical before and after.
+
+- **`benches/python/` ships the benchmark harness** behind every published
+  performance figure, so a claim can be re-run rather than trusted.
+
+### Upgrading
+
+Nothing breaks on import. Old class names work for this release.
+
+Three behaviour changes to be aware of:
+
+1. **Renko backtests through `BarAggregator` were wrong** and are now correct.
+   Re-run any stored Renko results.
+2. **Tick backtests that used the default `max_trades`** were truncated and are
+   now complete. Their numbers will change, substantially.
+3. **Input that used to be guessed is now refused.** If you were passing
+   `direction=0`, an option-type string outside `CE/CALL/C/PE/PUT/P`, an
+   unrecognised `strike_selection`, or a non-positive-definite correlation
+   matrix, you will now get a `ValueError` naming the argument. Those calls were
+   already producing wrong answers; they were just not saying so.
+
+The published performance numbers moved because the harness changed, not the
+engine. The 0.6.4 wheel and this build measure at 71.0 µs and 70.5 µs on 1,000
+bars on the harness now in `benches/`, with identical results.
+
 ## [0.6.4] - 2026-08-10
 
 One defect, one character, and it inverted every multi-leg options backtest.

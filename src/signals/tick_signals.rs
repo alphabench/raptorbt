@@ -21,6 +21,9 @@
 ///
 /// `return_direction`: +1 for long (return_1m must be positive), -1 for short
 /// (return_1m must be negative).
+// Three parallel series plus the five thresholds that gate them. Grouping
+// the thresholds would separate them from the series they apply to.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_momentum_entry(
     spread_pct: &[f64],
     bsi_delta: &[f64],
@@ -96,10 +99,6 @@ pub fn tick_momentum_exit(timestamps_ns: &[i64], eod_exit_time_ns: i64) -> Vec<b
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_return_1m(vals: &[f64]) -> Vec<f64> {
-        vals.to_vec()
-    }
 
     #[test]
     fn test_entry_spread_gate() {

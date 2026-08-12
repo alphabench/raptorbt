@@ -91,7 +91,6 @@ impl StreamingIndicator for StreamingSma {
 /// Exponential moving average, SMA-seeded like the batch function.
 #[derive(Debug)]
 pub struct StreamingEma {
-    period: usize,
     alpha: f64,
     seed: Window,
     latest: Option<f64>,
@@ -100,13 +99,13 @@ pub struct StreamingEma {
 impl StreamingEma {
     pub fn new(period: usize) -> Self {
         let period = period.max(1);
-        Self { period, alpha: 2.0 / (period as f64 + 1.0), seed: Window::new(period), latest: None }
+        Self { alpha: 2.0 / (period as f64 + 1.0), seed: Window::new(period), latest: None }
     }
 
     /// Wilder-style smoothing (alpha = 1/period), SMA-seeded.
     pub fn wilder(period: usize) -> Self {
         let period = period.max(1);
-        Self { period, alpha: 1.0 / period as f64, seed: Window::new(period), latest: None }
+        Self { alpha: 1.0 / period as f64, seed: Window::new(period), latest: None }
     }
 }
 
@@ -287,9 +286,7 @@ impl StreamingRsi {
 
 impl StreamingIndicator for StreamingRsi {
     fn update(&mut self, value: f64) -> Option<f64> {
-        let Some(prev) = self.prev.replace(value) else {
-            return None;
-        };
+        let prev = self.prev.replace(value)?;
         let change = value - prev;
         let (gain, loss) = if change > 0.0 { (change, 0.0) } else { (0.0, -change) };
 

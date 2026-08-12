@@ -5,9 +5,10 @@
 use crate::core::types::CompiledSignals;
 
 /// Synchronization mode for combining signals from multiple instruments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncMode {
     /// All instruments must signal (AND logic).
+    #[default]
     All,
     /// Any instrument can signal (OR logic).
     Any,
@@ -15,12 +16,6 @@ pub enum SyncMode {
     Majority,
     /// Use first instrument's signals as master.
     Master,
-}
-
-impl Default for SyncMode {
-    fn default() -> Self {
-        SyncMode::All
-    }
 }
 
 /// Signal synchronizer for multi-instrument backtests.
@@ -76,7 +71,7 @@ impl SignalSynchronizer {
                 SyncMode::All => count == num_instruments,
                 SyncMode::Any => count > 0,
                 SyncMode::Majority => {
-                    let threshold = self.min_signals.unwrap_or((num_instruments + 1) / 2);
+                    let threshold = self.min_signals.unwrap_or(num_instruments.div_ceil(2));
                     count >= threshold
                 }
                 SyncMode::Master => signals[0][i],
@@ -121,7 +116,7 @@ impl SignalSynchronizer {
                 // For Any entry mode, exit when ALL want to exit
                 SyncMode::Any => count == num_instruments,
                 SyncMode::Majority => {
-                    let threshold = self.min_signals.unwrap_or((num_instruments + 1) / 2);
+                    let threshold = self.min_signals.unwrap_or(num_instruments.div_ceil(2));
                     count >= threshold
                 }
                 SyncMode::Master => signals[0][i],
@@ -225,11 +220,9 @@ pub fn forward_fill_signals(signals: &[bool]) -> Vec<bool> {
     let mut result = signals.to_vec();
     let mut last_value = false;
 
-    for i in 0..result.len() {
-        if result[i] {
-            last_value = true;
-        }
-        result[i] = last_value;
+    for slot in result.iter_mut() {
+        last_value |= *slot;
+        *slot = last_value;
     }
 
     result

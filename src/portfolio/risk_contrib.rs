@@ -43,14 +43,11 @@ pub fn risk_contributions(
     }
 
     // sigma^2 = w' Sigma w ; cov_w = Sigma w
-    let mut cov_w = vec![0.0; n];
-    for i in 0..n {
-        let mut acc = 0.0;
-        for j in 0..n {
-            acc += model.cov[i * n + j] * weights[j];
-        }
-        cov_w[i] = acc;
-    }
+    let cov_w: Vec<f64> = model
+        .cov
+        .chunks_exact(n)
+        .map(|row| row.iter().zip(weights).map(|(c, w)| c * w).sum())
+        .collect();
     let variance: f64 = weights.iter().zip(cov_w.iter()).map(|(w, c)| w * c).sum();
     if variance <= 0.0 {
         return Err(PortfolioMathError::DegenerateInput(format!(

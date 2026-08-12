@@ -45,8 +45,8 @@ allowed.
 import numpy as np
 import pytest
 
-from raptorbt import PyBacktestConfig, Strategy, TickStrategyStream
-from raptorbt._raptorbt import PyPortfolioSession
+from raptorbt import BacktestConfig, Strategy, TickStrategyStream
+from raptorbt._raptorbt import PortfolioSession
 
 SYMBOL = "RELIANCE"
 QUANTITY = 100.0
@@ -73,14 +73,16 @@ class Passive(Strategy):
 def _config(**kwargs):
     kwargs.setdefault("initial_capital", INITIAL_CAPITAL)
     kwargs.setdefault("fees", 0.001)
-    return PyBacktestConfig(**kwargs)
+    return BacktestConfig(**kwargs)
 
 
 def _bars(closes, start_ts=0):
     closes = np.asarray(closes, dtype=np.float64)
     n = len(closes)
     return {
-        "timestamps": np.arange(start_ts, start_ts + n * DAY_NS, DAY_NS, dtype=np.int64),
+        "timestamps": np.arange(
+            start_ts, start_ts + n * DAY_NS, DAY_NS, dtype=np.int64
+        ),
         "open": closes,
         "high": closes,
         "low": closes,
@@ -91,7 +93,7 @@ def _bars(closes, start_ts=0):
 
 def _sealed_session(closes, config=None, account_type="cash", leverage=1.0):
     """A sealed one-instrument session, ready to adopt into."""
-    session = PyPortfolioSession(
+    session = PortfolioSession(
         config=config or _config(), account_type=account_type, leverage=leverage
     )
     instrument = session.add_instrument(SYMBOL, direction=1)
@@ -282,7 +284,9 @@ def test_cash_and_fully_funded_margin_report_the_same_numbers():
     assert cash_metrics.open_trade_pnl == pytest.approx(margin_metrics.open_trade_pnl)
     assert cash_metrics.total_fees_paid == pytest.approx(margin_metrics.total_fees_paid)
     assert cash_metrics.total_closed_trades == margin_metrics.total_closed_trades
-    assert cash_metrics.max_drawdown_pct == pytest.approx(margin_metrics.max_drawdown_pct)
+    assert cash_metrics.max_drawdown_pct == pytest.approx(
+        margin_metrics.max_drawdown_pct
+    )
 
 
 @pytest.mark.parametrize(
@@ -373,7 +377,7 @@ def test_adoption_is_still_allowed_after_a_quote_only_event():
     this test is the regression a future refactor is most likely to
     reintroduce.
     """
-    session = PyPortfolioSession(config=_config())
+    session = PortfolioSession(config=_config())
     instrument = session.add_instrument(SYMBOL, direction=1)
     session.seal()
 

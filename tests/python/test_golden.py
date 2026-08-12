@@ -23,7 +23,7 @@ from generate import (  # noqa: E402
 )
 
 import raptorbt  # noqa: E402
-from raptorbt import PyBacktestConfig  # noqa: E402
+from raptorbt import BacktestConfig  # noqa: E402
 
 FIXTURES = json.loads((HERE / "golden" / "fixtures.json").read_text())
 
@@ -37,7 +37,9 @@ INPUTS = FIXTURES["inputs"]
 def assert_digest_equal(actual: dict, expected: dict, name: str) -> None:
     assert actual.keys() == expected.keys(), f"{name}: digest shape changed"
     for key in expected:
-        assert actual[key] == expected[key], f"{name}: {key} diverged from golden baseline"
+        assert (
+            actual[key] == expected[key]
+        ), f"{name}: {key} diverged from golden baseline"
 
 
 @pytest.mark.parametrize("variant", [v[0] for v in config_variants()])
@@ -45,8 +47,17 @@ def test_single_path_matches_golden(variant):
     ts, o, h, l, c, v, entries, exits = thaw_inputs(INPUTS["shared"])
     name, config, ic, direction = next(x for x in config_variants() if x[0] == variant)
     result = raptorbt.run_single_backtest(
-        ts, o, h, l, c, v, entries, exits,
-        direction=direction, config=config, instrument_config=ic,
+        ts,
+        o,
+        h,
+        l,
+        c,
+        v,
+        entries,
+        exits,
+        direction=direction,
+        config=config,
+        instrument_config=ic,
     )
     assert_digest_equal(result_digest(result), FIXTURES[f"single/{name}"], name)
 
@@ -54,7 +65,9 @@ def test_single_path_matches_golden(variant):
 def test_class_path_matches_golden():
     ts, o, h, l, c, v, _, _ = thaw_inputs(INPUTS["shared"])
     result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
-    assert_digest_equal(result_digest(result), FIXTURES["class/sma_cross"], "class/sma_cross")
+    assert_digest_equal(
+        result_digest(result), FIXTURES["class/sma_cross"], "class/sma_cross"
+    )
 
 
 def test_portfolio_shared_pool_matches_golden():
@@ -64,7 +77,7 @@ def test_portfolio_shared_pool_matches_golden():
         pts, po, ph, pl, pc, pv, pe, px = thaw_inputs(INPUTS[symbol])
         instruments.append((pts, po, ph, pl, pc, pv, pe, px, 1, 1.0, symbol))
     portfolio = raptorbt.run_portfolio_backtest(
-        instruments, config=PyBacktestConfig(), allocation="equal_weight"
+        instruments, config=BacktestConfig(), allocation="equal_weight"
     )
     expected = FIXTURES["portfolio/shared_pool"]
     actual = {

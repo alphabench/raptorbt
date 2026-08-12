@@ -170,7 +170,8 @@ impl StopCalculator for ChandelierExit {
         }
 
         let distance = self.atr * self.multiplier;
-        let new_stop = match direction {
+
+        match direction {
             Direction::Long => {
                 let proposed = high - distance;
                 current_stop.map(|cs| cs.max(proposed)).or(Some(proposed))
@@ -179,9 +180,7 @@ impl StopCalculator for ChandelierExit {
                 let proposed = low + distance;
                 current_stop.map(|cs| cs.min(proposed)).or(Some(proposed))
             }
-        };
-
-        new_stop
+        }
     }
 }
 

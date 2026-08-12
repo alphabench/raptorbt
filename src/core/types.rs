@@ -9,10 +9,11 @@ pub type Price = f64;
 pub type Timestamp = i64;
 
 /// Trading direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[repr(i8)]
 pub enum Direction {
     /// Long position (buy to open, sell to close).
+    #[default]
     Long = 1,
     /// Short position (sell to open, buy to close).
     Short = -1,
@@ -32,12 +33,6 @@ impl Direction {
             -1 => Some(Direction::Short),
             _ => None,
         }
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Long
     }
 }
 
@@ -484,7 +479,7 @@ impl BacktestConfig {
 }
 
 /// Per-instrument configuration for position sizing and risk management.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstrumentConfig {
     /// Minimum tradeable quantity (1.0 for NSE EQ, 50.0 for NIFTY F&O, 0.01 for forex).
     pub lot_size: Option<f64>,
@@ -507,19 +502,6 @@ impl InstrumentConfig {
         match self.lot_size {
             Some(lot) if lot > 0.0 => (raw_size / lot).floor() * lot,
             _ => raw_size,
-        }
-    }
-}
-
-impl Default for InstrumentConfig {
-    fn default() -> Self {
-        Self {
-            lot_size: None,
-            alloted_capital: None,
-            stop: None,
-            target: None,
-            existing_qty: None,
-            avg_price: None,
         }
     }
 }
@@ -692,6 +674,9 @@ impl Position {
     }
 
     /// Open a new position.
+    // These are the position's opening terms, not incidental options; a
+    // builder here would hide which of them are required.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
         idx: usize,
