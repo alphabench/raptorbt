@@ -208,3 +208,62 @@ class TestTickTruncation:
         """The knob must keep working, or the default change is a removal."""
         res = r.run_tick_backtest(**self._tape(200_000), entry_cooldown_ticks=10, max_trades=50)
         assert len(res.trades()) == 50
+
+
+class TestTickPositionSize:
+    """A tick backtest must charge and earn on the position actually traded.
+
+    Plain words: through 0.7.3 this path priced everything as if you had traded
+    exactly one unit, whatever your real lot size. It charged one unit's costs,
+    earned one unit's profit, and then measured that profit against your whole
+    account. A 75-lot option was off by roughly 75x on both sides.
+
+    These pin the Python seam: the arguments exist, they reach the engine, and
+    the itemized regulatory schedule is reachable from this path at all -- it
+    never was before, because `fee_segment` was not on the signature.
+    """
+
+    def _flat_tape(self, n=6, price=100.0):
+        entries = np.zeros(n, dtype=bool)
+        entries[1] = True
+        exits = np.zeros(n, dtype=bool)
+        exits[4] = True
+        flat = np.full(n, price)
+        return dict(
+            timestamps=np.arange(n, dtype=np.int64) * 1_000_000_000,
+            ltp=flat, bid=flat.copy(), ask=flat.copy(),
+            buy_qty_delta=np.zeros(n), sell_qty_delta=np.zeros(n), oi=np.zeros(n),
+            entries=entries, exits=exits, symbol="T",
+            stop_loss_pct=50.0, take_profit_pct=50.0,
+            max_hold_seconds=0, entry_cooldown_ticks=0)
+
+    def test_costs_scale_with_lot_size(self):
+        one = r.run_tick_backtest(**self._flat_tape(), fees=0.001, lot_size=1, quantity=1)
+        lot = r.run_tick_backtest(**self._flat_tape(), fees=0.001, lot_size=75, quantity=1)
+
+        assert one.trades()[0].fees == pytest.approx(0.20)
+        assert lot.trades()[0].fees == pytest.approx(15.00), (
+            "a 75-lot round trip on a 100 premium costs 75x one unit")
+
+    def test_defaults_reproduce_the_pre_074_numbers(self):
+        """Upgrading must not change anyone's results silently."""
+        res = r.run_tick_backtest(**self._flat_tape(), fees=0.001)
+        trade = res.trades()[0]
+        assert trade.size == 1.0
+        assert trade.fees == pytest.approx(0.20), "price * rate, both sides, one unit"
+
+    def test_fee_segment_reaches_the_tick_path(self):
+        """Brokerage is flat per order, so no percentage rate can express it."""
+        flat = r.run_tick_backtest(**self._flat_tape(), fees=0.001, lot_size=75, quantity=1)
+        itemized = r.run_tick_backtest(
+            **self._flat_tape(), fees=0.001, lot_size=75, quantity=1, fee_segment="NFO-OPT")
+
+        assert itemized.trades()[0].fees > flat.trades()[0].fees, (
+            "the real schedule adds 2 x Rs 20 brokerage plus GST")
+        entry = itemized.trades()[0].entry_fees
+        exit_ = itemized.trades()[0].exit_fees
+        assert entry != exit_, "stamp duty falls on the buy, transaction tax on the sell"
+
+    def test_a_short_is_refused_not_silently_run_long(self):
+        with pytest.raises(ValueError, match="long-only"):
+            r.run_tick_backtest(**self._flat_tape(), quantity=-1)

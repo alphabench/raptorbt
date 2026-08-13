@@ -279,6 +279,14 @@ def run_tick_backtest(
     # reports as if the input ended there. Unlimited by default since 0.7.0
     # (was 50, which silently truncated long tapes).
     max_trades: int = ...,
+    # Costs and P&L both scale by |quantity| * lot_size. The defaults trade one
+    # bare unit, reproducing the per-unit behaviour of releases through 0.7.3.
+    lot_size: int = ...,
+    # Long-only path: a negative quantity raises ValueError.
+    quantity: int = ...,
+    # Itemized regulatory schedule, e.g. "NFO-OPT". Unset keeps the flat `fees`
+    # rate, which cannot express per-order brokerage at any rate.
+    fee_segment: str | None = ...,
 ) -> BacktestResult: ...
 def batch_spread_backtest(*args: Any, **kwargs: Any) -> list[BacktestResult]: ...
 def simulate_portfolio_mc(

@@ -1517,6 +1517,9 @@ pub fn run_multi_backtest<'py>(
     max_hold_seconds = 1800_u64,
     entry_cooldown_ticks = 10_usize,
     max_trades = usize::MAX,
+    lot_size = 1_u32,
+    quantity = 1_i64,
+    fee_segment = None,
 ))]
 // The argument list IS the Python signature; collapsing it into a
 // struct would change the public API for no reader benefit.
@@ -1541,7 +1544,19 @@ pub fn run_tick_backtest<'py>(
     max_hold_seconds: u64,
     entry_cooldown_ticks: usize,
     max_trades: usize,
+    lot_size: u32,
+    quantity: i64,
+    fee_segment: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    // This path enters at the ask and exits at the bid, with its stop below
+    // entry and target above -- it is long-only. Refuse a short rather than
+    // silently running long logic against a negative quantity.
+    if quantity < 0 {
+        return Err(PyValueError::new_err(format!(
+            "tick backtests are long-only: quantity must be >= 0, got {quantity}"
+        )));
+    }
+
     let tick_data = crate::core::types::TickData {
         timestamps: numpy_to_vec_i64(timestamps),
         ltp: numpy_to_vec_f64(ltp),
@@ -1565,6 +1580,7 @@ pub fn run_tick_backtest<'py>(
             upon_bar_close: false,
             // The tick engine reads `slippage` directly (see TickBacktest::run)
             // and always honored it, unlike the bar engine.
+            fee_segment: fee_segment.map(|s| s.to_string()),
             ..Default::default()
         },
         stop_loss_pct,
@@ -1572,6 +1588,8 @@ pub fn run_tick_backtest<'py>(
         max_hold_seconds,
         entry_cooldown_ticks,
         max_trades,
+        lot_size,
+        quantity,
     };
 
     let backtest = TickBacktest::new(config);
