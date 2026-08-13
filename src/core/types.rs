@@ -266,6 +266,13 @@ pub enum ExitReason {
     Liquidation,
     /// Max hold time exceeded (tick backtest).
     TimeExit,
+    /// Force-closed at the session squareoff time.
+    ///
+    /// Distinct from `EndOfData`: this is a position the strategy would have
+    /// been flattened out of by its broker before the close, so it pays real
+    /// exit costs at a real in-session price. `EndOfData` is the run simply
+    /// running out of bars.
+    Squareoff,
 }
 
 /// Backtest configuration.
@@ -326,6 +333,23 @@ pub struct BacktestConfig {
     /// `Some(0.0)` marks a continuously traded (24x7) market, which annualizes
     /// on calendar time instead. `None` uses the NSE default.
     pub session_minutes: Option<f64>,
+
+    /// Local time-of-day, in minutes from midnight, at which open positions
+    /// are force-closed each session. `None` disables squareoff.
+    ///
+    /// This is what makes an intraday backtest describe a tradeable strategy.
+    /// Without it a multi-session array is one continuous tape: a position
+    /// opened at 15:29 on Monday is still open at 09:15 on Tuesday, and the
+    /// overnight gap is booked as if it were a price move the strategy could
+    /// have traded through. Most intraday products are force-flattened by the
+    /// broker before the close, so that P&L is unreachable.
+    ///
+    /// Interpreted in the timezone given by `session_tz_offset_ns`, so it is
+    /// market-agnostic: 925 is NSE's 15:25, five minutes before its 15:30
+    /// close. The engine exits on the first bar at or after this time in each
+    /// local day, at that bar's price, paying normal exit costs -- it is a
+    /// real trade-out, not a free settlement.
+    pub squareoff_time_minutes: Option<u32>,
 
     /// Reproduce pre-0.5.0 annualization.
     ///
@@ -416,6 +440,7 @@ impl Default for BacktestConfig {
             periods_per_year: None,
             risk_free_rate: 0.0,
             session_minutes: None,
+            squareoff_time_minutes: None,
             fee_segment: None,
             max_positions: None,
             max_drawdown_pct: None,
