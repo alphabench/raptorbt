@@ -3,8 +3,10 @@
 //! Supports dynamic strike selection and options-specific position sizing.
 
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, OhlcvData, Trade,
+    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, Direction, ExitReason,
+    OhlcvData, Trade,
 };
+use crate::execution::indian_costs::FeeBreakdown;
 use crate::execution::FeeModel;
 use crate::metrics::streaming::StreamingMetrics;
 
@@ -98,6 +100,53 @@ impl OptionsBacktest {
         Self { fee_model: config.base.fee_model(), config }
     }
 
+    /// Contracts traded, from a lot count.
+    ///
+    /// [`Self::calculate_contracts`] returns **lots**, not contracts -- it
+    /// divides by `option_price * lot_size`. Every P&L, cash and equity line
+    /// multiplies back up by `lot_size`; the fee path did not, so it charged a
+    /// 50-lot position as if it were a single contract.
+    fn contracts_traded(&self, lots: usize) -> f64 {
+        lots as f64 * self.config.lot_size as f64
+    }
+
+    /// Costs for one side of a trade, and the itemized components to report.
+    ///
+    /// The single place this path prices an order. `is_entry` decides which way
+    /// the trade points, so side-specific charges (transaction tax on the sell,
+    /// stamp duty on the buy) land on the side that actually owes them --
+    /// [`FeeModel::calculate`] cannot do this, because it assumes every call is
+    /// an entry.
+    fn charge(
+        &self,
+        price: f64,
+        lots: usize,
+        direction: Direction,
+        is_entry: bool,
+    ) -> (f64, Option<FeeBreakdown>) {
+        let size = self.contracts_traded(lots);
+        (
+            self.fee_model.calculate_side(price, size, direction, is_entry),
+            self.fee_model.breakdown(price, size, direction, is_entry),
+        )
+    }
+
+    /// Entry components plus exit components, so the itemized total equals the
+    /// costs actually deducted from the equity curve.
+    fn merge_breakdowns(
+        entry: Option<FeeBreakdown>,
+        exit: Option<FeeBreakdown>,
+    ) -> Option<FeeBreakdown> {
+        match (entry, exit) {
+            (Some(entry), Some(exit)) => {
+                let mut total = entry;
+                total.add(&exit);
+                Some(total)
+            }
+            (entry, exit) => entry.or(exit),
+        }
+    }
+
     /// Run options backtest.
     ///
     /// # Arguments
@@ -140,18 +189,22 @@ impl OptionsBacktest {
             if exits[i] {
                 if let Some(pos) = position.take() {
                     let exit_price = option_price;
-                    let fees = self.fee_model.calculate(
-                        exit_price,
-                        pos.contracts as f64,
-                        signals.direction,
-                    );
+                    let (exit_fees, exit_breakdown) =
+                        self.charge(exit_price, pos.contracts, signals.direction, false);
+                    let entry_fees = pos.entry_fees;
+                    let fees = entry_fees + exit_fees;
+                    let fee_breakdown = Self::merge_breakdowns(pos.entry_breakdown, exit_breakdown);
 
+                    // Both halves are subtracted: the entry charge left cash
+                    // when the position opened, so a P&L net of the exit alone
+                    // would report more profit than the account ever saw.
                     let pnl = self.calculate_pnl(&pos, exit_price) - fees;
-                    let cost_basis =
-                        pos.entry_price * pos.contracts as f64 * self.config.lot_size as f64;
+                    let cost_basis = pos.entry_price * self.contracts_traded(pos.contracts);
                     let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
-                    cash += exit_price * pos.contracts as f64 * self.config.lot_size as f64 - fees;
+                    // Entry costs already left `cash` at open, so only the exit
+                    // side is charged here.
+                    cash += exit_price * self.contracts_traded(pos.contracts) - exit_fees;
 
                     trades.push(Trade {
                         id: trade_counter,
@@ -160,16 +213,16 @@ impl OptionsBacktest {
                         exit_idx: i,
                         entry_price: pos.entry_price,
                         exit_price,
-                        size: pos.contracts as f64,
+                        size: self.contracts_traded(pos.contracts),
                         direction: signals.direction,
                         pnl,
                         return_pct,
                         entry_time: spot_ohlcv.timestamps[pos.entry_idx],
                         exit_time: spot_ohlcv.timestamps[i],
                         fees,
-                        entry_fees: 0.0,
-                        exit_fees: fees,
-                        fee_breakdown: None,
+                        entry_fees,
+                        exit_fees,
+                        fee_breakdown,
                         exit_reason: ExitReason::Signal,
                     });
 
@@ -183,11 +236,11 @@ impl OptionsBacktest {
                 let contracts = self.calculate_contracts(option_price, cash);
 
                 if contracts > 0 {
-                    let entry_cost = option_price * contracts as f64 * self.config.lot_size as f64;
-                    let fees =
-                        self.fee_model.calculate(option_price, contracts as f64, signals.direction);
+                    let entry_cost = option_price * self.contracts_traded(contracts);
+                    let (entry_fees, entry_breakdown) =
+                        self.charge(option_price, contracts, signals.direction, true);
 
-                    cash -= entry_cost + fees;
+                    cash -= entry_cost + entry_fees;
 
                     position = Some(OptionsPosition {
                         entry_idx: i,
@@ -195,13 +248,15 @@ impl OptionsBacktest {
                         strike,
                         contracts,
                         option_type: self.config.option_type,
+                        entry_fees,
+                        entry_breakdown,
                     });
                 }
             }
 
             // Update equity
             let position_value = if let Some(ref pos) = position {
-                option_price * pos.contracts as f64 * self.config.lot_size as f64
+                option_price * self.contracts_traded(pos.contracts)
             } else {
                 0.0
             };
@@ -224,11 +279,14 @@ impl OptionsBacktest {
         if let Some(pos) = position.take() {
             let last_idx = n - 1;
             let exit_price = option_prices[last_idx];
-            let fees =
-                self.fee_model.calculate(exit_price, pos.contracts as f64, signals.direction);
+            let (exit_fees, exit_breakdown) =
+                self.charge(exit_price, pos.contracts, signals.direction, false);
+            let entry_fees = pos.entry_fees;
+            let fees = entry_fees + exit_fees;
+            let fee_breakdown = Self::merge_breakdowns(pos.entry_breakdown, exit_breakdown);
 
             let pnl = self.calculate_pnl(&pos, exit_price) - fees;
-            let cost_basis = pos.entry_price * pos.contracts as f64 * self.config.lot_size as f64;
+            let cost_basis = pos.entry_price * self.contracts_traded(pos.contracts);
             let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
             trades.push(Trade {
@@ -238,18 +296,35 @@ impl OptionsBacktest {
                 exit_idx: last_idx,
                 entry_price: pos.entry_price,
                 exit_price,
-                size: pos.contracts as f64,
+                size: self.contracts_traded(pos.contracts),
                 direction: signals.direction,
                 pnl,
                 return_pct,
                 entry_time: spot_ohlcv.timestamps[pos.entry_idx],
                 exit_time: spot_ohlcv.timestamps[last_idx],
                 fees,
-                entry_fees: 0.0,
-                exit_fees: fees,
-                fee_breakdown: None,
+                entry_fees,
+                exit_fees,
+                fee_breakdown,
                 exit_reason: ExitReason::EndOfData,
             });
+
+            // Closing out is a real trade, so it is paid for out of the curve.
+            // The loop already wrote `last_idx` from the position marked to
+            // market, which charges nothing to close it -- so without this the
+            // exit cost appeared in the trade list and nowhere else, and the
+            // reported end value was one exit charge too high.
+            cash += exit_price * self.contracts_traded(pos.contracts) - exit_fees;
+            equity_curve[last_idx] = cash;
+
+            if cash > peak_equity {
+                peak_equity = cash;
+            }
+            drawdown_curve[last_idx] = (peak_equity - cash) / peak_equity * 100.0;
+            if last_idx > 0 {
+                returns[last_idx] =
+                    (cash - equity_curve[last_idx - 1]) / equity_curve[last_idx - 1];
+            }
         }
 
         // Calculate metrics
@@ -402,6 +477,11 @@ impl OptionsBacktest {
             losing_trades,
             start_value,
             end_value,
+            // Summed from the trade list, as the portfolio engine does. This
+            // path builds its own metrics rather than finalizing a
+            // `StreamingMetrics`, so leaving the field to `Default` reported
+            // zero costs however much a run actually charged.
+            total_fees_paid: trades.iter().map(|t| t.fees).sum(),
             ..Default::default()
         }
     }
@@ -417,49 +497,17 @@ struct OptionsPosition {
     contracts: usize,
     #[allow(dead_code)]
     option_type: OptionType,
+    /// Costs charged when this position was opened.
+    ///
+    /// Retained rather than recomputed at exit: the entry is charged against
+    /// the entry premium, and re-deriving it from the exit premium would both
+    /// bill a different amount and leave the trade record disagreeing with the
+    /// cash that actually left the account.
+    entry_fees: f64,
+    /// Itemized entry costs, when an itemized fee model is configured.
+    entry_breakdown: Option<FeeBreakdown>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_strike_selection_atm() {
-        let config = OptionsConfig {
-            strike_interval: 50.0,
-            strike_selection: StrikeSelection::Atm,
-            ..Default::default()
-        };
-        let backtest = OptionsBacktest::new(config);
-
-        // Spot at 17834, ATM should be 17850
-        let strike = backtest.select_strike(17834.0);
-        assert!((strike - 17850.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_strike_selection_otm() {
-        let config = OptionsConfig {
-            strike_interval: 50.0,
-            strike_selection: StrikeSelection::Otm(2),
-            option_type: OptionType::Call,
-            ..Default::default()
-        };
-        let backtest = OptionsBacktest::new(config);
-
-        // Spot at 17834, ATM=17850, OTM 2 strikes = 17950
-        let strike = backtest.select_strike(17834.0);
-        assert!((strike - 17950.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_position_sizing_percent() {
-        let config =
-            OptionsConfig { size_type: SizeType::Percent(0.5), lot_size: 50, ..Default::default() };
-        let backtest = OptionsBacktest::new(config);
-
-        // 50% of 100000 = 50000, option at 100 * lot 50 = 5000 per contract
-        let contracts = backtest.calculate_contracts(100.0, 100_000.0);
-        assert_eq!(contracts, 10);
-    }
-}
+#[path = "options_tests.rs"]
+mod tests;
