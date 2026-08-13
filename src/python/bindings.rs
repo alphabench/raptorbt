@@ -551,8 +551,18 @@ pub struct PyTrade {
     pub entry_time: i64,
     #[pyo3(get)]
     pub exit_time: i64,
+    /// Total costs over the round trip, equal to `entry_fees + exit_fees`.
     #[pyo3(get)]
     pub fees: f64,
+    /// Costs charged when the position was opened.
+    #[pyo3(get)]
+    pub entry_fees: f64,
+    /// Costs charged when it was closed.
+    ///
+    /// Zero when the exit was not a trade-out -- an option left to expire is
+    /// never sold, so it owes no exit-side brokerage or transaction tax.
+    #[pyo3(get)]
+    pub exit_fees: f64,
     /// Itemized regulatory costs, when `config.fee_segment` is set.
     ///
     /// Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
@@ -2100,6 +2110,8 @@ pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
         entry_time: t.entry_time,
         exit_time: t.exit_time,
         fees: t.fees,
+        entry_fees: t.entry_fees,
+        exit_fees: t.exit_fees,
         fee_breakdown: t.fee_breakdown.map(|b| {
             HashMap::from([
                 ("brokerage".to_string(), b.brokerage),

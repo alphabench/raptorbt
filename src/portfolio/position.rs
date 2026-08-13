@@ -154,6 +154,8 @@ impl PositionManager {
             entry_time: entry_timestamp,
             exit_time: exit_timestamp,
             fees: total_fees,
+            entry_fees: pos.entry_fees,
+            exit_fees,
             fee_breakdown,
             exit_reason,
         }

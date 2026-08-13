@@ -5,11 +5,10 @@
 //! per round trip -- STT "on sell side", stamp duty "on buy side" -- which is
 //! why each component below states which side it lands on.
 //!
-//! Rates mirror the Zerodha/NSE schedules the backend already encodes, so the
-//! engine's equity curve and the reported cost breakdown describe the same
-//! money. Previously the engine took a single composite `fees` fraction and
-//! the itemized breakdown was recomputed separately in Python for display,
-//! leaving the two free to disagree.
+//! Rates follow the published Zerodha/NSE schedules, and the engine charges
+//! them directly so its equity curve and the reported cost breakdown describe
+//! the same money. Recomputing an itemized breakdown separately for display
+//! leaves the two free to disagree.
 
 use crate::core::types::Direction;
 use serde::{Deserialize, Serialize};
@@ -106,13 +105,12 @@ const BROKERAGE: f64 = 20.0;
 /// incurs it five times. That unit is why it is NOT a `CostSchedule` field:
 /// every rate there applies per side of one trade, and folding a per-ISIN-day
 /// flat fee into them would either overcount multi-order days or undercount
-/// multi-scrip days. Consumers (the rebalance simulator, and the backend's
-/// small-book refusal arithmetic) count distinct ISINs with net sells per day
+/// multi-scrip days. Consumers (the rebalance simulator, and any small-book
+/// refusal arithmetic built on it) count distinct ISINs with net sells per day
 /// and multiply.
 ///
-/// Measured consequence (2026-07 dev study): this flat charge, not the
-/// percentage rates, is what dominates rebalancing costs on small delivery
-/// books -- at a Rs 3,000 sell it is ~0.5% before STT.
+/// This flat charge, not the percentage rates, is what dominates rebalancing
+/// costs on small delivery books -- at a Rs 3,000 sell it is ~0.5% before STT.
 pub const DP_SELL_CHARGE_PER_ISIN_PER_DAY: f64 = 15.34;
 
 impl Segment {
@@ -201,7 +199,7 @@ impl Segment {
         matches!(self, Segment::OptionsNfo | Segment::OptionsMcx | Segment::OptionsCds)
     }
 
-    /// Parse a segment name, as used by the backend's instrument records.
+    /// Parse a segment name, as it appears on a broker's instrument records.
     ///
     /// `intraday` distinguishes equity intraday from delivery; it is ignored
     /// for derivative segments, which are always intraday-rated.
@@ -353,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_parsing_covers_backend_names() {
+    fn segment_parsing_covers_broker_names() {
         assert_eq!(Segment::parse("NSE", None, true), Some(Segment::EquityIntraday));
         assert_eq!(Segment::parse("NSE", None, false), Some(Segment::EquityDelivery));
         assert_eq!(Segment::parse("nfo", Some("OPT"), true), Some(Segment::OptionsNfo));

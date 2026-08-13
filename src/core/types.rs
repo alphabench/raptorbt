@@ -218,8 +218,22 @@ pub struct Trade {
     pub entry_time: Timestamp,
     /// Exit timestamp.
     pub exit_time: Timestamp,
-    /// Fees paid.
+    /// Total costs charged over the round trip, entry plus exit.
+    ///
+    /// Invariant: `fees == entry_fees + exit_fees`. Both halves are recorded
+    /// separately below so a reported total can never drift from the amounts
+    /// actually deducted -- a strategy that charged one side and reported the
+    /// other would otherwise pass every trade-level audit.
     pub fees: f64,
+    /// Costs charged when the position was opened.
+    #[serde(default)]
+    pub entry_fees: f64,
+    /// Costs charged when the position was closed.
+    ///
+    /// Zero for an exit that is not a trade-out: an option left to expire is
+    /// never sold, so it owes no exit-side brokerage or transaction tax.
+    #[serde(default)]
+    pub exit_fees: f64,
     /// Itemized regulatory costs, when an itemized fee model is configured.
     ///
     /// Entry and exit components are summed, so `fee_breakdown.total()` equals

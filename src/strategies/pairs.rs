@@ -54,7 +54,7 @@ pub struct PairsBacktest {
 impl PairsBacktest {
     /// Create a new pairs backtest.
     pub fn new(config: PairsConfig) -> Self {
-        Self { fee_model: FeeModel::percentage(config.base.fees), config }
+        Self { fee_model: config.base.fee_model(), config }
     }
 
     /// Run pairs trading backtest.
@@ -130,6 +130,8 @@ impl PairsBacktest {
                         entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg1_ohlcv.timestamps[i],
                         fees: fees / 2.0,
+                        entry_fees: 0.0,
+                        exit_fees: fees / 2.0,
                         fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                     });
@@ -150,6 +152,8 @@ impl PairsBacktest {
                         entry_time: leg2_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg2_ohlcv.timestamps[i],
                         fees: fees / 2.0,
+                        entry_fees: 0.0,
+                        exit_fees: fees / 2.0,
                         fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                     });
@@ -249,6 +253,8 @@ impl PairsBacktest {
                 entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                 exit_time: leg1_ohlcv.timestamps[last_idx],
                 fees,
+                entry_fees: 0.0,
+                exit_fees: fees,
                 fee_breakdown: None,
                 exit_reason: ExitReason::EndOfData,
             });

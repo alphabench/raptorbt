@@ -5,7 +5,6 @@
 use crate::core::types::{
     BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, OhlcvData, Trade,
 };
-use crate::execution::FeeModel;
 use crate::metrics::streaming::StreamingMetrics;
 
 /// Strategy combination mode.
@@ -53,15 +52,12 @@ impl Default for MultiStrategyConfig {
 pub struct MultiStrategyBacktest {
     /// Configuration.
     config: MultiStrategyConfig,
-    /// Fee model.
-    #[allow(dead_code)]
-    fee_model: FeeModel,
 }
 
 impl MultiStrategyBacktest {
     /// Create a new multi-strategy backtest.
     pub fn new(config: MultiStrategyConfig) -> Self {
-        Self { fee_model: FeeModel::percentage(config.base.fees), config }
+        Self { config }
     }
 
     /// Run multi-strategy backtest.

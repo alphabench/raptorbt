@@ -15,6 +15,7 @@
 use crate::core::types::{
     BacktestConfig, BacktestMetrics, BacktestResult, Direction, ExitReason, Trade,
 };
+use crate::execution::{indian_costs::FeeBreakdown, FeeModel};
 use crate::metrics::streaming::StreamingMetrics;
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +187,15 @@ struct SpreadPosition {
     pub entry_time: i64,
     /// Whether position is open.
     pub is_open: bool,
+    /// Costs charged when this position was opened.
+    ///
+    /// Retained rather than recomputed at exit: the entry is charged against
+    /// entry premiums, and re-deriving it from exit premiums would both bill a
+    /// different amount and leave the trade record disagreeing with the cash
+    /// that actually left the account.
+    pub entry_fees: f64,
+    /// Itemized entry costs, when an itemized fee model is configured.
+    pub entry_breakdown: Option<FeeBreakdown>,
 }
 
 impl SpreadPosition {
@@ -195,7 +205,15 @@ impl SpreadPosition {
             .map(|leg| leg.entry_premium * leg.config.quantity as f64 * leg.config.lot_size as f64)
             .sum();
 
-        Self { legs, entry_idx, entry_net_premium, entry_time, is_open: true }
+        Self {
+            legs,
+            entry_idx,
+            entry_net_premium,
+            entry_time,
+            is_open: true,
+            entry_fees: 0.0,
+            entry_breakdown: None,
+        }
     }
 
     /// Calculate total unrealized P&L across all legs.
@@ -220,12 +238,18 @@ impl SpreadPosition {
 /// Spread backtest runner.
 pub struct SpreadBacktest {
     config: SpreadConfig,
+    fee_model: FeeModel,
 }
 
 impl SpreadBacktest {
     /// Create a new spread backtest.
+    ///
+    /// The fee model comes from `BacktestConfig::fee_model`, so setting
+    /// `fee_segment` charges the itemized regulatory schedule -- per-order
+    /// brokerage included -- and leaving it unset keeps the flat `fees` rate.
     pub fn new(config: SpreadConfig) -> Self {
-        Self { config }
+        let fee_model = config.base.fee_model();
+        Self { config, fee_model }
     }
 
     /// Run the spread backtest.
@@ -315,13 +339,9 @@ impl SpreadBacktest {
             if should_exit {
                 if let Some(mut pos) = position.take() {
                     let pnl = pos.close();
-                    let fees = self.calculate_fees(&pos);
-                    let net_pnl = pnl - fees;
 
-                    cash += net_pnl;
-
-                    // Record trade
-                    trade_id += 1;
+                    // Resolved before costs are charged: settlement pays no
+                    // exit-side fee, so the reason decides the bill.
                     let exit_reason = if is_expiry {
                         ExitReason::Settlement
                     } else if exits[i] {
@@ -333,6 +353,18 @@ impl SpreadBacktest {
                     } else {
                         ExitReason::TakeProfit
                     };
+
+                    let (exit_fees, fee_breakdown) = self.calculate_exit(&pos, exit_reason);
+                    let entry_fees = pos.entry_fees;
+                    let fees = entry_fees + exit_fees;
+                    // Entry costs already left `cash` when the position
+                    // opened, so only the exit side is charged here.
+                    let net_pnl = pnl - fees;
+
+                    cash += pnl - exit_fees;
+
+                    // Record trade
+                    trade_id += 1;
 
                     let entry_premium = pos.entry_net_premium;
                     let exit_premium: f64 = current_premiums
@@ -359,10 +391,13 @@ impl SpreadBacktest {
                         entry_time: pos.entry_time,
                         exit_time: timestamps[i],
                         fees,
-                        fee_breakdown: None,
+                        entry_fees,
+                        exit_fees,
+                        fee_breakdown,
                         exit_reason,
                     });
 
+                    metrics.record_fees(fees);
                     metrics.record_trade(
                         net_pnl,
                         net_pnl / entry_premium.abs() * 100.0,
@@ -386,10 +421,11 @@ impl SpreadBacktest {
                     .map(|(cfg, &premium)| LegPosition::new(cfg.clone(), premium, i))
                     .collect();
 
-                let new_position = SpreadPosition::new(legs, i, timestamps[i]);
+                let mut new_position = SpreadPosition::new(legs, i, timestamps[i]);
 
-                // Calculate entry fees
-                let entry_fees = self.calculate_entry_fees(&new_position);
+                let (entry_fees, entry_breakdown) = self.calculate_side(&new_position, true);
+                new_position.entry_fees = entry_fees;
+                new_position.entry_breakdown = entry_breakdown;
                 cash -= entry_fees;
 
                 position = Some(new_position);
@@ -429,9 +465,11 @@ impl SpreadBacktest {
                 .sum();
 
             let pnl = pos.close();
-            let fees = self.calculate_fees(&pos);
+            let (exit_fees, fee_breakdown) = self.calculate_exit(&pos, ExitReason::EndOfData);
+            let entry_fees = pos.entry_fees;
+            let fees = entry_fees + exit_fees;
             let net_pnl = pnl - fees;
-            cash += net_pnl;
+            cash += pnl - exit_fees;
 
             trade_id += 1;
             trades.push(Trade {
@@ -452,11 +490,14 @@ impl SpreadBacktest {
                 entry_time: pos.entry_time,
                 exit_time: timestamps[last],
                 fees,
-                fee_breakdown: None,
+                entry_fees,
+                exit_fees,
+                fee_breakdown,
                 exit_reason: ExitReason::EndOfData,
             });
 
             if entry_premium.abs() > 0.0 {
+                metrics.record_fees(fees);
                 metrics.record_trade(
                     net_pnl,
                     net_pnl / entry_premium.abs() * 100.0,
@@ -491,24 +532,81 @@ impl SpreadBacktest {
         false
     }
 
-    /// Calculate entry fees for a position.
-    fn calculate_entry_fees(&self, position: &SpreadPosition) -> f64 {
-        let total_premium: f64 = position
-            .legs
-            .iter()
-            .map(|leg| leg.entry_premium.abs() * leg.config.lot_size as f64)
-            .sum();
-        total_premium * self.config.base.fees
+    /// Costs for one side of a spread, charged leg by leg.
+    ///
+    /// Each leg is a separate exchange order, so a flat per-order charge is
+    /// levied once per leg -- an N-leg structure pays it N times per side, and
+    /// summing the legs' premiums first would collect it only once.
+    ///
+    /// A leg's direction is the sign of its quantity, and `is_entry` decides
+    /// which way that points: a short leg is sold to open and bought to close,
+    /// so side-specific charges (transaction tax on the sell, stamp duty on the
+    /// buy) land on the leg and side that actually owes them.
+    ///
+    /// Returns the total and, for itemized models, the component breakdown.
+    fn calculate_side(
+        &self,
+        position: &SpreadPosition,
+        is_entry: bool,
+    ) -> (f64, Option<FeeBreakdown>) {
+        let mut total = 0.0;
+        let mut breakdown: Option<FeeBreakdown> = None;
+
+        for leg in &position.legs {
+            // A leg holding nothing places no order, so it owes no per-order
+            // charge. Without this a zero-quantity leg would be billed full
+            // brokerage for a trade that never happened.
+            if leg.config.quantity == 0 {
+                continue;
+            }
+
+            let premium = if is_entry { leg.entry_premium } else { leg.current_premium };
+            // Contract count, not lots: a two-lot leg trades twice the
+            // contracts of a one-lot leg and owes proportionally more.
+            let size = (leg.config.quantity.unsigned_abs() as f64) * leg.config.lot_size as f64;
+            let direction = if leg.config.is_long() { Direction::Long } else { Direction::Short };
+
+            match self.fee_model.breakdown(premium.abs(), size, direction, is_entry) {
+                Some(leg_breakdown) => {
+                    total += leg_breakdown.total();
+                    breakdown.get_or_insert_with(FeeBreakdown::default).add(&leg_breakdown);
+                }
+                None => total += self.fee_model.calculate(premium.abs(), size, direction),
+            }
+        }
+
+        (total, breakdown)
     }
 
-    /// Calculate exit fees for a position.
-    fn calculate_fees(&self, position: &SpreadPosition) -> f64 {
-        let total_premium: f64 = position
-            .legs
-            .iter()
-            .map(|leg| leg.current_premium.abs() * leg.config.lot_size as f64)
-            .sum();
-        total_premium * self.config.base.fees * 2.0 // Entry + Exit
+    /// Costs for closing a position, and the round-trip breakdown to report.
+    ///
+    /// An option left to expire is never traded out: no order is placed, so no
+    /// brokerage and no transaction tax are owed. Charging a full exit there
+    /// would overstate the cost of every structure held to expiry, so
+    /// settlement pays nothing on the way out. Entry costs still stand.
+    fn calculate_exit(
+        &self,
+        position: &SpreadPosition,
+        exit_reason: ExitReason,
+    ) -> (f64, Option<FeeBreakdown>) {
+        let (exit_fees, exit_breakdown) = if exit_reason == ExitReason::Settlement {
+            (0.0, None)
+        } else {
+            self.calculate_side(position, false)
+        };
+
+        // Entry components plus exit components, so the itemized total equals
+        // the fees actually deducted from the equity curve.
+        let combined = match (position.entry_breakdown, exit_breakdown) {
+            (Some(entry), Some(exit)) => {
+                let mut total = entry;
+                total.add(&exit);
+                Some(total)
+            }
+            (entry, exit) => entry.or(exit),
+        };
+
+        (exit_fees, combined)
     }
 
     /// Create an empty result (used for validation failures).
@@ -607,451 +705,6 @@ pub fn create_vertical_spread_config(
         ..Default::default()
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::types::StopConfig;
-    use crate::core::types::TargetConfig;
-
-    /// `(timestamps, underlying, per-leg premiums, entries, exits)`.
-    type SampleData = (Vec<i64>, Vec<f64>, Vec<Vec<f64>>, Vec<bool>, Vec<bool>);
-
-    fn sample_data() -> SampleData {
-        let n = 20;
-        let timestamps: Vec<i64> = (0..n as i64).collect();
-        let underlying: Vec<f64> = (100..120).map(|x| x as f64).collect();
-
-        // Call and Put premiums
-        let call_premiums: Vec<f64> = (0..n).map(|i| 5.0 + (i as f64 * 0.2)).collect();
-        let put_premiums: Vec<f64> = (0..n).map(|i| 5.0 - (i as f64 * 0.1)).collect();
-
-        let legs_premiums = vec![call_premiums, put_premiums];
-
-        let entries = vec![
-            false, true, false, false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false, false, false, false,
-        ];
-        let exits = vec![
-            false, false, false, false, false, false, false, false, false, true, false, false,
-            false, false, false, false, false, false, false, false,
-        ];
-
-        (timestamps, underlying, legs_premiums, entries, exits)
-    }
-
-    #[test]
-    fn test_straddle_backtest() {
-        let base_config = BacktestConfig {
-            initial_capital: 100_000.0,
-            fees: 0.001,
-            slippage: 0.0,
-            stop: StopConfig::None,
-            target: TargetConfig::None,
-            upon_bar_close: true,
-            ..Default::default()
-        };
-
-        let config = create_straddle_config(base_config, 100.0, 50, true);
-        let backtest = SpreadBacktest::new(config);
-
-        let (timestamps, underlying, legs_premiums, entries, exits) = sample_data();
-
-        let result = backtest.run(&timestamps, &underlying, &legs_premiums, &entries, &exits);
-
-        assert_eq!(result.trades.len(), 1);
-        assert!(result.equity_curve.len() == timestamps.len());
-    }
-
-    #[test]
-    fn test_iron_condor_backtest() {
-        let base_config = BacktestConfig::default();
-
-        let config = create_iron_condor_config(
-            base_config,
-            95.0,  // short put
-            90.0,  // long put
-            105.0, // short call
-            110.0, // long call
-            50,
-        );
-
-        let backtest = SpreadBacktest::new(config);
-
-        let n = 20;
-        let timestamps: Vec<i64> = (0..n as i64).collect();
-        let underlying: Vec<f64> = vec![100.0; n];
-
-        // Four legs: short put, long put, short call, long call
-        let legs_premiums = vec![
-            vec![3.0; n], // short put
-            vec![1.5; n], // long put
-            vec![3.0; n], // short call
-            vec![1.5; n], // long call
-        ];
-
-        let mut entries = vec![false; n];
-        entries[1] = true;
-
-        let mut exits = vec![false; n];
-        exits[15] = true;
-
-        let result = backtest.run(&timestamps, &underlying, &legs_premiums, &entries, &exits);
-
-        assert_eq!(result.trades.len(), 1);
-        // Every leg holds a flat premium for the whole run, so the structure
-        // neither gains nor loses and the four legs must sum to exactly zero
-        // before costs. This pins the multi-leg summation path in
-        // `total_unrealized_pnl`, which the single-leg tests below cannot
-        // reach: a per-leg sign error that happened to cancel across a
-        // symmetric condor would still surface here as a non-zero gross.
-        let gross = result.trades[0].pnl + result.trades[0].fees;
-        assert_eq!(gross, 0.0);
-        // Costs are real, though, so the booked P&L is a small loss.
-        assert!(result.trades[0].fees > 0.0);
-        assert!(result.trades[0].pnl < 0.0);
-    }
-
-    // ---------------------------------------------------------------------
-    // Signed P&L regression pins.
-    //
-    // Through 0.6.3 `LegPosition::unrealized_pnl` carried a stray leading
-    // minus that negated every spread result. These assert the correct signed
-    // answer for all four short/long x win/lose cases, plus the two exit
-    // triggers that read the same figure.
-    //
-    // Fees are zeroed so the numbers are exact integers. The design -- assert
-    // precise values on a full deterministic engine run instead of reaching
-    // for a snapshot library -- follows nautilus's acceptance tests
-    // (tests/acceptance_tests/test_backtest.py). Read, not copied.
-    // ---------------------------------------------------------------------
-
-    /// One CE leg, lot 75, entered on bar 1 and exited on bar 4.
-    ///
-    /// Mirrors the Python guard in the backend
-    /// (tests/guards/test_spread_backtest_pnl_sign.py) so both sides describe
-    /// the same trade. Premiums move thirty points across a 75 lot, so every
-    /// correct answer below is 2250.
-    fn single_leg(premiums: &[f64], quantity: i32) -> BacktestResult {
-        single_leg_with(premiums, quantity, None, None, true)
-    }
-
-    /// As `single_leg`, but lets a test set the max-loss / target-profit
-    /// thresholds and drop the exit signal so a trigger is the only way out.
-    fn single_leg_with(
-        premiums: &[f64],
-        quantity: i32,
-        max_loss: Option<f64>,
-        target_profit: Option<f64>,
-        exit_on_bar_4: bool,
-    ) -> BacktestResult {
-        let n = premiums.len();
-        let timestamps: Vec<i64> = (0..n as i64).map(|i| i * 300_000_000_000).collect();
-        let underlying = vec![24_550.0; n];
-
-        let mut entries = vec![false; n];
-        entries[1] = true;
-        let mut exits = vec![false; n];
-        if exit_on_bar_4 {
-            exits[4] = true;
-        }
-
-        let config = SpreadConfig {
-            base: BacktestConfig {
-                initial_capital: 500_000.0,
-                // Zeroed so assertions are exact: with the default rate the
-                // true 2250 arrives as 2259, which hides sign-adjacent slips.
-                fees: 0.0,
-                slippage: 0.0,
-                ..Default::default()
-            },
-            spread_type: SpreadType::Custom,
-            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, quantity, 75)],
-            max_loss,
-            target_profit,
-            ..Default::default()
-        };
-
-        SpreadBacktest::new(config).run(
-            &timestamps,
-            &underlying,
-            &[premiums.to_vec()],
-            &entries,
-            &exits,
-        )
-    }
-
-    /// Premium falls 100 -> 60. Entered at bar 1 (90), exited at bar 4 (60).
-    const FALLING: [f64; 6] = [100.0, 90.0, 80.0, 70.0, 60.0, 60.0];
-    /// The mirror: premium rises, entered at 70, exited at 100.
-    const RISING: [f64; 6] = [60.0, 70.0, 80.0, 90.0, 100.0, 100.0];
-
-    #[test]
-    fn a_short_leg_that_gained_reports_a_profit() {
-        let result = single_leg(&FALLING, -1);
-
-        // Sold at 90, bought back at 60: a 2250 gain, reported as a gain.
-        assert_eq!(result.trades[0].pnl, 2250.0);
-    }
-
-    #[test]
-    fn a_short_leg_that_lost_reports_a_loss() {
-        let result = single_leg(&RISING, -1);
-
-        // Sold at 70, bought back at 100: a 2250 loss, reported as a loss.
-        assert_eq!(result.trades[0].pnl, -2250.0);
-    }
-
-    #[test]
-    fn a_long_leg_that_gained_reports_a_profit() {
-        let result = single_leg(&RISING, 1);
-
-        // Bought at 70, sold at 100: a 2250 gain, reported as a gain.
-        assert_eq!(result.trades[0].pnl, 2250.0);
-    }
-
-    #[test]
-    fn a_long_leg_that_lost_reports_a_loss() {
-        let result = single_leg(&FALLING, 1);
-
-        // Bought at 90, sold at 60: a 2250 loss, reported as a loss.
-        assert_eq!(result.trades[0].pnl, -2250.0);
-    }
-
-    #[test]
-    fn net_premium_signs_are_already_correct() {
-        let result = single_leg(&FALLING, -1);
-        let trade = &result.trades[0];
-
-        // Not a bug, and deliberately pinned: `entry_price` / `exit_price` are
-        // computed independently of `unrealized_pnl` and are already right, so
-        // the trade record carries the correct answer next to the wrong one.
-        // The sign fix must not disturb these -- that is what makes it a pure
-        // sign flip rather than a repricing.
-        assert_eq!(trade.entry_price, -6750.0); // -90 * 75, a credit
-        assert_eq!(trade.exit_price, -4500.0); // -60 * 75
-        assert_eq!(trade.exit_price - trade.entry_price, 2250.0);
-        // And the leg is sized off its stated 75 lot, not some other number.
-        assert_eq!(trade.entry_price / -90.0, 75.0);
-    }
-
-    // The four trigger tests below are the reason the sign fix needed its own
-    // pins rather than riding along on the P&L assertions. `check_max_loss`
-    // and `check_target_profit` both read `total_unrealized_pnl`, so inverting
-    // it did not merely misreport a number -- it decided when a position
-    // closed. Each test drops the exit signal entirely, leaving the threshold
-    // as the only way out, so `exit_reason` is the assertion.
-    //
-    // A non-firing threshold is asserted as `EndOfData`, not as an empty trade
-    // book. Through 0.7.1 the terminal open position was settled into `cash`
-    // without recording a Trade, so "the stop did not fire" and "the position
-    // was never reported" were indistinguishable. 0.7.2 records that close, so
-    // the distinction is now expressible -- and these tests assert the thing
-    // they were always about: which exit reason closed the position.
-
-    #[test]
-    fn max_loss_does_not_fire_on_a_winner() {
-        let result = single_leg_with(&FALLING, -1, Some(1000.0), None, false);
-
-        // This leg gained 2250. Through 0.6.3 the stop read it as -2250 and
-        // closed the position: a max-loss stop firing on a winner, which is
-        // the most damaging half of the sign bug.
-        assert_eq!(result.trades.len(), 1);
-        assert_eq!(result.trades[0].exit_reason, ExitReason::EndOfData);
-    }
-
-    #[test]
-    fn max_loss_fires_on_a_real_loser() {
-        let result = single_leg_with(&RISING, -1, Some(1000.0), None, false);
-
-        // Sold at 70, premium ran to 100: a 2250 loss, past the 1000
-        // threshold. The stop must still work.
-        assert_eq!(result.trades.len(), 1);
-        assert_eq!(result.trades[0].exit_reason, ExitReason::StopLoss);
-    }
-
-    #[test]
-    fn target_profit_does_not_fire_on_a_loser() {
-        let result = single_leg_with(&RISING, -1, None, Some(1000.0), false);
-
-        // This leg lost 2250. Through 0.6.3 the target read it as +2250 and
-        // booked a "profit" on it.
-        assert_eq!(result.trades.len(), 1);
-        assert_eq!(result.trades[0].exit_reason, ExitReason::EndOfData);
-    }
-
-    #[test]
-    fn target_profit_fires_on_a_real_winner() {
-        let result = single_leg_with(&FALLING, -1, None, Some(1000.0), false);
-
-        assert_eq!(result.trades.len(), 1);
-        assert_eq!(result.trades[0].exit_reason, ExitReason::TakeProfit);
-    }
-
-    /// Squareoff closes the position before the overnight gap.
-    ///
-    /// **In plain words: without this, a backtest books profit the trader
-    /// could never have earned, because their broker would have closed the
-    /// position before the market shut.**
-    ///
-    /// Two sessions, entered each morning, with a large adverse premium jump
-    /// between them. With squareoff the position is flat overnight and the gap
-    /// never touches it. Without squareoff the gap is booked as a price move
-    /// the strategy "traded through". The gap is deliberately far larger than
-    /// the intraday drift so the two arms cannot be confused.
-    ///
-    /// This is the defect measured in the notebook that prompted 0.7.2: on a
-    /// real NIFTY option corpus, removing the overnight hold moved a short
-    /// straddle's P&L by -24% and a short strangle's by -42%, and it moved a
-    /// LONG straddle the other way (+16%) -- confirming the defect amplifies
-    /// whichever direction a position already points rather than adding a
-    /// constant bias.
-    #[test]
-    fn squareoff_flattens_before_the_overnight_gap() {
-        // 09:15 and 15:29 IST on two consecutive days.
-        const IST_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
-        let ist =
-            |day: i64, h: i64, m: i64| (day * 86_400 + h * 3600 + m * 60) * 1_000_000_000 - IST_NS;
-        let timestamps = vec![ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15), ist(1, 15, 29)];
-
-        // Premium drifts down 100 -> 95 intraday (a gain for a short), then
-        // gaps UP to 200 overnight (a large loss for a short).
-        let premiums = vec![100.0, 95.0, 200.0, 195.0];
-        let underlying = vec![24_550.0; 4];
-        let entries = vec![true, false, true, false];
-        let exits = vec![false; 4];
-
-        let base = |squareoff: Option<u32>| BacktestConfig {
-            initial_capital: 500_000.0,
-            fees: 0.0,
-            slippage: 0.0,
-            squareoff_time_minutes: squareoff,
-            // The squareoff time is a LOCAL time, so the offset that defines
-            // "local" has to be set too. Leaving it at the 0 (UTC) default
-            // reads 15:29 IST as 09:59 and the squareoff never fires -- a
-            // mistake worth pinning, since it fails silently in exactly the
-            // way the original defect did.
-            session_tz_offset_ns: IST_NS,
-            ..Default::default()
-        };
-        let spread = |squareoff: Option<u32>| SpreadConfig {
-            base: base(squareoff),
-            spread_type: SpreadType::Custom,
-            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, -1, 75)],
-            ..Default::default()
-        };
-
-        let without = SpreadBacktest::new(spread(None)).run(
-            &timestamps,
-            &underlying,
-            std::slice::from_ref(&premiums),
-            &entries,
-            &exits,
-        );
-        // 15:25 IST.
-        let with = SpreadBacktest::new(spread(Some(15 * 60 + 25))).run(
-            &timestamps,
-            &underlying,
-            &[premiums],
-            &entries,
-            &exits,
-        );
-
-        // Without squareoff: one position entered on day 0 and held through
-        // the gap. Sold at 100, marked at 195: a 95-point loss on a short.
-        assert_eq!(without.trades.len(), 1);
-        assert_eq!(without.trades[0].pnl, -95.0 * 75.0);
-
-        // With squareoff: two separate day trades, each closed at 15:29 --
-        // the first bar at or after 15:25 in its session.
-        assert_eq!(with.trades.len(), 2);
-        assert_eq!(with.trades[0].exit_reason, ExitReason::Squareoff);
-        assert_eq!(with.trades[1].exit_reason, ExitReason::Squareoff);
-
-        // Each captured only its own session's 5-point decay, and the
-        // overnight gap reached neither of them.
-        assert_eq!(with.trades[0].pnl, 5.0 * 75.0);
-        assert_eq!(with.trades[1].pnl, 5.0 * 75.0);
-
-        // The headline: the defect is worth more than the strategy earns.
-        assert!(with.metrics.end_value > without.metrics.end_value);
-    }
-
-    /// Squareoff must not re-open the position it just closed.
-    ///
-    /// The entry signal fires every bar here, including the squareoff bar. A
-    /// broker's square-off leaves the trader flat into the close; re-entering
-    /// on the same bar would put the position straight back on and carry it
-    /// overnight anyway, silently restoring the defect.
-    #[test]
-    fn squareoff_does_not_re_enter_on_the_same_bar() {
-        const IST_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
-        let ist =
-            |day: i64, h: i64, m: i64| (day * 86_400 + h * 3600 + m * 60) * 1_000_000_000 - IST_NS;
-        let timestamps = vec![ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15)];
-        let premiums = vec![100.0, 95.0, 200.0];
-
-        let result = SpreadBacktest::new(SpreadConfig {
-            base: BacktestConfig {
-                initial_capital: 500_000.0,
-                fees: 0.0,
-                slippage: 0.0,
-                squareoff_time_minutes: Some(15 * 60 + 25),
-                session_tz_offset_ns: IST_NS,
-                ..Default::default()
-            },
-            spread_type: SpreadType::Custom,
-            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, -1, 75)],
-            ..Default::default()
-        })
-        .run(&timestamps, &[24_550.0; 3], &[premiums], &[true; 3], &[false; 3]);
-
-        // Day 0 squared off at 15:29, then re-entered fresh on day 1 and left
-        // open at end of data. Never a position spanning the gap.
-        assert_eq!(result.trades.len(), 2);
-        assert_eq!(result.trades[0].exit_reason, ExitReason::Squareoff);
-        assert_eq!(result.trades[1].exit_reason, ExitReason::EndOfData);
-        assert_eq!(result.trades[0].pnl, 5.0 * 75.0);
-    }
-
-    /// A position still open at the end of the data must appear in `trades()`.
-    ///
-    /// Through 0.7.1 it did not. The terminal close settled P&L into `cash`,
-    /// so it reached `end_value`, `total_return_pct` and the equity curve --
-    /// but pushed no `Trade` and never called `record_trade`. The result was a
-    /// run whose entire return came from a position that `trades()` did not
-    /// list and `total_closed_trades` counted as zero.
-    ///
-    /// That is the most dangerous shape a reporting defect can take: every
-    /// trade-level audit passes, because there is nothing to audit. It was
-    /// found by a notebook measuring overnight holds, where a single position
-    /// opened on the first morning and never closed carried the whole P&L.
-    ///
-    /// The P&L assertion matters as much as the count: the recorded trade must
-    /// carry the SAME number that reached equity, or this fix would trade a
-    /// silent omission for a visible inconsistency.
-    #[test]
-    fn a_position_open_at_the_end_is_still_recorded_as_a_trade() {
-        // No exit signal and no threshold: the only way out is end-of-data.
-        let result = single_leg_with(&FALLING, -1, None, None, false);
-
-        assert_eq!(result.trades.len(), 1, "the open position must be reported");
-        let trade = &result.trades[0];
-        assert_eq!(trade.exit_reason, ExitReason::EndOfData);
-
-        // Entered at 90, ran to the final bar at 60: a 2250 gain on a short.
-        assert_eq!(trade.pnl, 2250.0);
-
-        // And it is counted, not merely listed.
-        assert_eq!(result.metrics.total_closed_trades, 1);
-
-        // The recorded P&L is the P&L that moved equity.
-        let equity_gain = result.metrics.end_value - 500_000.0;
-        assert!(
-            (trade.pnl - equity_gain).abs() < 1e-9,
-            "trade pnl {} must match the equity change {}",
-            trade.pnl,
-            equity_gain
-        );
-    }
-}
+#[path = "spreads_tests.rs"]
+mod tests;

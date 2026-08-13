@@ -153,6 +153,8 @@ impl TickBacktest {
                     entry_time,
                     exit_time: ts,
                     fees: entry_fees + exit_fees,
+                    entry_fees,
+                    exit_fees,
                     fee_breakdown: None,
                     exit_reason: reason,
                 });

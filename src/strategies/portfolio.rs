@@ -25,7 +25,7 @@ use crate::core::types::{
     BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, InstrumentConfig, OhlcvData,
     Trade,
 };
-use crate::execution::{FeeModel, FillPrice, SlippageModel};
+use crate::execution::{FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
@@ -109,7 +109,7 @@ impl PortfolioBacktest {
         }
 
         let n_instruments = instruments.len();
-        let fee_model = FeeModel::percentage(self.config.base.fees);
+        let fee_model = self.config.base.fee_model();
         let slippage_model = if self.config.base.apply_slippage && self.config.base.slippage > 0.0 {
             SlippageModel::percentage(self.config.base.slippage)
         } else {
