@@ -64,7 +64,7 @@ impl BasketBacktest {
             synchronizer: SignalSynchronizer::new(config.sync_mode),
             allocator,
             signal_processor: SignalProcessor::new(),
-            fee_model: FeeModel::percentage(config.base.fees),
+            fee_model: config.base.fee_model(),
             config,
         }
     }
@@ -172,6 +172,8 @@ impl BasketBacktest {
                             entry_time: ohlcv.timestamps[pos.entry_idx],
                             exit_time: ohlcv.timestamps[i],
                             fees,
+                            entry_fees: 0.0,
+                            exit_fees: fees,
                             fee_breakdown: None,
                             exit_reason: ExitReason::Signal,
                         });
@@ -260,6 +262,8 @@ impl BasketBacktest {
                     entry_time: ohlcv.timestamps[pos.entry_idx],
                     exit_time: ohlcv.timestamps[last_idx],
                     fees,
+                    entry_fees: 0.0,
+                    exit_fees: fees,
                     fee_breakdown: None,
                     exit_reason: ExitReason::EndOfData,
                 });

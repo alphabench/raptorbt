@@ -5,6 +5,124 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-08-14
+
+Patch. Multi-leg option spreads charged the wrong costs, four ways at once,
+and every one of them billed too little.
+
+**In plain words: a backtest of a multi-leg option strategy under-charged its
+costs and then under-reported even what it did charge. The engine billed the
+opening trade twice, told you about only half of it, never charged the flat
+per-order fee a broker really takes, and ignored how many lots you traded. All
+four errors point the same way, so a strategy that loses money could be
+reported as making money -- and the cheaper the options, the likelier that is.**
+
+### Fixed
+
+- **A spread round trip is charged twice, not three times.** `calculate_fees`
+  computed a full round-trip charge -- its own comment read `// Entry + Exit`
+  -- and was called at exit, on top of a separate entry charge that had already
+  been taken. The opening side was therefore billed twice, the second time
+  against exit premiums rather than the premiums actually paid.
+
+  On a flat 100 premium over a 75 lot at 0.1%, a round trip cost 22.50 where
+  15.00 was owed.
+
+- **The trade list now reports the same money the equity curve lost.** The
+  entry charge was a local variable that nothing retained, so `Trade.fees`
+  disclosed the exit side alone while the curve had been debited for both.
+  `Trade` already documented the opposite as its invariant.
+
+  This is the shape of defect that survives review, because every trade-level
+  audit passes: the figures are self-consistent, they are simply not the ones
+  charged. It is the same failure 0.7.2 fixed for open positions. `Trade` now
+  carries `entry_fees` and `exit_fees`, and `fees` is their sum, so the two
+  can no longer drift apart.
+
+- **`fee_segment` reaches multi-leg spreads.** `SpreadBacktest` held no fee
+  model and never imported one, so the itemized regulatory schedule was
+  unreachable from the spread path however the config was set, and only the
+  flat proportional rate ever applied.
+
+  This matters more than the rate being wrong. Brokerage is a flat charge per
+  order, and a purely proportional model cannot express it at all -- a 4-leg
+  structure is 8 orders whose per-order fee was never billed at any premium.
+  Because the missing charge is flat, the error is worst on cheap contracts:
+
+  | Premium | Flat rate as % of the real schedule |
+  | --- | --- |
+  | 2 | 0.6% |
+  | 20 | 6.1% |
+  | 100 | 25.7% |
+  | 400 | 65.4% |
+
+  Measured on a 4-leg structure, one round trip, 75 lot, `fees=0.001` against
+  `fee_segment="NFO-OPT"`.
+
+- **Costs scale with a leg's quantity.** Both fee functions used `lot_size`
+  alone and never `|quantity|`, so a leg holding two lots was charged as one
+  however large the position, while P&L correctly used both.
+
+- **`total_fees_paid` reports what a spread run charged.** The spread path
+  never called `record_fees`, so the summary metric read `0.0` for every
+  spread backtest regardless of the costs actually taken.
+
+- **A leg holding zero contracts is charged nothing.** Quantity is signed and
+  zero means the leg trades nothing, so it places no order and owes no
+  per-order charge. Only visible once this path charged a flat per-order fee
+  at all.
+
+- **`fee_segment` reaches four more strategy paths.** `options`, `pairs`,
+  `basket` and `portfolio` each built a flat percentage model directly,
+  silently ignoring a configured segment.
+
+### Added
+
+- **`Trade.entry_fees` and `Trade.exit_fees`**, in Rust and Python, alongside
+  the existing `fees` -- which now holds their sum and finally means what it
+  documented. Existing readers of `fees` need no change, and serialized
+  results from earlier versions still load.
+
+- **`Trade.fee_breakdown` is populated for spreads.** Setting `fee_segment`
+  reports the itemized components per trade, summed across legs and both
+  sides, so `fee_breakdown.total()` equals `fees`.
+
+### Changed
+
+- **An option left to expire pays no exit-side cost.** A leg exiting via
+  `ExitReason::Settlement` is not traded out: no order is placed, so no
+  brokerage and no transaction tax are owed. Entry costs stand. Charging a
+  full exit there would overstate every structure held to expiry -- the mirror
+  image of the undercharge above, and worth naming because fixing costs in one
+  direction makes the other error easy to introduce.
+
+- **`MultiStrategyBacktest` drops its unused `fee_model` field.** It was
+  constructed, marked `#[allow(dead_code)]`, and read by nothing; the path
+  delegates to `SingleBacktest`, which charges its own. Rust callers
+  constructing the struct literally are unaffected -- it was private.
+
+### Upgrading
+
+**Any stored multi-leg spread result produced by 0.7.2 or earlier understates
+its costs and should be re-run.** How far off it was depends on the premiums
+traded and on whether a `fee_segment` was set; on the measurement above, the
+real schedule cost between 1.5x (at a 400 premium) and 158x (at a 2 premium)
+the flat rate.
+
+Results move in three ways: total costs rise, `trades()` reports a larger
+`fees` than before (it now includes the entry side), and `total_fees_paid` is
+no longer zero for spread runs. Strategies held to expiry may see costs *fall*
+slightly, since settlement no longer pays a trade-out it never made.
+
+Nothing changes for a caller who sets no `fee_segment` beyond the four bug
+fixes -- the flat rate remains the default, and single-instrument backtests
+are untouched.
+
+Known gap, not fixed here: the tick strategy path (`strategies/tick.rs`)
+computes fees from price alone and does not scale them by position size. It is
+a separate defect and is left for its own release rather than bundled into
+this one.
+
 ## [0.7.2] - 2026-08-13
 
 Patch, but a consequential one: intraday backtests can now be told to close

@@ -206,4 +206,45 @@ mod tests {
         let result = fee.calculate(100.0, 100.0, Direction::Long);
         assert!((result - 0.0).abs() < 1e-10);
     }
+
+    /// The itemized model splits a round trip across its two sides.
+    ///
+    /// `calculate` alone always prices the entry side, so an exit priced
+    /// through it would carry the wrong side-specific charges. These cover
+    /// `breakdown`/`calculate_side`, which the flat-rate tests above cannot
+    /// reach.
+    #[test]
+    fn indian_model_charges_each_side_separately() {
+        use crate::execution::indian_costs::Segment;
+        let model = FeeModel::indian(Segment::OptionsNfo);
+
+        let entry = model.breakdown(100.0, 75.0, Direction::Long, true).unwrap();
+        let exit = model.breakdown(100.0, 75.0, Direction::Long, false).unwrap();
+
+        // A long buys to open: stamp duty on entry, transaction tax on exit.
+        assert!(entry.stamp_duty > 0.0);
+        assert_eq!(entry.stt, 0.0);
+        assert_eq!(exit.stamp_duty, 0.0);
+        assert!(exit.stt > 0.0);
+
+        // Per-order brokerage lands on both sides.
+        assert_eq!(entry.brokerage, exit.brokerage);
+        assert!(entry.brokerage > 0.0);
+    }
+
+    /// `calculate_side` returns the itemized total, or the flat fee when the
+    /// model has no component structure.
+    #[test]
+    fn calculate_side_matches_the_breakdown_it_reports() {
+        use crate::execution::indian_costs::Segment;
+        let indian = FeeModel::indian(Segment::OptionsNfo);
+        let side = indian.calculate_side(100.0, 75.0, Direction::Short, true);
+        let breakdown = indian.breakdown(100.0, 75.0, Direction::Short, true).unwrap();
+        assert!((side - breakdown.total()).abs() < 1e-9);
+
+        // A flat model has no breakdown to report, and falls back cleanly.
+        let flat = FeeModel::percentage(0.001);
+        assert!(flat.breakdown(100.0, 75.0, Direction::Long, true).is_none());
+        assert_eq!(flat.calculate_side(100.0, 75.0, Direction::Long, true), 7.5);
+    }
 }

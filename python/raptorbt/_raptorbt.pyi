@@ -137,7 +137,11 @@ class Trade:
     return_pct: float
     entry_time: int
     exit_time: int
+    # Total costs over the round trip: entry_fees + exit_fees.
     fees: float
+    entry_fees: float
+    # Zero when the exit was not a trade-out, e.g. an option left to expire.
+    exit_fees: float
     # Present only when config.fee_segment selects an itemized schedule.
     # Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
     fee_breakdown: dict[str, float] | None

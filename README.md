@@ -583,6 +583,40 @@ including on symbols that never traded. Results carry `halted` and
 report. `result.rejected_entries` is the sum across instruments, whereas the
 array portfolio runner reports its single shared risk gate's counter.
 
+### Transaction Costs
+
+By default the engine charges a flat fraction of traded value on each side:
+
+```python
+config = raptorbt.BacktestConfig(fees=0.001)   # 0.1% per side
+```
+
+That is fine for equities, but it cannot express a **flat per-order charge** —
+and where brokerage is a fixed amount per order rather than a percentage, a
+purely proportional rate understates cost badly on cheap instruments. Set
+`fee_segment` to charge a real regulatory schedule instead:
+
+```python
+config.fee_segment = "NFO-OPT"   # options: flat brokerage per order,
+                                 # transaction tax on the sell leg,
+                                 # stamp duty on the buy leg, GST
+```
+
+Accepted segments are `NSE` / `BSE` (add `-INTRADAY` or `-DELIVERY`), `NFO` /
+`BFO`, `MCX` and `CDS`, each optionally suffixed `-OPT` or `-FUT`. An
+unparseable value falls back to the flat `fees` rate rather than raising, so
+`fees` should still hold a usable composite number.
+
+Each side of each leg is charged separately, because the charges are not
+symmetric: transaction tax lands on the sell and stamp duty on the buy, so a
+short leg owes the tax when it opens and a long leg when it closes. A multi-leg
+structure pays the per-order charge **once per leg per side** — a four-leg
+spread round trip is eight orders.
+
+`trade.fee_breakdown` reports the components (`brokerage`, `stt`,
+`exchange_txn`, `sebi_fee`, `stamp_duty`, `gst`, `total`) when a segment is set,
+and `None` when it is not.
+
 ### Execution Realism Knobs
 
 Four opt-in settings, all off by default:
@@ -1523,9 +1557,17 @@ for trade in result.trades():
     print(trade.direction)    # 1=Long, -1=Short
     print(trade.pnl)          # Profit/Loss
     print(trade.return_pct)   # Return percentage
-    print(trade.fees)         # Fees paid
+    print(trade.fees)         # Total costs: entry_fees + exit_fees
+    print(trade.entry_fees)   # Charged when the position opened
+    print(trade.exit_fees)    # Charged when it closed; 0 if left to expire
+    print(trade.fee_breakdown)  # Itemized components, or None on a flat rate
     print(trade.exit_reason)  # "Signal", "StopLoss", "TakeProfit", "TrailingStop", "EndOfData", "Settlement", "TimeExit"
 ```
+
+`fees` always equals `entry_fees + exit_fees`, and when an itemized schedule is
+configured `fee_breakdown["total"]` equals `fees` — the reported costs and the
+equity curve are the same money. An option left to expire carries
+`exit_fees == 0.0`: it is never traded out, so it owes no exit-side charge.
 
 ---
 

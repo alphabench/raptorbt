@@ -326,3 +326,105 @@ def test_batch_spread_backtest_honours_squareoff():
     assert [t.exit_reason for t in with_.trades()] == ["Squareoff", "Squareoff"]
     # The overnight gap turns a winning pair of day trades into a loser.
     assert without.metrics.total_return_pct < 0 < with_.metrics.total_return_pct
+
+
+# ---------------------------------------------------------------------------
+# Costs
+#
+# Through 0.7.2 the spread path computed its own fees: it charged the entry
+# twice, disclosed only the exit half on the trade, ignored ``fee_segment``
+# entirely, and dropped each leg's quantity. All four understated costs, so a
+# losing structure could read as a winner. These assert at the boundary a
+# consumer actually reads.
+# ---------------------------------------------------------------------------
+
+
+def _costed(premiums, quantity, *, fees=0.001, fee_segment=None, legs=None):
+    """One or more CE legs with costs live, entered bar 1 and exited bar 4."""
+    n = len(premiums)
+    timestamps = (
+        np.arange(n, dtype=np.int64) * 300_000_000_000 + 1_786_000_000_000_000_000
+    )
+    entries = np.zeros(n, dtype=bool)
+    entries[1] = True
+    exits = np.zeros(n, dtype=bool)
+    exits[4] = True
+
+    quantities = legs if legs is not None else [quantity]
+    config = r.BacktestConfig(initial_capital=500_000.0, fees=fees)
+    if fee_segment is not None:
+        config.fee_segment = fee_segment
+
+    return r.run_spread_backtest(
+        timestamps=timestamps,
+        underlying_close=np.full(n, 24_550.0),
+        legs_premiums=[np.array(premiums, dtype=np.float64) for _ in quantities],
+        leg_configs=[("CE", STRIKE, q, LOT) for q in quantities],
+        entries=entries,
+        exits=exits,
+        config=config,
+        spread_type="custom",
+    )
+
+
+def test_a_round_trip_is_charged_exactly_twice():
+    """Entry and exit, never a third side.
+
+    The old exit function multiplied by two on top of an entry that had
+    already been charged, so a flat 100 premium on a 75 lot billed 22.50
+    where 15.00 was owed.
+    """
+    trade = _costed([100.0] * 6, 1).trades()[0]
+
+    assert trade.entry_fees == pytest.approx(7.50)
+    assert trade.exit_fees == pytest.approx(7.50)
+    assert trade.fees == pytest.approx(15.00)
+
+
+def test_reported_costs_are_the_money_the_equity_curve_lost():
+    """``fees`` must equal what was actually deducted.
+
+    The entry charge used to be discarded after it hit cash, so ``trades()``
+    disclosed only the exit half. A consumer auditing the trade list could
+    not discover the difference -- every trade-level check passed.
+    """
+    result = _costed([100.0] * 6, 1)
+    trade = result.trades()[0]
+
+    assert trade.fees == pytest.approx(trade.entry_fees + trade.exit_fees)
+
+    equity = result.equity_curve()
+    # Premium never moves, so the entire fall in equity is cost.
+    assert equity[0] - equity[-1] == pytest.approx(trade.fees, abs=1e-6)
+
+
+def test_costs_scale_with_leg_quantity():
+    """A two-lot leg costs twice a one-lot leg.
+
+    Both fee functions used ``lot_size`` alone and never ``|quantity|``, so
+    every multi-lot leg was billed as a single lot however large it was.
+    """
+    one = _costed([100.0] * 6, 1).trades()[0]
+    two = _costed([100.0] * 6, 2).trades()[0]
+
+    assert two.fees == pytest.approx(one.fees * 2.0)
+
+
+def test_fee_segment_reaches_the_spread_path():
+    """Setting a segment charges the real schedule, per leg, per side.
+
+    The spread path held no fee model, so ``fee_segment`` was silently
+    ignored and the flat proportional rate was all that ever applied.
+    Brokerage is flat per order, so a proportional model never charges it at
+    any premium -- and a four-leg round trip is eight orders.
+    """
+    result = _costed([100.0] * 6, 1, fee_segment="NFO-OPT", legs=[1, -1, 1, -1])
+    trade = result.trades()[0]
+
+    assert trade.fee_breakdown is not None
+    assert trade.fee_breakdown["brokerage"] == pytest.approx(160.0)
+    assert trade.fee_breakdown["total"] == pytest.approx(trade.fees, abs=1e-9)
+    assert trade.fees == pytest.approx(trade.entry_fees + trade.exit_fees)
+
+    # The flat rate bills 4 legs x 7.50 x 2 sides = 60.00 and no brokerage.
+    assert trade.fees > 200.0
