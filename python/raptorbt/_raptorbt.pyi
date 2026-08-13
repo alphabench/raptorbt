@@ -253,7 +253,40 @@ def run_portfolio_backtest(
     `allocation` is "equal_weight" or "full".
     """
 
-def run_options_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_options_backtest(
+    timestamps: _I64,
+    open: _F64,
+    high: _F64,
+    low: _F64,
+    close: _F64,
+    volume: _F64,
+    option_prices: _F64,
+    entries: _Bool,
+    exits: _Bool,
+    direction: int = ...,
+    symbol: str = ...,
+    config: BacktestConfig | None = ...,
+    option_type: str = ...,
+    strike_selection: str = ...,
+    size_type: str = ...,
+    size_value: float = ...,
+    # Contracts per lot. Costs and P&L both scale by lots * lot_size, so this
+    # is the difference between a 50-contract position and a single one.
+    lot_size: int = ...,
+    strike_interval: float = ...,
+) -> BacktestResult:
+    """Backtest a single-leg option against its underlying.
+
+    `option_type` is "call" or "put"; `strike_selection` is one of "atm",
+    "otm1", "otm2", "itm1", "itm2"; `size_type` is "contracts", "percent",
+    "notional" or "risk_percent", read together with `size_value`. Unknown
+    values raise ValueError rather than falling back to a default.
+
+    Set `fee_segment` on `config` (e.g. "NFO-OPT") to charge the itemized
+    regulatory schedule, including per-order brokerage, instead of the flat
+    `fees` rate.
+    """
+
 def run_pairs_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_multi_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_spread_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...

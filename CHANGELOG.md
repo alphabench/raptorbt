@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.4] - 2026-08-14
 
-Patch. The tick strategy path priced every backtest as if you had traded
-exactly one unit, whatever you actually traded.
+Patch. The last two strategy paths that computed their own trading costs --
+tick and options -- now use the engine's fee model like every other path. Both
+under-charged, and both reported less than they charged.
+
+**In plain words: if you backtested a tick strategy or a single-leg option, the
+costs it reported were too low and the profit too high. How much depends on how
+many contracts you traded: the bigger the position, the wider the gap. Anything
+that looked marginally profitable is worth running again.**
+
+Release 0.7.3 fixed this same family of defect for spreads, pairs, baskets and
+portfolios. These are the remaining two.
+
+### The tick path
+
+The tick strategy path priced every backtest as if you had traded exactly one
+unit, whatever you actually traded.
 
 **In plain words: a tick backtest charged one unit's costs, earned one unit's
 profit, and then measured that one-unit profit against your entire account. If
@@ -102,11 +116,70 @@ Setting `fee_segment` moves results further: on cheap contracts the real
 schedule costs many multiples of the flat rate (158x at a 2 premium on a 75
 lot), because the per-order brokerage it adds does not shrink with the premium.
 
-Known gap, not fixed here: `strategies/options.rs` holds a fee model but prices
-through `calculate` rather than `calculate_side`, so it reports `entry_fees` as
-zero with the entry charge folded into `fees`, and it sizes by contracts without
-the lot multiplier. It is a separate defect of the same family and gets its own
-release.
+### The options path
+
+Six defects, all under-charging, under-reporting, or both.
+
+**In plain words: an options backtest under-charged its costs by the lot size,
+reported the cost of opening a position as zero, and then told you total costs
+were zero however much it had billed. A strategy trading a 50-lot contract paid
+1/50th of its real costs while earning full-size profit, so it looked better
+than it was — and every figure that would have exposed this was either blank or
+agreed with itself.**
+
+`options.rs` was the last strategy path still computing its own costs instead of
+using the engine's fee model. It now uses the same path as spreads and ticks.
+
+- **Costs scale with the lot size.** `calculate_contracts` returns *lots*, and
+  every P&L, cash and equity line multiplied back up by `lot_size` — but all
+  three fee calls passed the bare lot count. A 50-lot position was charged as a
+  single contract. Unlike the tick defect above, costs and profit were wrong by
+  *different* factors here, so net P&L was overstated on every trade rather than
+  merely scaled down.
+
+- **The opening charge is reported, and subtracted.** `entry_fees` was hard-coded
+  to `0.0` at both trade sites. The charge was really deducted from cash, but the
+  local binding died with the block that computed it, so `fees` disclosed the
+  exit half alone — and the entry half was missing from `pnl` too, not just from
+  the report. `Trade` documents `fees == entry_fees + exit_fees`; here it held
+  only because both sides of the equation were wrong.
+
+- **Each charge lands on the side that owes it.** Both sides were priced through
+  `calculate`, which assumes every call is an entry, so exits were billed the buy
+  schedule — stamp duty instead of transaction tax. Pricing now goes through
+  `calculate_side`, and `fee_breakdown` is populated instead of hard-coded
+  `None`, so a configured `fee_segment` finally reports its components.
+
+  Measured on a 50-lot round trip against `fee_segment="NFO-OPT"`, the flat rate
+  as a share of the real schedule: **0.4%** at a premium of 2, **4.1%** at 20,
+  **18.3%** at 100.
+
+- **`total_fees_paid` reports what the run charged.** It fell to a default of
+  zero for every options backtest. This path builds its own metrics rather than
+  finalizing a `StreamingMetrics`, so it now sums the trade list, as the
+  portfolio engine does.
+
+- **`Trade.size` reports contracts, not lots** — consistent with every other
+  path.
+
+- **An end-of-data close is paid for out of the equity curve.** *Found while
+  fixing the five above, and scope beyond them.* The end-of-data close computed
+  fees and pushed a trade but never touched `cash`, and it runs after the loop
+  had already written the last equity point from the position marked to market.
+  The exit charge appeared in the trade list and nowhere else, and the reported
+  end value was one exit charge too high.
+
+  It could not be deferred: correcting the lot multiplier multiplies that
+  unrecorded charge by the lot size, so leaving it would have widened the gap
+  between the trade list and the equity curve rather than narrowing it.
+
+**Any stored options result should be re-run.** Costs rise and net profit falls,
+by more the larger the lot size and the cheaper the premium. Results held at
+end of data move further, since closing out is now paid for.
+
+The options path is also now covered: it had three tests, none of which ever ran
+a backtest, which is how six defects accumulated in it. Tests moved to
+`src/strategies/options_tests.rs` alongside pins for each defect above.
 
 ## [0.7.3] - 2026-08-14
 
