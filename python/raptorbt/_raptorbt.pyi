@@ -46,6 +46,7 @@ class BacktestConfig:
     fill_seed: int
     bar_path_adaptive: bool
     legacy_annualization: bool
+    squareoff_time_minutes: int | None
 
     def __init__(
         self,
@@ -65,6 +66,11 @@ class BacktestConfig:
         fill_prob_slippage: float = ...,
         fill_seed: int = ...,
         bar_path_adaptive: bool = ...,
+        queue_fill_model: bool = ...,
+        session_tz_offset_ns: int = ...,
+        limit_slippage: float = ...,
+        liquidate_on_margin_call: bool = ...,
+        squareoff_time: str | None = ...,
     ) -> None: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...
@@ -72,7 +78,6 @@ class BacktestConfig:
     def set_fixed_target(self, percent: float) -> None: ...
     def set_atr_target(self, multiplier: float, period: int) -> None: ...
     def set_risk_reward_target(self, ratio: float) -> None: ...
-    def set_session_config(self, *args: Any, **kwargs: Any) -> None: ...
 
 class InstrumentConfig:
     lot_size: float | None

@@ -5,6 +5,104 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-08-13
+
+Patch, but a consequential one: intraday backtests can now be told to close
+their positions before the market shuts, and a position left open at the end of
+a run is finally reported as a trade.
+
+**In plain words: a backtest could report profit earned overnight, while the
+market was closed — money no trader could have made, because their broker would
+have closed the position at the end of the day. There was no setting to stop
+it. Now there is, and the results change materially.**
+
+### Added
+
+- **`BacktestConfig(squareoff_time="15:25")`** — force-closes open positions at
+  the first bar at or after that local time in each trading day. `None` (the
+  default) keeps the old behaviour, so no existing result moves unless you ask
+  it to.
+
+  The time is **local**, interpreted through `session_tz_offset_ns`, so it is
+  market-agnostic: `"15:25"` with an IST offset is NSE's squareoff, `"16:00"`
+  with a zero offset is a UTC-quoted market. Setting `squareoff_time` and
+  leaving the offset at its `0` default is the one easy mistake — 15:29 IST
+  then reads as 09:59 UTC and nothing fires. Unreadable values raise
+  `ValueError` rather than silently disabling squareoff.
+
+  Positions closed this way carry the new `ExitReason::Squareoff` (`"Squareoff"`
+  from Python), distinct from `EndOfData`: it is a real trade-out at a real
+  in-session price, paying normal exit costs. The engine will not re-enter on
+  the squareoff bar itself.
+
+- `core::session::squareoff_flags` — the shared session-boundary helper behind
+  it, usable by any strategy path.
+
+### Fixed
+
+- **A position still open when the data ends is now recorded as a trade.** The
+  spread path settled it into cash without pushing a `Trade` or calling
+  `record_trade`, so its P&L reached `end_value`, `total_return_pct` and the
+  equity curve while `trades()` returned empty and `total_closed_trades` read
+  zero.
+
+  This is the most dangerous shape a reporting defect can take: every
+  trade-level audit passes, because there is nothing to audit. It was found by
+  a run whose entire return came from one position opened on the first morning
+  and never closed — visible in the equity curve, invisible in the trade book.
+
+- **`BacktestConfig.set_session_config` no longer appears in the type stub.**
+  It was declared in `_raptorbt.pyi` and never existed in the engine. Callers
+  guarding with `hasattr(config, "set_session_config")` took the else-branch
+  every time, so `session_aware=True` was silently dropped and every intraday
+  backtest ran with no squareoff. A type checker reading the stub agreed with
+  the call throughout.
+
+  A new guard (`TestStubDeclaresNothingFictional`) pins the stub -> runtime
+  direction. The existing `TestStubCompleteness` only checked runtime -> stub,
+  which is why this was never caught. Verified by injection: reinstating the
+  fictional declaration fails the guard.
+
+### Changed
+
+- **`SpreadConfig.close_at_eod` is removed.** It was declared, defaulted to
+  `false`, hardcoded to `false` at both binding sites, and read by nothing —
+  dead since it shipped. `squareoff_time` supersedes it and is actually
+  honoured. A field that looks like a working setting and does nothing is what
+  this release exists to stop; leaving it in place would repeat the defect.
+
+  Rust callers constructing `SpreadConfig` literally should drop the field;
+  those using `..Default::default()` need no change. No Python API used it.
+
+### Measured
+
+On a real NIFTY option corpus (7 sessions, one expiry), enforcing a 15:25
+squareoff moved net-of-cost P&L by:
+
+| Strategy | No squareoff | With squareoff | Change |
+| --- | --- | --- | --- |
+| Short ATM straddle | ₹18,405 | ₹13,934 | −24% |
+| Short strangle | ₹7,736 | ₹4,523 | −42% |
+| Long ATM straddle | −₹18,627 | −₹15,590 | +16% |
+
+The long straddle moving the *other* way is the important one: the defect does
+not add a constant bias, it **amplifies whichever direction a position already
+points** — making winners look better and losers worse. On that corpus one
+boundary (the night into expiry day) carried 47.1% of all overnight P&L, so the
+direction is robust but the magnitude is corpus-specific.
+
+### Upgrading
+
+Existing results are unchanged unless you set `squareoff_time`, with one
+exception: a backtest that ended with a position still open now reports one
+more trade than it did before. The P&L was always in `end_value`; it is now
+also in `trades()`, so trade counts and per-trade statistics will differ for
+those runs. That is the fix, not a regression.
+
+If you run intraday strategies, set `squareoff_time` **and**
+`session_tz_offset_ns` together — the first without the second silently does
+nothing.
+
 ## [0.7.1] - 2026-08-12
 
 Patch. The 0.7.0 deprecated names resolved but could not be enumerated.

@@ -1,10 +1,10 @@
 # RaptorBT
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PyPI version](https://img.shields.io/pypi/v/raptorbt.svg)](https://pypi.org/project/raptorbt/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Rust](https://img.shields.io/badge/rust-1.70+-red.svg)](https://www.rust-lang.org/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/raptorbt?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=ORANGE&left_text=downloads)](https://pepy.tech/projects/raptorbt)
+[![PyPI](https://img.shields.io/pypi/v/raptorbt.svg)](https://pypi.org/project/raptorbt/)
+[![Python](https://img.shields.io/pypi/pyversions/raptorbt.svg)](https://pypi.org/project/raptorbt/)
+[![Rust](https://img.shields.io/badge/Rust-powered-orange?logo=rust)](https://www.rust-lang.org/)
+[![Downloads](https://api.pepy.tech/badge/raptorbt/month)](https://pepy.tech/projects/raptorbt)
+[![License](https://img.shields.io/pypi/l/raptorbt.svg)](https://opensource.org/licenses/MIT)
 
 **Blazing-fast backtesting for the modern quant.**
 
@@ -125,15 +125,15 @@ rather than scheduler noise. Reproduce any row with `uv run python
 benches/python/run_all.py` — the harness is in the repo precisely so these are
 checkable.
 
-| Data size          | Time     | Throughput    |
-| ------------------ | -------- | ------------- |
-| 1,000 bars         | 0.069 ms | 15M bars/sec  |
-| 5,000 bars         | 0.36 ms  | 14M bars/sec  |
-| 10,000 bars        | 0.72 ms  | 14M bars/sec  |
-| 50,000 bars        | 3.59 ms  | 14M bars/sec  |
-| 93,750 bars        | 6.90 ms  | 14M bars/sec  |
-| 1,875,000 bars     | 156 ms   | 12M bars/sec  |
-| 25,000,000 bars    | 1.82 s   | 14M bars/sec  |
+| Data size       | Time     | Throughput   |
+| --------------- | -------- | ------------ |
+| 1,000 bars      | 0.069 ms | 15M bars/sec |
+| 5,000 bars      | 0.36 ms  | 14M bars/sec |
+| 10,000 bars     | 0.72 ms  | 14M bars/sec |
+| 50,000 bars     | 3.59 ms  | 14M bars/sec |
+| 93,750 bars     | 6.90 ms  | 14M bars/sec |
+| 1,875,000 bars  | 156 ms   | 12M bars/sec |
+| 25,000,000 bars | 1.82 s   | 14M bars/sec |
 
 The 1,875,000-bar row is the one worth dwelling on: that is roughly **twenty
 years of Indian one-minute intraday data**, backtested in about a sixth of a
@@ -143,14 +143,14 @@ data stops fitting in cache.
 
 Other paths, measured the same way:
 
-| Path | Result |
-| ---- | ------ |
-| Tick engine | 175–242M ticks/sec, every tick traversed to the end of the array |
-| 500 option spreads in parallel | 42,848/sec, 6.9x faster than serial, bit-for-bit identical to it |
-| 190-combo parameter sweep over a year of minute bars | 1.47 s wall, 67 MB peak RSS |
-| Determinism | 20 runs across 3 processes → one SHA-256 |
-| Compiled engine | 1.59 MB |
-| Metrics per backtest | 33 attributes (24 in `to_dict()`) |
+| Path                                                 | Result                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------- |
+| Tick engine                                          | 175–242M ticks/sec, every tick traversed to the end of the array |
+| 500 option spreads in parallel                       | 42,848/sec, 6.9x faster than serial, bit-for-bit identical to it |
+| 190-combo parameter sweep over a year of minute bars | 1.47 s wall, 67 MB peak RSS                                      |
+| Determinism                                          | 20 runs across 3 processes → one SHA-256                         |
+| Compiled engine                                      | 1.59 MB                                                          |
+| Metrics per backtest                                 | 33 attributes (24 in `to_dict()`)                                |
 
 > **These numbers are not comparable to the 0.6.4 ones published earlier.** They
 > come from a different harness, not a slower engine — the 0.6.4 figures were
@@ -306,7 +306,7 @@ class CrossSectional(raptorbt.Strategy):
 ```
 
 Under the default netting policy an order's side is authoritative for
-*opening*: with no position it opens in that side, while an order opposing an
+_opening_: with no position it opens in that side, while an order opposing an
 open position closes it (so bracket legs and take-profits behave as before).
 Mark an order `reduce_only` to guarantee it can only ever close.
 
@@ -336,7 +336,7 @@ class Breakout(raptorbt.Strategy):
 - **Kinds**: `orders.Market`, `orders.Limit` (with `post_only=`),
   `orders.StopMarket`, `orders.StopLimit` (trigger fires, then rests as a
   limit from the next bar), `orders.MarketIfTouched` / `orders.LimitIfTouched`
-  (favorable-touch triggers — a buy fires when price *falls* to the
+  (favorable-touch triggers — a buy fires when price _falls_ to the
   trigger), `orders.MarketToLimit` (fills at the next bar's open), and
   `orders.TrailingStopMarket` / `orders.TrailingStopLimit` (trigger trails
   the running favorable extreme; `offset_kind` is `"price"`, `"bps"`, or
@@ -361,7 +361,7 @@ class Breakout(raptorbt.Strategy):
   omit both on a closing-side order to close the full position.
 - **Semantics**: market orders fill on the submission bar at the configured
   fill-price model — the same contract as `enter()`. Resting orders begin
-  matching on the *next* bar (an order cannot rest into a bar that had
+  matching on the _next_ bar (an order cannot rest into a bar that had
   already closed), with gap-throughs filling at the open.
 - **Lifecycle hooks**: `on_order_accepted`, `on_order_triggered`,
   `on_order_filled`, `on_order_canceled`, `on_order_expired`,
@@ -383,7 +383,7 @@ unaffected.
 New in 0.5.0. Streaming and batch aggregation of bars (and raw ticks) into
 coarser bars — time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
 `"volume"`, and `"value"` units. Time bars use left-open epoch-aligned
-windows and are stamped with the window-*end* timestamp, so a bar labeled
+windows and are stamped with the window-_end_ timestamp, so a bar labeled
 `t` contains only data strictly before `t` — no look-ahead by construction.
 Beyond time, tick, volume and value windows, two families sample on
 something other than the clock:
@@ -407,9 +407,9 @@ Bricks carry no wicks, and a partial brick is discarded at end of data
 rather than flushed — an incomplete brick is not a brick.
 
 **Signed-flow bars** (`"{tick,volume,value}_imbalance"` and
-`"{tick,volume,value}_runs"`) sample by order-flow direction. *Imbalance*
+`"{tick,volume,value}_runs"`) sample by order-flow direction. _Imbalance_
 closes on net signed flow, so balanced two-sided trading never closes a bar
-however heavy it is; *runs* closes on the larger one-sided accumulation, so
+however heavy it is; _runs_ closes on the larger one-sided accumulation, so
 the same tape does close bars. `step` is the threshold — fixed, rather than
 the adaptive estimate in the literature, so runs stay reproducible.
 
@@ -438,7 +438,7 @@ class TrendGated(raptorbt.Strategy):
             self.enter()
 ```
 
-`on_composite_bar` dispatches *before* the `on_bar` of the primary bar that
+`on_composite_bar` dispatches _before_ the `on_bar` of the primary bar that
 completed the window — the composite closed strictly earlier. A partial
 final window is not dispatched to strategies (it never closed); the batch
 helpers do include it, flushed at end of data.
@@ -466,49 +466,50 @@ New in 0.5.0:
   per bar, producing values identical to the batch array functions
   (equivalence-tested). Register for auto-update:
 
-  ```python
-  class Cross(raptorbt.Strategy):
-      def on_start(self, ctx):
-          self.fast = self.register_indicator(raptorbt.Indicator.ema(10))
-          self.slow = self.register_indicator(raptorbt.Indicator.ema(30))
-          # Or feed a subscribed higher timeframe instead:
-          h5 = self.subscribe_bars(5, "m")
-          self.trend = self.register_indicator(raptorbt.Indicator.sma(20), stream_id=h5)
+    ```python
+    class Cross(raptorbt.Strategy):
+        def on_start(self, ctx):
+            self.fast = self.register_indicator(raptorbt.Indicator.ema(10))
+            self.slow = self.register_indicator(raptorbt.Indicator.ema(30))
+            # Or feed a subscribed higher timeframe instead:
+            h5 = self.subscribe_bars(5, "m")
+            self.trend = self.register_indicator(raptorbt.Indicator.sma(20), stream_id=h5)
 
-      def on_bar(self, ctx):
-          if not self.indicators_initialized():
-              return
-          if self.fast.value > self.slow.value and ctx.position is None:
-              self.enter()
-  ```
+        def on_bar(self, ctx):
+            if not self.indicators_initialized():
+                return
+            if self.fast.value > self.slow.value and ctx.position is None:
+                self.enter()
+    ```
 
-  In portfolio runs an indicator tracks one symbol, so register one per
-  symbol with `symbol=` — an unrouted registration is fed every symbol's
-  bars interleaved (and warns):
+    In portfolio runs an indicator tracks one symbol, so register one per
+    symbol with `symbol=` — an unrouted registration is fed every symbol's
+    bars interleaved (and warns):
 
-  ```python
-  class Cross(raptorbt.Strategy):
-      def on_start(self, ctx):
-          self.fast = self.register_indicators(
-              lambda: raptorbt.Indicator.ema(10), ctx.symbols
-          )
-          # Equivalently, explicit per symbol:
-          self.slow = {
-              s: self.register_indicator(raptorbt.Indicator.ema(30), symbol=s)
-              for s in ctx.symbols
-          }
+    ```python
+    class Cross(raptorbt.Strategy):
+        def on_start(self, ctx):
+            self.fast = self.register_indicators(
+                lambda: raptorbt.Indicator.ema(10), ctx.symbols
+            )
+            # Equivalently, explicit per symbol:
+            self.slow = {
+                s: self.register_indicator(raptorbt.Indicator.ema(30), symbol=s)
+                for s in ctx.symbols
+            }
 
-      def on_bar(self, ctx):
-          fast, slow = self.fast[ctx.symbol], self.slow[ctx.symbol]
-          if self.indicators_initialized() and fast.value > slow.value:
-              self.enter()
-  ```
+        def on_bar(self, ctx):
+            fast, slow = self.fast[ctx.symbol], self.slow[ctx.symbol]
+            if self.indicators_initialized() and fast.value > slow.value:
+                self.enter()
+    ```
 
-  Registered indicators update *before* handlers see the bar.
+    Registered indicators update _before_ handlers see the bar.
+
 - **Clock** — `self.clock.set_time_alert(name, at_ns)` (one-shot) and
   `set_timer(name, interval_ns, start_ns=None, stop_ns=None)` (recurring;
   one firing per bar, gaps collapse); due events reach `on_time_event`
-  *before* the bar's data handlers. Bar-granular by design: events carry
+  _before_ the bar's data handlers. Bar-granular by design: events carry
   `ts_scheduled` and `ts_fired`.
 - **Cache** — `self.cache`, an event-sourced mirror (no per-query engine
   calls): `order(client_id)` / `orders_open()` / `is_order_open()`,
@@ -564,7 +565,7 @@ Risk limits on the config are portfolio-wide, matching
 `run_portfolio_backtest`: `max_positions` counts open positions across all
 symbols (including entries from resting orders), and `max_drawdown_pct`
 trips on portfolio equity and halts entries on every symbol. Capital
-*allocation* is the strategy's own — each entry is offered the full free
+_allocation_ is the strategy's own — each entry is offered the full free
 balance, so size it with `size_frac`; there is no `EqualWeight` budget on
 this path yet.
 
@@ -575,7 +576,7 @@ balance plus direction-aware unrealized PnL so winning shorts price upward.
 The maintenance requirement is the **sum of each instrument's own**
 requirement, so per-symbol `margin_maint` rates apply rather than one
 blended rate. A breach fires `on_margin_call` once and halts new entries on
-*every* instrument — subsequent entries are rejected with `MarginCall`,
+_every_ instrument — subsequent entries are rejected with `MarginCall`,
 including on symbols that never traded. Results carry `halted` and
 `halted_at`; in portfolio runs `halted_at` is a **schedule-event ordinal**
 (the session interleaves N streams), not the bar index the array runners
@@ -642,7 +643,7 @@ bar_ns=...` if you prefer to think in bars.
 
 A schedule is not an order: cancelling it (`cancel_twap`) stops the
 remaining slices but does not unwind the ones that already traded, and
-`on_algo_completed` means fully *released*, not fully filled. Only explicit
+`on_algo_completed` means fully _released_, not fully filled. Only explicit
 `units` can be sliced — `size_frac` resolves against equity at fill time,
 so each slice would size against a different account.
 
@@ -1022,7 +1023,7 @@ what you want.
 #### Position Adoption — Starting on Shares You Already Own
 
 New in 0.6.2. A strategy attached to a stock the user already holds must start
-out *knowing* it holds those shares, at the price actually paid. The naive
+out _knowing_ it holds those shares, at the price actually paid. The naive
 workaround — submitting a fake buy at the average price — is wrong in three
 ways: it charges brokerage that was never paid, it writes a trade into the log
 that never happened, and it emits an entry event that any position-diffing
@@ -1131,14 +1132,14 @@ result = raptorbt.run_tick_strategy(Maker, ticks, config=config, depth=depth)
 
 `queue_fill_model` replaces `fill_prob_limit`'s coin flip with the tape. The
 size queued ahead is estimated once when the order rests, then consumed by
-print volume at that price; a print *through* the level fills
+print volume at that price; a print _through_ the level fills
 unconditionally. Progress is monotone, so an order passed over repeatedly
 genuinely advances — the probability model has no such memory.
 
 It does not claim a real queue rank. Market-by-price data cannot tell you
 where you stand in line, nor separate size that executed ahead of you from
 size that was cancelled, so the model falls back to `fill_prob_limit` rather
-than guessing: on bar events (a bar's volume is not volume *at* the limit
+than guessing: on bar events (a bar's volume is not volume _at_ the limit
 price) and on a quote-only book (a quote gives the price, not the size). A
 level outside the visible five reads as unknown, never as empty.
 
@@ -1594,8 +1595,8 @@ traceback, no stderr, nothing on the log. It cannot raise, and it cannot print.
 The notice itself is `INFO`, which keeps it below `logging.lastResort`'s
 `WARNING` threshold, so it is invisible unless you have asked for INFO logs.
 
-| Variable | Effect |
-| --- | --- |
+| Variable                      | Effect                                          |
+| ----------------------------- | ----------------------------------------------- |
 | `RAPTORBT_NO_VERSION_CHECK=1` | Disable the check entirely; no request is made. |
 
 Continuous-integration environments (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`,

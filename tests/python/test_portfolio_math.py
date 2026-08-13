@@ -477,3 +477,63 @@ class TestMonteCarloShapeValidation:
         )
         assert set(out) >= {"expected_return", "probability_of_loss", "final_values"}
         assert len(out["final_values"]) == 100
+
+
+class TestStubDeclaresNothingFictional:
+    """The stub must not promise methods the engine does not have.
+
+    ``TestStubCompleteness`` above checks runtime -> stub: every exported
+    symbol is declared. This is the OTHER direction, stub -> runtime, and it
+    was unguarded until 0.7.2.
+
+    ``BacktestConfig.set_session_config`` was declared in ``_raptorbt.pyi``
+    and never existed in the engine. The backend called it behind
+    ``hasattr(raptor_config, "set_session_config")``, the guard was always
+    False, and the else-branch logged at DEBUG -- so every intraday backtest
+    silently ran with no squareoff, holding option positions overnight and
+    reporting profit no user could have earned. A type checker reading the
+    stub agreed with the call the whole time.
+
+    **What a user saw: backtest results that looked tradeable and were not.**
+
+    Scoped to methods on stubbed classes, which is where the fiction lived and
+    where ``hasattr`` probes are written.
+    """
+
+    def test_no_stubbed_method_is_missing_from_the_runtime(self):
+        import raptorbt
+        from raptorbt import _raptorbt
+
+        stub = TestStubCompleteness._stub_text()
+
+        fictional: list[str] = []
+        current: str | None = None
+        for line in stub.splitlines():
+            class_match = re.match(r"^class (\w+)", line)
+            if class_match:
+                current = class_match.group(1)
+                continue
+            # Dedent to column 0 ends the class body.
+            if line and not line[0].isspace():
+                current = None
+                continue
+            if current is None:
+                continue
+            method = re.match(r"^    def (\w+)\(", line)
+            if not method:
+                continue
+            name = method.group(1)
+            if name.startswith("__"):
+                continue
+            cls = getattr(_raptorbt, current, None) or getattr(raptorbt, current, None)
+            if cls is None:
+                continue
+            if not hasattr(cls, name):
+                fictional.append(f"{current}.{name}")
+
+        assert not fictional, (
+            "declared in _raptorbt.pyi but absent from the runtime — a caller "
+            "guarding with hasattr() will silently take the else-branch "
+            "forever, which is how set_session_config disabled squareoff on "
+            f"every intraday backtest: {sorted(fictional)}"
+        )

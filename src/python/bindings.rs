@@ -121,6 +121,11 @@ pub struct PyBacktestConfig {
     /// Offset for the trading date DAY orders expire on (0 = UTC).
     #[pyo3(get, set)]
     pub session_tz_offset_ns: i64,
+    /// Squareoff time as minutes from local midnight; `None` disables.
+    ///
+    /// Set through the `squareoff_time` "HH:MM" argument, not directly.
+    #[pyo3(get)]
+    pub squareoff_time_minutes: Option<u32>,
     /// Adverse adjustment on limit fills, as a fraction of the limit price.
     #[pyo3(get, set)]
     pub limit_slippage: f64,
@@ -163,6 +168,7 @@ impl PyBacktestConfig {
         session_tz_offset_ns=0,
         limit_slippage=0.0,
         liquidate_on_margin_call=false,
+        squareoff_time=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -186,8 +192,10 @@ impl PyBacktestConfig {
         session_tz_offset_ns: i64,
         limit_slippage: f64,
         liquidate_on_margin_call: bool,
-    ) -> Self {
-        Self {
+        squareoff_time: Option<String>,
+    ) -> PyResult<Self> {
+        let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
+        Ok(Self {
             initial_capital,
             fees,
             slippage,
@@ -210,7 +218,8 @@ impl PyBacktestConfig {
             bar_path_adaptive,
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
-        }
+            squareoff_time_minutes,
+        })
     }
 
     /// Set fixed percentage stop-loss.
@@ -244,6 +253,40 @@ impl PyBacktestConfig {
     }
 }
 
+/// Parse a "HH:MM" local squareoff time into minutes from midnight.
+///
+/// Refuses anything it cannot read rather than guessing. A silently ignored
+/// squareoff is the exact defect this argument exists to fix: the backend
+/// passed `session_aware=True` to an engine with no such setting for months,
+/// the call was swallowed by a `hasattr` guard, and every intraday backtest
+/// held positions overnight while reporting profit no user could have earned.
+/// Refusing loudly is the whole point -- do not add a fallback here.
+fn parse_squareoff_time(value: Option<&str>) -> PyResult<Option<u32>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let text = raw.trim();
+
+    let invalid = || {
+        PyValueError::new_err(format!(
+            "invalid squareoff_time {raw:?}; expected 24-hour \"HH:MM\" local \
+             time, e.g. \"15:25\" for NSE. Pass None to disable squareoff."
+        ))
+    };
+
+    let (h, m) = text.split_once(':').ok_or_else(invalid)?;
+    let hours: u32 = h.trim().parse().map_err(|_| invalid())?;
+    let minutes: u32 = m.trim().parse().map_err(|_| invalid())?;
+
+    // 24:00 is rejected too: a squareoff at midnight local time would never
+    // fire inside a session, so accepting it would be accepting a no-op.
+    if hours > 23 || minutes > 59 {
+        return Err(invalid());
+    }
+
+    Ok(Some(hours * 60 + minutes))
+}
+
 impl From<&PyBacktestConfig> for BacktestConfig {
     fn from(py_config: &PyBacktestConfig) -> Self {
         BacktestConfig {
@@ -257,6 +300,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             periods_per_year: py_config.periods_per_year,
             risk_free_rate: py_config.risk_free_rate,
             session_minutes: py_config.session_minutes,
+            squareoff_time_minutes: py_config.squareoff_time_minutes,
             fee_segment: py_config.fee_segment.clone(),
             max_positions: py_config.max_positions,
             max_drawdown_pct: py_config.max_drawdown_pct,
@@ -1213,7 +1257,6 @@ pub fn run_spread_backtest<'py>(
         leg_configs: rust_leg_configs,
         max_loss,
         target_profit,
-        close_at_eod: false,
         leg_expiry_timestamps,
     };
 
@@ -1345,7 +1388,6 @@ pub fn batch_spread_backtest(
                 leg_configs: rust_leg_configs.clone(),
                 max_loss: item.max_loss,
                 target_profit: item.target_profit,
-                close_at_eod: false,
                 leg_expiry_timestamps: None,
             };
 

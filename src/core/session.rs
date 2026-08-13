@@ -408,3 +408,108 @@ mod tests {
         assert_eq!(tracker.session_low(), 95.0);
     }
 }
+
+/// Bars at which an intraday position must be force-closed for squareoff.
+///
+/// **In plain words: marks the last bar of each trading day at or after the
+/// squareoff time, so the engine can flatten before the market closes.**
+///
+/// `squareoff_time_minutes` is a local time-of-day in minutes from midnight
+/// (925 = 15:25); `tz_offset_ns` shifts UTC timestamps into that local day.
+/// Returns one flag per timestamp: `true` on the FIRST bar at or after the
+/// squareoff time within each local day.
+///
+/// Only the first qualifying bar per day is marked. Marking every late bar
+/// would be harmless for a single position but wrong as a general signal: a
+/// strategy that re-enters after squareoff would be flattened on every
+/// subsequent bar, which is not what a broker's square-off does.
+///
+/// Timestamps are assumed non-decreasing, as everywhere else in the engine.
+pub fn squareoff_flags(
+    timestamps_ns: &[i64],
+    squareoff_time_minutes: u32,
+    tz_offset_ns: i64,
+) -> Vec<bool> {
+    let mut flags = vec![false; timestamps_ns.len()];
+    let mut last_marked_day: Option<i64> = None;
+
+    for (i, &ts) in timestamps_ns.iter().enumerate() {
+        // Floor-divide so pre-epoch timestamps land in the right local day
+        // rather than truncating toward zero.
+        let local_s = (ts + tz_offset_ns).div_euclid(1_000_000_000);
+        let day = local_s.div_euclid(86_400);
+        let minute_of_day = (local_s.rem_euclid(86_400) / 60) as u32;
+
+        if minute_of_day >= squareoff_time_minutes && last_marked_day != Some(day) {
+            flags[i] = true;
+            last_marked_day = Some(day);
+        }
+    }
+
+    flags
+}
+
+#[cfg(test)]
+mod squareoff_tests {
+    use super::*;
+
+    /// IST is UTC+5:30.
+    const IST: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+    /// 15:25 local, NSE's squareoff.
+    const AT_1525: u32 = 15 * 60 + 25;
+
+    /// Build a UTC nanosecond timestamp for an IST wall-clock time.
+    fn ist(day: i64, hour: i64, minute: i64) -> i64 {
+        (day * 86_400 + hour * 3600 + minute * 60) * 1_000_000_000 - IST
+    }
+
+    #[test]
+    fn marks_the_first_bar_at_or_after_squareoff() {
+        let ts = vec![
+            ist(0, 9, 15),
+            ist(0, 15, 24),
+            ist(0, 15, 25), // <- exactly at squareoff
+            ist(0, 15, 26),
+        ];
+        assert_eq!(squareoff_flags(&ts, AT_1525, IST), vec![false, false, true, false]);
+    }
+
+    #[test]
+    fn marks_once_per_day_across_sessions() {
+        let ts = vec![ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15), ist(1, 15, 29), ist(2, 9, 15)];
+        // Each day's late bar is marked; the fresh morning bars are not.
+        assert_eq!(squareoff_flags(&ts, AT_1525, IST), vec![false, true, false, true, false]);
+    }
+
+    /// The defect this whole feature exists to fix, stated as a test.
+    ///
+    /// A session that ends before squareoff (a half day, or a series that
+    /// simply stops early) must NOT be marked -- there is no bar at which the
+    /// close could have happened, and inventing one would report a fill at a
+    /// price that never traded.
+    #[test]
+    fn a_session_ending_before_squareoff_is_not_marked() {
+        let ts = vec![ist(0, 9, 15), ist(0, 12, 0), ist(1, 9, 15)];
+        assert_eq!(squareoff_flags(&ts, AT_1525, IST), vec![false, false, false]);
+    }
+
+    #[test]
+    fn a_bar_after_midnight_utc_stays_in_its_ist_day() {
+        // 15:25 IST is 09:55 UTC, but a 23:00 IST bar is 17:30 UTC the same
+        // IST day. Without the offset this would split one session in two.
+        let ts = vec![ist(0, 15, 25), ist(0, 23, 0)];
+        assert_eq!(squareoff_flags(&ts, AT_1525, IST), vec![true, false]);
+    }
+
+    #[test]
+    fn utc_market_needs_no_offset() {
+        let ts = vec![ist(0, 9, 0), ist(0, 16, 0)];
+        let flags = squareoff_flags(&ts, 16 * 60, 0);
+        assert_eq!(flags.len(), 2);
+    }
+
+    #[test]
+    fn empty_input_is_empty_output() {
+        assert!(squareoff_flags(&[], AT_1525, IST).is_empty());
+    }
+}

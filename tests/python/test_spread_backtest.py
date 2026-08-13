@@ -125,11 +125,18 @@ def test_max_loss_does_not_close_a_winner():
 
     Through 0.6.3 it did: the threshold read the negated P&L as a 2250 loss
     and closed a leg that had gained 2250. With no exit signal and no trigger
-    reached, the position runs to the end of the data and records no trade.
-    """
-    result = _run(FALLING, -1, max_loss=1000.0, exit_on_bar_4=False)
+    reached, the position runs to the end of the data.
 
-    assert len(result.trades()) == 0
+    Asserted as ``EndOfData`` rather than an empty trade book: before 0.7.2 the
+    terminal open position was settled into cash without being recorded, so
+    "the stop did not fire" and "the position was never reported" looked
+    identical here. They are different things, and only one of them is correct.
+    """
+    trades = _run(FALLING, -1, max_loss=1000.0, exit_on_bar_4=False).trades()
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "EndOfData"
+    assert trades[0].pnl > 0
 
 
 def test_max_loss_still_closes_a_real_loser():
@@ -141,10 +148,15 @@ def test_max_loss_still_closes_a_real_loser():
 
 
 def test_target_profit_does_not_close_a_loser():
-    """A target must not book a win on a position that is down."""
-    result = _run(RISING, -1, target_profit=1000.0, exit_on_bar_4=False)
+    """A target must not book a win on a position that is down.
 
-    assert len(result.trades()) == 0
+    ``EndOfData`` for the same reason as the max-loss case above.
+    """
+    trades = _run(RISING, -1, target_profit=1000.0, exit_on_bar_4=False).trades()
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "EndOfData"
+    assert trades[0].pnl < 0
 
 
 def test_target_profit_still_closes_a_real_winner():
@@ -153,3 +165,164 @@ def test_target_profit_still_closes_a_real_winner():
 
     assert len(trades) == 1
     assert trades[0].pnl > 0
+
+
+# ---------------------------------------------------------------------------
+# Session squareoff
+#
+# In plain words: an intraday backtest must close its positions before the
+# market shuts, because a real broker would have. Through 0.7.1 the engine had
+# no way to be told that, so a position opened one morning stayed open for
+# days and the overnight price jumps were booked as profit or loss the trader
+# could never have experienced.
+#
+# The backend passed `session_aware=True` for months. It reached a `hasattr`
+# guard for a `set_session_config` method that existed only in the type stub,
+# never in the engine, so the call was silently dropped. These tests exist so
+# that cannot recur: the setting is real, it is reachable from Python, and bad
+# input refuses instead of quietly doing nothing.
+# ---------------------------------------------------------------------------
+
+#: IST is UTC+5:30, in nanoseconds.
+IST_NS = (5 * 3600 + 30 * 60) * 1_000_000_000
+#: NSE squares off intraday positions five minutes before its 15:30 close.
+NSE_SQUAREOFF = "15:25"
+
+
+def _two_session_run(squareoff_time):
+    """Two sessions, entered each morning, with a gap between them.
+
+    The premium drifts down five points within each session (a gain for the
+    short leg) and then jumps twenty points overnight (a large loss). The two
+    are deliberately far apart in size so a squareoff that fails cannot be
+    mistaken for one that works.
+    """
+    day_ns = 86_400 * 1_000_000_000
+
+    def ist(day, hour, minute):
+        """UTC nanoseconds for an IST wall-clock time."""
+        return day * day_ns + (hour * 3600 + minute * 60) * 1_000_000_000 - IST_NS
+
+    timestamps = np.array(
+        [ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15), ist(1, 15, 29)],
+        dtype=np.int64,
+    )
+    premiums = np.array([100.0, 95.0, 115.0, 110.0], dtype=np.float64)
+
+    config_kwargs = {"initial_capital": 500_000.0, "fees": 0.0, "slippage": 0.0}
+    if squareoff_time is not None:
+        config_kwargs["squareoff_time"] = squareoff_time
+        # The squareoff time is a LOCAL time, so the offset defining "local"
+        # must be set with it. At the 0 (UTC) default, 15:29 IST reads as
+        # 09:59 and the squareoff never fires.
+        config_kwargs["session_tz_offset_ns"] = IST_NS
+
+    return r.run_spread_backtest(
+        timestamps=timestamps,
+        underlying_close=np.full(4, 24_550.0),
+        legs_premiums=[premiums],
+        leg_configs=[("CE", STRIKE, -1, LOT)],
+        entries=np.array([True, False, True, False]),
+        exits=np.zeros(4, dtype=bool),
+        config=r.BacktestConfig(**config_kwargs),
+        spread_type="custom",
+    )
+
+
+def test_without_squareoff_a_position_rides_through_the_overnight_gap():
+    """The defect, pinned as behaviour so a fix cannot silently regress it."""
+    trades = _two_session_run(None).trades()
+
+    # One position, opened on the first morning and never closed until the
+    # data ran out -- straight through the night.
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "EndOfData"
+    # Sold at 100, marked at 110: the overnight jump is booked as a loss.
+    assert trades[0].pnl == pytest.approx(-10.0 * LOT)
+
+
+def test_squareoff_closes_each_session_before_the_gap():
+    """With squareoff on, each day is its own trade and the gap never lands."""
+    trades = _two_session_run(NSE_SQUAREOFF).trades()
+
+    assert len(trades) == 2
+    assert [t.exit_reason for t in trades] == ["Squareoff", "Squareoff"]
+    # Each captured only its own session's five-point decay.
+    assert trades[0].pnl == pytest.approx(5.0 * LOT)
+    assert trades[1].pnl == pytest.approx(5.0 * LOT)
+
+
+def test_squareoff_changes_the_reported_result():
+    """The headline: this is not a cosmetic difference.
+
+    A short option that looks like a loser without squareoff is a winner with
+    it, because the loss came entirely from hours the trader was not exposed.
+    """
+    without = _two_session_run(None).metrics
+    with_ = _two_session_run(NSE_SQUAREOFF).metrics
+
+    assert without.total_return_pct < 0 < with_.total_return_pct
+
+
+@pytest.mark.parametrize("bad", ["1525", "25:00", "15:99", "abc", "", "15:", ":25"])
+def test_an_unreadable_squareoff_time_refuses(bad):
+    """Refusing loudly is the point.
+
+    A squareoff that silently does nothing is precisely the defect being
+    fixed. Never add a fallback that guesses.
+    """
+    with pytest.raises(ValueError, match="invalid squareoff_time"):
+        r.BacktestConfig(squareoff_time=bad)
+
+
+def test_squareoff_time_parses_to_minutes_from_midnight():
+    """And ``None`` leaves it off, which stays the default."""
+    assert r.BacktestConfig(squareoff_time=NSE_SQUAREOFF).squareoff_time_minutes == 925
+    assert r.BacktestConfig(squareoff_time=None).squareoff_time_minutes is None
+    assert r.BacktestConfig().squareoff_time_minutes is None
+
+
+def test_batch_spread_backtest_honours_squareoff():
+    """The batch path is what production calls, so it gets its own pin.
+
+    ``batch_spread_backtest`` builds each item's config by cloning the shared
+    base config. That is why squareoff reaches it -- but "why" is an argument,
+    and this is the measurement. The pipeline that ran option spreads with no
+    squareoff for months went through this function.
+    """
+    day_ns = 86_400 * 1_000_000_000
+
+    def ist(day, hour, minute):
+        return day * day_ns + (hour * 3600 + minute * 60) * 1_000_000_000 - IST_NS
+
+    timestamps = np.array(
+        [ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15), ist(1, 15, 29)],
+        dtype=np.int64,
+    )
+    item = r.BatchSpreadItem(
+        strategy_id="s1",
+        legs_premiums=[np.array([100.0, 95.0, 115.0, 110.0], dtype=np.float64)],
+        leg_configs=[("CE", STRIKE, -1, LOT)],
+        entries=np.array([True, False, True, False]),
+        exits=np.zeros(4, dtype=bool),
+        spread_type="custom",
+    )
+
+    def run(**extra):
+        results = r.batch_spread_backtest(
+            timestamps,
+            np.full(4, 24_550.0),
+            [item],
+            config=r.BacktestConfig(
+                initial_capital=500_000.0, fees=0.0, slippage=0.0, **extra
+            ),
+        )
+        return dict(results)["s1"]
+
+    without = run()
+    with_ = run(squareoff_time=NSE_SQUAREOFF, session_tz_offset_ns=IST_NS)
+
+    assert [t.exit_reason for t in without.trades()] == ["EndOfData"]
+    assert [t.exit_reason for t in with_.trades()] == ["Squareoff", "Squareoff"]
+    # The overnight gap turns a winning pair of day trades into a loser.
+    assert without.metrics.total_return_pct < 0 < with_.metrics.total_return_pct

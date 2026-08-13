@@ -115,8 +115,6 @@ pub struct SpreadConfig {
     pub max_loss: Option<f64>,
     /// Target profit threshold (optional, for early exit).
     pub target_profit: Option<f64>,
-    /// Whether to close at end of day.
-    pub close_at_eod: bool,
     /// Per-leg expiry timestamps in nanoseconds (optional, for settlement logic).
     /// When provided, positions are force-closed at or after the earliest leg expiry.
     pub leg_expiry_timestamps: Option<Vec<i64>>,
@@ -130,7 +128,6 @@ impl Default for SpreadConfig {
             leg_configs: Vec::new(),
             max_loss: None,
             target_profit: None,
-            close_at_eod: false,
             leg_expiry_timestamps: None,
         }
     }
@@ -274,6 +271,19 @@ impl SpreadBacktest {
         let mut position: Option<SpreadPosition> = None;
         let mut prev_equity = cash;
 
+        // Session squareoff. Computed once up front rather than per bar: the
+        // day boundary depends only on the timestamps, not on position state.
+        // Empty (all-false) when squareoff is disabled, so the hot loop reads
+        // one bool either way.
+        let squareoff: Vec<bool> = match self.config.base.squareoff_time_minutes {
+            Some(minutes) => crate::core::session::squareoff_flags(
+                timestamps,
+                minutes,
+                self.config.base.session_tz_offset_ns,
+            ),
+            None => vec![false; n],
+        };
+
         // Single-pass O(n) algorithm
         for i in 0..n {
             // Get current leg premiums
@@ -298,6 +308,7 @@ impl SpreadBacktest {
             let should_exit = position.is_some()
                 && (exits[i]
                     || is_expiry
+                    || squareoff[i]
                     || self.check_max_loss(&position, unrealized_pnl)
                     || self.check_target_profit(&position, unrealized_pnl));
 
@@ -315,6 +326,8 @@ impl SpreadBacktest {
                         ExitReason::Settlement
                     } else if exits[i] {
                         ExitReason::Signal
+                    } else if squareoff[i] {
+                        ExitReason::Squareoff
                     } else if self.check_max_loss(&Some(pos.clone()), pnl) {
                         ExitReason::StopLoss
                     } else {
@@ -364,7 +377,7 @@ impl SpreadBacktest {
                 .leg_expiry_timestamps
                 .as_ref()
                 .is_some_and(|expiries| expiries.iter().all(|&exp_ts| timestamps[i] >= exp_ts));
-            if position.is_none() && entries[i] && !all_expired {
+            if position.is_none() && entries[i] && !all_expired && !squareoff[i] {
                 let legs: Vec<LegPosition> = self
                     .config
                     .leg_configs
@@ -396,11 +409,60 @@ impl SpreadBacktest {
             drawdown_curve.push(metrics.current_drawdown_pct());
         }
 
-        // Close any remaining open position at end
+        // Close any remaining open position at end.
+        //
+        // This MUST record a Trade, not merely settle into `cash`. Until
+        // 0.7.2 it did the latter: the position's P&L reached `end_value`
+        // and the equity curve, while `trades()` stayed empty and
+        // `total_open_trades` read 0. A caller auditing trade-by-trade saw
+        // a clean, empty book for a run whose return was driven entirely by
+        // a position that never closed -- the worst shape for a defect,
+        // because every trade-level check passes.
         if let Some(mut pos) = position.take() {
+            let last = n - 1;
+            let current_premiums: Vec<f64> = legs_premiums.iter().map(|p| p[last]).collect();
+            let entry_premium = pos.entry_net_premium;
+            let exit_premium: f64 = current_premiums
+                .iter()
+                .zip(self.config.leg_configs.iter())
+                .map(|(&p, cfg)| p * cfg.quantity as f64 * cfg.lot_size as f64)
+                .sum();
+
             let pnl = pos.close();
             let fees = self.calculate_fees(&pos);
-            cash += pnl - fees;
+            let net_pnl = pnl - fees;
+            cash += net_pnl;
+
+            trade_id += 1;
+            trades.push(Trade {
+                id: trade_id,
+                symbol: "SPREAD".to_string(),
+                entry_idx: pos.entry_idx,
+                exit_idx: last,
+                entry_price: entry_premium,
+                exit_price: exit_premium,
+                size: 1.0,
+                direction: Direction::Long,
+                pnl: net_pnl,
+                return_pct: if entry_premium.abs() > 0.0 {
+                    net_pnl / entry_premium.abs() * 100.0
+                } else {
+                    0.0
+                },
+                entry_time: pos.entry_time,
+                exit_time: timestamps[last],
+                fees,
+                fee_breakdown: None,
+                exit_reason: ExitReason::EndOfData,
+            });
+
+            if entry_premium.abs() > 0.0 {
+                metrics.record_trade(
+                    net_pnl,
+                    net_pnl / entry_premium.abs() * 100.0,
+                    last - pos.entry_idx,
+                );
+            }
         }
 
         // Finalize metrics
@@ -778,9 +840,14 @@ mod tests {
     // and `check_target_profit` both read `total_unrealized_pnl`, so inverting
     // it did not merely misreport a number -- it decided when a position
     // closed. Each test drops the exit signal entirely, leaving the threshold
-    // as the only way out, so `exit_reason` is the assertion. With no trigger
-    // reached the position runs to the end-of-data close, which records no
-    // trade -- hence the empty-trades assertions.
+    // as the only way out, so `exit_reason` is the assertion.
+    //
+    // A non-firing threshold is asserted as `EndOfData`, not as an empty trade
+    // book. Through 0.7.1 the terminal open position was settled into `cash`
+    // without recording a Trade, so "the stop did not fire" and "the position
+    // was never reported" were indistinguishable. 0.7.2 records that close, so
+    // the distinction is now expressible -- and these tests assert the thing
+    // they were always about: which exit reason closed the position.
 
     #[test]
     fn max_loss_does_not_fire_on_a_winner() {
@@ -789,7 +856,8 @@ mod tests {
         // This leg gained 2250. Through 0.6.3 the stop read it as -2250 and
         // closed the position: a max-loss stop firing on a winner, which is
         // the most damaging half of the sign bug.
-        assert!(result.trades.is_empty());
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].exit_reason, ExitReason::EndOfData);
     }
 
     #[test]
@@ -808,7 +876,8 @@ mod tests {
 
         // This leg lost 2250. Through 0.6.3 the target read it as +2250 and
         // booked a "profit" on it.
-        assert!(result.trades.is_empty());
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].exit_reason, ExitReason::EndOfData);
     }
 
     #[test]
@@ -817,5 +886,172 @@ mod tests {
 
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::TakeProfit);
+    }
+
+    /// Squareoff closes the position before the overnight gap.
+    ///
+    /// **In plain words: without this, a backtest books profit the trader
+    /// could never have earned, because their broker would have closed the
+    /// position before the market shut.**
+    ///
+    /// Two sessions, entered each morning, with a large adverse premium jump
+    /// between them. With squareoff the position is flat overnight and the gap
+    /// never touches it. Without squareoff the gap is booked as a price move
+    /// the strategy "traded through". The gap is deliberately far larger than
+    /// the intraday drift so the two arms cannot be confused.
+    ///
+    /// This is the defect measured in the notebook that prompted 0.7.2: on a
+    /// real NIFTY option corpus, removing the overnight hold moved a short
+    /// straddle's P&L by -24% and a short strangle's by -42%, and it moved a
+    /// LONG straddle the other way (+16%) -- confirming the defect amplifies
+    /// whichever direction a position already points rather than adding a
+    /// constant bias.
+    #[test]
+    fn squareoff_flattens_before_the_overnight_gap() {
+        // 09:15 and 15:29 IST on two consecutive days.
+        const IST_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+        let ist =
+            |day: i64, h: i64, m: i64| (day * 86_400 + h * 3600 + m * 60) * 1_000_000_000 - IST_NS;
+        let timestamps = vec![ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15), ist(1, 15, 29)];
+
+        // Premium drifts down 100 -> 95 intraday (a gain for a short), then
+        // gaps UP to 200 overnight (a large loss for a short).
+        let premiums = vec![100.0, 95.0, 200.0, 195.0];
+        let underlying = vec![24_550.0; 4];
+        let entries = vec![true, false, true, false];
+        let exits = vec![false; 4];
+
+        let base = |squareoff: Option<u32>| BacktestConfig {
+            initial_capital: 500_000.0,
+            fees: 0.0,
+            slippage: 0.0,
+            squareoff_time_minutes: squareoff,
+            // The squareoff time is a LOCAL time, so the offset that defines
+            // "local" has to be set too. Leaving it at the 0 (UTC) default
+            // reads 15:29 IST as 09:59 and the squareoff never fires -- a
+            // mistake worth pinning, since it fails silently in exactly the
+            // way the original defect did.
+            session_tz_offset_ns: IST_NS,
+            ..Default::default()
+        };
+        let spread = |squareoff: Option<u32>| SpreadConfig {
+            base: base(squareoff),
+            spread_type: SpreadType::Custom,
+            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, -1, 75)],
+            ..Default::default()
+        };
+
+        let without = SpreadBacktest::new(spread(None)).run(
+            &timestamps,
+            &underlying,
+            std::slice::from_ref(&premiums),
+            &entries,
+            &exits,
+        );
+        // 15:25 IST.
+        let with = SpreadBacktest::new(spread(Some(15 * 60 + 25))).run(
+            &timestamps,
+            &underlying,
+            &[premiums],
+            &entries,
+            &exits,
+        );
+
+        // Without squareoff: one position entered on day 0 and held through
+        // the gap. Sold at 100, marked at 195: a 95-point loss on a short.
+        assert_eq!(without.trades.len(), 1);
+        assert_eq!(without.trades[0].pnl, -95.0 * 75.0);
+
+        // With squareoff: two separate day trades, each closed at 15:29 --
+        // the first bar at or after 15:25 in its session.
+        assert_eq!(with.trades.len(), 2);
+        assert_eq!(with.trades[0].exit_reason, ExitReason::Squareoff);
+        assert_eq!(with.trades[1].exit_reason, ExitReason::Squareoff);
+
+        // Each captured only its own session's 5-point decay, and the
+        // overnight gap reached neither of them.
+        assert_eq!(with.trades[0].pnl, 5.0 * 75.0);
+        assert_eq!(with.trades[1].pnl, 5.0 * 75.0);
+
+        // The headline: the defect is worth more than the strategy earns.
+        assert!(with.metrics.end_value > without.metrics.end_value);
+    }
+
+    /// Squareoff must not re-open the position it just closed.
+    ///
+    /// The entry signal fires every bar here, including the squareoff bar. A
+    /// broker's square-off leaves the trader flat into the close; re-entering
+    /// on the same bar would put the position straight back on and carry it
+    /// overnight anyway, silently restoring the defect.
+    #[test]
+    fn squareoff_does_not_re_enter_on_the_same_bar() {
+        const IST_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+        let ist =
+            |day: i64, h: i64, m: i64| (day * 86_400 + h * 3600 + m * 60) * 1_000_000_000 - IST_NS;
+        let timestamps = vec![ist(0, 9, 15), ist(0, 15, 29), ist(1, 9, 15)];
+        let premiums = vec![100.0, 95.0, 200.0];
+
+        let result = SpreadBacktest::new(SpreadConfig {
+            base: BacktestConfig {
+                initial_capital: 500_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                squareoff_time_minutes: Some(15 * 60 + 25),
+                session_tz_offset_ns: IST_NS,
+                ..Default::default()
+            },
+            spread_type: SpreadType::Custom,
+            leg_configs: vec![LegConfig::new(OptionType::Call, 24_800.0, -1, 75)],
+            ..Default::default()
+        })
+        .run(&timestamps, &[24_550.0; 3], &[premiums], &[true; 3], &[false; 3]);
+
+        // Day 0 squared off at 15:29, then re-entered fresh on day 1 and left
+        // open at end of data. Never a position spanning the gap.
+        assert_eq!(result.trades.len(), 2);
+        assert_eq!(result.trades[0].exit_reason, ExitReason::Squareoff);
+        assert_eq!(result.trades[1].exit_reason, ExitReason::EndOfData);
+        assert_eq!(result.trades[0].pnl, 5.0 * 75.0);
+    }
+
+    /// A position still open at the end of the data must appear in `trades()`.
+    ///
+    /// Through 0.7.1 it did not. The terminal close settled P&L into `cash`,
+    /// so it reached `end_value`, `total_return_pct` and the equity curve --
+    /// but pushed no `Trade` and never called `record_trade`. The result was a
+    /// run whose entire return came from a position that `trades()` did not
+    /// list and `total_closed_trades` counted as zero.
+    ///
+    /// That is the most dangerous shape a reporting defect can take: every
+    /// trade-level audit passes, because there is nothing to audit. It was
+    /// found by a notebook measuring overnight holds, where a single position
+    /// opened on the first morning and never closed carried the whole P&L.
+    ///
+    /// The P&L assertion matters as much as the count: the recorded trade must
+    /// carry the SAME number that reached equity, or this fix would trade a
+    /// silent omission for a visible inconsistency.
+    #[test]
+    fn a_position_open_at_the_end_is_still_recorded_as_a_trade() {
+        // No exit signal and no threshold: the only way out is end-of-data.
+        let result = single_leg_with(&FALLING, -1, None, None, false);
+
+        assert_eq!(result.trades.len(), 1, "the open position must be reported");
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::EndOfData);
+
+        // Entered at 90, ran to the final bar at 60: a 2250 gain on a short.
+        assert_eq!(trade.pnl, 2250.0);
+
+        // And it is counted, not merely listed.
+        assert_eq!(result.metrics.total_closed_trades, 1);
+
+        // The recorded P&L is the P&L that moved equity.
+        let equity_gain = result.metrics.end_value - 500_000.0;
+        assert!(
+            (trade.pnl - equity_gain).abs() < 1e-9,
+            "trade pnl {} must match the equity change {}",
+            trade.pnl,
+            equity_gain
+        );
     }
 }
