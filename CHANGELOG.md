@@ -5,6 +5,109 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-08-14
+
+Patch. The tick strategy path priced every backtest as if you had traded
+exactly one unit, whatever you actually traded.
+
+**In plain words: a tick backtest charged one unit's costs, earned one unit's
+profit, and then measured that one-unit profit against your entire account. If
+you traded a 75-lot option, it reported roughly 1/75th of your real profit and
+1/75th of your real costs, and your return, drawdown and Sharpe were all
+computed from the wrong number. Costs and profit were wrong by the same factor,
+so the trade list looked entirely self-consistent -- it was simply describing a
+position nobody held.**
+
+This resolves the gap 0.7.3 recorded as *"the tick strategy path computes fees
+from price alone and does not scale them by position size."* That description
+was accurate but understated the defect in two ways, both fixed here.
+
+### Fixed
+
+- **Costs and P&L scale with the position traded.** `tick.rs` computed
+  `entry_price * fees` and `(exit_price - entry_price) * 1.0`, with `size` hard-
+  coded to `1.0` on every emitted trade. It now scales both by
+  `|quantity| * lot_size`.
+
+  The 0.7.3 note named only the fee half. The P&L half matters more: because
+  `build_result` adds per-trade P&L to a real `initial_capital`, a per-unit
+  profit was being accumulated against a full-size account, so the equity curve,
+  the returns series, the drawdown curve and every metric derived from them were
+  wrong -- not just the cost line.
+
+- **The "caller scales by lot_size" contract was unfulfillable.** A comment in
+  the tick loop instructed callers to scale the result themselves. The only
+  caller is `run_tick_backtest`, whose signature had no lot-size or quantity
+  parameter, so no caller could have complied and none did. The comment is gone
+  and the engine does the scaling.
+
+- **`fee_segment` reaches the tick path.** `tick.rs` never imported a fee model
+  -- it hand-rolled `price * rate` inline -- and the binding built its config
+  with `..Default::default()`, so the itemized regulatory schedule was
+  unreachable from a tick backtest by two independent routes. Both are closed;
+  this path now uses `BacktestConfig::fee_model()` like every other strategy.
+
+  This is the same defect 0.7.3 fixed for spreads, and it matters for the same
+  reason: brokerage is a flat charge per order, and a purely proportional model
+  cannot express it at any rate. Measured on a 75-lot round trip against
+  `fee_segment="NFO-OPT"`:
+
+  | Premium | Flat rate as % of the real schedule |
+  | --- | --- |
+  | 2 | 0.6% |
+  | 20 | 6.1% |
+  | 100 | 25.7% |
+
+- **Each charge lands on the side that owes it.** Entry and exit are priced
+  through `calculate_side`, so transaction tax falls on the sell and stamp duty
+  on the buy. Routing through `calculate` instead would charge the buy schedule
+  on both sides, and a test now fails if anyone does.
+
+- **A zero-quantity position costs nothing.** It places no order, so it owes no
+  per-order brokerage. Only visible once this path charged one at all.
+
+### Added
+
+- **`lot_size` and `quantity`** on `TickBacktestConfig` and on the Python
+  `run_tick_backtest`, both defaulting to `1`.
+
+- **`fee_segment`** on the Python `run_tick_backtest`, matching the other
+  strategy entry points. `Trade.fee_breakdown` is populated when it is set, so
+  `fee_breakdown.total()` equals `fees`.
+
+### Changed
+
+- **A negative `quantity` is refused** with a `ValueError` rather than accepted.
+  This path is long-only by construction -- it enters at the ask, exits at the
+  bid, and places its stop below entry and its target above -- so running it
+  against a short would report a trade that could not have happened. Short
+  support is a real feature, not a sign flip, and is not in this release.
+
+- **`return_pct` divides by notional** rather than by entry price, so it stays a
+  true percentage return and does not move with position size.
+
+### Upgrading
+
+**Nothing changes unless you pass the new arguments.** `lot_size=1` and
+`quantity=1` reproduce the pre-0.7.4 numbers exactly, and a test pins that.
+
+**Any stored tick-path result for a position larger than one unit understates
+both its profit and its costs, in proportion to the size traded, and should be
+re-run** with the real `lot_size`. A 75-lot option backtest was off by ~75x on
+both. Because the two errors are the same factor, the reported *percentage*
+return was roughly right while every rupee figure -- P&L, costs, equity curve,
+drawdown -- was not.
+
+Setting `fee_segment` moves results further: on cheap contracts the real
+schedule costs many multiples of the flat rate (158x at a 2 premium on a 75
+lot), because the per-order brokerage it adds does not shrink with the premium.
+
+Known gap, not fixed here: `strategies/options.rs` holds a fee model but prices
+through `calculate` rather than `calculate_side`, so it reports `entry_fees` as
+zero with the entry charge folded into `fees`, and it sizes by contracts without
+the lot multiplier. It is a separate defect of the same family and gets its own
+release.
+
 ## [0.7.3] - 2026-08-14
 
 Patch. Multi-leg option spreads charged the wrong costs, four ways at once,
@@ -121,7 +224,8 @@ are untouched.
 Known gap, not fixed here: the tick strategy path (`strategies/tick.rs`)
 computes fees from price alone and does not scale them by position size. It is
 a separate defect and is left for its own release rather than bundled into
-this one.
+this one. *(Fixed in 0.7.4, which also found the same hard-coded unit size in
+that path's P&L and equity curve, not only in its fees.)*
 
 ## [0.7.2] - 2026-08-13
 
