@@ -33,11 +33,32 @@ struct LegPosition {
     pub current_premium: f64,
     /// Leg configuration.
     pub config: LegConfig,
+    /// Bar index at which this leg settled at its own expiry, once it has.
+    /// `None` while the leg is still live.
+    pub settled_idx: Option<usize>,
 }
 
 impl LegPosition {
     fn new(config: LegConfig, entry_premium: f64, entry_idx: usize) -> Self {
-        Self { entry_premium, entry_idx, current_premium: entry_premium, config }
+        Self { entry_premium, entry_idx, current_premium: entry_premium, config, settled_idx: None }
+    }
+
+    /// Whether this leg has reached its own expiry and been settled.
+    fn is_settled(&self) -> bool {
+        self.settled_idx.is_some()
+    }
+
+    /// P&L this leg still contributes to a mark-to-market reading.
+    ///
+    /// Zero once the leg has settled. The settled amount was credited to
+    /// cash on its expiry bar, and cash is the other half of the equity
+    /// line -- counting it here too would bank the same rupees twice.
+    fn open_pnl(&self) -> f64 {
+        if self.is_settled() {
+            0.0
+        } else {
+            self.unrealized_pnl()
+        }
     }
 
     /// Calculate unrealized P&L for this leg.
@@ -83,6 +104,13 @@ struct SpreadPosition {
     pub entry_fees: f64,
     /// Itemized entry costs, when an itemized fee model is configured.
     pub entry_breakdown: Option<FeeBreakdown>,
+    /// P&L from legs that reached their own expiry before the structure
+    /// closed, and which has already been credited to cash.
+    ///
+    /// Held apart from the mark-to-market so a settled leg is counted once,
+    /// and added back when the trade is reported so the record covers the
+    /// whole structure rather than only the legs that outlived it.
+    pub realized_pnl: f64,
 }
 
 impl SpreadPosition {
@@ -100,22 +128,65 @@ impl SpreadPosition {
             is_open: true,
             entry_fees: 0.0,
             entry_breakdown: None,
+            realized_pnl: 0.0,
         }
     }
 
-    /// Calculate total unrealized P&L across all legs.
+    /// Mark-to-market P&L across the legs that are still live.
     fn total_unrealized_pnl(&self) -> f64 {
-        self.legs.iter().map(|leg| leg.unrealized_pnl()).sum()
+        self.legs.iter().map(|leg| leg.open_pnl()).sum()
+    }
+
+    /// P&L of the whole structure, settled legs included. What a trade
+    /// reports, as against what is still owed to cash.
+    fn lifetime_pnl(&self) -> f64 {
+        self.realized_pnl + self.total_unrealized_pnl()
     }
 
     /// Update leg premiums.
+    ///
+    /// A settled leg keeps the premium it settled at. Its contract no longer
+    /// exists, so whatever the series carries past that bar is not a price
+    /// -- a stale quote there must not reach the exit price or the P&L.
     fn update_premiums(&mut self, leg_premiums: &[f64]) {
         for (leg, &premium) in self.legs.iter_mut().zip(leg_premiums.iter()) {
+            if leg.is_settled() {
+                continue;
+            }
             leg.current_premium = premium;
         }
     }
 
-    /// Close the position and return P&L.
+    /// Settle every leg whose own expiry has now passed, returning the cash
+    /// to credit for them.
+    ///
+    /// A leg settles once, at whatever premium its series carries on the
+    /// settlement bar -- the engine does not compute intrinsic value, and
+    /// the contract on `SpreadConfig::leg_expiry_timestamps` says so. Its
+    /// P&L moves out of the mark-to-market and into `realized_pnl`, so the
+    /// caller can credit it to cash without the equity line double-counting.
+    fn settle_expired_legs(&mut self, idx: usize, timestamp: i64, expiries: &[i64]) -> f64 {
+        let mut credited = 0.0;
+        for (leg, &expiry) in self.legs.iter_mut().zip(expiries.iter()) {
+            if leg.is_settled() || timestamp < expiry {
+                continue;
+            }
+            credited += leg.unrealized_pnl();
+            leg.settled_idx = Some(idx);
+        }
+        self.realized_pnl += credited;
+        credited
+    }
+
+    /// Whether every leg has reached its own expiry.
+    fn all_legs_settled(&self) -> bool {
+        self.legs.iter().all(|leg| leg.is_settled())
+    }
+
+    /// Close the position and return the P&L still owed to cash.
+    ///
+    /// Live legs only: anything already settled was credited on its own
+    /// expiry bar.
     fn close(&mut self) -> f64 {
         self.is_open = false;
         self.total_unrealized_pnl()
@@ -171,6 +242,15 @@ impl SpreadBacktest {
             }
         }
 
+        // Expiries are matched to legs by position, so a list of the wrong
+        // length would settle the wrong leg or leave the trailing legs
+        // immortal -- both silently. Refuse instead.
+        if let Some(expiries) = self.config.leg_expiry_timestamps.as_ref() {
+            if expiries.len() != self.config.leg_configs.len() {
+                return self.empty_result(n);
+            }
+        }
+
         let mut metrics = StreamingMetrics::with_initial_capital(self.config.base.initial_capital);
         let mut equity_curve = Vec::with_capacity(n);
         let mut drawdown_curve = Vec::with_capacity(n);
@@ -205,15 +285,27 @@ impl SpreadBacktest {
                 pos.update_premiums(&current_premiums);
             }
 
+            // Settle any leg that reached its own expiry at this bar, before
+            // anything reads the position's P&L.
+            //
+            // Each leg dies on its own date. Closing the whole structure when
+            // the FIRST one expires is what 0.7.4 did, and it made a calendar
+            // spread -- sell the near expiry, buy the far one -- unmeasurable:
+            // the engine closed before the far leg had done anything, so the
+            // result was not merely optimistic, it was unrelated to the trade.
+            if let (Some(pos), Some(expiries)) =
+                (position.as_mut(), self.config.leg_expiry_timestamps.as_ref())
+            {
+                // No exit fee: an option left to expire is never sold, so no
+                // order is placed and no brokerage or transaction tax is owed.
+                cash += pos.settle_expired_legs(i, timestamps[i], expiries);
+            }
+
             // Calculate unrealized P&L for exit checks
             let unrealized_pnl = position.as_ref().map(|p| p.total_unrealized_pnl()).unwrap_or(0.0);
 
-            // Check if any leg has expired at this bar
-            let is_expiry =
-                position.is_some()
-                    && self.config.leg_expiry_timestamps.as_ref().is_some_and(|expiries| {
-                        expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts)
-                    });
+            // The structure is finished only once its LAST leg has expired.
+            let is_expiry = position.as_ref().is_some_and(|p| p.all_legs_settled());
 
             // Check for exit signals or conditions
             let should_exit = position.is_some()
@@ -242,15 +334,7 @@ impl SpreadBacktest {
                     };
 
                     trade_id += 1;
-                    let trade = self.emit_trade(
-                        &pos,
-                        pnl,
-                        trade_id,
-                        i,
-                        timestamps[i],
-                        &current_premiums,
-                        exit_reason,
-                    );
+                    let trade = self.emit_trade(&pos, trade_id, i, timestamps[i], exit_reason);
                     cash += pnl - trade.exit_fees;
                     Self::record_trade(&mut metrics, &trade, &pos);
                     trades.push(trade);
@@ -307,19 +391,11 @@ impl SpreadBacktest {
         // because every trade-level check passes.
         if let Some(mut pos) = position.take() {
             let last = n - 1;
-            let current_premiums: Vec<f64> = legs_premiums.iter().map(|p| p[last]).collect();
             let pnl = pos.close();
 
             trade_id += 1;
-            let trade = self.emit_trade(
-                &pos,
-                pnl,
-                trade_id,
-                last,
-                timestamps[last],
-                &current_premiums,
-                ExitReason::EndOfData,
-            );
+            let trade =
+                self.emit_trade(&pos, trade_id, last, timestamps[last], ExitReason::EndOfData);
             cash += pnl - trade.exit_fees;
             Self::record_trade(&mut metrics, &trade, &pos);
             trades.push(trade);
@@ -379,6 +455,14 @@ impl SpreadBacktest {
                 continue;
             }
 
+            // A leg left to expire is never traded out, so it owes nothing on
+            // the way out. Only on the exit side: the order that opened it was
+            // real regardless of how it ended, and entry costs must not change
+            // retroactively.
+            if !is_entry && leg.is_settled() {
+                continue;
+            }
+
             let premium = if is_entry { leg.entry_premium } else { leg.current_premium };
             // Contract count, not lots: a two-lot leg trades twice the
             // contracts of a one-lot leg and owes proportionally more.
@@ -435,30 +519,35 @@ impl SpreadBacktest {
     /// in whether they guarded a division; keeping one body is what stops the
     /// two from drifting apart on how a closed position is reported.
     ///
-    /// `pnl` is the raw P&L still owed to cash, before costs. The caller
-    /// credits `pnl - trade.exit_fees`, because the entry side already left
-    /// cash when the position opened.
-    #[allow(clippy::too_many_arguments)]
+    /// The reported `pnl` covers the whole structure. What the caller credits
+    /// to cash is narrower -- the live legs' P&L less the exit fee -- because
+    /// a settled leg was credited on its own expiry bar and the entry side
+    /// left cash when the position opened.
     fn emit_trade(
         &self,
         position: &SpreadPosition,
-        pnl: f64,
         trade_id: u64,
         exit_idx: usize,
         exit_time: i64,
-        current_premiums: &[f64],
         exit_reason: ExitReason,
     ) -> Trade {
         let (exit_fees, fee_breakdown) = self.calculate_exit(position, exit_reason);
         let entry_fees = position.entry_fees;
         let fees = entry_fees + exit_fees;
-        let net_pnl = pnl - fees;
+        // The whole structure, legs that settled early included -- not just
+        // the ones that were still alive at the close.
+        let net_pnl = position.lifetime_pnl() - fees;
 
         let entry_premium = position.entry_net_premium;
-        let exit_premium: f64 = current_premiums
+        // From the position's own legs, not the bar row: a settled leg is
+        // frozen at what it settled for, and the series past its expiry is
+        // a quote on a contract that no longer exists.
+        let exit_premium: f64 = position
+            .legs
             .iter()
-            .zip(self.config.leg_configs.iter())
-            .map(|(&p, cfg)| p * cfg.quantity as f64 * cfg.lot_size as f64)
+            .map(|leg| {
+                leg.current_premium * leg.config.quantity as f64 * leg.config.lot_size as f64
+            })
             .sum();
 
         Trade {
@@ -528,3 +617,7 @@ impl SpreadBacktest {
 #[cfg(test)]
 #[path = "spreads_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "spreads_settlement_tests.rs"]
+mod settlement_tests;

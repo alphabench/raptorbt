@@ -105,8 +105,22 @@ pub struct SpreadConfig {
     pub max_loss: Option<f64>,
     /// Target profit threshold (optional, for early exit).
     pub target_profit: Option<f64>,
-    /// Per-leg expiry timestamps in nanoseconds (optional, for settlement logic).
-    /// When provided, positions are force-closed at or after the earliest leg expiry.
+    /// Expiry timestamp for each leg, in nanoseconds. Optional.
+    ///
+    /// Matched to `leg_configs` by position, and a list of a different length
+    /// is refused outright -- it would otherwise settle the wrong leg or
+    /// leave the trailing legs immortal, silently.
+    ///
+    /// Each leg settles on its own date and the survivors keep marking, so a
+    /// calendar or diagonal spread runs to its far expiry. The structure
+    /// closes when the last leg goes.
+    ///
+    /// **The premium series must carry the leg's settlement value at and
+    /// after its expiry.** The engine settles a leg at whatever its series
+    /// reads on that bar and then freezes it; it does not compute intrinsic
+    /// value, and it never invents a price. A caller settling options against
+    /// the underlying computes intrinsic itself and writes it into the series
+    /// before calling in.
     pub leg_expiry_timestamps: Option<Vec<i64>>,
 }
 
