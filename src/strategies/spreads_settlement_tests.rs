@@ -274,3 +274,45 @@ fn the_reported_pnl_equals_what_the_account_actually_gained() {
         trade.pnl
     );
 }
+
+/// A structure with one dead leg cannot be opened.
+///
+/// After the near leg expires, its series is no longer quoting a contract
+/// that exists. Re-entering the calendar there would open that leg at a
+/// number that is not a price. The entry signal at bar 25 must be ignored,
+/// leaving exactly the one trade that ran from bar 1.
+#[test]
+fn a_spread_is_not_re_entered_once_a_leg_has_died() {
+    let n = BARS;
+    let timestamps: Vec<i64> = (0..n as i64).map(|i| i * 300_000_000_000).collect();
+
+    let mut entries = vec![false; n];
+    entries[1] = true;
+    entries[25] = true; // after the near leg is gone
+    let mut exits = vec![false; n];
+    exits[22] = true; // close the survivor, freeing the engine to re-enter
+
+    let config = SpreadConfig {
+        base: BacktestConfig { initial_capital: 500_000.0, fees: 0.0, ..Default::default() },
+        spread_type: SpreadType::Custom,
+        leg_configs: vec![
+            LegConfig::new(OptionType::Call, STRIKE, -1, LOT),
+            LegConfig::new(OptionType::Call, STRIKE, 1, LOT),
+        ],
+        leg_expiry_timestamps: Some(vec![timestamps[NEAR_EXPIRY_BAR], timestamps[FAR_EXPIRY_BAR]]),
+        ..Default::default()
+    };
+
+    let (near_premiums, _, _) = near_leg(0.0);
+    let (far_premiums, _, _) = far_leg(100.0);
+    let result = SpreadBacktest::new(config).run(
+        &timestamps,
+        &vec![24_550.0; n],
+        &[near_premiums, far_premiums],
+        &entries,
+        &exits,
+    );
+
+    assert_eq!(result.trades.len(), 1, "the entry at bar 25 must be ignored");
+    assert_eq!(result.trades[0].exit_idx, 22, "and the first trade closed on its signal");
+}

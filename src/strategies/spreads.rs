@@ -341,13 +341,19 @@ impl SpreadBacktest {
                 }
             }
 
-            // Check for entry signals (don't re-enter after all legs expired)
-            let all_expired = self
+            // Check for entry signals.
+            //
+            // One dead leg is enough to block re-entry, not all of them: a
+            // structure containing an expired contract is not one anybody can
+            // open, and entering it would price that leg off a series that is
+            // no longer quoting anything. Identical to the old all-expired
+            // test for a same-expiry structure, where the two coincide.
+            let any_expired = self
                 .config
                 .leg_expiry_timestamps
                 .as_ref()
-                .is_some_and(|expiries| expiries.iter().all(|&exp_ts| timestamps[i] >= exp_ts));
-            if position.is_none() && entries[i] && !all_expired && !squareoff[i] {
+                .is_some_and(|expiries| expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts));
+            if position.is_none() && entries[i] && !any_expired && !squareoff[i] {
                 let legs: Vec<LegPosition> = self
                     .config
                     .leg_configs
