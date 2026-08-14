@@ -978,30 +978,3 @@ def resolve_atr_period(
     instrument_config: InstrumentConfig | None = ...,
 ) -> int | None: ...
 
-# --- Deprecated aliases ------------------------------------------------------
-# The ``Py`` prefix is a Rust-side disambiguator (the crate has its own
-# ``BacktestConfig``, ``Trade`` and ``BacktestResult`` in ``src/core``); it was
-# never meant to reach Python. These aliases keep old code type-checking while
-# it migrates. Resolved at runtime by ``raptorbt.__getattr__`` with a
-# DeprecationWarning. Removed in 0.8.0.
-PyBacktestConfig = BacktestConfig
-PyBacktestMetrics = BacktestMetrics
-PyBacktestResult = BacktestResult
-PyBatchSpreadItem = BatchSpreadItem
-PyEngineEvent = EngineEvent
-PyInstrumentConfig = InstrumentConfig
-PyInstrumentSummary = InstrumentSummary
-PyKernelSession = KernelSession
-PyOptimizationResult = OptimizationResult
-PyOptimizeItem = OptimizeItem
-PyOptimizerConfig = OptimizerConfig
-PyPortfolioResult = PortfolioResult
-PyPortfolioSession = PortfolioSession
-PyPositionSnapshot = PositionSnapshot
-PyRankIc = RankIC
-PyRebalanceSimResult = RebalanceSimResult
-PyRiskContributions = RiskContributions
-PyRiskModel = RiskModel
-PyStopConfig = StopConfig
-PyTargetConfig = TargetConfig
-PyTrade = Trade
