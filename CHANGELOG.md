@@ -5,6 +5,96 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-14
+
+Minor. Spread legs now settle on their own expiry dates instead of the whole
+structure closing when the first one expires. This is what makes calendar and
+diagonal spreads measurable; it also rejects an input that used to be accepted.
+
+**In plain words: a calendar spread sells an option expiring soon and buys one
+expiring later. The whole trade is the gap between the two -- the near one dies
+and the far one keeps living. The engine closed both the moment the near one
+expired, so it never simulated the part of the trade that is the trade. If you
+have backtested a calendar or a diagonal on any earlier release, the number it
+gave you was not a number about your strategy. Same-expiry structures --
+straddles, strangles, verticals, iron condors, butterflies -- are unaffected and
+produce identical results.**
+
+### Why this one is worse than an optimistic result
+
+An over-optimistic backtest is still informative: you can discount it. This was
+not that. Because the engine closed at the first expiry, nothing the surviving
+leg did afterwards reached the P&L at all -- so the same structure reported the
+same figure no matter how the trade turned out.
+
+Selling the near leg at 50 (expiring worthless) and buying the far leg at 80,
+on a 75 lot, with the far leg free to settle anywhere:
+
+| Far leg settles at | Reported | The truth | Error |
+| --- | --- | --- | --- |
+| 120 | 3,750 | 6,750 | +3,000 |
+| 100 | 3,750 | 5,250 | +1,500 |
+| 80 | 3,750 | 3,750 | 0 |
+| 60 | 3,750 | 2,250 | -1,500 |
+| 30 | 3,750 | 0 | -3,750 |
+
+The error changes sign, so it is not a bias that could be corrected for -- the
+result is uncorrelated with the trade. And it was silent: no error, no warning,
+no NaN, just a clean-looking P&L stamped `exit_reason=Settlement`.
+
+### Fixed
+
+- **Each leg settles at its own expiry, and the survivors keep marking.**
+  `spreads.rs` tested `expiries.iter().any(...)`, force-closing the whole
+  position at the earliest leg expiry. Legs now carry their own settled state;
+  the structure closes when the last one goes.
+
+- **A settled leg's profit is credited once, not twice.** It leaves the
+  mark-to-market and enters cash on its expiry bar. Those are the two halves of
+  the equity line, so equity does not move across a settlement at all -- the
+  accounting is invisible, as it should be. The reported P&L is reconciled
+  against the account's actual gain end to end.
+
+- **A settled leg is frozen at what it settled for.** Its contract no longer
+  exists, so whatever the premium series carries past that bar is not a price.
+  A stale quote there can no longer reach the exit price or the P&L.
+
+- **A settled leg pays no exit cost; a surviving leg still pays full.** An
+  option left to expire is never sold, so no order is placed and no brokerage
+  or transaction tax is owed. Entry costs are unchanged either way -- the order
+  that opened the leg was real regardless of how it ended.
+
+- **A spread containing a dead leg is not re-entered.** The re-entry block
+  waited for every leg to expire; one is enough. Identical for same-expiry
+  structures, where the two conditions coincide.
+
+### Changed
+
+- **`leg_expiry_timestamps` must carry one entry per leg.** Expiries are matched
+  to legs by position, so a shorter list left the trailing legs immortal and a
+  longer one settled on a date belonging to no leg -- silently, in both cases.
+  `run_spread_backtest` now raises `ValueError` naming both counts.
+
+  **This is the breaking change in this release.** Any caller passing a
+  correctly-sized list is unaffected.
+
+- **The engine still does not compute intrinsic value, and now says so.** The
+  contract is documented on `leg_expiry_timestamps`: the premium series must
+  carry the leg's settlement value at and after its expiry, and the engine
+  freezes the leg there. A caller settling options against the underlying
+  substitutes intrinsic itself. Two implementations of the same number, silently
+  reconciled, would be a worse defect than the one this release fixes.
+
+- **`run_spread_backtest` has a real type stub.** It was `*args, **kwargs`,
+  which told a type checker nothing about a function with eleven parameters.
+
+### Not in this release
+
+- **`batch_spread_backtest` still passes no expiries**, so batch runs never
+  settle at expiry. That is correct by omission rather than an oversight, and is
+  now marked as such in the source. Wiring it in needs a new field on the item
+  class, its stub, and a test.
+
 ## [0.7.4] - 2026-08-14
 
 Patch. The last two strategy paths that computed their own trading costs --
