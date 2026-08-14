@@ -7,6 +7,7 @@ pub mod pairs;
 pub mod portfolio;
 pub mod single;
 pub mod spreads;
+mod spreads_config;
 pub mod tick;
 
 pub use basket::BasketBacktest;

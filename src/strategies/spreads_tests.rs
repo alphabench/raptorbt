@@ -4,6 +4,7 @@
 //! into that module so `super::*` and private items still resolve.
 
 use super::*;
+use crate::core::types::BacktestConfig;
 use crate::core::types::StopConfig;
 use crate::core::types::TargetConfig;
 
