@@ -22,13 +22,18 @@ RaptorBT is a high-performance backtesting engine written in Rust with Python bi
 pip install raptorbt
 ```
 
-> **Upgrading from 0.6.x?** Public classes dropped their `Py` prefix in 0.7.0 —
-> `PyBacktestConfig` is now `BacktestConfig`, `PyTrade` is `Trade`, and so on.
-> Old names still work and warn; **they are removed in 0.8.0.** Two behaviour
-> fixes in the same release change results: `BarAggregator` now honours
-> `brick_size` (Renko backtests through it were wrong), and tick backtests no
-> longer stop after 50 trades by default. See the
-> [CHANGELOG](CHANGELOG.md#070---2026-08-12).
+> **Upgrading from 0.6.x or 0.7.x?** Public classes dropped their `Py` prefix in
+> 0.7.0 — `PyBacktestConfig` is now `BacktestConfig`, `PyTrade` is `Trade`, and
+> so on. The old names resolved with a `DeprecationWarning` through 0.7.x and
+> **are removed in 0.8.0**: they now raise `AttributeError`. Rename them, or
+> pin `raptorbt<0.8`.
+>
+> Two other changes alter results. In 0.7.0, `BarAggregator` began honouring
+> `brick_size` (Renko backtests through it were wrong) and tick backtests
+> stopped truncating at 50 trades by default. In 0.8.0, each leg of a spread
+> settles on its own expiry date, so calendar and diagonal spreads are measured
+> correctly for the first time; same-expiry structures are unaffected. See the
+> [CHANGELOG](CHANGELOG.md#080---2026-08-14).
 
 ### 30-Second Example
 
