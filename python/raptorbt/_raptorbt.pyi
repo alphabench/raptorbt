@@ -289,7 +289,29 @@ def run_options_backtest(
 
 def run_pairs_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
 def run_multi_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
-def run_spread_backtest(*args: Any, **kwargs: Any) -> BacktestResult: ...
+def run_spread_backtest(
+    timestamps: _I64,
+    underlying_close: _F64,
+    legs_premiums: list[_F64],
+    # (option_type, strike, quantity, lot_size) per leg. `option_type` is
+    # CE/CALL/C or PE/PUT/P, case-insensitive; anything else raises ValueError
+    # rather than pricing a put as a call. `quantity` is signed: +1 long, -1
+    # short.
+    leg_configs: list[tuple[str, float, int, int]],
+    entries: _Bool,
+    exits: _Bool,
+    config: BacktestConfig | None = ...,
+    spread_type: str = ...,
+    max_loss: float | None = ...,
+    target_profit: float | None = ...,
+    # One expiry per leg, in nanoseconds, matched to `leg_configs` by position;
+    # a different length raises ValueError. Each leg settles on its own date
+    # and the survivors keep marking, so calendars and diagonals run to the far
+    # expiry. The premium series must carry the leg's settlement value at and
+    # after its expiry -- the engine freezes the leg there and never invents a
+    # price.
+    leg_expiry_timestamps: list[int] | None = ...,
+) -> BacktestResult: ...
 def run_tick_backtest(
     timestamps: _I64,
     ltp: _F64,

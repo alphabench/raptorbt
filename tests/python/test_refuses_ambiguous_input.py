@@ -267,3 +267,32 @@ class TestTickPositionSize:
     def test_a_short_is_refused_not_silently_run_long(self):
         with pytest.raises(ValueError, match="long-only"):
             r.run_tick_backtest(**self._flat_tape(), quantity=-1)
+
+
+def test_leg_expiry_timestamps_must_match_the_legs():
+    """One expiry per leg, matched by position -- or refuse.
+
+    A short list would leave the trailing legs immortal and a long one
+    would settle on a date belonging to no leg. Both are silent, and a
+    silently mis-settled spread reports a clean-looking P&L for a trade
+    nobody made.
+    """
+    n = 6
+    timestamps = (
+        np.arange(n, dtype=np.int64) * 300_000_000_000 + 1_786_000_000_000_000_000
+    )
+    entries = np.zeros(n, dtype=bool)
+    entries[1] = True
+
+    with pytest.raises(ValueError, match="leg_expiry_timestamps"):
+        r.run_spread_backtest(
+            timestamps=timestamps,
+            underlying_close=np.full(n, 24_550.0),
+            legs_premiums=[np.full(n, 50.0), np.full(n, 80.0)],
+            leg_configs=[("CE", 24_800.0, -1, 75), ("CE", 24_800.0, 1, 75)],
+            entries=entries,
+            exits=np.zeros(n, dtype=bool),
+            config=r.BacktestConfig(initial_capital=500_000.0),
+            # Two legs, one expiry.
+            leg_expiry_timestamps=[int(timestamps[4])],
+        )

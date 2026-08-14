@@ -428,3 +428,96 @@ def test_fee_segment_reaches_the_spread_path():
 
     # The flat rate bills 4 legs x 7.50 x 2 sides = 60.00 and no brokerage.
     assert trade.fees > 200.0
+
+
+# ---------------------------------------------------------------------
+# Legs that expire on different days.
+#
+# A calendar spread sells an option expiring soon and buys one expiring
+# later. The whole trade is the gap between the two. Through 0.7.4 the
+# engine closed the whole structure when the FIRST leg expired, so it
+# never simulated the part of the trade that is the trade -- and none of
+# this surface was exercised through the wheel at all.
+# ---------------------------------------------------------------------
+
+CALENDAR_BARS = 31
+NEAR_EXPIRY_BAR = 20
+FAR_EXPIRY_BAR = 30
+
+
+def _calendar(far_settles_at=100.0, *, near_expiry_bar=NEAR_EXPIRY_BAR):
+    """Sell the near leg for 50, buy the far leg for 80.
+
+    The near leg expires worthless at bar 20 and the seller keeps the
+    premium: (-1) * (0 - 50) * 75 = +3750. The far leg lives to bar 30 and
+    settles at ``far_settles_at``. Premiums carry each leg's settlement
+    value from its own expiry onward, which is the engine's contract.
+    """
+    n = CALENDAR_BARS
+    timestamps = (
+        np.arange(n, dtype=np.int64) * 300_000_000_000 + 1_786_000_000_000_000_000
+    )
+    near = np.full(n, 50.0)
+    near[near_expiry_bar:] = 0.0
+    far = np.full(n, 80.0)
+    far[FAR_EXPIRY_BAR:] = far_settles_at
+
+    entries = np.zeros(n, dtype=bool)
+    entries[1] = True
+
+    return r.run_spread_backtest(
+        timestamps=timestamps,
+        underlying_close=np.full(n, 24_550.0),
+        legs_premiums=[near, far],
+        leg_configs=[("CE", STRIKE, -1, LOT), ("CE", STRIKE, 1, LOT)],
+        entries=entries,
+        exits=np.zeros(n, dtype=bool),
+        config=r.BacktestConfig(initial_capital=500_000.0, fees=0.0),
+        spread_type="custom",
+        leg_expiry_timestamps=[
+            int(timestamps[near_expiry_bar]),
+            int(timestamps[FAR_EXPIRY_BAR]),
+        ],
+    )
+
+
+def test_a_calendar_spread_survives_its_near_leg_expiry():
+    """The near leg expiring must not take the far leg with it.
+
+    Near leg +3750, far leg (100 - 80) * 75 = +1500, so the trade made
+    5250. Through 0.7.4 this reported 3750 and called it a settlement.
+    """
+    trades = _calendar().trades()
+
+    assert len(trades) == 1
+    assert trades[0].exit_idx == FAR_EXPIRY_BAR
+    assert trades[0].exit_reason == "Settlement"
+    assert trades[0].pnl == pytest.approx(5250.0)
+
+
+def test_the_far_leg_still_moves_a_calendars_result():
+    """What the far leg does after the near one dies has to reach the P&L.
+
+    The old engine returned the same number whatever the far leg did,
+    because it had already closed -- an answer uncorrelated with the
+    trade rather than merely optimistic. A 40-point difference in where
+    the far leg settles is 3000 on a 75 lot.
+    """
+    up = _calendar(far_settles_at=100.0).trades()[0].pnl
+    down = _calendar(far_settles_at=60.0).trades()[0].pnl
+
+    assert up - down == pytest.approx(3000.0)
+
+
+def test_both_legs_expiring_together_is_unchanged():
+    """The guard on every structure already trading.
+
+    A straddle, vertical or iron condor shares one expiry across its legs.
+    There is no gap to settle across, so the whole structure closes on
+    that bar exactly as it always has.
+    """
+    trades = _calendar(near_expiry_bar=FAR_EXPIRY_BAR).trades()
+
+    assert len(trades) == 1
+    assert trades[0].exit_idx == FAR_EXPIRY_BAR
+    assert trades[0].exit_reason == "Settlement"

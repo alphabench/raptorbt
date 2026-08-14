@@ -1242,6 +1242,21 @@ pub fn run_spread_backtest<'py>(
         })
         .collect::<PyResult<_>>()?;
 
+    // Expiries are matched to legs by position, so a list of the wrong length
+    // would settle the wrong leg or leave the trailing legs immortal -- and
+    // would do it silently, which is worse than refusing.
+    if let Some(ref expiries) = leg_expiry_timestamps {
+        if expiries.len() != rust_leg_configs.len() {
+            return Err(PyValueError::new_err(format!(
+                "leg_expiry_timestamps has {} entries but there are {} legs; \
+                 each leg needs its own expiry, matched by position. \
+                 Guessing would settle the wrong leg.",
+                expiries.len(),
+                rust_leg_configs.len(),
+            )));
+        }
+    }
+
     // Parse spread type
     let spread_type_enum = match spread_type.to_lowercase().as_str() {
         "straddle" => SpreadType::Straddle,
@@ -1398,6 +1413,10 @@ pub fn batch_spread_backtest(
                 leg_configs: rust_leg_configs.clone(),
                 max_loss: item.max_loss,
                 target_profit: item.target_profit,
+                // Deliberately omitted: `PyBatchSpreadItem` carries no expiries, so
+                // batch runs never settle at expiry. That is correct by omission
+                // rather than an oversight -- wiring it in means a new field on the
+                // item class, its stub, and a test. Tracked separately.
                 leg_expiry_timestamps: None,
             };
 
