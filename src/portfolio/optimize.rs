@@ -42,9 +42,20 @@
 //! The no-trade band and minimum trade value are non-convex, so they are
 //! applied *post-solve*: small diffs snap back to the current weight and the
 //! residual goes to explicit cash -- never rescaled across other names, which
-//! could breach a cap. If snapping strands cash outside [0, cash_max] (or,
-//! in long/short mode, net exposure outside [net_min, net_max]), the
-//! function errors with the amounts rather than clamping.
+//! could breach a cap. Snapping is therefore re-checked against the
+//! constraints it can violate, and every breach errors with the arithmetic
+//! rather than clamping:
+//!
+//! - cash outside [0, cash_max], or net exposure outside [net_min, net_max]
+//!   in long/short mode;
+//! - a snapped weight above `position_cap` or below `-short_cap`, a sector
+//!   total above its cap, or gross above `gross_max` (added 2026-08-18 --
+//!   previously only the budget was re-checked, and a 0.02 band was measured
+//!   returning 0.0980 against an 8% cap).
+//!
+//! All of these apply to a PARTIAL snap only. When every diff snaps away the
+//! status-quo book stands, and a book that already exists is feasible by
+//! definition -- the caps bind a proposed target, not a holding already owned.
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{
@@ -490,6 +501,71 @@ pub fn optimize_book(
     let mut cash = 1.0 - invested;
     let eps = (10.0 * cfg.tolerance).max(1e-9);
     let no_trade = weights.iter().zip(w_current.iter()).all(|(w, c)| (w - c).abs() < eps);
+
+    // A snap restores `w_current[i]`, which the solver's box never bounded --
+    // so snapping can hand back a book breaching a cap the caller treats as
+    // hard. The module header admits this ("could breach a cap") and only the
+    // BUDGET was ever checked afterwards; measured with no_trade_band = 0.02
+    // the largest weight reached 0.0980 against an 8% cap, 22.5% over, with
+    // no error. Refuse with the arithmetic, exactly as the budget guards
+    // below do, rather than clamping -- clamping would silently re-open the
+    // stranded-weight problem those guards exist to catch.
+    //
+    // Only a weight the SNAP moved is checked. A live book may legitimately
+    // sit above the cap today (the cap binds the target, not the holding you
+    // already own), and `w_current` is feasible by definition -- flagging it
+    // would refuse every rebalance of a concentrated book, which is the one
+    // case that most needs rebalancing.
+    // `!no_trade` for the same reason the budget guards below carry it: when
+    // EVERY diff snapped away the status-quo book stands, and a book that
+    // already exists is feasible by definition -- a live holding may sit
+    // above the cap today (the cap binds the target, not what you already
+    // own). Only a PARTIAL snap, which produced a book nobody chose, is
+    // checked.
+    for i in 0..n {
+        if no_trade || !snapped[i] {
+            continue;
+        }
+        let w = weights[i];
+        if w > cfg.position_cap + eps {
+            return Err(PortfolioMathError::Infeasible(format!(
+                "post-snap weight {w:.6} on asset {i} exceeds position_cap                  {:.6}; the no-trade band snapped a trade that was reducing                  it -- lower the band, raise the cap, or accept the trades",
+                cfg.position_cap
+            )));
+        }
+        if ls && w < -cfg.short_cap - eps {
+            return Err(PortfolioMathError::Infeasible(format!(
+                "post-snap weight {w:.6} on asset {i} breaches short_cap                  -{:.6}; the no-trade band snapped a covering trade -- lower                  the band, raise the cap, or accept the trades",
+                cfg.short_cap
+            )));
+        }
+    }
+    if !no_trade && snapped.iter().any(|&s| s) {
+        // Sector and gross budgets are sums, so one snapped name can push a
+        // total over even when every individual weight is inside its cap.
+        let mut sector_totals = vec![0.0_f64; cfg.sector_caps.len()];
+        for i in 0..n {
+            let contrib = if ls { weights[i].abs() } else { weights[i] };
+            sector_totals[cfg.sector_ids[i]] += contrib;
+        }
+        for (k, total) in sector_totals.iter().enumerate() {
+            if *total > cfg.sector_caps[k] + eps {
+                return Err(PortfolioMathError::Infeasible(format!(
+                    "post-snap sector {k} exposure {total:.6} exceeds its cap                      {:.6}; snapping stranded weight in the sector -- lower                      the band, raise the cap, or accept the trades",
+                    cfg.sector_caps[k]
+                )));
+            }
+        }
+        if ls {
+            let gross: f64 = weights.iter().map(|w| w.abs()).sum();
+            if gross > cfg.gross_max + eps {
+                return Err(PortfolioMathError::Infeasible(format!(
+                    "post-snap gross exposure {gross:.6} exceeds gross_max                      {:.6}; snapping stranded weight -- lower the band, raise                      the budget, or accept the trades",
+                    cfg.gross_max
+                )));
+            }
+        }
+    }
     if no_trade {
         // Every diff snapped away: the status-quo book stands. Its cash is
         // whatever it already is -- the budget bounds govern PROPOSED
@@ -692,6 +768,63 @@ mod tests {
         assert!(r.snapped[0] && r.snapped[1], "{:?}", r.snapped);
         assert_eq!(r.weights, vec![0.505, 0.495]);
         assert_eq!(r.turnover, 0.0);
+    }
+
+    #[test]
+    fn post_snap_cap_breach_is_refused_not_returned() {
+        // The defect this guards: snapping restores w_current[i], which the
+        // solver's box never bounded, so a book can come back OVER a cap the
+        // mandate treats as hard -- and before 2026-08-18 nothing checked.
+        //
+        // Fully invested (cash_max = 0), so the zero-alpha optimum is 50/50
+        // and the cap is 0.49. Current is 0.505/0.495: the optimizer wants to
+        // trim asset 0 by 0.005 to reach its cap, but that trade is inside
+        // the 0.02 band, so it snaps back to 0.505 -- over the cap, and
+        // before 2026-08-18 returned without complaint.
+        let m = model(vec![0.04, 0.0, 0.0, 0.04], 2);
+        let mut cfg = base_cfg(2);
+        cfg.position_cap = 0.49;
+        cfg.no_trade_band = 0.02;
+        let err = optimize_long_only(&m, &[0.0, 0.0], &[0.505, 0.495], &cfg)
+            .expect_err("an over-cap post-snap book must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("position_cap"),
+            "the refusal must name the breached cap and the arithmetic: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_status_quo_book_over_the_cap_is_not_refused() {
+        // The counterpart, and the reason the guard checks only SNAPPED
+        // weights. A live book may legitimately exceed the cap today -- the
+        // cap binds the target, not a holding already owned. Refusing here
+        // would block every rebalance of a concentrated book, which is
+        // precisely the book that needs one.
+        let m = model(vec![0.04, 0.0, 0.0, 0.04], 2);
+        let mut cfg = base_cfg(2);
+        cfg.position_cap = 0.08;
+        cfg.min_trade_value = 5_000.0;
+        cfg.portfolio_value = 400.0; // every possible trade is below the floor
+        cfg.cash_max = 0.99;
+        let w_cur = [0.50, 0.05]; // 50% in one name, far over the 8% cap
+        let r = optimize_long_only(&m, &[0.5, 0.5], &w_cur, &cfg)
+            .expect("a pre-existing concentrated book is feasible by definition");
+        assert_eq!(r.weights, w_cur.to_vec());
+        assert_eq!(r.turnover, 0.0);
+    }
+
+    #[test]
+    fn an_unbreached_snap_still_succeeds() {
+        // Positive control: a guard that refused unconditionally would leave
+        // the test above green while breaking every banded rebalance.
+        let m = model(vec![0.04, 0.0, 0.0, 0.04], 2);
+        let mut cfg = base_cfg(2);
+        cfg.position_cap = 0.60;
+        cfg.no_trade_band = 0.02;
+        let r = optimize_long_only(&m, &[0.0, 0.0], &[0.505, 0.495], &cfg)
+            .expect("a snap that breaches nothing must be returned");
+        assert_eq!(r.weights, vec![0.505, 0.495]);
     }
 
     #[test]
