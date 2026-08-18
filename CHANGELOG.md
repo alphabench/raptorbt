@@ -5,6 +5,49 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-18
+
+Patch. The optimizer now refuses a book whose post-solve snapping pushed a
+weight past a cap, instead of returning it. No behaviour changes for any run
+that was already inside its caps.
+
+**In plain words: you tell the optimizer the most it may put in any one stock.
+After it picks the weights, it undoes trades too small to be worth making --
+that keeps the book from churning over trivial adjustments. Undoing a trade can
+leave a holding sitting above the limit you set, and nothing checked. The engine
+handed the book back as if it were fine.**
+
+Measured: with `no_trade_band = 0.02` the largest weight came back at **0.0980
+against an 8% cap** -- 22.5% over a limit a mandate treats as hard, with no
+error, no warning, and a `Solved` status.
+
+The module header had admitted the hazard in prose since the feature landed
+("never rescaled across other names, which could breach a cap") while only the
+CASH budget was actually re-checked afterwards.
+
+### Why it was latent rather than live
+
+`book_optimizer.py` in the backend never passes `no_trade_band`, so production
+could not reach this. It becomes reachable the moment anyone sets one -- which
+is a reasonable thing to want, since a no-trade band is exactly how you stop a
+book churning on tiny adjustments.
+
+### Fixed
+
+- **Post-snap weights are re-checked against every cap they can breach.**
+  `position_cap`, `short_cap`, the per-sector totals and `gross_max`, each
+  refusing with `PortfolioMathError::Infeasible` and the arithmetic that
+  breached -- the same shape as the existing cash and net-exposure guards.
+  Never clamped: clamping would silently re-open the stranded-weight problem
+  those guards exist to catch.
+
+- **The check applies to a PARTIAL snap only.** When every diff snaps away the
+  status-quo book stands, and a book that already exists is feasible by
+  definition -- a live holding may legitimately sit above the cap, which binds
+  the target, not what is already owned. Refusing there would block every
+  rebalance of a concentrated book, which is precisely the book that most needs
+  one.
+
 ## [0.8.0] - 2026-08-14
 
 Minor. Spread legs now settle on their own expiry dates instead of the whole
