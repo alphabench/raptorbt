@@ -768,7 +768,13 @@ pub fn indian_cost_schedule(segment: &str) -> PyResult<HashMap<String, f64>> {
     let seg = parse_segment(segment)?;
     let s = seg.schedule();
     let mut out = HashMap::new();
-    out.insert("brokerage_per_order".into(), s.brokerage_per_order);
+    // Two keys since 0.9.0: flat is the per-order cap (zero on delivery,
+    // where Zerodha charges nothing), rate is the percentage alternative
+    // (zero where only the flat applies). The old single
+    // `brokerage_per_order` key is gone on purpose -- a consumer still
+    // reading it must fail loudly rather than treat the cap as the charge.
+    out.insert("brokerage_flat".into(), s.brokerage_flat);
+    out.insert("brokerage_rate".into(), s.brokerage_rate);
     out.insert("stt_rate".into(), s.stt_rate);
     out.insert("exchange_txn_rate".into(), s.exchange_txn_rate);
     out.insert("sebi_turnover_rate".into(), s.sebi_turnover_rate);

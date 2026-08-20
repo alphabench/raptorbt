@@ -498,6 +498,13 @@ def simulate_rebalance_policy(
     dp_charge_per_isin: float = ...,
     periods_per_year: float = ...,
 ) -> RebalanceSimResult: ...
+# Keys since 0.9.0: brokerage_flat (per-order cap in rupees; 0 on equity
+# delivery, where the broker charges nothing), brokerage_rate (percentage
+# alternative per order, 0 where only the flat applies -- charge is
+# min(flat, rate * order_value) when rate > 0), stt_rate, exchange_txn_rate,
+# sebi_turnover_rate, stamp_duty_rate, gst_rate,
+# dp_sell_charge_per_isin_per_day. The pre-0.9.0 `brokerage_per_order` key
+# was removed deliberately so stale consumers fail loudly.
 def indian_cost_schedule(segment: str) -> dict[str, float]: ...
 
 # --- Indicators -------------------------------------------------------------

@@ -5,6 +5,55 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-20
+
+The Indian cost schedules now match the broker's published schedule
+(zerodha.com/charges, verified 2026-08-20), and every rate is pinned by a
+test against that source. Backtest and rebalance costs change for every
+segment; equity delivery and small-order costs change the most.
+
+**In plain words: buying and selling costs money in several ways -- broker
+fees and government taxes. The old numbers charged a Rs 20 broker fee on
+delivery trades where the broker actually charges nothing, always charged the
+full Rs 20 on small trades where the broker's percentage rate is cheaper, and
+used tax rates for futures and options that were two statutory increases out
+of date. Every backtest was slightly wrong; small delivery backtests were
+very wrong (47 bps of phantom fees on a Rs 10,000 position).**
+
+### Changed
+
+- **Equity delivery brokerage is now zero** (was a flat Rs 20 per order).
+- **Intraday equity and all futures brokerage is now min(Rs 20, 0.03% of
+  order value)** (was an unconditional Rs 20). Options stay flat Rs 20.
+- **F&O STT raised to the rates effective 2026-04-01** (Budget 2026-27):
+  futures 0.01% → 0.05% sell-side; options 0.0625% → 0.15% of sell-side
+  premium. The old values predated *both* the 2024-10-01 and 2026-04-01
+  statutory increases.
+- **MCX futures now levy CTT** (0.01% non-agri sell side; was zero -- "no STT
+  on commodity futures" ignored the commodities transaction tax).
+- Exchange transaction charges corrected to the published values (all
+  sub-0.1 bps): NSE equity 0.00345% → 0.00307%, NFO futures 0.002% →
+  0.00183%, NFO options 0.035% → 0.03553%, MCX 0.002%/0.035% →
+  0.0021%/0.0418%, CDS options 0.031% → 0.0311%.
+- Currency (CDS) stamp duty corrected to 0.0001% (Rs 10/crore) buy-side; the
+  old values were 10x (futures) and 30x (options) the published rate.
+
+### Breaking
+
+- `CostSchedule.brokerage_per_order` is replaced by `brokerage_flat` +
+  `brokerage_rate` (charge per order = `min(flat, rate * value)` when
+  `rate > 0`, else `flat`). `indian_cost_schedule()` exports the two new keys
+  and no longer carries `brokerage_per_order` -- deliberately, so a stale
+  consumer fails loudly instead of reading the cap as the charge.
+
+### Deliberate approximations (stated, not hidden)
+
+- BSE equity / BFO derivatives share the NSE-family schedules; their
+  published exchange-transaction rates differ by under 0.2 bps and execution
+  truth for the platform is Zerodha on NSE/NFO.
+- STT on *exercised* options (0.15% of intrinsic) is not modelled; the engine
+  trades out of positions rather than simulating exercise.
+
 ## [0.8.1] - 2026-08-18
 
 Patch. The optimizer now refuses a book whose post-solve snapping pushed a
