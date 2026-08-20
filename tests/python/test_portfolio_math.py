@@ -269,14 +269,38 @@ class TestRebalanceSim:
 
 class TestCostScheduleExport:
     def test_equity_delivery_schedule_fields(self):
+        """Pins the Zerodha-published rates (zerodha.com/charges, 2026-08-20).
+
+        Delivery brokerage is ZERO -- the pre-0.9.0 flat Rs 20 charged money
+        no broker collects. The old `brokerage_per_order` key must stay gone
+        so stale consumers fail loudly instead of reading the cap as the
+        charge.
+        """
         s = r.indian_cost_schedule("equity_delivery")
-        assert s["brokerage_per_order"] == 20.0
+        assert "brokerage_per_order" not in s
+        assert s["brokerage_flat"] == 0.0
+        assert s["brokerage_rate"] == 0.0
         assert s["stt_rate"] == 0.001
-        assert s["exchange_txn_rate"] == 0.0000345
+        assert s["exchange_txn_rate"] == 0.0000307
         assert s["sebi_turnover_rate"] == 0.000001
         assert s["stamp_duty_rate"] == 0.00015
         assert s["gst_rate"] == 0.18
         assert s["dp_sell_charge_per_isin_per_day"] == 15.34
+
+    def test_capped_and_flat_brokerage_export(self):
+        """Intraday/futures carry the min(Rs 20, 0.03%) cap; options stay flat."""
+        intraday = r.indian_cost_schedule("equity_intraday")
+        assert intraday["brokerage_flat"] == 20.0
+        assert intraday["brokerage_rate"] == 0.0003
+
+        fut = r.indian_cost_schedule("futures_nfo")
+        assert fut["brokerage_rate"] == 0.0003
+        assert fut["stt_rate"] == 0.0005  # 0.05% sell side, eff. 2026-04-01
+
+        opt = r.indian_cost_schedule("options_nfo")
+        assert opt["brokerage_flat"] == 20.0
+        assert opt["brokerage_rate"] == 0.0
+        assert opt["stt_rate"] == 0.0015  # 0.15% on premium, eff. 2026-04-01
 
     def test_unknown_segment_refused_with_alternatives(self):
         with pytest.raises(ValueError, match="equity_delivery"):

@@ -9,6 +9,18 @@
 //! them directly so its equity curve and the reported cost breakdown describe
 //! the same money. Recomputing an itemized breakdown separately for display
 //! leaves the two free to disagree.
+//!
+//! Every rate below was verified against <https://zerodha.com/charges/> on
+//! 2026-08-20 and is pinned field-by-field in this module's tests. Two
+//! deliberate approximations, both stated here rather than hidden:
+//!
+//! * BSE equity and BFO derivatives share the NSE-family schedules. Their
+//!   published exchange-transaction rates differ by under 0.2 bps, and
+//!   execution truth for this platform is Zerodha on NSE/NFO.
+//! * The STT levied on options that are *exercised* (0.15% of intrinsic) is
+//!   not modelled -- the engine closes positions by trading out, and the
+//!   settlement path freezes legs at their settlement value without
+//!   simulating exercise.
 
 use crate::core::types::Direction;
 use serde::{Deserialize, Serialize};
@@ -24,7 +36,7 @@ pub enum Segment {
     FuturesNfo,
     /// NFO/BFO options. STT and exchange charges apply to premium.
     OptionsNfo,
-    /// MCX commodity futures. No STT.
+    /// MCX commodity futures. CTT (0.01% non-agri) on the sell side.
     FuturesMcx,
     /// MCX commodity options.
     OptionsMcx,
@@ -48,8 +60,14 @@ enum ChargedOn {
 /// Regulatory rates for one segment. All rates are fractions.
 #[derive(Debug, Clone, Copy)]
 pub struct CostSchedule {
-    /// Flat brokerage per executed order, in rupees.
-    pub brokerage_per_order: f64,
+    /// Flat brokerage per executed order, in rupees. When `brokerage_rate` is
+    /// non-zero this is the cap ("0.03% or Rs 20, whichever is lower");
+    /// zero means the broker charges nothing on this segment (equity
+    /// delivery).
+    pub brokerage_flat: f64,
+    /// Percentage brokerage per executed order, applied to the order's value.
+    /// Zero means the flat amount alone applies (options; delivery).
+    pub brokerage_rate: f64,
     /// Securities Transaction Tax rate.
     pub stt_rate: f64,
     /// Which leg STT applies to.
@@ -62,6 +80,25 @@ pub struct CostSchedule {
     pub stamp_duty_rate: f64,
     /// GST on brokerage + exchange + SEBI charges.
     pub gst_rate: f64,
+}
+
+impl CostSchedule {
+    /// Brokerage owed on one executed order of `value` rupees.
+    ///
+    /// Zerodha's schedule is "0.03% or Rs 20 per executed order, whichever is
+    /// lower" on intraday equity and all futures, flat Rs 20 on options, and
+    /// zero on equity delivery. A single flat figure cannot express that: the
+    /// old unconditional Rs 20 overcharged every delivery trade (Zerodha
+    /// charges nothing there) and every small intraday/futures order (below
+    /// about Rs 66,667 the percentage is cheaper).
+    #[inline]
+    pub fn brokerage_for_order(&self, value: f64) -> f64 {
+        if self.brokerage_rate > 0.0 {
+            (self.brokerage_rate * value).min(self.brokerage_flat)
+        } else {
+            self.brokerage_flat
+        }
+    }
 }
 
 /// Itemized costs for one side of a trade.
@@ -95,7 +132,12 @@ impl FeeBreakdown {
 
 const GST: f64 = 0.18;
 const SEBI: f64 = 0.000001;
+/// Flat brokerage per executed order (also the cap where a rate applies).
 const BROKERAGE: f64 = 20.0;
+/// "0.03% or Rs 20, whichever is lower" -- intraday equity and all futures.
+const BROKERAGE_CAP_RATE: f64 = 0.0003;
+/// Marker for segments where only the flat amount applies.
+const FLAT_ONLY: f64 = 0.0;
 
 /// Depository participant charge on equity delivery sells, in rupees:
 /// Rs 13.00 (Zerodha DP fee, CDSL) + 18% GST = Rs 15.34.
@@ -118,75 +160,83 @@ impl Segment {
     pub fn schedule(&self) -> CostSchedule {
         match self {
             Segment::EquityIntraday => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.00025,
+                brokerage_flat: BROKERAGE,
+                brokerage_rate: BROKERAGE_CAP_RATE,
+                stt_rate: 0.00025, // 0.025% on the sell side
                 stt_on: ChargedOn::Sell,
-                exchange_txn_rate: 0.0000345,
+                exchange_txn_rate: 0.0000307, // NSE 0.00307%
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00003,
+                stamp_duty_rate: 0.00003, // 0.003% buy side
                 gst_rate: GST,
             },
             Segment::EquityDelivery => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.001,
+                brokerage_flat: 0.0, // Zerodha: zero brokerage on delivery
+                brokerage_rate: FLAT_ONLY,
+                stt_rate: 0.001, // 0.1% on buy & sell
                 stt_on: ChargedOn::Both,
-                exchange_txn_rate: 0.0000345,
+                exchange_txn_rate: 0.0000307, // NSE 0.00307%
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00015,
+                stamp_duty_rate: 0.00015, // 0.015% buy side
                 gst_rate: GST,
             },
             Segment::FuturesNfo => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.0001,
+                brokerage_flat: BROKERAGE,
+                brokerage_rate: BROKERAGE_CAP_RATE,
+                stt_rate: 0.0005, // 0.05% sell side, effective 2026-04-01
                 stt_on: ChargedOn::Sell,
-                exchange_txn_rate: 0.00002,
+                exchange_txn_rate: 0.0000183, // NSE 0.00183%
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00002,
+                stamp_duty_rate: 0.00002, // 0.002% buy side
                 gst_rate: GST,
             },
             Segment::OptionsNfo => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.000625,
+                brokerage_flat: BROKERAGE, // flat Rs 20, no percentage
+                brokerage_rate: FLAT_ONLY,
+                stt_rate: 0.0015, // 0.15% sell side on premium, eff. 2026-04-01
                 stt_on: ChargedOn::Sell,
-                exchange_txn_rate: 0.00035,
+                exchange_txn_rate: 0.0003553, // NSE 0.03553% on premium
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00003,
+                stamp_duty_rate: 0.00003, // 0.003% buy side
                 gst_rate: GST,
             },
             Segment::FuturesMcx => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.0,
-                stt_on: ChargedOn::Never,
-                exchange_txn_rate: 0.00002,
+                brokerage_flat: BROKERAGE,
+                brokerage_rate: BROKERAGE_CAP_RATE,
+                stt_rate: 0.0001, // CTT 0.01% sell side (non-agri)
+                stt_on: ChargedOn::Sell,
+                exchange_txn_rate: 0.000021, // MCX 0.0021%
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00002,
+                stamp_duty_rate: 0.00002, // 0.002% buy side
                 gst_rate: GST,
             },
             Segment::OptionsMcx => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.0005,
+                brokerage_flat: BROKERAGE, // flat Rs 20, no percentage
+                brokerage_rate: FLAT_ONLY,
+                stt_rate: 0.0005, // CTT 0.05% sell side on premium
                 stt_on: ChargedOn::Sell,
-                exchange_txn_rate: 0.00035,
+                exchange_txn_rate: 0.000418, // MCX 0.0418% on premium
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00003,
+                stamp_duty_rate: 0.00003, // 0.003% buy side
                 gst_rate: GST,
             },
             Segment::FuturesCds => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.0,
+                brokerage_flat: BROKERAGE,
+                brokerage_rate: BROKERAGE_CAP_RATE,
+                stt_rate: 0.0, // no STT on currency
                 stt_on: ChargedOn::Never,
-                exchange_txn_rate: 0.0000035,
+                exchange_txn_rate: 0.0000035, // NSE 0.00035%
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00001,
+                stamp_duty_rate: 0.000001, // 0.0001% (Rs 10/crore) buy side
                 gst_rate: GST,
             },
             Segment::OptionsCds => CostSchedule {
-                brokerage_per_order: BROKERAGE,
-                stt_rate: 0.0,
+                brokerage_flat: BROKERAGE, // flat Rs 20, no percentage
+                brokerage_rate: FLAT_ONLY,
+                stt_rate: 0.0, // no STT on currency
                 stt_on: ChargedOn::Never,
-                exchange_txn_rate: 0.00031,
+                exchange_txn_rate: 0.000311, // NSE 0.0311% on premium
                 sebi_turnover_rate: SEBI,
-                stamp_duty_rate: 0.00003,
+                stamp_duty_rate: 0.000001, // 0.0001% (Rs 10/crore) buy side
                 gst_rate: GST,
             },
         }
@@ -246,7 +296,8 @@ pub fn calculate_side(
     let is_buy =
         matches!((direction, is_entry), (Direction::Long, true) | (Direction::Short, false));
 
-    let mut fees = FeeBreakdown { brokerage: schedule.brokerage_per_order, ..Default::default() };
+    let mut fees =
+        FeeBreakdown { brokerage: schedule.brokerage_for_order(value), ..Default::default() };
 
     fees.stt = match schedule.stt_on {
         ChargedOn::Never => 0.0,
@@ -315,11 +366,23 @@ mod tests {
     }
 
     #[test]
-    fn commodity_and_currency_futures_have_no_stt() {
-        for segment in [Segment::FuturesMcx, Segment::FuturesCds, Segment::OptionsCds] {
+    fn currency_segments_have_no_stt() {
+        for segment in [Segment::FuturesCds, Segment::OptionsCds] {
             let fees = calculate_side(segment, 1_000_000.0, Direction::Long, false);
             assert_eq!(fees.stt, 0.0, "{segment:?} should not levy STT");
         }
+    }
+
+    /// Commodity futures DO levy CTT (0.01% on the non-agri sell side). The
+    /// schedule carried 0.0 for years -- "no STT for commodity futures" is
+    /// true of the *securities* transaction tax but the commodities
+    /// transaction tax fills the same line on the contract note.
+    #[test]
+    fn commodity_futures_levy_ctt_on_the_sell_side() {
+        let sell = calculate_side(Segment::FuturesMcx, 1_000_000.0, Direction::Long, false);
+        let buy = calculate_side(Segment::FuturesMcx, 1_000_000.0, Direction::Long, true);
+        assert!((sell.stt - 0.0001 * 1_000_000.0).abs() < 1e-9);
+        assert_eq!(buy.stt, 0.0);
     }
 
     #[test]
@@ -372,5 +435,134 @@ mod tests {
         let on_notional = calculate_side(Segment::OptionsNfo, notional, Direction::Long, false);
         assert!(on_notional.total() > on_premium.total() * 50.0);
         assert!(Segment::OptionsNfo.charges_on_premium());
+    }
+
+    // ── Brokerage behaviour ─────────────────────────────────────────────────
+
+    /// Zerodha charges ZERO brokerage on equity delivery. The old flat Rs 20
+    /// charged money no broker collects -- 47 bps of phantom cost on a
+    /// Rs 10,000 position, and it dominated STT below about Rs 21,000.
+    #[test]
+    fn equity_delivery_charges_no_brokerage() {
+        for is_entry in [true, false] {
+            let fees = calculate_side(Segment::EquityDelivery, 10_000.0, Direction::Long, is_entry);
+            assert_eq!(fees.brokerage, 0.0);
+        }
+    }
+
+    /// Intraday equity and futures brokerage is min(Rs 20, 0.03% of order
+    /// value): below Rs 66,667 the percentage is cheaper.
+    #[test]
+    fn brokerage_cap_applies_below_the_crossover() {
+        for segment in [Segment::EquityIntraday, Segment::FuturesNfo, Segment::FuturesMcx] {
+            let small = calculate_side(segment, 50_000.0, Direction::Long, true);
+            assert!(
+                (small.brokerage - 15.0).abs() < 1e-9,
+                "{segment:?}: 0.03% of 50k is Rs 15, under the Rs 20 cap"
+            );
+            let large = calculate_side(segment, 500_000.0, Direction::Long, true);
+            assert_eq!(large.brokerage, 20.0, "{segment:?}: capped at Rs 20");
+        }
+    }
+
+    /// Options brokerage is flat Rs 20 per order at any premium -- nb22/nb27
+    /// class results depend on this staying flat, and Zerodha publishes it
+    /// flat.
+    #[test]
+    fn options_brokerage_is_flat_at_any_size() {
+        for value in [1_000.0, 50_000.0, 5_000_000.0] {
+            let fees = calculate_side(Segment::OptionsNfo, value, Direction::Long, true);
+            assert_eq!(fees.brokerage, 20.0);
+        }
+    }
+
+    // ── Rate pinning ────────────────────────────────────────────────────────
+    //
+    // Every rate asserted against the schedule published at
+    // https://zerodha.com/charges/, verified 2026-08-20. These exist because
+    // the previous tests only checked schedules against each other, which let
+    // the pre-2024 F&O STT rates survive two rounds of statutory increases
+    // (2024-10-01 and 2026-04-01) undetected.
+
+    #[test]
+    fn pinned_equity_delivery_rates() {
+        let s = Segment::EquityDelivery.schedule();
+        assert_eq!(s.brokerage_flat, 0.0); // "Zero brokerage"
+        assert_eq!(s.brokerage_rate, 0.0);
+        assert_eq!(s.stt_rate, 0.001); // STT 0.1% on buy & sell
+        assert_eq!(s.stt_on, ChargedOn::Both);
+        assert_eq!(s.exchange_txn_rate, 0.0000307); // NSE 0.00307%
+        assert_eq!(s.sebi_turnover_rate, 0.000001); // Rs 10/crore
+        assert_eq!(s.stamp_duty_rate, 0.00015); // 0.015% buy side
+        assert_eq!(s.gst_rate, 0.18);
+    }
+
+    #[test]
+    fn pinned_equity_intraday_rates() {
+        let s = Segment::EquityIntraday.schedule();
+        assert_eq!(s.brokerage_flat, 20.0); // "0.03% or Rs 20, whichever lower"
+        assert_eq!(s.brokerage_rate, 0.0003);
+        assert_eq!(s.stt_rate, 0.00025); // STT 0.025% sell side
+        assert_eq!(s.stt_on, ChargedOn::Sell);
+        assert_eq!(s.exchange_txn_rate, 0.0000307); // NSE 0.00307%
+        assert_eq!(s.stamp_duty_rate, 0.00003); // 0.003% buy side
+    }
+
+    #[test]
+    fn pinned_nfo_futures_rates() {
+        let s = Segment::FuturesNfo.schedule();
+        assert_eq!(s.brokerage_flat, 20.0);
+        assert_eq!(s.brokerage_rate, 0.0003);
+        // STT on sale of futures in securities: 0.05%, effective 2026-04-01
+        // (Budget 2026-27; was 0.02% from 2024-10-01, 0.0125% before that).
+        assert_eq!(s.stt_rate, 0.0005);
+        assert_eq!(s.stt_on, ChargedOn::Sell);
+        assert_eq!(s.exchange_txn_rate, 0.0000183); // NSE 0.00183%
+        assert_eq!(s.stamp_duty_rate, 0.00002); // 0.002% buy side
+    }
+
+    #[test]
+    fn pinned_nfo_options_rates() {
+        let s = Segment::OptionsNfo.schedule();
+        assert_eq!(s.brokerage_flat, 20.0); // flat Rs 20 per executed order
+        assert_eq!(s.brokerage_rate, 0.0);
+        // STT on sale of an option: 0.15% of premium, effective 2026-04-01
+        // (Budget 2026-27; was 0.1% from 2024-10-01, 0.0625% before that).
+        assert_eq!(s.stt_rate, 0.0015);
+        assert_eq!(s.stt_on, ChargedOn::Sell);
+        assert_eq!(s.exchange_txn_rate, 0.0003553); // NSE 0.03553% on premium
+        assert_eq!(s.stamp_duty_rate, 0.00003); // 0.003% buy side
+        assert!(Segment::OptionsNfo.charges_on_premium());
+    }
+
+    #[test]
+    fn pinned_mcx_rates() {
+        let fut = Segment::FuturesMcx.schedule();
+        assert_eq!(fut.brokerage_rate, 0.0003);
+        assert_eq!(fut.stt_rate, 0.0001); // CTT 0.01% sell side, non-agri
+        assert_eq!(fut.stt_on, ChargedOn::Sell);
+        assert_eq!(fut.exchange_txn_rate, 0.000021); // MCX 0.0021%
+        assert_eq!(fut.stamp_duty_rate, 0.00002);
+
+        let opt = Segment::OptionsMcx.schedule();
+        assert_eq!(opt.brokerage_rate, 0.0);
+        assert_eq!(opt.stt_rate, 0.0005); // CTT 0.05% sell side on premium
+        assert_eq!(opt.exchange_txn_rate, 0.000418); // MCX 0.0418% on premium
+        assert_eq!(opt.stamp_duty_rate, 0.00003);
+    }
+
+    #[test]
+    fn pinned_cds_rates() {
+        let fut = Segment::FuturesCds.schedule();
+        assert_eq!(fut.brokerage_rate, 0.0003);
+        assert_eq!(fut.stt_rate, 0.0); // no STT on currency
+        assert_eq!(fut.exchange_txn_rate, 0.0000035); // NSE 0.00035%
+        assert_eq!(fut.stamp_duty_rate, 0.000001); // 0.0001% (Rs 10/crore)
+
+        let opt = Segment::OptionsCds.schedule();
+        assert_eq!(opt.brokerage_rate, 0.0);
+        assert_eq!(opt.stt_rate, 0.0);
+        assert_eq!(opt.exchange_txn_rate, 0.000311); // NSE 0.0311% on premium
+        assert_eq!(opt.stamp_duty_rate, 0.000001);
     }
 }
