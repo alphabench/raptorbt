@@ -51,13 +51,13 @@ went straight to `Error`.
 **What the user saw: every holding on the Portfolio page read "Not under a
 strategy" for the whole morning, and nothing traded.**
 
-So, when the engine gains a capability the backend depends on:
+So, when the engine gains a capability a consuming application depends on:
 
 - Bumping `version` in `Cargo.toml` and `pyproject.toml` here is **step one of
-  five, not the whole job.** The other four files live in the *backend* repo
-  (`docker/requirements.{paper,trader}.{txt,lock}`) and are a separate commit in
-  a separate repo. `backend/CLAUDE.md` § "Bumping the raptorbt version" is the
-  authority; read it before claiming a release is done.
+  five, not the whole job.** The other four files
+  (`docker/requirements.{paper,trader}.{txt,lock}`) live in the consuming
+  application's own repo and are a separate commit there. Read that repo's own
+  guidance on bumping the raptorbt version before claiming a release is done.
 - **A floor may never point at an unpublished version.** Every image build
   installs from PyPI, so a floor ahead of what is published breaks all of them.
   Publish first, raise floors second.
