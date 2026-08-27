@@ -5,6 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-powered-orange?logo=rust)](https://www.rust-lang.org/)
 [![Downloads](https://api.pepy.tech/badge/raptorbt/month)](https://pepy.tech/projects/raptorbt)
 [![License](https://img.shields.io/pypi/l/raptorbt.svg)](https://opensource.org/licenses/MIT)
+[![Support](https://img.shields.io/badge/Support-the%20project-ff69b4)](https://checkout.dodopayments.com/buy/pdt_0NmIpbPfM2KlwPVgZ6kMX?redirect_url=https%3A%2F%2Fwww.alphabench.in%2Fraptorbt%2Fthanks)
 
 **Blazing-fast backtesting for the modern quant.**
 
@@ -1648,6 +1649,17 @@ The notice itself is `INFO`, which keeps it below `logging.lastResort`'s
 
 Continuous-integration environments (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`,
 `JENKINS_URL`, `BUILDKITE`) are skipped automatically.
+
+## Support
+
+RaptorBT is free and MIT licensed, and always will be. If it saved you time
+and you want to put something back, you can [send a one-time amount of your
+choosing](https://checkout.dodopayments.com/buy/pdt_0NmIpbPfM2KlwPVgZ6kMX?redirect_url=https%3A%2F%2Fwww.alphabench.in%2Fraptorbt%2Fthanks).
+
+It buys no features, no support commitment, and no priority — it just helps
+keep the work going.
+
+---
 
 ## License
 
