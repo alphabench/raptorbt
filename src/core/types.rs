@@ -640,6 +640,11 @@ pub struct BacktestMetrics {
     pub payoff_ratio: f64,
     /// Recovery factor (net profit / max drawdown).
     pub recovery_factor: f64,
+    /// Total traded notional, both sides counted (`metrics::trade_stats::
+    /// total_turnover`): every entry leg plus every exit leg that really
+    /// traded, at `price * |size|` — the same base the fee models charge
+    /// on. 0.0 on result paths that carry no trade list.
+    pub total_turnover: f64,
 }
 
 /// Complete backtest result.

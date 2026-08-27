@@ -203,6 +203,37 @@ pub struct MonthlyReturns {
     pub trade_count: usize,
 }
 
+/// Total traded notional across all trades, counting BOTH sides.
+///
+/// A round trip is two legs: buying 100,000 of stock and selling it back is
+/// 200,000 of turnover, not 100,000 — the same per-leg `price * |size|`
+/// base the fee models charge on, so `total_fees_paid / total_turnover` is
+/// a meaningful cost rate. Exit legs that never actually traded contribute
+/// nothing: `EndOfData` is the run ending while still holding, and
+/// `Settlement` is an option left to expire — neither moves money through
+/// the market nor pays an exit fee.
+///
+/// Deliberately excludes the instrument's contract multiplier, matching
+/// the fee models (execution/fees.rs charges on `price * size.abs()`).
+/// For multiplier-bearing instruments both figures are in the same
+/// per-point unit, so their ratio stays exact.
+pub fn total_turnover(trades: &[Trade]) -> f64 {
+    use crate::core::types::ExitReason;
+
+    trades
+        .iter()
+        .map(|t| {
+            let size = t.size.abs();
+            let entry_leg = t.entry_price.abs() * size;
+            let exit_leg = match t.exit_reason {
+                ExitReason::EndOfData | ExitReason::Settlement => 0.0,
+                _ => t.exit_price.abs() * size,
+            };
+            entry_leg + exit_leg
+        })
+        .sum()
+}
+
 /// Calculate trade statistics by exit reason.
 pub fn stats_by_exit_reason(
     trades: &[Trade],
@@ -335,6 +366,25 @@ mod tests {
         // W, L, W -> max consecutive wins = 1, max consecutive losses = 1
         assert_eq!(max_wins, 1);
         assert_eq!(max_losses, 1);
+    }
+
+    #[test]
+    fn test_total_turnover_counts_both_legs() {
+        // 100->110 and 100->95 at size 10: (1000+1100) + (1000+950).
+        let trades = &sample_trades()[..2];
+        assert!((total_turnover(trades) - 4050.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_total_turnover_skips_untraded_exit_legs() {
+        let mut trade = sample_trades()[0].clone();
+        trade.exit_reason = ExitReason::EndOfData;
+        assert!((total_turnover(&[trade.clone()]) - 1000.0).abs() < 1e-9);
+        trade.exit_reason = ExitReason::Settlement;
+        assert!((total_turnover(&[trade.clone()]) - 1000.0).abs() < 1e-9);
+        // A squareoff IS a real trade-out and counts both legs.
+        trade.exit_reason = ExitReason::Squareoff;
+        assert!((total_turnover(&[trade]) - 2100.0).abs() < 1e-9);
     }
 
     #[test]

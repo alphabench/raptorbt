@@ -184,6 +184,11 @@ class BacktestMetrics:
     profit_factor: float | None
     payoff_ratio: float | None
     recovery_factor: float | None
+    # Total traded notional, both sides counted (a buy and its sell-back are
+    # two legs), at the same price*|size| base the fee models charge on.
+    # Exit legs that never traded (EndOfData, Settlement) contribute nothing.
+    # 0.0 on result paths that carry no trade list. Added in 0.10.0.
+    total_turnover: float
 
     def to_dict(self) -> dict[str, Any]: ...
 

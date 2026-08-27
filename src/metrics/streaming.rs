@@ -571,6 +571,10 @@ impl StreamingMetrics {
             exposure_pct: 0.0, // TODO: calculate based on time in market
             payoff_ratio,
             recovery_factor,
+            // finalize() sees only the returns array, never the trades, so
+            // it cannot compute turnover. 0.0 means "not measured here" —
+            // callers with a trade list use trade_stats::total_turnover.
+            total_turnover: 0.0,
         }
     }
 

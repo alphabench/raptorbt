@@ -5,6 +5,39 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-27
+
+Backtest metrics now report **total turnover** -- the total traded
+notional across the run, both sides counted.
+
+**In plain words: a result used to say only what you made on the money you
+started with. It now also says how much money actually moved through the
+market. A round trip is two legs -- buying Rs 1,00,000 of stock and
+selling it back is Rs 2,00,000 of turnover -- because that is exactly the
+per-leg value fees are charged on, so `total_fees_paid / total_turnover`
+is a meaningful cost rate. Two strategies with the same return but very
+different churn stop looking identical.**
+
+### Added
+
+- `BacktestMetrics.total_turnover` (Rust) and
+  `metrics.total_turnover` / `to_dict()["Total Turnover"]` (Python):
+  every entry leg plus every exit leg that really traded, at
+  `price * |size|` -- the same base the fee models charge on. Exit legs
+  that never crossed the market contribute nothing: `EndOfData` (the run
+  ended while still holding) and `Settlement` (an option left to expire)
+  pay no exit fee and move no money. `Squareoff` and `Liquidation` are
+  real trade-outs and count.
+- Result paths that carry no trade list report `0.0`, meaning "not
+  measured", never "measured as zero".
+
+### Notes
+
+- The contract multiplier is deliberately **not** folded in, matching the
+  fee models (which also charge on `price * |size|`): for
+  multiplier-bearing instruments both figures share the same per-point
+  unit, so their ratio stays exact.
+
 ## [0.9.0] - 2026-08-20
 
 The Indian cost schedules now match the broker's published schedule

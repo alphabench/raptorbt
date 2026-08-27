@@ -424,6 +424,7 @@ impl PortfolioEngine {
             exposure_pct,
             payoff_ratio,
             recovery_factor,
+            total_turnover: crate::metrics::trade_stats::total_turnover(trades),
         }
     }
 

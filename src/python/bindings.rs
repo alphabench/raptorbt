@@ -653,6 +653,10 @@ pub struct PyBacktestMetrics {
     pub payoff_ratio: Option<f64>,
     #[pyo3(get)]
     pub recovery_factor: Option<f64>,
+    /// Total traded notional, both sides counted; see
+    /// `metrics::trade_stats::total_turnover`.
+    #[pyo3(get)]
+    pub total_turnover: f64,
 }
 
 #[pymethods]
@@ -671,6 +675,7 @@ impl PyBacktestMetrics {
         dict.set_item("End Value", self.end_value)?;
         dict.set_item("Total Return [%]", self.total_return_pct)?;
         dict.set_item("Total Fees Paid", self.total_fees_paid)?;
+        dict.set_item("Total Turnover", self.total_turnover)?;
         dict.set_item("Max Drawdown [%]", self.max_drawdown_pct)?;
         dict.set_item("Max Drawdown Duration", self.max_drawdown_duration)?;
         dict.set_item("Total Trades", self.total_trades)?;
@@ -2200,6 +2205,7 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         exposure_pct: result.metrics.exposure_pct,
         payoff_ratio: finite(result.metrics.payoff_ratio),
         recovery_factor: finite(result.metrics.recovery_factor),
+        total_turnover: result.metrics.total_turnover,
     };
 
     let trades: Vec<PyTrade> = result.trades.into_iter().map(convert_trade).collect();
