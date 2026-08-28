@@ -588,6 +588,16 @@ pub struct BacktestMetrics {
     pub max_drawdown_pct: f64,
     /// Maximum drawdown duration in bars.
     pub max_drawdown_duration: usize,
+    /// Maximum drawdown duration in seconds of wall-clock time, when the run
+    /// supplied timestamps.
+    ///
+    /// `max_drawdown_duration` counts *bars*, and one bar is one day only on
+    /// daily data. A tick run made it one tick, so a 6-day backtest reported
+    /// "93,510" and a caller labelling that in days showed 256 years. Callers
+    /// that want a human duration must read this field and fall back to the
+    /// bar count only when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_drawdown_duration_secs: Option<f64>,
     /// Win rate percentage.
     pub win_rate_pct: f64,
     /// Profit factor.
@@ -634,6 +644,11 @@ pub struct BacktestMetrics {
     pub max_consecutive_losses: usize,
     /// Average holding period in bars.
     pub avg_holding_period: f64,
+    /// Average holding period in seconds of wall-clock time, when the run
+    /// supplied timestamps. See `max_drawdown_duration_secs` for why the bar
+    /// count alone cannot be rendered as a duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_holding_period_secs: Option<f64>,
     /// Exposure time percentage (time in market).
     pub exposure_pct: f64,
     /// Payoff ratio (avg win / avg loss).

@@ -5,6 +5,42 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-08-28
+
+Duration metrics are now reported in **real elapsed time** as well as in bars,
+and time-in-market can no longer exceed 100%.
+
+**In plain words: the engine measured how long a trade lasted by counting
+bars. On daily data one bar is one day, so that was right by accident. On a
+tick run one bar is one tick, so a trade lasting 45 seconds was reported as
+"329" -- and a caller printing that as days showed 329 days. A six-day
+backtest reported a drawdown lasting roughly 256 years. The bar counts are
+still there and still mean bars; alongside them the engine now reports the
+same figures in seconds, taken from the timestamps it already had.**
+
+### Added
+
+- `BacktestMetrics.max_drawdown_duration_secs` and
+  `BacktestMetrics.avg_holding_period_secs` (Rust), exposed as
+  `metrics.max_drawdown_duration_secs` / `metrics.avg_holding_period_secs`
+  and `to_dict()["Max Drawdown Duration [s]"]` (Python). Both are `None`
+  when the run carried no usable timestamps -- "cannot say" rather than a
+  zero that reads as a real measurement.
+
+### Fixed
+
+- `exposure_pct` could exceed 100%. Concurrent positions each contribute
+  their own holding period, and the sum was divided by a single equity
+  curve, so a netting book with overlapping trades reported more time in
+  the market than the backtest ran -- 123.5% observed on a real run. Time
+  in the market is now capped at the time available.
+
+### Notes for callers
+
+`max_drawdown_duration` and `avg_holding_period` are unchanged and still
+count **bars**. Anything rendered to a person should read the `_secs`
+fields and fall back to the bar counts only when they are `None`.
+
 ## [0.10.0] - 2026-08-27
 
 Backtest metrics now report **total turnover** -- the total traded

@@ -1240,10 +1240,17 @@ access all 33. The most useful are grouped below.
 
 ### Drawdown
 
-| Metric                  | Description                    |
-| ----------------------- | ------------------------------ |
-| `max_drawdown_pct`      | Maximum peak-to-trough decline |
-| `max_drawdown_duration` | Longest drawdown period (bars) |
+| Metric                       | Description                                        |
+| ---------------------------- | -------------------------------------------------- |
+| `max_drawdown_pct`           | Maximum peak-to-trough decline                     |
+| `max_drawdown_duration`      | Longest drawdown period (bars)                     |
+| `max_drawdown_duration_secs` | The same stretch in seconds; `None` without timestamps |
+
+> **Bars are not days.** A bar is one day on daily data and one tick on a tick
+> run, so `max_drawdown_duration` cannot be rendered as a duration on its own —
+> a 6-day tick backtest reports ~93,510 bars. Read the `_secs` field for
+> anything shown to a person, and fall back to the bar count only when it is
+> `None`.
 
 ### Trade Statistics
 
@@ -1271,9 +1278,10 @@ access all 33. The most useful are grouped below.
 
 ### Duration
 
-| Metric                 | Description                    |
-| ---------------------- | ------------------------------ |
-| `avg_holding_period`   | Average trade duration (bars)  |
+| Metric                    | Description                                          |
+| ------------------------- | ---------------------------------------------------- |
+| `avg_holding_period`      | Average trade duration (bars)                        |
+| `avg_holding_period_secs` | The same average in seconds; `None` without timestamps |
 | `avg_winning_duration` | Average winning trade duration |
 | `avg_losing_duration`  | Average losing trade duration  |
 
@@ -1292,7 +1300,7 @@ access all 33. The most useful are grouped below.
 | `end_value`       | Final portfolio value              |
 | `total_fees_paid` | Total transaction costs            |
 | `open_trade_pnl`  | Unrealized PnL from open positions |
-| `exposure_pct`    | Percentage of time in market       |
+| `exposure_pct`    | Percentage of time in market, capped at 100% |
 
 ---
 

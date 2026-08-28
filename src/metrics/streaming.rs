@@ -545,6 +545,10 @@ impl StreamingMetrics {
             omega_ratio,
             max_drawdown_pct: self.max_drawdown_pct,
             max_drawdown_duration: self.max_drawdown_duration,
+            // The streaming accumulator carries no timestamps, so it cannot
+            // place a drawdown or a trade in wall-clock time. None is the
+            // honest answer; a caller falls back to the bar counts.
+            max_drawdown_duration_secs: None,
             win_rate_pct,
             profit_factor,
             expectancy,
@@ -568,6 +572,7 @@ impl StreamingMetrics {
             max_consecutive_wins: self.max_consecutive_wins,
             max_consecutive_losses: self.max_consecutive_losses,
             avg_holding_period,
+            avg_holding_period_secs: None,
             exposure_pct: 0.0, // TODO: calculate based on time in market
             payoff_ratio,
             recovery_factor,

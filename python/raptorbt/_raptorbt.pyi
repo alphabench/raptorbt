@@ -152,6 +152,7 @@ class BacktestMetrics:
     sharpe_ratio: float
     max_drawdown_pct: float
     max_drawdown_duration: int
+    max_drawdown_duration_secs: float | None
     win_rate_pct: float
     expectancy: float
     sqn: float
@@ -174,6 +175,7 @@ class BacktestMetrics:
     max_consecutive_wins: int
     max_consecutive_losses: int
     avg_holding_period: float
+    avg_holding_period_secs: float | None
     exposure_pct: float
 
     # None when the denominator is zero -- e.g. profit factor with no losing

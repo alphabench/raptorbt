@@ -321,10 +321,45 @@ impl PortfolioEngine {
             0.0
         };
 
-        // Exposure (time in market)
+        // ...and the same average as real elapsed time, which is the only form
+        // a caller can render as a duration. A bar is a day on daily data and
+        // a tick on a tick run, so "329" meant 329 days on one and 45 seconds
+        // on the other.
+        let avg_holding_period_secs = if total_trades > 0 && timestamps.len() >= 2 {
+            let spans: Vec<f64> = trades
+                .iter()
+                .filter_map(|t| {
+                    let start = timestamps.get(t.entry_idx)?;
+                    let end = timestamps.get(t.exit_idx)?;
+                    let span = (*end - *start) as f64;
+                    if span < 0.0 {
+                        None
+                    } else {
+                        Some(span / 1_000_000_000.0)
+                    }
+                })
+                .collect();
+            // Only report an average that covers every trade; a partial one
+            // would understate the true figure without saying so.
+            if spans.len() == total_trades {
+                Some(spans.iter().sum::<f64>() / total_trades as f64)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Exposure (time in market).
+        //
+        // Capped at 100%: positions can overlap (several concurrent trades in
+        // a netting book), and summing their holding periods against a single
+        // equity curve then reports more time in the market than the backtest
+        // actually ran -- 123.5% was observed. Time in market cannot exceed
+        // the time available.
         let bars_in_position: usize = trades.iter().map(|t| t.holding_period()).sum();
         let exposure_pct = if !equity_curve.is_empty() {
-            bars_in_position as f64 / equity_curve.len() as f64 * 100.0
+            (bars_in_position as f64 / equity_curve.len() as f64 * 100.0).min(100.0)
         } else {
             0.0
         };
@@ -398,6 +433,7 @@ impl PortfolioEngine {
             omega_ratio,
             max_drawdown_pct,
             max_drawdown_duration,
+            max_drawdown_duration_secs: self.max_drawdown_duration_secs(drawdown_curve, timestamps),
             win_rate_pct,
             profit_factor,
             expectancy,
@@ -421,6 +457,7 @@ impl PortfolioEngine {
             max_consecutive_wins,
             max_consecutive_losses,
             avg_holding_period,
+            avg_holding_period_secs,
             exposure_pct,
             payoff_ratio,
             recovery_factor,
@@ -443,6 +480,50 @@ impl PortfolioEngine {
         }
 
         max_duration
+    }
+
+    /// The longest drawdown stretch measured in wall-clock seconds.
+    ///
+    /// Returns `None` when the run carried no usable timestamps, in which case
+    /// only the bar count is meaningful. Bars are not a unit of time: one bar
+    /// is one day on daily data and one tick on a tick run, so a caller that
+    /// renders `max_drawdown_duration` as days is right only by accident.
+    fn max_drawdown_duration_secs(
+        &self,
+        drawdown_curve: &[f64],
+        timestamps: &[i64],
+    ) -> Option<f64> {
+        if timestamps.len() < 2 || drawdown_curve.is_empty() {
+            return None;
+        }
+
+        // Walk the same stretches as the bar-count version, but keep the start
+        // and end indices so the span can be read off the timestamps.
+        let mut best: Option<(usize, usize)> = None;
+        let mut run_start: Option<usize> = None;
+
+        for (i, &dd) in drawdown_curve.iter().enumerate() {
+            if dd > 0.0 {
+                let start = *run_start.get_or_insert(i);
+                let longer = best.is_none_or(|(bs, be)| (i - start) > (be - bs));
+                if longer {
+                    best = Some((start, i));
+                }
+            } else {
+                run_start = None;
+            }
+        }
+
+        let (start, end) = best?;
+        // The curves and the timestamp series are index-aligned; a shorter
+        // timestamp series means we cannot place these indices in time.
+        let t_start = timestamps.get(start)?;
+        let t_end = timestamps.get(end)?;
+        let span_nanos = (*t_end - *t_start) as f64;
+        if span_nanos < 0.0 {
+            return None;
+        }
+        Some(span_nanos / 1_000_000_000.0)
     }
 
     /// Calculate max consecutive wins and losses.
@@ -680,6 +761,188 @@ mod tests {
 
         // Equity curve should have correct length
         assert_eq!(result.equity_curve.len(), 20);
+    }
+
+    /// A bar is not a day. On tick data it is a fraction of a second, and the
+    /// bar counts alone reported "avg hold 329" for trades lasting seconds --
+    /// which a caller rendered as 329 days.
+    #[test]
+    fn durations_are_reported_in_real_time_not_bar_counts() {
+        let config = BacktestConfig {
+            initial_capital: 100_000.0,
+            fees: 0.0,
+            slippage: 0.0,
+            stop: StopConfig::None,
+            target: TargetConfig::None,
+            upon_bar_close: true,
+            ..Default::default()
+        };
+
+        // Same 20 bars, but spaced one second apart instead of the default
+        // 1-nanosecond ticks -- the shape of a tick run.
+        const ONE_SEC: i64 = 1_000_000_000;
+        let mut ohlcv = sample_ohlcv();
+        ohlcv.timestamps = (0..20).map(|i| i as i64 * ONE_SEC).collect();
+
+        let engine = PortfolioEngine::new(config);
+        let result = engine.run_single(&ohlcv, &sample_signals());
+        let m = &result.metrics;
+
+        // The bar count is unchanged and still means bars.
+        assert!(m.avg_holding_period > 0.0);
+
+        // The trades span 4 bars each, one second apart, so the honest
+        // duration is seconds -- not the bar count, and not days.
+        let secs = m.avg_holding_period_secs.expect("timestamps were supplied");
+        assert!(
+            (secs - m.avg_holding_period).abs() < 1e-9,
+            "one-second bars: {secs}s should equal {} bars",
+            m.avg_holding_period
+        );
+
+        // Re-space the same run 60x wider. The bar count cannot change; the
+        // reported duration must, which is the whole point of the field.
+        let mut minute_ohlcv = sample_ohlcv();
+        minute_ohlcv.timestamps = (0..20).map(|i| i as i64 * ONE_SEC * 60).collect();
+        let minute = engine.run_single(&minute_ohlcv, &sample_signals());
+
+        assert!(
+            (minute.metrics.avg_holding_period - m.avg_holding_period).abs() < 1e-9,
+            "bar count must not depend on spacing"
+        );
+        let minute_secs = minute.metrics.avg_holding_period_secs.expect("timestamps were supplied");
+        assert!(
+            (minute_secs - secs * 60.0).abs() < 1e-6,
+            "60x wider bars must report 60x the elapsed time: {minute_secs} vs {secs}"
+        );
+    }
+
+    /// Time in the market cannot exceed the time the backtest ran. Summing the
+    /// holding periods of *concurrent* positions against one equity curve
+    /// reported 123.5% on a real run.
+    #[test]
+    fn exposure_never_exceeds_one_hundred_percent() {
+        fn trade_over(id: u64, entry_idx: usize, exit_idx: usize) -> Trade {
+            Trade {
+                id,
+                symbol: "TEST".to_string(),
+                entry_idx,
+                exit_idx,
+                entry_price: 100.0,
+                exit_price: 101.0,
+                size: 1.0,
+                direction: Direction::Long,
+                pnl: 1.0,
+                return_pct: 1.0,
+                entry_time: entry_idx as i64,
+                exit_time: exit_idx as i64,
+                fees: 0.0,
+                entry_fees: 0.0,
+                exit_fees: 0.0,
+                fee_breakdown: None,
+                exit_reason: ExitReason::Signal,
+            }
+        }
+
+        let engine = PortfolioEngine::new(BacktestConfig {
+            initial_capital: 100_000.0,
+            ..Default::default()
+        });
+
+        // Three positions held simultaneously across the whole 10-bar run.
+        // Their holding periods sum to 27 bars against a 10-bar curve -- 270%
+        // before the clamp.
+        let equity_curve: Vec<f64> = (0..10).map(|i| 100_000.0 + i as f64).collect();
+        let drawdown_curve = vec![0.0; 10];
+        let returns = vec![0.0; 10];
+        let timestamps: Vec<i64> = (0..10).map(|i| i as i64 * 1_000_000_000).collect();
+        let trades = vec![trade_over(1, 0, 9), trade_over(2, 0, 9), trade_over(3, 0, 9)];
+
+        let metrics = engine.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            &trades,
+            &timestamps,
+            &StreamingMetrics::with_initial_capital(100_000.0),
+        );
+
+        assert!(
+            metrics.exposure_pct <= 100.0,
+            "exposure {} exceeds the time available",
+            metrics.exposure_pct
+        );
+        assert!(metrics.exposure_pct > 0.0, "the book was in the market");
+    }
+
+    /// The reported drawdown stretch is the same stretch the bar count found,
+    /// measured on the clock. A 6-day tick run reported "93,510" bars, which a
+    /// caller printed as 93,510 days -- roughly 256 years.
+    #[test]
+    fn drawdown_duration_is_reported_in_real_time() {
+        let engine = PortfolioEngine::new(BacktestConfig {
+            initial_capital: 100_000.0,
+            ..Default::default()
+        });
+
+        // Underwater for indices 2..=6 -- five bars, four intervals.
+        let drawdown_curve = vec![0.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, 0.0, 0.0];
+        let equity_curve = vec![100_000.0; 10];
+        let returns = vec![0.0; 10];
+        let timestamps: Vec<i64> = (0..10).map(|i| i as i64 * 1_000_000_000).collect();
+
+        let metrics = engine.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            &[],
+            &timestamps,
+            &StreamingMetrics::with_initial_capital(100_000.0),
+        );
+
+        assert_eq!(metrics.max_drawdown_duration, 5, "five bars underwater");
+        let secs = metrics.max_drawdown_duration_secs.expect("timestamps supplied");
+        assert!(
+            (secs - 4.0).abs() < 1e-9,
+            "one-second bars: index 2 to 6 is 4 seconds, got {secs}"
+        );
+
+        // Without timestamps the honest answer is "cannot say", not zero.
+        let no_ts = engine.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
+            &[],
+            &[],
+            &StreamingMetrics::with_initial_capital(100_000.0),
+        );
+        assert_eq!(no_ts.max_drawdown_duration, 5);
+        assert_eq!(no_ts.max_drawdown_duration_secs, None);
+    }
+
+    /// Without timestamps there is no honest duration to report, and a caller
+    /// must be able to tell that from a real zero.
+    #[test]
+    fn durations_are_none_when_the_run_carried_no_timestamps() {
+        let config = BacktestConfig {
+            initial_capital: 100_000.0,
+            fees: 0.0,
+            slippage: 0.0,
+            stop: StopConfig::None,
+            target: TargetConfig::None,
+            upon_bar_close: true,
+            ..Default::default()
+        };
+
+        let mut ohlcv = sample_ohlcv();
+        ohlcv.timestamps = vec![0; 20];
+
+        let engine = PortfolioEngine::new(config);
+        let result = engine.run_single(&ohlcv, &sample_signals());
+
+        // Every bar shares one timestamp, so no span is measurable.
+        assert_eq!(result.metrics.avg_holding_period_secs, Some(0.0));
+        assert!(result.metrics.avg_holding_period > 0.0, "bars still counted");
     }
 
     #[test]

@@ -601,6 +601,11 @@ pub struct PyBacktestMetrics {
     pub max_drawdown_pct: f64,
     #[pyo3(get)]
     pub max_drawdown_duration: usize,
+    /// The same stretch in seconds, when the run supplied timestamps. A bar is
+    /// a day only on daily data, so the count above cannot be rendered as a
+    /// duration on its own.
+    #[pyo3(get)]
+    pub max_drawdown_duration_secs: Option<f64>,
     #[pyo3(get)]
     pub win_rate_pct: f64,
     #[pyo3(get)]
@@ -647,6 +652,9 @@ pub struct PyBacktestMetrics {
     pub max_consecutive_losses: usize,
     #[pyo3(get)]
     pub avg_holding_period: f64,
+    /// The same average in seconds, when the run supplied timestamps.
+    #[pyo3(get)]
+    pub avg_holding_period_secs: Option<f64>,
     #[pyo3(get)]
     pub exposure_pct: f64,
     #[pyo3(get)]
@@ -678,6 +686,9 @@ impl PyBacktestMetrics {
         dict.set_item("Total Turnover", self.total_turnover)?;
         dict.set_item("Max Drawdown [%]", self.max_drawdown_pct)?;
         dict.set_item("Max Drawdown Duration", self.max_drawdown_duration)?;
+        // Bars above, seconds here. The bar count is a duration only on daily
+        // data; on a tick run it is a count of ticks.
+        dict.set_item("Max Drawdown Duration [s]", self.max_drawdown_duration_secs)?;
         dict.set_item("Total Trades", self.total_trades)?;
         dict.set_item("Total Closed Trades", self.total_closed_trades)?;
         dict.set_item("Total Open Trades", self.total_open_trades)?;
@@ -2179,6 +2190,7 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         omega_ratio: finite(result.metrics.omega_ratio),
         max_drawdown_pct: result.metrics.max_drawdown_pct,
         max_drawdown_duration: result.metrics.max_drawdown_duration,
+        max_drawdown_duration_secs: result.metrics.max_drawdown_duration_secs,
         win_rate_pct: result.metrics.win_rate_pct,
         profit_factor: finite(result.metrics.profit_factor),
         expectancy: result.metrics.expectancy,
@@ -2202,6 +2214,7 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         max_consecutive_wins: result.metrics.max_consecutive_wins,
         max_consecutive_losses: result.metrics.max_consecutive_losses,
         avg_holding_period: result.metrics.avg_holding_period,
+        avg_holding_period_secs: result.metrics.avg_holding_period_secs,
         exposure_pct: result.metrics.exposure_pct,
         payoff_ratio: finite(result.metrics.payoff_ratio),
         recovery_factor: finite(result.metrics.recovery_factor),
