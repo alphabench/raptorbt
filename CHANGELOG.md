@@ -5,6 +5,39 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-08-30
+
+Holding-period seconds now survive a tick session, where they were always
+dropped.
+
+**In plain words: 0.10.1 taught the engine to report how long a trade lasted
+in real time rather than in bars. On tick runs that number never arrived — it
+came back empty every time, and a caller with nothing to render fell back to
+the bar count, so a scalping strategy still reported "132 bars" for a hold
+that really lasted about four minutes. The measurement was being thrown away
+before anyone saw it.**
+
+### Fixed
+
+- **`avg_holding_period_secs` is no longer `None` on every tick backtest.**
+  The average was computed by looking up each trade's `entry_idx` / `exit_idx`
+  in the equity timeline. Those indices count **events**, while the timeline
+  holds one entry per **equity sample** — and on a tick session equity is
+  sampled once per print while quotes advance the index too. Measured on one
+  session of a liquid NSE equity (28,642 prints against 28,635 quotes), a
+  trade closing on the final event carried `exit_idx = 57276` against a
+  28,642-entry timeline. The lookup missed, every span was discarded, and the
+  "cover every trade or report nothing" guard then correctly returned `None`
+  for the whole run.
+
+  The span now comes from the trade's own `entry_time` / `exit_time`, which
+  every production path already populates from the same clock. Bar runs are
+  unaffected — there one event is one bar, so the old indexing happened to
+  agree — and both existing duration tests pass unchanged.
+
+  A tick run that reported no holding duration at all now reports a real one:
+  a two-hour hold measures 7,200 s.
+
 ## [0.10.1] - 2026-08-28
 
 Duration metrics are now reported in **real elapsed time** as well as in bars,

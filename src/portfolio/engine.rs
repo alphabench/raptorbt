@@ -325,13 +325,28 @@ impl PortfolioEngine {
         // a caller can render as a duration. A bar is a day on daily data and
         // a tick on a tick run, so "329" meant 329 days on one and 45 seconds
         // on the other.
-        let avg_holding_period_secs = if total_trades > 0 && timestamps.len() >= 2 {
+        //
+        // Read the trade's OWN timestamps rather than indexing `timestamps`
+        // by `entry_idx`/`exit_idx`. Those indices count **events**, while
+        // `timestamps` holds one entry per **equity sample**, and on a tick
+        // session those are different domains: equity is sampled once per
+        // print, but quotes advance the index too. Measured on one session of
+        // NSE:HDFCBANK — 28,642 prints and 28,635 quotes — a trade closing on
+        // the last event carried `exit_idx = 57276` against a 28,642-entry
+        // array, so `timestamps.get()` returned `None`, every span was
+        // dropped, and the all-trades guard below correctly discarded the
+        // whole average. The result reached users as a NULL that the UI
+        // rendered as "Avg hold 132 bars" on a run where no bar existed.
+        //
+        // `entry_time`/`exit_time` are populated from the same clock on every
+        // production path (portfolio ledger, single-instrument position book,
+        // options runner), so this is exact on bar and tick runs alike rather
+        // than merely tolerant of the mismatch.
+        let avg_holding_period_secs = if total_trades > 0 {
             let spans: Vec<f64> = trades
                 .iter()
                 .filter_map(|t| {
-                    let start = timestamps.get(t.entry_idx)?;
-                    let end = timestamps.get(t.exit_idx)?;
-                    let span = (*end - *start) as f64;
+                    let span = (t.exit_time - t.entry_time) as f64;
                     if span < 0.0 {
                         None
                     } else {
@@ -918,6 +933,70 @@ mod tests {
         );
         assert_eq!(no_ts.max_drawdown_duration, 5);
         assert_eq!(no_ts.max_drawdown_duration_secs, None);
+    }
+
+    /// A trade index may sit beyond the equity timeline, and the duration
+    /// must still be right.
+    ///
+    /// `entry_idx`/`exit_idx` count **events**; `timestamps` holds one entry
+    /// per **equity sample**. On a tick session those diverge: equity is
+    /// sampled once per print, but quotes advance the index too. Measured on
+    /// one session of NSE:HDFCBANK -- 28,642 prints against 28,635 quotes --
+    /// a trade closing on the final event carried `exit_idx = 57276` against
+    /// a 28,642-entry array. Indexing it returned `None`, every span was
+    /// dropped, and the all-trades guard discarded the whole average. Users
+    /// saw "Avg hold 132 bars" on a run in which no bar existed.
+    ///
+    /// So the span comes from the trade's own timestamps. This fixture makes
+    /// the old code fail: the indices are deliberately out of range for the
+    /// timeline, while the timestamps carry an honest two-hour hold.
+    #[test]
+    fn holding_seconds_survive_indices_past_the_equity_timeline() {
+        const ONE_SEC: i64 = 1_000_000_000;
+        let engine = PortfolioEngine::new(BacktestConfig::default());
+
+        let trade = Trade {
+            id: 1,
+            symbol: "TEST".to_string(),
+            // Both indices point past a 10-entry timeline, as a tick run's
+            // event indices do.
+            entry_idx: 40,
+            exit_idx: 7_240,
+            entry_price: 100.0,
+            exit_price: 101.0,
+            size: 1.0,
+            direction: Direction::Long,
+            pnl: 1.0,
+            return_pct: 1.0,
+            entry_time: 1_000 * ONE_SEC,
+            exit_time: 8_200 * ONE_SEC, // exactly two hours later
+            fees: 0.0,
+            entry_fees: 0.0,
+            exit_fees: 0.0,
+            fee_breakdown: None,
+            exit_reason: ExitReason::Signal,
+        };
+
+        let timestamps: Vec<i64> = (0..10).map(|i| i as i64 * ONE_SEC).collect();
+        let equity = vec![100_000.0; 10];
+        let returns = vec![0.0; 10];
+        let drawdown = vec![0.0; 10];
+
+        let m = engine.calculate_metrics(
+            &equity,
+            &drawdown,
+            &returns,
+            std::slice::from_ref(&trade),
+            &timestamps,
+            &StreamingMetrics::default(),
+        );
+
+        assert_eq!(
+            m.avg_holding_period_secs,
+            Some(7_200.0),
+            "the trade's own timestamps say two hours; indexing the equity \
+             timeline by an event index would have discarded it entirely"
+        );
     }
 
     /// Without timestamps there is no honest duration to report, and a caller

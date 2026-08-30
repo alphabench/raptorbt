@@ -119,6 +119,59 @@ def test_the_metrics_dict_carries_the_seconds_figure():
     )
 
 
+def test_a_tick_run_reports_a_real_holding_duration():
+    """The tick path, through `run_tick_strategy` — where this was always None.
+
+    A tick session dispatches a print AND a quote from the same row, so the
+    trade indices count roughly twice the number of equity samples. The
+    seconds figure used to be derived by looking those indices up in the
+    equity timeline; the lookup missed, every span was discarded, and the
+    all-trades guard returned None for the whole run. Callers with nothing to
+    render fell back to the bar count and printed "132 bars" for a hold that
+    lasted about four minutes, on a run where no bar existed at all.
+
+    This drives the real boundary rather than the Rust unit: only here do the
+    print/quote streams actually diverge.
+    """
+    from raptorbt import run_tick_strategy
+
+    n = 400
+    base = 1_700_000_000 * SEC_NS
+    # Every row carries a print and a two-sided quote, so events advance at
+    # twice the rate of equity samples — the shape that broke the lookup.
+    ticks = {
+        "TEST": {
+            "timestamps": np.array([base + i * SEC_NS for i in range(n)], dtype=np.int64),
+            "ltp": np.full(n, 100.0),
+            "bid": np.full(n, 99.5),
+            "ask": np.full(n, 100.5),
+            "buy_qty_delta": np.zeros(n),
+            "sell_qty_delta": np.zeros(n),
+        }
+    }
+
+    class EnterOnceHoldToEnd(Strategy):
+        def on_trade_tick(self, ctx, tick):
+            if not ctx.position and tick.price > 0:
+                self.enter(size_frac=0.2)
+
+    result = run_tick_strategy(EnterOnceHoldToEnd, ticks)
+    m = result.result.metrics
+
+    assert m.total_trades >= 1, "fixture must open a position"
+    secs = m.avg_holding_period_secs
+    assert secs is not None, (
+        "a tick run reported no holding duration at all — the trade indices "
+        "were looked up in the equity timeline again, which counts a "
+        "different thing"
+    )
+    # The position opens on the first print and is held to the end, so the
+    # hold is the span of the data: (n - 1) one-second rows.
+    assert secs == pytest_approx(float(n - 1)), (
+        f"expected ~{n - 1}s of real elapsed hold, got {secs}s"
+    )
+
+
 def pytest_approx(value):
     """Local shim so this file needs no pytest import for one comparison."""
 
