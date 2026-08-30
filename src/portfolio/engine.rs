@@ -274,41 +274,54 @@ impl PortfolioEngine {
             0.0
         };
 
+        // An average over an empty set is undefined, not zero. Reporting 0.0
+        // for "the average losing trade" on a run where nothing lost money
+        // states that the losers broke even, which is a claim about trades
+        // that do not exist -- the same defect that had profit_factor showing
+        // 0.00 beside a 100% win rate.
         let avg_win_pct = if winning_trades > 0 {
-            closed_trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.return_pct).sum::<f64>()
-                / winning_trades as f64
+            Some(
+                closed_trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.return_pct).sum::<f64>()
+                    / winning_trades as f64,
+            )
         } else {
-            0.0
+            None
         };
 
         let avg_loss_pct = if losing_trades > 0 {
-            closed_trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.return_pct).sum::<f64>()
-                / losing_trades as f64
+            Some(
+                closed_trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.return_pct).sum::<f64>()
+                    / losing_trades as f64,
+            )
         } else {
-            0.0
+            None
         };
 
         // Average winning/losing trade duration
         let avg_winning_duration = if winning_trades > 0 {
-            closed_trades
-                .iter()
-                .filter(|t| t.pnl > 0.0)
-                .map(|t| t.holding_period() as f64)
-                .sum::<f64>()
-                / winning_trades as f64
+            Some(
+                closed_trades
+                    .iter()
+                    .filter(|t| t.pnl > 0.0)
+                    .map(|t| t.holding_period() as f64)
+                    .sum::<f64>()
+                    / winning_trades as f64,
+            )
         } else {
-            0.0
+            None
         };
 
         let avg_losing_duration = if losing_trades > 0 {
-            closed_trades
-                .iter()
-                .filter(|t| t.pnl < 0.0)
-                .map(|t| t.holding_period() as f64)
-                .sum::<f64>()
-                / losing_trades as f64
+            Some(
+                closed_trades
+                    .iter()
+                    .filter(|t| t.pnl < 0.0)
+                    .map(|t| t.holding_period() as f64)
+                    .sum::<f64>()
+                    / losing_trades as f64,
+            )
         } else {
-            0.0
+            None
         };
 
         // Consecutive wins/losses
@@ -411,9 +424,13 @@ impl PortfolioEngine {
             crate::metrics::drawdown::calmar_ratio(total_return_pct, max_drawdown_pct);
 
         // Payoff ratio: average win / average loss (absolute value)
-        let payoff_ratio = if avg_loss_pct.abs() > 0.0 {
-            avg_win_pct / avg_loss_pct.abs()
-        } else if avg_win_pct > 0.0 {
+        // Undefined without both halves: no loss to divide by, or no win to
+        // divide. unwrap_or(0.0) reproduces the pre-Option branch exactly.
+        let avg_win_for_payoff = avg_win_pct.unwrap_or(0.0);
+        let avg_loss_for_payoff = avg_loss_pct.unwrap_or(0.0);
+        let payoff_ratio = if avg_loss_for_payoff.abs() > 0.0 {
+            avg_win_for_payoff / avg_loss_for_payoff.abs()
+        } else if avg_win_for_payoff > 0.0 {
             f64::INFINITY
         } else {
             0.0

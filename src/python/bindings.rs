@@ -638,14 +638,18 @@ pub struct PyBacktestMetrics {
     pub worst_trade_pct: f64,
     #[pyo3(get)]
     pub avg_trade_return_pct: f64,
+    /// None when no trade won -- an average over an empty set is undefined.
     #[pyo3(get)]
-    pub avg_win_pct: f64,
+    pub avg_win_pct: Option<f64>,
+    /// None when no trade lost.
     #[pyo3(get)]
-    pub avg_loss_pct: f64,
+    pub avg_loss_pct: Option<f64>,
+    /// None when no trade won.
     #[pyo3(get)]
-    pub avg_winning_duration: f64,
+    pub avg_winning_duration: Option<f64>,
+    /// None when no trade lost.
     #[pyo3(get)]
-    pub avg_losing_duration: f64,
+    pub avg_losing_duration: Option<f64>,
     #[pyo3(get)]
     pub max_consecutive_wins: usize,
     #[pyo3(get)]

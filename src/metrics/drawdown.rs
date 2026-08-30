@@ -350,6 +350,28 @@ mod tests {
     }
 
     #[test]
+    fn an_average_over_an_empty_population_is_undefined() {
+        // Not a drawdown test, but the same rule, and this module is where the
+        // "undefined is not zero" convention is pinned.
+        //
+        // Measured 2026-08-30: a two-leg straddle closed two winning trades and
+        // no losing ones, and the stored row read avg_losing_duration = 0.00
+        // and avg_loss_pct = 0.00 -- figures describing trades that do not
+        // exist. BacktestMetrics now carries Option for all four, so an empty
+        // population reports "cannot say" instead of a number.
+        let no_trades: Vec<f64> = Vec::new();
+        let mean = |xs: &[f64]| -> Option<f64> {
+            if xs.is_empty() {
+                None
+            } else {
+                Some(xs.iter().sum::<f64>() / xs.len() as f64)
+            }
+        };
+        assert_eq!(mean(&no_trades), None, "an average of nothing is not zero");
+        assert_eq!(mean(&[2.0, 4.0]), Some(3.0), "a real population still averages");
+    }
+
+    #[test]
     fn calmar_is_undefined_rather_than_zero_without_drawdown() {
         // A profitable run that never drew down has no defined Calmar. Returning
         // 0.0 (as three of the strategy runners used to) reads as "terrible",

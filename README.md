@@ -1265,16 +1265,16 @@ access all 33. The most useful are grouped below.
 
 ### Trade Performance
 
-| Metric                 | Description                       |
-| ---------------------- | --------------------------------- |
-| `profit_factor`        | Gross profit / Gross loss         |
-| `expectancy`           | Average expected profit per trade |
-| `sqn`                  | System Quality Number             |
-| `avg_trade_return_pct` | Average trade return              |
-| `avg_win_pct`          | Average winning trade return      |
-| `avg_loss_pct`         | Average losing trade return       |
-| `best_trade_pct`       | Best single trade return          |
-| `worst_trade_pct`      | Worst single trade return         |
+| Metric                 | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| `profit_factor`        | Gross profit / Gross loss; `None` when nothing lost   |
+| `expectancy`           | Average expected profit per trade                    |
+| `sqn`                  | System Quality Number                                |
+| `avg_trade_return_pct` | Average trade return                                 |
+| `avg_win_pct`          | Average winning trade return; `None` without winners |
+| `avg_loss_pct`         | Average losing trade return; `None` without losers   |
+| `best_trade_pct`       | Best single trade return                             |
+| `worst_trade_pct`      | Worst single trade return                            |
 
 ### Duration
 
@@ -1282,8 +1282,8 @@ access all 33. The most useful are grouped below.
 | ------------------------- | ---------------------------------------------------- |
 | `avg_holding_period`      | Average trade duration (bars)                        |
 | `avg_holding_period_secs` | The same average in seconds; `None` without timestamps |
-| `avg_winning_duration` | Average winning trade duration |
-| `avg_losing_duration`  | Average losing trade duration  |
+| `avg_winning_duration`    | Average winning trade duration; `None` without winners |
+| `avg_losing_duration`     | Average losing trade duration; `None` without losers   |
 
 ### Streaks
 

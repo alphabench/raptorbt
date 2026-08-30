@@ -5,6 +5,42 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-08-30
+
+Averages over an empty set now report "undefined" instead of zero.
+
+**In plain words: a backtest where every trade won still reported "average
+losing trade: 0.00" and "average losing trade duration: 0.00" -- figures
+describing trades that do not exist. Zero is a measurement; it says the losers
+broke even. The honest answer is that there were no losers, so there is
+nothing to average. These four now come back empty, the way profit factor
+already did.**
+
+### Changed
+
+- **`avg_win_pct`, `avg_loss_pct`, `avg_winning_duration` and
+  `avg_losing_duration` are now `Option<f64>`** (Python: `float | None`), and
+  are `None` when their population is empty -- no winning trade, or no losing
+  trade. Previously each returned `0.0`, which is indistinguishable from a real
+  measurement of zero and reads as a claim about trades that were never taken.
+  Measured on a two-leg straddle that closed two winners and no losers: the
+  stored row carried `avg_loss_pct = 0.00` and `avg_losing_duration = 0.00`
+  beside a 100% win rate.
+
+  This is the same rule 0.10.3 applied to `calmar_ratio` and that
+  `profit_factor` already followed: a quantity with no denominator, or no
+  population, is undefined rather than zero.
+
+  `payoff_ratio` is unaffected -- it reads both averages through
+  `unwrap_or(0.0)`, reproducing its previous branch exactly.
+
+### Migration
+
+Callers reading these four fields must handle `None`. In Python they arrive as
+`None` and can be formatted like any other optional metric; a caller that
+previously relied on the `0.0` fallback for arithmetic should decide
+explicitly whether "no such trades" should score as zero or be skipped.
+
 ## [0.10.3] - 2026-08-30
 
 Calmar is no longer annualized, and every runner now computes it the same way.

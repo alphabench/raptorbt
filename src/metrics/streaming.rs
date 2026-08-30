@@ -437,28 +437,30 @@ impl StreamingMetrics {
             0.0
         };
 
+        // Undefined over an empty population -- see the note in
+        // `portfolio::engine`. None, not 0.0.
         let avg_win_pct = if self.winning_trades > 0 {
-            self.sum_wins / self.winning_trades as f64 / initial_capital * 100.0
+            Some(self.sum_wins / self.winning_trades as f64 / initial_capital * 100.0)
         } else {
-            0.0
+            None
         };
 
         let avg_loss_pct = if self.losing_trades > 0 {
-            -(self.sum_losses / self.losing_trades as f64 / initial_capital * 100.0)
+            Some(-(self.sum_losses / self.losing_trades as f64 / initial_capital * 100.0))
         } else {
-            0.0
+            None
         };
 
         let avg_winning_duration = if self.winning_trades > 0 {
-            self.sum_winning_duration as f64 / self.winning_trades as f64
+            Some(self.sum_winning_duration as f64 / self.winning_trades as f64)
         } else {
-            0.0
+            None
         };
 
         let avg_losing_duration = if self.losing_trades > 0 {
-            self.sum_losing_duration as f64 / self.losing_trades as f64
+            Some(self.sum_losing_duration as f64 / self.losing_trades as f64)
         } else {
-            0.0
+            None
         };
 
         let avg_holding_period = if self.trade_count > 0 {
@@ -510,9 +512,12 @@ impl StreamingMetrics {
             if self.worst_trade_pct == f64::INFINITY { 0.0 } else { self.worst_trade_pct };
 
         // Payoff ratio: average win / average loss (absolute value)
-        let payoff_ratio = if avg_loss_pct.abs() > 0.0 {
-            avg_win_pct / avg_loss_pct.abs()
-        } else if avg_win_pct > 0.0 {
+        // unwrap_or(0.0) reproduces the pre-Option branch exactly.
+        let avg_win_for_payoff = avg_win_pct.unwrap_or(0.0);
+        let avg_loss_for_payoff = avg_loss_pct.unwrap_or(0.0);
+        let payoff_ratio = if avg_loss_for_payoff.abs() > 0.0 {
+            avg_win_for_payoff / avg_loss_for_payoff.abs()
+        } else if avg_win_for_payoff > 0.0 {
             f64::INFINITY
         } else {
             0.0

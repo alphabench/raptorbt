@@ -630,14 +630,16 @@ pub struct BacktestMetrics {
     pub worst_trade_pct: f64,
     /// Average trade return percentage.
     pub avg_trade_return_pct: f64,
-    /// Average winning trade return percentage.
-    pub avg_win_pct: f64,
-    /// Average losing trade return percentage.
-    pub avg_loss_pct: f64,
-    /// Average winning trade duration in bars.
-    pub avg_winning_duration: f64,
-    /// Average losing trade duration in bars.
-    pub avg_losing_duration: f64,
+    /// Average winning trade return percentage. `None` when no trade won:
+    /// an average over an empty set is undefined, and 0.0 there reads as
+    /// "the winners averaged nothing" rather than "there were no winners".
+    pub avg_win_pct: Option<f64>,
+    /// Average losing trade return percentage. `None` when no trade lost.
+    pub avg_loss_pct: Option<f64>,
+    /// Average winning trade duration in bars. `None` when no trade won.
+    pub avg_winning_duration: Option<f64>,
+    /// Average losing trade duration in bars. `None` when no trade lost.
+    pub avg_losing_duration: Option<f64>,
     /// Maximum consecutive wins.
     pub max_consecutive_wins: usize,
     /// Maximum consecutive losses.
