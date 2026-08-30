@@ -495,14 +495,10 @@ impl StreamingMetrics {
         // Sortino ratio (annualized)
         let sortino_ratio = return_metrics.sortino_ratio(252.0);
 
-        // Calmar ratio (annualized return / max drawdown)
-        let calmar_ratio = if self.max_drawdown_pct > 0.0 {
-            total_return_pct / self.max_drawdown_pct
-        } else if total_return_pct > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
+        // Calmar ratio: total return / max drawdown. Not annualized -- see
+        // `metrics::drawdown::calmar_ratio`, the single definition every runner shares.
+        let calmar_ratio =
+            crate::metrics::drawdown::calmar_ratio(total_return_pct, self.max_drawdown_pct);
 
         // Omega ratio
         let omega_ratio = return_metrics.omega_ratio();

@@ -393,28 +393,22 @@ impl PortfolioEngine {
         let (sharpe_ratio, sortino_ratio, omega_ratio) =
             self.calculate_risk_metrics(returns, periods_per_year, self.config.risk_free_rate);
 
-        // Calmar ratio: CAGR / max drawdown.
+        // Calmar ratio: total return / max drawdown, both as percentages.
         //
-        // Years come from elapsed wall-clock time. Deriving them from bar count
-        // (the pre-0.5.0 behavior) made CAGR meaningless on intraday data --
-        // 11k one-minute bars read as ~31 "years".
-        let years = if self.config.legacy_annualization {
-            equity_curve.len().max(1) as f64 / annualization::LEGACY_CALMAR_DAYS
-        } else {
-            annualization::elapsed_years(timestamps)
-                .unwrap_or(equity_curve.len().max(1) as f64 / annualization::LEGACY_CALMAR_DAYS)
-        };
-        let total_return_frac = total_return_pct / 100.0;
-        // CAGR = (end/start)^(1/years) - 1 = (1 + total_return)^(1/years) - 1
-        let cagr =
-            if years > 0.0 { (1.0 + total_return_frac).powf(1.0 / years) - 1.0 } else { 0.0 };
-        let calmar_ratio = if max_drawdown_pct > 0.0 {
-            cagr / (max_drawdown_pct / 100.0) // Both as fractions
-        } else if total_return_pct > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
+        // This is deliberately NOT annualized. Annualizing compounds the run's
+        // return up to a full year, so on a short window the result is an
+        // artifact of the window length rather than a property of the strategy:
+        // a 15.5% gain over 5.27 days reported a Calmar of 115,906 while the
+        // plain ratio is 0.83. The shorter the run, the larger the number, with
+        // no floor to stop it -- one day of the same strategy reported ~3.7e23.
+        //
+        // Every other runner in this crate (streaming, multi, basket, pairs,
+        // options) already uses the plain ratio, so annualizing here also made
+        // one strategy report a Calmar five orders of magnitude apart depending
+        // only on which runner executed it. `metrics::drawdown::calmar_ratio` is
+        // the single definition they now all share.
+        let calmar_ratio =
+            crate::metrics::drawdown::calmar_ratio(total_return_pct, max_drawdown_pct);
 
         // Payoff ratio: average win / average loss (absolute value)
         let payoff_ratio = if avg_loss_pct.abs() > 0.0 {

@@ -199,15 +199,26 @@ def test_mcx_session_scales_annualization(intraday):
     assert ratio == pytest.approx(math.sqrt(870.0 / 375.0), rel=0.001)
 
 
-def test_intraday_calmar_is_not_derived_from_bar_count(intraday):
-    """Bar-count years made an 11k-bar run look like ~31 years of compounding."""
+def test_intraday_calmar_is_not_annualized(intraday):
+    """Calmar is total return / max drawdown, with no time term at all.
+
+    Two bugs have lived here. Bar-count years once made an 11k-bar run look
+    like ~31 years of compounding, collapsing Calmar toward zero. The fix for
+    that annualized from wall-clock time instead, which broke the other way:
+    a 15.5% gain over 5.27 days compounded to a CAGR of 2.17e4 and reported
+    Calmar = 115,906. Both are artifacts of the window length rather than
+    properties of the strategy, so the ratio is no longer annualized at all.
+    """
     entries, exits = sma_crossover(intraday)
     r = run(intraday, entries, exits, initial_capital=500_000.0, fees=0.0003)
     calmar = r.metrics.calmar_ratio
     if calmar is not None and r.metrics.max_drawdown_pct > 0:
-        # Over ~30 calendar days a plausible CAGR cannot be a rounding artifact
-        # of dividing by 31 "years".
+        # Not collapsed to zero by a bogus year count...
         assert abs(calmar) > 1e-6
+        # ...and not inflated by compounding a short window either. This is the
+        # exact identity, so it holds no matter how long the run happens to be.
+        expected = r.metrics.total_return_pct / r.metrics.max_drawdown_pct
+        assert calmar == pytest.approx(expected, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

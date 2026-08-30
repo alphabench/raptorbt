@@ -275,11 +275,10 @@ impl MultiStrategyBacktest {
             total_return_pct,
             sharpe_ratio,
             sortino_ratio,
-            calmar_ratio: if max_drawdown_pct > 0.0 {
-                total_return_pct / max_drawdown_pct
-            } else {
-                0.0
-            },
+            calmar_ratio: crate::metrics::drawdown::calmar_ratio(
+                total_return_pct,
+                max_drawdown_pct,
+            ),
             max_drawdown_pct,
             win_rate_pct,
             profit_factor,

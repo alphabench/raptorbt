@@ -1230,13 +1230,13 @@ access all 33. The most useful are grouped below.
 
 ### Core Performance
 
-| Metric             | Description                       |
-| ------------------ | --------------------------------- |
-| `total_return_pct` | Total return as percentage        |
-| `sharpe_ratio`     | Risk-adjusted return (annualized) |
-| `sortino_ratio`    | Downside risk-adjusted return     |
-| `calmar_ratio`     | Return / Max Drawdown             |
-| `omega_ratio`      | Probability-weighted gains/losses |
+| Metric             | Description                            |
+| ------------------ | -------------------------------------- |
+| `total_return_pct` | Total return as percentage             |
+| `sharpe_ratio`     | Risk-adjusted return (annualized)      |
+| `sortino_ratio`    | Downside risk-adjusted return          |
+| `calmar_ratio`     | Return / Max Drawdown (not annualized) |
+| `omega_ratio`      | Probability-weighted gains/losses      |
 
 ### Drawdown
 

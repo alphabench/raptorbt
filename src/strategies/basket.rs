@@ -399,13 +399,8 @@ impl BasketBacktest {
             );
             (sharpe, sortino)
         };
-        let calmar_ratio = if max_drawdown_pct > 0.0 {
-            total_return_pct / max_drawdown_pct
-        } else if total_return_pct > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
+        let calmar_ratio =
+            crate::metrics::drawdown::calmar_ratio(total_return_pct, max_drawdown_pct);
 
         BacktestMetrics {
             total_return_pct,

@@ -334,6 +334,34 @@ mod tests {
     }
 
     #[test]
+    fn calmar_does_not_annualize_a_short_window() {
+        // Measured 2026-08-30 on a real 5.27-day options backtest: total return
+        // 15.4971%, max drawdown 18.6952%. The portfolio engine used to annualize
+        // this into a CAGR before dividing, reporting Calmar = 115_906.80 -- an
+        // artifact of the window length, not a property of the strategy. The
+        // plain ratio is 0.83, and the same number must come out no matter how
+        // short the run is, because this function is given no notion of time.
+        let calmar = calmar_ratio(15.4971, 18.6952);
+        assert!(
+            (calmar - 0.8289).abs() < 1e-4,
+            "expected the un-annualized ratio ~0.8289, got {calmar}"
+        );
+        assert!(calmar < 5.0, "a plausible Calmar cannot be in the thousands");
+    }
+
+    #[test]
+    fn calmar_is_undefined_rather_than_zero_without_drawdown() {
+        // A profitable run that never drew down has no defined Calmar. Returning
+        // 0.0 (as three of the strategy runners used to) reads as "terrible",
+        // which is the opposite of the truth; INFINITY maps to None at the
+        // Python boundary via `finite()`.
+        assert!(calmar_ratio(12.0, 0.0).is_infinite());
+        // No return and no drawdown is genuinely zero, not undefined.
+        assert_eq!(calmar_ratio(0.0, 0.0), 0.0);
+        assert_eq!(calmar_ratio(-5.0, 0.0), 0.0);
+    }
+
+    #[test]
     fn test_ulcer_index() {
         let equity = vec![100.0, 95.0, 90.0, 95.0, 100.0];
         let ui = ulcer_index(&equity);

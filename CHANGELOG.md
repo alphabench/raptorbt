@@ -5,6 +5,53 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-08-30
+
+Calmar is no longer annualized, and every runner now computes it the same way.
+
+**In plain words: the results panel showed a risk score of 115,906.80 where
+anything above about 5 is implausible. The number was not corrupt -- it came
+from a formula that stretches a run's profit out to a full year before
+dividing by the worst loss along the way. Over five days that stretch is
+enormous, so the shorter the backtest, the sillier the number got. Calmar now
+divides profit by the worst loss directly, with no stretching, which is what
+the README always said it did.**
+
+### Fixed
+
+- **`calmar_ratio` is no longer annualized.** `PortfolioEngine` computed it as
+  **CAGR / max drawdown**, compounding the run's return up to a full year from
+  elapsed wall-clock time with no minimum-window floor. Measured on a real
+  5.27-day options backtest: a 15.4971% return against an 18.6952% drawdown
+  compounded to a CAGR of 2.17e4 and reported **Calmar = 115,906.80**. The
+  same inputs now give **0.83**. The shorter the run the worse it got -- one
+  day of the same strategy reported ~3.7e23 -- and a value large enough to
+  overflow `NUMERIC(10,4)` had previously been observed downstream.
+
+  Because the ratio carries no time term, a caller comparing two strategies is
+  now comparing the strategies rather than their window lengths.
+
+- **All six call sites share one definition.** `metrics::drawdown::calmar_ratio`
+  already implemented the plain ratio and nothing called it. `PortfolioEngine`
+  annualized; `StreamingMetrics`, `MultiStrategyBacktest`, the basket, pairs
+  and options runners each carried their own inline copy. The same strategy
+  therefore reported a Calmar differing by five orders of magnitude depending
+  only on which runner executed it. Every one of them now calls the shared
+  function.
+
+- **A profitable run with no drawdown reports "undefined", not "terrible".**
+  The multi-strategy, pairs and options runners returned `0.0` when max
+  drawdown was zero, which reads as the worst possible score; the correct
+  answer is that the ratio is undefined. They now return `f64::INFINITY`,
+  which crosses to Python as `None` like every other undefined ratio.
+
+### Notes
+
+- `annualization::elapsed_years` and `LEGACY_CALMAR_DAYS` are retained. Calmar
+  no longer calls either, but both are public API with their own tests.
+- Results stored by earlier versions keep their annualized values. A Calmar
+  compared across the 0.10.2/0.10.3 boundary is comparing two definitions.
+
 ## [0.10.2] - 2026-08-30
 
 Holding-period seconds now survive a tick session, where they were always
