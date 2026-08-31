@@ -224,12 +224,46 @@ impl SpreadBacktest {
     pub fn run(
         &self,
         timestamps: &[i64],
-        _underlying_close: &[f64],
+        underlying_close: &[f64],
         legs_premiums: &[Vec<f64>],
         entries: &[bool],
         exits: &[bool],
     ) -> BacktestResult {
+        self.run_with_opens(timestamps, underlying_close, legs_premiums, None, entries, exits)
+    }
+
+    /// [`Self::run`], with each leg's opening premiums supplied.
+    ///
+    /// Under [`FillTiming::NextBarOpen`] a signal fill lands on the bar
+    /// after the decision; with `legs_open_premiums` present it prices the
+    /// legs at that bar's OPEN premiums — real quotes the caller observed —
+    /// instead of the bar's (later) settled values. Nothing is synthesized:
+    /// without the series, the next bar's value remains the honest causal
+    /// fill. Only signal entries and exits use the opens; expiry
+    /// settlement, squareoff, max-loss and target-profit closes are forced
+    /// or protective exits against current marks and keep pricing there.
+    /// The opens are ignored outside `NextBarOpen`.
+    ///
+    /// [`FillTiming::NextBarOpen`]: crate::core::types::FillTiming::NextBarOpen
+    pub fn run_with_opens(
+        &self,
+        timestamps: &[i64],
+        _underlying_close: &[f64],
+        legs_premiums: &[Vec<f64>],
+        legs_open_premiums: Option<&[Vec<f64>]>,
+        entries: &[bool],
+        exits: &[bool],
+    ) -> BacktestResult {
         let n = timestamps.len();
+
+        // Open premiums, when given, must mirror the premium series' shape
+        // exactly -- same legs, same bars. A mismatch would price some legs
+        // off a different series than their marks, silently.
+        if let Some(opens) = legs_open_premiums {
+            if opens.len() != legs_premiums.len() || opens.iter().any(|o| o.len() != n) {
+                return self.empty_result(n);
+            }
+        }
 
         // Validate inputs
         if legs_premiums.len() != self.config.leg_configs.len() {
@@ -340,6 +374,16 @@ impl SpreadBacktest {
 
             if should_exit {
                 if let Some(mut pos) = position.take() {
+                    // A SIGNAL exit fills at the bar's open premiums when the
+                    // caller supplied them (reason precedence puts expiry
+                    // settlement first, so an expiry bar is untouched).
+                    // Forced exits keep the current marks.
+                    if next_open && !is_expiry && exits[i] {
+                        if let Some(opens) = legs_open_premiums {
+                            let open_row: Vec<f64> = opens.iter().map(|o| o[i]).collect();
+                            pos.update_premiums(&open_row);
+                        }
+                    }
                     let pnl = pos.close();
 
                     // Resolved before costs are charged: settlement pays no
@@ -377,11 +421,15 @@ impl SpreadBacktest {
                 .as_ref()
                 .is_some_and(|expiries| expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts));
             if position.is_none() && entries[i] && !any_expired && !squareoff[i] {
+                let entry_premiums: Vec<f64> = match (next_open, legs_open_premiums) {
+                    (true, Some(opens)) => opens.iter().map(|o| o[i]).collect(),
+                    _ => current_premiums.clone(),
+                };
                 let legs: Vec<LegPosition> = self
                     .config
                     .leg_configs
                     .iter()
-                    .zip(current_premiums.iter())
+                    .zip(entry_premiums.iter())
                     .map(|(cfg, &premium)| LegPosition::new(cfg.clone(), premium, i))
                     .collect();
 

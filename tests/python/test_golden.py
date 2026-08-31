@@ -16,9 +16,12 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE / "golden"))
 
 from generate import (  # noqa: E402
+    MULTILEG_KINDS,
+    MULTILEG_TIMINGS,
     GoldenSma,
     config_variants,
     result_digest,
+    run_multileg,
     thaw_inputs,
 )
 
@@ -89,3 +92,17 @@ def test_portfolio_shared_pool_matches_golden():
         },
     }
     assert_digest_equal(actual, expected, "portfolio/shared_pool")
+
+
+@pytest.mark.parametrize("timing", MULTILEG_TIMINGS)
+@pytest.mark.parametrize("kind", MULTILEG_KINDS)
+def test_multileg_matches_golden(kind, timing):
+    """Basket, pairs, options and spread runs replay bit-exact.
+
+    The next_bar_open variants also pin the premium-open fill path where
+    the runner accepts an open series (options, spread).
+    """
+    result = run_multileg(INPUTS, kind, timing)
+    assert_digest_equal(
+        result_digest(result), FIXTURES[f"{kind}/{timing}"], f"{kind}/{timing}"
+    )

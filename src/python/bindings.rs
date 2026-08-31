@@ -1096,7 +1096,7 @@ pub fn run_portfolio_backtest<'py>(
 #[allow(clippy::too_many_arguments)]
 /// Run options backtest.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, option_prices, entries, exits, direction=1, symbol="OPTION", config=None, option_type="call", strike_selection="atm", size_type="percent", size_value=1.0, lot_size=1, strike_interval=50.0))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, option_prices, entries, exits, direction=1, symbol="OPTION", config=None, option_type="call", strike_selection="atm", size_type="percent", size_value=1.0, lot_size=1, strike_interval=50.0, option_open_prices=None))]
 pub fn run_options_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1117,6 +1117,7 @@ pub fn run_options_backtest<'py>(
     size_value: f64,
     lot_size: usize,
     strike_interval: f64,
+    option_open_prices: Option<PyReadonlyArray1<f64>>,
 ) -> PyResult<PyBacktestResult> {
     let ohlcv = OhlcvData {
         timestamps: numpy_to_vec_i64(timestamps),
@@ -1128,6 +1129,17 @@ pub fn run_options_backtest<'py>(
     };
 
     let opt_prices = numpy_to_vec_f64(option_prices);
+    let opt_opens = option_open_prices.map(numpy_to_vec_f64);
+    if let Some(ref opens) = opt_opens {
+        if opens.len() != opt_prices.len() {
+            return Err(PyValueError::new_err(format!(
+                "option_open_prices has {} entries but option_prices has {}; \
+                 the two series must cover the same bars",
+                opens.len(),
+                opt_prices.len(),
+            )));
+        }
+    }
 
     let dir = parse_direction(direction)?;
 
@@ -1191,7 +1203,7 @@ pub fn run_options_backtest<'py>(
     };
 
     let backtest = OptionsBacktest::new(options_config);
-    let result = backtest.run(&ohlcv, &opt_prices, &signals);
+    let result = backtest.run_with_opens(&ohlcv, &opt_prices, opt_opens.as_deref(), &signals);
 
     Ok(convert_result(result))
 }
@@ -1271,7 +1283,7 @@ pub fn run_pairs_backtest<'py>(
 #[allow(clippy::too_many_arguments)]
 /// Run spread backtest (multi-leg options).
 #[pyfunction]
-#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None, leg_expiry_timestamps=None))]
+#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None, leg_expiry_timestamps=None, legs_open_premiums=None))]
 pub fn run_spread_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1285,10 +1297,23 @@ pub fn run_spread_backtest<'py>(
     max_loss: Option<f64>,
     target_profit: Option<f64>,
     leg_expiry_timestamps: Option<Vec<i64>>,
+    legs_open_premiums: Option<Vec<PyReadonlyArray1<f64>>>,
 ) -> PyResult<PyBacktestResult> {
     let ts = numpy_to_vec_i64(timestamps);
     let underlying = numpy_to_vec_f64(underlying_close);
     let premiums: Vec<Vec<f64>> = legs_premiums.into_iter().map(numpy_to_vec_f64).collect();
+    let open_premiums: Option<Vec<Vec<f64>>> =
+        legs_open_premiums.map(|legs| legs.into_iter().map(numpy_to_vec_f64).collect());
+    if let Some(ref opens) = open_premiums {
+        let shape_matches = opens.len() == premiums.len()
+            && opens.iter().zip(premiums.iter()).all(|(o, p)| o.len() == p.len());
+        if !shape_matches {
+            return Err(PyValueError::new_err(
+                "legs_open_premiums must mirror legs_premiums exactly -- same \
+                 number of legs, same number of bars per leg",
+            ));
+        }
+    }
     let entry_signals = numpy_to_vec_bool(entries);
     let exit_signals = numpy_to_vec_bool(exits);
 
@@ -1351,7 +1376,14 @@ pub fn run_spread_backtest<'py>(
     };
 
     let backtest = SpreadBacktest::new(spread_config);
-    let result = backtest.run(&ts, &underlying, &premiums, &entry_signals, &exit_signals);
+    let result = backtest.run_with_opens(
+        &ts,
+        &underlying,
+        &premiums,
+        open_premiums.as_deref(),
+        &entry_signals,
+        &exit_signals,
+    );
 
     Ok(convert_result(result))
 }
@@ -1363,6 +1395,7 @@ pub struct PyBatchSpreadItem {
     #[pyo3(get, set)]
     pub strategy_id: String,
     pub legs_premiums: Vec<Vec<f64>>,
+    pub legs_open_premiums: Option<Vec<Vec<f64>>>,
     pub leg_configs: Vec<(String, f64, i32, usize)>,
     pub entries: Vec<bool>,
     pub exits: Vec<bool>,
@@ -1378,7 +1411,7 @@ pub struct PyBatchSpreadItem {
 impl PyBatchSpreadItem {
     #[new]
     #[pyo3(signature = (strategy_id, legs_premiums, leg_configs, entries, exits,
-        spread_type="custom", max_loss=None, target_profit=None))]
+        spread_type="custom", max_loss=None, target_profit=None, legs_open_premiums=None))]
     // The argument list IS the Python signature; collapsing it into a
     // struct would change the public API for no reader benefit.
     #[allow(clippy::too_many_arguments)]
@@ -1391,10 +1424,13 @@ impl PyBatchSpreadItem {
         spread_type: &str,
         max_loss: Option<f64>,
         target_profit: Option<f64>,
+        legs_open_premiums: Option<Vec<PyReadonlyArray1<f64>>>,
     ) -> Self {
         Self {
             strategy_id,
             legs_premiums: legs_premiums.into_iter().map(numpy_to_vec_f64).collect(),
+            legs_open_premiums: legs_open_premiums
+                .map(|legs| legs.into_iter().map(numpy_to_vec_f64).collect()),
             leg_configs,
             entries: numpy_to_vec_bool(entries),
             exits: numpy_to_vec_bool(exits),
@@ -1431,6 +1467,7 @@ pub fn batch_spread_backtest(
     struct PreparedItem {
         strategy_id: String,
         premiums: Vec<Vec<f64>>,
+        open_premiums: Option<Vec<Vec<f64>>>,
         entries: Vec<bool>,
         exits: Vec<bool>,
         spread_config: SpreadConfig,
@@ -1488,6 +1525,7 @@ pub fn batch_spread_backtest(
             Ok(PreparedItem {
                 strategy_id: item.strategy_id,
                 premiums: item.legs_premiums,
+                open_premiums: item.legs_open_premiums,
                 entries: item.entries,
                 exits: item.exits,
                 spread_config,
@@ -1501,8 +1539,14 @@ pub fn batch_spread_backtest(
             .into_par_iter()
             .map(|item| {
                 let backtest = SpreadBacktest::new(item.spread_config);
-                let result =
-                    backtest.run(&ts, &underlying, &item.premiums, &item.entries, &item.exits);
+                let result = backtest.run_with_opens(
+                    &ts,
+                    &underlying,
+                    &item.premiums,
+                    item.open_premiums.as_deref(),
+                    &item.entries,
+                    &item.exits,
+                );
                 (item.strategy_id, result)
             })
             .collect()

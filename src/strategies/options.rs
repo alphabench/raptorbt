@@ -162,9 +162,33 @@ impl OptionsBacktest {
         option_prices: &[f64],
         signals: &CompiledSignals,
     ) -> BacktestResult {
+        self.run_with_opens(spot_ohlcv, option_prices, None, signals)
+    }
+
+    /// [`Self::run`], with the premium series' opening prices supplied.
+    ///
+    /// Under [`FillTiming::NextBarOpen`] a fill lands on the bar after the
+    /// decision; with `option_open_prices` present it prices at that bar's
+    /// OPEN premium — a real quote the caller observed — instead of the
+    /// bar's (later) settled value. Nothing is synthesized: without the
+    /// series, the next bar's value remains the honest causal fill. The
+    /// opens are ignored outside `NextBarOpen`, where fills coincide with
+    /// the decision bar's value by design.
+    ///
+    /// [`FillTiming::NextBarOpen`]: crate::core::types::FillTiming::NextBarOpen
+    pub fn run_with_opens(
+        &self,
+        spot_ohlcv: &OhlcvData,
+        option_prices: &[f64],
+        option_open_prices: Option<&[f64]>,
+        signals: &CompiledSignals,
+    ) -> BacktestResult {
         let n = spot_ohlcv.len();
         assert_eq!(n, option_prices.len());
         assert_eq!(n, signals.len());
+        if let Some(opens) = option_open_prices {
+            assert_eq!(n, opens.len(), "option_open_prices must match the premium series");
+        }
 
         // Clean signals
         let processor = crate::signals::processor::SignalProcessor::new();
@@ -202,11 +226,17 @@ impl OptionsBacktest {
         for i in 0..n {
             let spot_price = spot_ohlcv.close[i];
             let option_price = option_prices[i];
+            // Signal fills pay the fill bar's open premium when the caller
+            // supplied one; equity keeps marking at the bar's settled value.
+            let fill_premium = match (next_open, option_open_prices) {
+                (true, Some(opens)) => opens[i],
+                _ => option_price,
+            };
 
             // Check for exit
             if exits[i] {
                 if let Some(pos) = position.take() {
-                    let exit_price = option_price;
+                    let exit_price = fill_premium;
                     let (exit_fees, exit_breakdown) =
                         self.charge(exit_price, pos.contracts, signals.direction, false);
                     let entry_fees = pos.entry_fees;
@@ -256,18 +286,18 @@ impl OptionsBacktest {
                 // premium the fill actually pays.
                 let decision_spot = if next_open { spot_ohlcv.close[i - 1] } else { spot_price };
                 let strike = self.select_strike(decision_spot);
-                let contracts = self.calculate_contracts(option_price, cash);
+                let contracts = self.calculate_contracts(fill_premium, cash);
 
                 if contracts > 0 {
-                    let entry_cost = option_price * self.contracts_traded(contracts);
+                    let entry_cost = fill_premium * self.contracts_traded(contracts);
                     let (entry_fees, entry_breakdown) =
-                        self.charge(option_price, contracts, signals.direction, true);
+                        self.charge(fill_premium, contracts, signals.direction, true);
 
                     cash -= entry_cost + entry_fees;
 
                     position = Some(OptionsPosition {
                         entry_idx: i,
-                        entry_price: option_price,
+                        entry_price: fill_premium,
                         strike,
                         contracts,
                         option_type: self.config.option_type,

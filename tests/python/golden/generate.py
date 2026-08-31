@@ -78,6 +78,16 @@ def thaw_inputs(frozen):
     )
 
 
+def freeze_series(arr):
+    """Serialize one float series exactly."""
+    return [float.hex(float(x)) for x in arr]
+
+
+def thaw_series(frozen):
+    """Rebuild a series written by :func:`freeze_series`, bit-for-bit."""
+    return np.array([float.fromhex(x) for x in frozen], dtype=np.float64)
+
+
 def make_signals(close, fast=10, slow=30):
     fast_ma = raptorbt.sma(close, fast)
     slow_ma = raptorbt.sma(close, slow)
@@ -160,6 +170,151 @@ def config_variants():
     return variants
 
 
+MULTILEG_KINDS = ("basket", "pairs", "options", "spread")
+MULTILEG_TIMINGS = ("default", "next_bar_open")
+
+
+def multileg_config(timing):
+    if timing == "default":
+        return BacktestConfig()
+    return BacktestConfig(fill_timing="next_bar_open")
+
+
+def make_multileg_inputs():
+    """Deterministic inputs for the multi-leg corpus.
+
+    Frozen alongside the outputs like every other input: the premium series
+    are DERIVED here with NumPy, once, at generation time — replay thaws the
+    hex, so the gate never re-enters NumPy's unrounded kernels.
+    """
+    inputs = {}
+
+    # Basket: two instruments with their own signals.
+    for seed in (21, 22):
+        ts, o, h, l, c, v = make_data(300, seed=seed)
+        e, x = make_signals(c)
+        inputs[f"BASKET{seed}"] = freeze_inputs(ts, o, h, l, c, v, e, x)
+
+    # Pairs: two legs; the signals ride on leg 1's freeze.
+    for seed in (31, 32):
+        ts, o, h, l, c, v = make_data(300, seed=seed)
+        if seed == 31:
+            e, x = make_signals(c)
+        else:
+            e = x = np.zeros(300, dtype=bool)
+        inputs[f"PAIRS{seed}"] = freeze_inputs(ts, o, h, l, c, v, e, x)
+
+    # One spot series drives the options and spread runs. Premiums are a
+    # simple intrinsic-plus-floor shape — deterministic, positive, and
+    # distinct between each bar's open and close so a fill off the wrong
+    # series is always visible.
+    ts, o, h, l, c, v = make_data(300, seed=41)
+    e, x = make_signals(c)
+    inputs["OPTSPOT"] = freeze_inputs(ts, o, h, l, c, v, e, x)
+    anchor = float(c[0])
+    inputs["OPTPREMIUMS"] = {
+        "call": freeze_series(np.maximum(c - anchor, 0.0) * 0.4 + 12.0),
+        "call_open": freeze_series(np.maximum(o - anchor, 0.0) * 0.4 + 12.0),
+        "put": freeze_series(np.maximum(anchor - c, 0.0) * 0.4 + 12.0),
+        "put_open": freeze_series(np.maximum(anchor - o, 0.0) * 0.4 + 12.0),
+    }
+    return inputs
+
+
+def run_multileg(inputs, kind, timing):
+    """Replay one multi-leg runner from frozen inputs.
+
+    Shared by generation and the gate so both sides run byte-identical
+    calls. The next_bar_open variants pass the premium OPEN series where
+    the runner accepts one, pinning the fill-at-open path as well.
+    """
+    config = multileg_config(timing)
+
+    if kind == "basket":
+        instruments = []
+        for seed in (21, 22):
+            ts, o, h, l, c, v, e, x = thaw_inputs(inputs[f"BASKET{seed}"])
+            instruments.append((ts, o, h, l, c, v, e, x, 1, 1.0, f"BASKET{seed}"))
+        # "any": one instrument signaling moves the basket. The default
+        # "all" needs every instrument to cross on the same bar, which two
+        # independently seeded series essentially never do — it pinned an
+        # empty run.
+        return raptorbt.run_basket_backtest(instruments, config=config, sync_mode="any")
+
+    if kind == "pairs":
+        l1 = thaw_inputs(inputs["PAIRS31"])
+        l2 = thaw_inputs(inputs["PAIRS32"])
+        return raptorbt.run_pairs_backtest(
+            *l1[:6],
+            *l2[:6],
+            l1[6],
+            l1[7],
+            direction=1,
+            symbol="PAIR",
+            config=config,
+            hedge_ratio=1.0,
+            dynamic_hedge=True,
+        )
+
+    if kind == "options":
+        ts, o, h, l, c, v, e, x = thaw_inputs(inputs["OPTSPOT"])
+        prem = thaw_series(inputs["OPTPREMIUMS"]["call"])
+        opens = (
+            thaw_series(inputs["OPTPREMIUMS"]["call_open"])
+            if timing == "next_bar_open"
+            else None
+        )
+        return raptorbt.run_options_backtest(
+            ts,
+            o,
+            h,
+            l,
+            c,
+            v,
+            prem,
+            e,
+            x,
+            direction=1,
+            symbol="OPT",
+            config=config,
+            option_type="call",
+            strike_selection="atm",
+            size_type="percent",
+            size_value=0.5,
+            lot_size=50,
+            strike_interval=50.0,
+            option_open_prices=opens,
+        )
+
+    if kind == "spread":
+        ts, o, h, l, c, v, e, x = thaw_inputs(inputs["OPTSPOT"])
+        legs = [
+            thaw_series(inputs["OPTPREMIUMS"]["call"]),
+            thaw_series(inputs["OPTPREMIUMS"]["put"]),
+        ]
+        opens = (
+            [
+                thaw_series(inputs["OPTPREMIUMS"]["call_open"]),
+                thaw_series(inputs["OPTPREMIUMS"]["put_open"]),
+            ]
+            if timing == "next_bar_open"
+            else None
+        )
+        return raptorbt.run_spread_backtest(
+            ts,
+            c,
+            legs,
+            [("CE", 100.0, -1, 50), ("PE", 100.0, -1, 50)],
+            e,
+            x,
+            config=config,
+            spread_type="straddle",
+            legs_open_premiums=opens,
+        )
+
+    raise ValueError(f"unknown multi-leg kind {kind!r}")
+
+
 class GoldenSma(raptorbt.Strategy):
     """Class-path twin of the array SMA cross."""
 
@@ -224,6 +379,16 @@ def generate():
             for s in portfolio.per_instrument
         },
     }
+
+    # Multi-leg runners: basket, pairs, options, spread — each pinned in
+    # both timings, with the premium-open path exercised where it exists.
+    multileg_inputs = make_multileg_inputs()
+    fixtures["inputs"].update(multileg_inputs)
+    for kind in MULTILEG_KINDS:
+        for timing in MULTILEG_TIMINGS:
+            fixtures[f"{kind}/{timing}"] = result_digest(
+                run_multileg(multileg_inputs, kind, timing)
+            )
 
     out = HERE / "fixtures.json"
     out.write_text(json.dumps(fixtures, indent=1, sort_keys=True))

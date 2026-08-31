@@ -95,3 +95,88 @@ class TestConfigSurface:
             BacktestConfig(fill_timing="next_bar_open").fill_timing
             == "next_bar_open"
         )
+
+
+class TestPremiumOpenSeries:
+    """Optional open premiums for the premium-only runners.
+
+    Under fill_timing="next_bar_open" a signal fill prices at the fill
+    bar's OPEN premium when the caller supplies the series; without it the
+    bar's settled value remains the fill. Nothing is synthesized.
+    """
+
+    def _spot(self, n=10):
+        ts = np.arange(n, dtype=np.int64) * 1_000_000_000
+        o = np.full(n, 100.0)
+        h = np.full(n, 101.0)
+        l = np.full(n, 99.0)
+        c = np.full(n, 100.0)
+        v = np.full(n, 1000.0)
+        return ts, o, h, l, c, v
+
+    def test_options_fill_at_the_open_premium(self):
+        ts, o, h, l, c, v = self._spot()
+        premiums = 10.0 + np.arange(10, dtype=np.float64)
+        opens = 100.0 + np.arange(10, dtype=np.float64)
+        entries = np.zeros(10, dtype=bool)
+        exits = np.zeros(10, dtype=bool)
+        entries[3] = True
+        exits[6] = True
+
+        result = raptorbt.run_options_backtest(
+            ts, o, h, l, c, v, premiums, entries, exits,
+            direction=1,
+            config=_no_cost_config(fill_timing="next_bar_open"),
+            option_open_prices=opens,
+        )
+        trade = result.trades()[0]
+        assert trade.entry_idx == 4
+        assert trade.entry_price == 104.0  # bar 4's OPEN premium
+        assert trade.exit_price == 107.0
+
+    def test_options_open_series_length_is_validated(self):
+        ts, o, h, l, c, v = self._spot()
+        premiums = np.full(10, 10.0)
+        with pytest.raises(ValueError, match="option_open_prices"):
+            raptorbt.run_options_backtest(
+                ts, o, h, l, c, v, premiums,
+                np.zeros(10, dtype=bool), np.zeros(10, dtype=bool),
+                option_open_prices=np.full(9, 10.0),
+            )
+
+    def test_spread_fills_legs_at_their_open_premiums(self):
+        ts, _, _, _, c, _ = self._spot()
+        legs = [10.0 + np.arange(10, dtype=np.float64),
+                20.0 + np.arange(10, dtype=np.float64)]
+        opens = [100.0 + np.arange(10, dtype=np.float64),
+                 200.0 + np.arange(10, dtype=np.float64)]
+        entries = np.zeros(10, dtype=bool)
+        exits = np.zeros(10, dtype=bool)
+        entries[3] = True
+        exits[6] = True
+
+        result = raptorbt.run_spread_backtest(
+            ts, c, legs,
+            [("CE", 100.0, 1, 1), ("PE", 100.0, 1, 1)],
+            entries, exits,
+            config=_no_cost_config(fill_timing="next_bar_open"),
+            spread_type="straddle",
+            legs_open_premiums=opens,
+        )
+        trade = result.trades()[0]
+        assert trade.entry_idx == 4
+        assert trade.exit_idx == 7
+        # Long both legs, open-premium fills: +3 per leg. Settled-value
+        # fills would report +6 per leg.
+        assert abs(trade.pnl - 6.0) < 1e-9
+
+    def test_spread_open_series_shape_is_validated(self):
+        ts, _, _, _, c, _ = self._spot()
+        legs = [np.full(10, 10.0), np.full(10, 20.0)]
+        with pytest.raises(ValueError, match="legs_open_premiums"):
+            raptorbt.run_spread_backtest(
+                ts, c, legs,
+                [("CE", 100.0, 1, 1), ("PE", 100.0, 1, 1)],
+                np.zeros(10, dtype=bool), np.zeros(10, dtype=bool),
+                legs_open_premiums=[np.full(10, 10.0)],  # one leg missing
+            )

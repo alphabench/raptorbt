@@ -386,3 +386,97 @@ fn spreads_next_bar_open_prices_legs_off_the_next_bar() {
     assert_eq!(result.trades[0].entry_idx, 3);
     assert_eq!(result.trades[0].exit_idx, 6);
 }
+
+#[test]
+fn options_next_bar_open_uses_the_open_premium_when_supplied() {
+    use raptorbt::strategies::options::{OptionsBacktest, OptionsConfig};
+
+    let spot = stepped_ohlcv(10);
+    // Settled premiums 10+i; opening premiums 100+i — distinct on every bar
+    // so the wrong series is always visible.
+    let premiums: Vec<f64> = (0..10).map(|i| 10.0 + i as f64).collect();
+    let opens: Vec<f64> = (0..10).map(|i| 100.0 + i as f64).collect();
+
+    let cfg = OptionsConfig { base: config(FillTiming::NextBarOpen), ..OptionsConfig::default() };
+    let result = OptionsBacktest::new(cfg).run_with_opens(
+        &spot,
+        &premiums,
+        Some(&opens),
+        &signals(10, 3, Some(6)),
+    );
+
+    let trade = &result.trades[0];
+    assert_eq!(trade.entry_idx, 4);
+    assert_eq!(trade.entry_price, 104.0, "the fill bar's OPEN premium, not its settled value");
+    assert_eq!(trade.exit_idx, 7);
+    assert_eq!(trade.exit_price, 107.0);
+
+    // Outside NextBarOpen the opens are ignored: same-bar fills coincide
+    // with the decision bar's settled value by design.
+    let cfg = OptionsConfig { base: config(FillTiming::SameBarClose), ..OptionsConfig::default() };
+    let result = OptionsBacktest::new(cfg).run_with_opens(
+        &spot,
+        &premiums,
+        Some(&opens),
+        &signals(10, 3, Some(6)),
+    );
+    assert_eq!(result.trades[0].entry_price, 13.0);
+}
+
+#[test]
+fn spreads_next_bar_open_prices_signal_fills_at_leg_open_premiums() {
+    use raptorbt::strategies::{
+        LegConfig, SpreadBacktest, SpreadConfig, SpreadOptionType, SpreadType,
+    };
+
+    let n = 10;
+    let timestamps: Vec<i64> = (0..n as i64).map(|i| i * 1_000_000_000).collect();
+    let underlying = vec![100.0; n];
+    // Settled premiums vs opening premiums, distinct per bar and per leg.
+    let legs_premiums = vec![
+        (0..n).map(|i| 10.0 + i as f64).collect::<Vec<f64>>(),
+        (0..n).map(|i| 20.0 + i as f64).collect::<Vec<f64>>(),
+    ];
+    let legs_opens = vec![
+        (0..n).map(|i| 100.0 + i as f64).collect::<Vec<f64>>(),
+        (0..n).map(|i| 200.0 + i as f64).collect::<Vec<f64>>(),
+    ];
+    let mut entries = vec![false; n];
+    let mut exits = vec![false; n];
+    entries[3] = true;
+    exits[6] = true;
+
+    let cfg = SpreadConfig {
+        base: config(FillTiming::NextBarOpen),
+        spread_type: SpreadType::Straddle,
+        leg_configs: vec![
+            LegConfig::new(SpreadOptionType::Call, 100.0, 1, 1),
+            LegConfig::new(SpreadOptionType::Put, 100.0, 1, 1),
+        ],
+        max_loss: None,
+        target_profit: None,
+        leg_expiry_timestamps: None,
+    };
+    let result = SpreadBacktest::new(cfg).run_with_opens(
+        &timestamps,
+        &underlying,
+        &legs_premiums,
+        Some(&legs_opens),
+        &entries,
+        &exits,
+    );
+
+    assert_eq!(result.trades.len(), 1);
+    let trade = &result.trades[0];
+    assert_eq!(trade.entry_idx, 4, "decision at 3 opens on 4");
+    assert_eq!(trade.exit_idx, 7, "decision at 6 closes on 7");
+    // Long both legs: entry pays open[4] per leg (104 + 204), signal exit
+    // receives open[7] per leg (107 + 207) — a P&L of +3 per leg, from the
+    // OPEN premiums. Marked-value fills (11+21 -> 17+27) would report +6
+    // per leg instead, so the pnl pins which series filled.
+    assert!(
+        (trade.pnl - 6.0).abs() < 1e-9,
+        "P&L must come from the open premiums (+3 per leg), got {}",
+        trade.pnl
+    );
+}

@@ -5,6 +5,35 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Premium-only runners can now fill at a real opening premium, and the golden
+corpus covers the multi-leg runners.
+
+**In plain words: under next-bar-open timing, an options or spread trade was
+filled at the next bar's settled premium, because those runners carry one
+premium per bar and have no opening price to fill at. That stays true when
+no open data exists — nothing is ever invented — but callers who HAVE the
+premiums' opening prices can now pass them in, and signal fills then price
+at the open the market actually traded, exactly like the equity runners.**
+
+### Added
+
+- **`option_open_prices` on `run_options_backtest`, `legs_open_premiums` on
+  `run_spread_backtest` and `BatchSpreadItem`** — optional opening-premium
+  series, mirroring the premium series' shape (a mismatch raises
+  `ValueError`). Consulted only under `fill_timing="next_bar_open"`, and in
+  the spread runner only for SIGNAL entries and exits: expiry settlement,
+  squareoff, max-loss and target-profit closes are forced or protective
+  exits against current marks and keep pricing there. Absent the series,
+  the next bar's settled value remains the fill, as in 0.11.0.
+- **Golden fixtures for the basket, pairs, options, and spread runners** —
+  eight new pinned runs (each runner in both `same_bar_close` and
+  `next_bar_open`, the latter exercising the premium-open path where the
+  runner accepts one), with their inputs frozen alongside. The multi-leg
+  execution cores were previously outside the bit-exact gate entirely.
+  Every pre-existing fixture is byte-identical.
+
 ## [0.11.0] - 2026-08-31
 
 Open-mode execution no longer trades on information from the future.

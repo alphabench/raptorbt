@@ -291,6 +291,12 @@ def run_options_backtest(
     # is the difference between a 50-contract position and a single one.
     lot_size: int = ...,
     strike_interval: float = ...,
+    # Opening premiums, parallel to option_prices. Used only under
+    # fill_timing="next_bar_open": a signal fill then prices at the fill
+    # bar's OPEN premium instead of the bar's settled value. Must match
+    # option_prices in length; ValueError otherwise. Nothing is synthesized
+    # when absent -- the next bar's value is the fill.
+    option_open_prices: _F64 | None = ...,
 ) -> BacktestResult:
     """Backtest a single-leg option against its underlying.
 
@@ -328,6 +334,12 @@ def run_spread_backtest(
     # after its expiry -- the engine freezes the leg there and never invents a
     # price.
     leg_expiry_timestamps: list[int] | None = ...,
+    # Opening premiums per leg, mirroring legs_premiums exactly (same legs,
+    # same bars; ValueError otherwise). Used only under
+    # fill_timing="next_bar_open", and only for SIGNAL entries and exits --
+    # expiry settlement, squareoff, max-loss and target-profit closes keep
+    # pricing at the current marks. Nothing is synthesized when absent.
+    legs_open_premiums: list[_F64] | None = ...,
 ) -> BacktestResult: ...
 def run_tick_backtest(
     timestamps: _I64,

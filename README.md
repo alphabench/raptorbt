@@ -1464,8 +1464,12 @@ bar's data is allowed to trade:
 `upon_bar_close` is deprecated and maps onto the policy (`True` →
 `"same_bar_close"`, `False` → `"next_bar_open"`); an explicit `fill_timing`
 wins. Runners priced off premium-only series (options, spreads) have no open
-to fill at, so `"next_bar_open"` there fills at the bar **after** the
-decision, at that bar's premium.
+to fill at by default, so `"next_bar_open"` there fills at the bar **after**
+the decision, at that bar's premium — unless the caller supplies the premium
+series' own opening prices (`option_open_prices` on `run_options_backtest`,
+`legs_open_premiums` on `run_spread_backtest` and `BatchSpreadItem`), in
+which case a signal fill prices at the fill bar's open premium. Nothing is
+ever synthesized: without real open data, the next bar's value is the fill.
 
 ```python
 
