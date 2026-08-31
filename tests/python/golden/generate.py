@@ -150,6 +150,13 @@ def config_variants():
     ic = InstrumentConfig(lot_size=50.0, alloted_capital=60_000.0)
     variants.append(("lots_and_cap", BacktestConfig(), ic, 1))
 
+    # Next-bar-open execution: a bar-i decision fills at bar i+1's open.
+    # Pinned so the causality contract itself is under golden protection —
+    # a fill sliding back onto the decision bar changes every number here.
+    variants.append(
+        ("next_bar_open", BacktestConfig(fill_timing="next_bar_open"), None, 1)
+    )
+
     return variants
 
 

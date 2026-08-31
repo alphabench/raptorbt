@@ -10,8 +10,8 @@
 
 use crate::accounts::{AccountMode, MarginBook};
 use crate::core::types::{
-    BacktestConfig, Direction, ExitReason, InstrumentConfig, OhlcvBar, Price, StopConfig,
-    TargetConfig, Timestamp, Trade,
+    BacktestConfig, Direction, ExitReason, FillTiming, InstrumentConfig, OhlcvBar, Price,
+    StopConfig, TargetConfig, Timestamp, Trade,
 };
 use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
 use crate::execution::algos::AlgoEngine;
@@ -120,6 +120,36 @@ pub struct StepInput {
     pub target_price_override: Option<Price>,
 }
 
+/// Signal intents carried from one bar to the next under
+/// [`FillTiming::NextBarOpen`].
+///
+/// A decision made while observing bar i may only trade at bar i+1's open.
+/// The intent is stashed when bar i's signals are processed and consumed at
+/// the very top of the next bar's step — before any code that can create a
+/// new intent runs — so a bar's own fill logic can never see an intent that
+/// bar created. That ordering, not convention, is what rules the look-ahead
+/// out.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeferredIntent {
+    /// A signal entry, with the per-bar payload it was decided with.
+    entry: Option<DeferredEntry>,
+    /// A signal exit for every open position.
+    exit: bool,
+}
+
+/// The decision-time payload of a deferred signal entry.
+///
+/// Everything here is information from the decision bar: the sizing
+/// multiplier and ATR are that bar's values, and the overrides are the
+/// strategy's own prices. Only the fill price comes from the fill bar.
+#[derive(Debug, Clone, Copy)]
+struct DeferredEntry {
+    size_mult: Option<f64>,
+    atr: f64,
+    stop_price_override: Option<Price>,
+    target_price_override: Option<Price>,
+}
+
 /// Which market event is driving a step.
 ///
 /// Selects the matching path only: every other phase of the step is shared.
@@ -160,6 +190,12 @@ pub struct EngineKernel {
     pub(crate) fee_model: FeeModel,
     slippage_model: SlippageModel,
     fill_price: FillPrice,
+    /// When a bar-i decision may execute. Under `NextBarOpen`, signal
+    /// entries/exits stash a [`DeferredIntent`] instead of filling.
+    fill_timing: FillTiming,
+    /// Intent stashed by the previous bar's signals, consumed at the top of
+    /// the next bar step. Always `None` outside `NextBarOpen`.
+    deferred: Option<DeferredIntent>,
     /// Limit/stop fill semantics, including gap-through handling.
     pub(crate) fill_model: FillModel,
 
@@ -245,12 +281,15 @@ impl EngineKernel {
         let config_seed = config.fill_seed;
         let tz_offset_ns = config.session_tz_offset_ns;
         let limit_slippage = config.limit_slippage;
+        let fill_timing = config.resolved_fill_timing();
 
         Self {
             config,
             fee_model,
             slippage_model,
             fill_price,
+            fill_timing,
+            deferred: None,
             fill_model: FillModel { fill_price, limit_slippage, ..FillModel::default() },
             ledger: PositionLedger::new(symbol, PositionPolicy::Net),
             cash,
@@ -780,6 +819,8 @@ impl EngineKernel {
         // trades at this bar, so neither exits-by-signal nor entries apply.
         // Working orders die with the contract.
         if self.spec.as_ref().is_some_and(|s| s.is_expired_at(bar.timestamp)) {
+            // A deferred intent dies with the contract: it can no longer trade.
+            self.deferred = None;
             events.extend(self.settle_expiry(idx, bar));
             self.cancel_all_orders(idx);
             events.append(&mut self.pending_events);
@@ -790,14 +831,96 @@ impl EngineKernel {
             return events;
         }
 
+        // Intents stashed by the previous bar's signals (NextBarOpen) fill
+        // FIRST, at this bar's open, before anything on this bar can create
+        // a new intent — so a bar's own fill logic can never reach a signal
+        // that bar generated. Exits before the entry, mirroring the phase
+        // order below; the entry then participates in this bar's own
+        // stop/target checks, since a position opened at the open lives
+        // through the rest of the bar.
+        if mode == StepMode::Bar {
+            if let Some(intent) = self.deferred.take() {
+                if intent.exit {
+                    let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+                    for position_id in open_ids {
+                        let direction = match self.ledger.get(position_id) {
+                            Some(managed) => managed.position.direction,
+                            None => continue,
+                        };
+                        let price = self.fill_price_for(bar, direction, false);
+                        if let Some(event) =
+                            self.close_at(idx, bar, position_id, price, ExitReason::Signal)
+                        {
+                            events.push(event);
+                        }
+                    }
+                }
+                if let Some(entry) = intent.entry {
+                    // Gates run at fill time, against the state the fill bar
+                    // actually sees; a refusal surfaces on this bar. No early
+                    // return: a refused deferred entry must not skip the rest
+                    // of the bar.
+                    if !self.ledger.is_in_position() {
+                        let active = self
+                            .spec
+                            .as_ref()
+                            .and_then(|s| s.activation_ns)
+                            .is_none_or(|act| bar.timestamp >= act);
+                        if !active {
+                            self.risk.record_rejection();
+                            events.push(EngineEvent::EntryRejected {
+                                idx,
+                                reason: RejectReason::Inactive,
+                            });
+                        } else if self.margin.is_halted() {
+                            self.risk.record_rejection();
+                            events.push(EngineEvent::EntryRejected {
+                                idx,
+                                reason: RejectReason::MarginCall,
+                            });
+                        } else {
+                            match self.risk.check_entry(self.gating_open_count()) {
+                                Ok(()) => {
+                                    let entry_input = StepInput {
+                                        entry: true,
+                                        atr: entry.atr,
+                                        size_mult: entry.size_mult,
+                                        stop_price_override: entry.stop_price_override,
+                                        target_price_override: entry.target_price_override,
+                                        ..StepInput::default()
+                                    };
+                                    if let Some(event) = self.try_enter(idx, bar, entry_input) {
+                                        events.push(event);
+                                    }
+                                }
+                                Err(reason) => {
+                                    self.risk.record_rejection();
+                                    events.push(EngineEvent::EntryRejected { idx, reason });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Track running extremes for trailing stops.
         self.ledger.update_price(bar.high, bar.low);
+
+        // Under NextBarOpen this bar's signals only stash intents; they fill
+        // at the top of the next bar step. Protective stop/target exits are
+        // NOT deferred — their triggers are intra-bar prices, already causal.
+        let defer_signals = self.fill_timing == FillTiming::NextBarOpen && mode == StepMode::Bar;
+        if defer_signals && input.exit {
+            self.deferred.get_or_insert_with(DeferredIntent::default).exit = true;
+        }
+        let same_bar_exit = !defer_signals && input.exit;
 
         // Protective/signal exits, per position in opening order. Net policy
         // holds one position, reproducing the original sequence exactly.
         let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         for position_id in open_ids {
-            if let Some(event) = self.try_exit_position(idx, bar, position_id, input.exit) {
+            if let Some(event) = self.try_exit_position(idx, bar, position_id, same_bar_exit) {
                 events.push(event);
             }
 
@@ -854,7 +977,17 @@ impl EngineKernel {
             self.apply_match_outcome(idx, bar, outcome, &mut events);
         }
 
-        if !self.ledger.is_in_position() && input.entry {
+        if defer_signals && input.entry {
+            // Stash the decision-time payload; the position-state and risk
+            // gates run at fill time, at the top of the next bar step,
+            // against the state that bar actually sees.
+            self.deferred.get_or_insert_with(DeferredIntent::default).entry = Some(DeferredEntry {
+                size_mult: input.size_mult,
+                atr: input.atr,
+                stop_price_override: input.stop_price_override,
+                target_price_override: input.target_price_override,
+            });
+        } else if !self.ledger.is_in_position() && input.entry {
             // Not-yet-active instruments refuse entries the same way expired
             // ones do, before the risk gate sees them.
             let active = self
@@ -895,24 +1028,51 @@ impl EngineKernel {
         // than trailing a step behind its schedule.
         self.release_algo_slices(idx, bar.timestamp, &mut events);
 
-        // Market orders placed while this bar was observed fill last, at the
-        // configured fill-price model — the same contract as signal entries.
+        // Market orders fill last, at the configured fill-price model — the
+        // same contract as signal entries. SameBarClose (and the legacy
+        // look-ahead mode) sweeps the orders this bar's observation placed;
+        // NextBarOpen sweeps the PREVIOUS bar's — a bar-i submission is
+        // unreachable by bar i's sweep and fills at bar i+1's open, exactly
+        // like a deferred signal.
+        let is_plain_market = |o: &&crate::execution::orders::Order| {
+            matches!(o.kind, OrderKind::Market)
+                && o.parent_id.is_none()
+                && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
+        };
+        if defer_signals {
+            // Acknowledge this bar's new market orders now; their fill
+            // arrives on the next bar step.
+            let ack_ids: Vec<u64> = self
+                .orders
+                .working()
+                .filter(is_plain_market)
+                .filter(|o| o.submitted_idx == idx)
+                .map(|o| o.id)
+                .collect();
+            for id in ack_ids {
+                if let Some(order) = self.orders.get_mut(id) {
+                    let _ = order.transition(OrderStatus::Accepted);
+                    let client_id = order.client_id.clone();
+                    events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
+                }
+            }
+        }
         let market_ids: Vec<u64> = self
             .orders
             .working()
-            .filter(|o| {
-                matches!(o.kind, OrderKind::Market)
-                    && o.submitted_idx == idx
-                    && o.parent_id.is_none()
-                    && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
-            })
+            .filter(is_plain_market)
+            .filter(|o| if defer_signals { o.submitted_idx < idx } else { o.submitted_idx == idx })
             .map(|o| o.id)
             .collect();
         for id in market_ids {
-            if let Some(order) = self.orders.get_mut(id) {
-                let _ = order.transition(OrderStatus::Accepted);
-                let client_id = order.client_id.clone();
-                events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
+            // Under deferral the order was already acknowledged (and moved
+            // to Accepted) on its submission bar.
+            if !defer_signals {
+                if let Some(order) = self.orders.get_mut(id) {
+                    let _ = order.transition(OrderStatus::Accepted);
+                    let client_id = order.client_id.clone();
+                    events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
+                }
             }
             self.apply_match_outcome(
                 idx,
@@ -1269,17 +1429,23 @@ impl EngineKernel {
     /// Force-close every position on a margin call.
     ///
     /// Unlike end-of-data finalization or expiry settlement, this is a real
-    /// trade-out: it prices through the fill model and pays exit costs,
-    /// because a broker liquidating a position actually crosses the spread.
+    /// trade-out: it pays exit costs, because a broker liquidating a
+    /// position actually crosses the spread.
+    ///
+    /// Fills at the bar's close unconditionally rather than through the
+    /// fill-price model: the breach is *detected* marking equity at the
+    /// close, and a broker liquidates on detection. The bar's open predates
+    /// the detection, so pricing this through an open-based model would
+    /// liquidate at a price from before the information existed.
     pub fn liquidate_all(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
         let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         let mut events = Vec::new();
         for position_id in ids {
-            let Some(managed) = self.ledger.get(position_id) else { continue };
-            let direction = managed.position.direction;
-            let price = self.fill_price_for(bar, direction, false);
+            if self.ledger.get(position_id).is_none() {
+                continue;
+            }
             if let Some(event) =
-                self.close_at(idx, bar, position_id, price, ExitReason::Liquidation)
+                self.close_at(idx, bar, position_id, bar.close, ExitReason::Liquidation)
             {
                 events.push(event);
             }

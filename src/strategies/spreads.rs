@@ -251,6 +251,29 @@ impl SpreadBacktest {
             }
         }
 
+        // Execution timing. Leg premiums carry one value per bar — there is
+        // no open to fill at — so under NextBarOpen a bar-i decision
+        // executes at bar i+1's premiums: the signal streams shift one bar
+        // forward (a last-bar decision never trades) and the loop prices the
+        // legs off the bar after the decision, re-checking that bar's own
+        // gates (expiry, squareoff, position state) before opening. Only the
+        // SIGNAL entry and exit shift: expiry settlement, squareoff,
+        // max-loss and target-profit closes are forced or protective exits
+        // whose triggers are current marks, already causal, and keep filling
+        // on their own bar. SameBarClose is the historical behavior,
+        // byte-identical; SameBarOpenLookahead has no distinct history in
+        // this runner and behaves the same.
+        let next_open =
+            self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
+        let shifted: (Vec<bool>, Vec<bool>);
+        let (entries, exits): (&[bool], &[bool]) = if next_open {
+            let shift = crate::signals::processor::shift_signals;
+            shifted = (shift(entries, 1), shift(exits, 1));
+            (&shifted.0, &shifted.1)
+        } else {
+            (entries, exits)
+        };
+
         let mut metrics = StreamingMetrics::with_initial_capital(self.config.base.initial_capital);
         let mut equity_curve = Vec::with_capacity(n);
         let mut drawdown_curve = Vec::with_capacity(n);

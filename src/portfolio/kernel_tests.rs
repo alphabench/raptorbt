@@ -1482,3 +1482,140 @@ fn leveraged_adoption_is_refused_not_guessed() {
     let err = kernel.adopt_position(0, 90.0, 100.0).unwrap_err();
     assert!(err.contains("fully funded"), "expected a leverage refusal, got: {err}");
 }
+
+/// Under NextBarOpen a streaming caller sees the `Entered` event on the
+/// step AFTER the signal, priced at that bar's open — never on the signal
+/// bar itself.
+#[test]
+fn next_bar_open_defers_the_entered_event_to_the_next_step() {
+    let config =
+        BacktestConfig { fill_timing: Some(FillTiming::NextBarOpen), ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let fill_price = FillPrice::for_timing(config.resolved_fill_timing());
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        fill_price,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+
+    // Signal bar: nothing fills, nothing opens.
+    let events = kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
+    assert!(events.is_empty(), "the signal bar must not fill: {events:?}");
+    assert!(!kernel.is_in_position());
+
+    // Next bar: the deferred entry fills at THIS bar's open, before this
+    // bar's own signals could have been seen.
+    let mut fill_bar = bar(1, 110.0);
+    fill_bar.open = 104.0;
+    let events = kernel.step(1, &fill_bar, StepInput::default());
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Entered { idx: 1, price, .. }] if *price == 104.0),
+        "expected a deferred entry at open, got {events:?}"
+    );
+    assert!(kernel.is_in_position());
+
+    // Exit signal defers the same way.
+    let events = kernel.step(2, &bar(2, 111.0), StepInput { exit: true, ..StepInput::default() });
+    assert!(events.is_empty(), "the exit-signal bar must not fill: {events:?}");
+    let mut exit_bar = bar(3, 108.0);
+    exit_bar.open = 109.0;
+    let events = kernel.step(3, &exit_bar, StepInput::default());
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Exited { trade, .. }] if trade.exit_price == 109.0),
+        "expected a deferred exit at open, got {events:?}"
+    );
+}
+
+/// The deferred fill happens before the bar's own signal processing: a
+/// same-step exit signal on the fill bar defers again rather than closing
+/// the position that just opened.
+#[test]
+fn deferred_fill_precedes_the_fill_bars_own_signals() {
+    let config =
+        BacktestConfig { fill_timing: Some(FillTiming::NextBarOpen), ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Open,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+
+    kernel.step(0, &bar(0, 100.0), StepInput { entry: true, ..StepInput::default() });
+    // Fill bar carries its own exit signal: the entry fills here, the exit
+    // is an intent for the NEXT bar.
+    let events = kernel.step(1, &bar(1, 101.0), StepInput { exit: true, ..StepInput::default() });
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Entered { .. }]),
+        "only the entry may fill on this bar: {events:?}"
+    );
+    assert!(kernel.is_in_position(), "the exit must not act on the bar that signaled it");
+
+    let events = kernel.step(2, &bar(2, 102.0), StepInput::default());
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Exited { .. }]),
+        "the deferred exit fills one bar later: {events:?}"
+    );
+}
+
+/// Under NextBarOpen an order-API market order submitted while observing
+/// bar i is unreachable by bar i's sweep: it is acknowledged there and
+/// fills at bar i+1's open — the same contract as a deferred signal.
+#[test]
+fn next_bar_open_market_order_fills_at_the_next_bars_open() {
+    for tif in [TimeInForce::Gtc, TimeInForce::Ioc] {
+        let config = BacktestConfig {
+            fill_timing: Some(FillTiming::NextBarOpen),
+            fees: 0.0,
+            ..BacktestConfig::default()
+        };
+        let fee_model = config.fee_model();
+        let mut kernel = EngineKernel::new(
+            config,
+            fee_model,
+            SlippageModel::None,
+            FillPrice::Open,
+            "TEST".to_string(),
+            Direction::Long,
+            None,
+        );
+
+        // Strategy observed bar 0 and placed a market order.
+        kernel.submit_order(
+            OrderSide::Buy,
+            QtySpec::Units(10.0),
+            OrderKind::Market,
+            tif,
+            0,
+            0,
+            "mkt-1".to_string(),
+            None,
+            None,
+        );
+
+        // Bar 0's step acknowledges but must not fill.
+        let events = kernel.step(0, &bar(0, 100.0), StepInput::default());
+        assert!(
+            matches!(events.as_slice(), [EngineEvent::OrderAccepted { idx: 0, .. }]),
+            "tif {tif:?}: submission bar acknowledges only, got {events:?}"
+        );
+        assert!(!kernel.is_in_position(), "tif {tif:?}: nothing may fill on the submission bar");
+
+        // Bar 1: fills at THIS bar's open.
+        let mut fill_bar = bar(1, 110.0);
+        fill_bar.open = 104.0;
+        let events = kernel.step(1, &fill_bar, StepInput::default());
+        let filled = events.iter().any(
+            |e| matches!(e, EngineEvent::OrderFilled { idx: 1, price, .. } if *price == 104.0),
+        );
+        assert!(filled, "tif {tif:?}: expected a fill at 104.0 on bar 1, got {events:?}");
+        assert!(kernel.is_in_position());
+    }
+}

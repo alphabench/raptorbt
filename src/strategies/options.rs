@@ -170,6 +170,24 @@ impl OptionsBacktest {
         let processor = crate::signals::processor::SignalProcessor::new();
         let (entries, exits) = processor.clean_signals(&signals.entries, &signals.exits);
 
+        // Execution timing. The premium series carries one value per bar —
+        // there is no open to fill at — so under NextBarOpen a bar-i
+        // decision executes at bar i+1's premium: the cleaned stream shifts
+        // one bar forward (a last-bar decision never trades) and the loop's
+        // ordinary fill price becomes the bar after the decision. Strike
+        // selection is decision-time information and reads the decision
+        // bar's spot. SameBarClose is the historical behavior,
+        // byte-identical; SameBarOpenLookahead has no distinct history in
+        // this runner and behaves the same.
+        let next_open =
+            self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
+        let (entries, exits) = if next_open {
+            let shift = crate::signals::processor::shift_signals;
+            (shift(&entries, 1), shift(&exits, 1))
+        } else {
+            (entries, exits)
+        };
+
         // Initialize state
         let mut cash = self.config.base.initial_capital;
         let mut position: Option<OptionsPosition> = None;
@@ -232,7 +250,12 @@ impl OptionsBacktest {
 
             // Check for entry
             if entries[i] && position.is_none() {
-                let strike = self.select_strike(spot_price);
+                // The strike was chosen when the decision was made; under
+                // NextBarOpen that is the previous bar's spot (a shifted
+                // entry never fires at i == 0). Contract count sizes at the
+                // premium the fill actually pays.
+                let decision_spot = if next_open { spot_ohlcv.close[i - 1] } else { spot_price };
+                let strike = self.select_strike(decision_spot);
                 let contracts = self.calculate_contracts(option_price, cash);
 
                 if contracts > 0 {

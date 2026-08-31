@@ -29,7 +29,16 @@ class BacktestConfig:
     initial_capital: float
     fees: float
     slippage: float
+    # Deprecated in favor of fill_timing: True maps to "same_bar_close",
+    # False to "next_bar_open". An explicit fill_timing wins over this flag.
     upon_bar_close: bool
+    # Execution-timing policy: "same_bar_close" (decide and fill at bar i's
+    # close), "next_bar_open" (decide at bar i's close, fill at bar i+1's
+    # open; a last-bar decision never trades), or "same_bar_open_lookahead"
+    # (pre-0.11 behavior — fills at a price from before the signal existed;
+    # not causally valid, for reproducing old results only). None derives
+    # the policy from upon_bar_close. Read-only; set via the constructor.
+    fill_timing: str | None
     apply_slippage: bool
     periods_per_year: float | None
     risk_free_rate: float
@@ -71,6 +80,7 @@ class BacktestConfig:
         limit_slippage: float = ...,
         liquidate_on_margin_call: bool = ...,
         squareoff_time: str | None = ...,
+        fill_timing: str | None = ...,
     ) -> None: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...

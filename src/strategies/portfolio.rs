@@ -115,8 +115,7 @@ impl PortfolioBacktest {
         } else {
             SlippageModel::None
         };
-        let fill_price =
-            if self.config.base.upon_bar_close { FillPrice::Close } else { FillPrice::Open };
+        let fill_price = FillPrice::for_timing(self.config.base.resolved_fill_timing());
 
         // Clean each instrument's signals independently.
         let processor = SignalProcessor::new();

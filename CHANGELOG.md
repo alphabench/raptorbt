@@ -5,6 +5,95 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-08-31
+
+Open-mode execution no longer trades on information from the future.
+
+**In plain words: a strategy decides at a bar's close, using everything that
+bar showed. With `upon_bar_close=False`, the engine then executed that
+decision at the same bar's OPENING price — a price the market had already
+left behind before the decision existed. That is a time machine, and it
+inflated every result run in this mode: on a fixture where one bar rallies
+100 → 200 and every later price is 150, a strategy whose signal fires on
+that close reported +50.0% — a profit no real trader could earn, since 100
+never traded again once the signal existed. The same run now reports 0.0%,
+buying at the next bar's open like a real order would. Every mature engine
+surveyed (backtrader, zipline, LEAN, NautilusTrader, vnpy) enforces exactly
+this next-bar contract; none fills a close-decided signal at that bar's
+open.**
+
+### Fixed
+
+- **`upon_bar_close=False` now means next-bar-open, not same-bar-open.** A
+  signal decided on bar i fills at bar i+1's open — never at bar i's own
+  open. The fill is structurally unreachable on the decision bar: the
+  deferred intent is consumed at the top of the next bar's step, before any
+  code that could create a new one runs. A position opened at bar i+1's open
+  lives through bar i+1, so its stop or target can fire within the fill bar.
+- **Order-API market orders follow the same contract in this mode.** An
+  order submitted while observing bar i is acknowledged on bar i's step and
+  fills at bar i+1's open. In `same_bar_close` mode (the default) nothing
+  changes: market orders still fill on their submission bar at its close.
+- **Margin-call liquidation prices at the breaching bar's close.** The
+  breach is detected marking equity at the close; the old open-based fill
+  liquidated at a price from before the detection. Close-mode results are
+  unchanged (the two coincided).
+
+### Changed
+
+- **New `fill_timing` policy on `BacktestConfig`** —
+  `"same_bar_close"` (decide and fill at bar i's close, the default),
+  `"next_bar_open"` (decide at bar i's close, fill at bar i+1's open), and
+  `"same_bar_open_lookahead"` (the pre-0.11 behavior, named for what it is;
+  see Migration). `upon_bar_close` is **deprecated** and maps onto the
+  policy (`True` → `"same_bar_close"`, `False` → `"next_bar_open"`); an
+  explicit `fill_timing` wins over the bool.
+- **The basket, pairs, options, and spread runners now honor the timing
+  policy.** They previously ignored `upon_bar_close` entirely and always
+  filled at the decision bar's close — causally valid, and still their
+  behavior under the default. Under `"next_bar_open"` a decision executes
+  on the following bar: at each leg's own open where the series carries one
+  (basket, pairs), and at the following bar's premium for premium-only
+  series (options, spread legs), which have no open to fill at. Decision-
+  time information stays on the decision bar: the pairs hedge ratio and the
+  options strike are computed from data available when the signal fired.
+  Spread expiry settlement, squareoff, max-loss and target-profit closes
+  are forced or protective exits and keep filling on their own bar.
+- **Streaming sessions surface deferred fills one step later.** In
+  `"next_bar_open"` mode, a `KernelSession`/`EventSession` step that
+  carries an entry or exit signal returns no `Entered`/`Exited` event;
+  the event arrives on the next step, priced at that bar's open.
+
+### Notes
+
+- A decision on the final bar never fills in `"next_bar_open"` mode —
+  there is no next bar to fill it on. End-of-data finalization still
+  closes open positions at the last close, as before.
+- The tick path is unaffected: a tick fill happens at the print itself,
+  which is already causal, and a print carries no "next open".
+- Resting orders (limit, stop, at-open, at-close) already matched from the
+  bar after submission and are unchanged.
+- `FillModel.delay_to_next_bar` and `FillModel::at_next_open()` — dead
+  code that was never consulted — are removed; `fill_timing` supersedes
+  them.
+
+### Migration
+
+- Results previously produced with `upon_bar_close=False` are **not
+  comparable** to 0.11 results and were optimistically biased. To reproduce
+  them exactly:
+
+  ```python
+  config = raptorbt.BacktestConfig(fill_timing="same_bar_open_lookahead")
+  ```
+
+  The name states what it does: it fills a bar's signal at that same bar's
+  open, a price from before the signal's information existed. Use it only
+  to reproduce pre-0.11 numbers.
+- Results produced with the default `upon_bar_close=True` are unchanged —
+  the golden corpus is byte-identical across this release.
+- Pin `raptorbt>=0.11.0,<0.12.0`.
+
 ## [0.10.4] - 2026-08-30
 
 Averages over an empty set now report "undefined" instead of zero.

@@ -39,7 +39,7 @@ impl PortfolioEngine {
     /// Create a new portfolio engine with the given configuration.
     pub fn new(config: BacktestConfig) -> Self {
         let fee_model = config.fee_model();
-        let fill_price = if config.upon_bar_close { FillPrice::Close } else { FillPrice::Open };
+        let fill_price = FillPrice::for_timing(config.resolved_fill_timing());
         let slippage_model = Self::slippage_model_for(&config);
 
         Self {

@@ -1447,8 +1447,27 @@ config = raptorbt.BacktestConfig(
     initial_capital: float = 100000.0,
     fees: float = 0.001,
     slippage: float = 0.0,
-    upon_bar_close: bool = True,
+    upon_bar_close: bool = True,   # deprecated — use fill_timing
+    fill_timing: str | None = None,
 )
+```
+
+`fill_timing` names the execution-timing policy — when a decision made from a
+bar's data is allowed to trade:
+
+| Value | Meaning |
+| --- | --- |
+| `"same_bar_close"` | Decide at bar i's close, fill at bar i's close (zero latency). |
+| `"next_bar_open"` | Decide at bar i's close, fill at bar i+1's open — the standard bar contract. A decision on the final bar never trades. |
+| `"same_bar_open_lookahead"` | Pre-0.11 behavior: fills a bar-i decision at bar i's **own open**, a price from before the decision's information existed. Not causally valid; exists only to reproduce pre-0.11 results. |
+
+`upon_bar_close` is deprecated and maps onto the policy (`True` →
+`"same_bar_close"`, `False` → `"next_bar_open"`); an explicit `fill_timing`
+wins. Runners priced off premium-only series (options, spreads) have no open
+to fill at, so `"next_bar_open"` there fills at the bar **after** the
+decision, at that bar's premium.
+
+```python
 
 # Stop methods
 config.set_fixed_stop(percent: float)

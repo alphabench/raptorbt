@@ -77,6 +77,9 @@ pub struct PyBacktestConfig {
     pub fees: f64,
     #[pyo3(get, set)]
     pub slippage: f64,
+    /// Deprecated in favor of `fill_timing`: `True` maps to
+    /// `"same_bar_close"`, `False` to `"next_bar_open"`. An explicit
+    /// `fill_timing` wins over this flag.
     #[pyo3(get, set)]
     pub upon_bar_close: bool,
     /// Whether `slippage` is applied to fills. Ignored entirely before 0.5.0.
@@ -141,6 +144,10 @@ pub struct PyBacktestConfig {
     pub bar_path_adaptive: bool,
     stop_config: StopConfig,
     target_config: TargetConfig,
+    /// Execution-timing policy, parsed at construction; `None` derives it
+    /// from the deprecated `upon_bar_close`. Read back via the
+    /// `fill_timing` getter as its string form.
+    fill_timing: Option<crate::core::types::FillTiming>,
 }
 
 #[pymethods]
@@ -169,6 +176,7 @@ impl PyBacktestConfig {
         limit_slippage=0.0,
         liquidate_on_margin_call=false,
         squareoff_time=None,
+        fill_timing=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -193,8 +201,10 @@ impl PyBacktestConfig {
         limit_slippage: f64,
         liquidate_on_margin_call: bool,
         squareoff_time: Option<String>,
+        fill_timing: Option<String>,
     ) -> PyResult<Self> {
         let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
+        let fill_timing = parse_fill_timing(fill_timing.as_deref())?;
         Ok(Self {
             initial_capital,
             fees,
@@ -219,6 +229,7 @@ impl PyBacktestConfig {
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
             squareoff_time_minutes,
+            fill_timing,
         })
     }
 
@@ -250,6 +261,39 @@ impl PyBacktestConfig {
     /// Set risk-reward based take-profit.
     fn set_risk_reward_target(&mut self, ratio: f64) {
         self.target_config = TargetConfig::RiskReward { ratio };
+    }
+
+    /// The execution-timing policy, or `None` when it derives from the
+    /// deprecated `upon_bar_close` flag.
+    #[getter]
+    fn fill_timing(&self) -> Option<&'static str> {
+        use crate::core::types::FillTiming;
+        self.fill_timing.map(|t| match t {
+            FillTiming::SameBarClose => "same_bar_close",
+            FillTiming::NextBarOpen => "next_bar_open",
+            FillTiming::SameBarOpenLookahead => "same_bar_open_lookahead",
+        })
+    }
+}
+
+/// Parse an execution-timing policy name.
+///
+/// Refuses anything it cannot read rather than guessing — a silently
+/// defaulted timing would decide which bar every fill prices off.
+fn parse_fill_timing(value: Option<&str>) -> PyResult<Option<crate::core::types::FillTiming>> {
+    use crate::core::types::FillTiming;
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    match raw.trim() {
+        "same_bar_close" => Ok(Some(FillTiming::SameBarClose)),
+        "next_bar_open" => Ok(Some(FillTiming::NextBarOpen)),
+        "same_bar_open_lookahead" => Ok(Some(FillTiming::SameBarOpenLookahead)),
+        _ => Err(PyValueError::new_err(format!(
+            "invalid fill_timing {raw:?}; expected \"same_bar_close\", \
+             \"next_bar_open\", or \"same_bar_open_lookahead\" (the \
+             pre-0.11 look-ahead, for reproducing old results only)"
+        ))),
     }
 }
 
@@ -296,6 +340,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             stop: py_config.stop_config,
             target: py_config.target_config,
             upon_bar_close: py_config.upon_bar_close,
+            fill_timing: py_config.fill_timing,
             apply_slippage: py_config.apply_slippage,
             periods_per_year: py_config.periods_per_year,
             risk_free_rate: py_config.risk_free_rate,

@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, InstrumentConfig,
-    OhlcvData, Trade,
+    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, ExitReason, FillTiming,
+    InstrumentConfig, OhlcvData, Trade,
 };
 use crate::execution::FeeModel;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::allocation::{AllocationStrategy, CapitalAllocator};
-use crate::signals::processor::SignalProcessor;
+use crate::signals::processor::{shift_signals, SignalProcessor};
 use crate::signals::synchronizer::{SignalSynchronizer, SyncMode};
 
 /// Basket backtest configuration.
@@ -119,6 +119,28 @@ impl BasketBacktest {
         let (clean_entries, clean_exits) =
             self.signal_processor.clean_signals(&synced_entries, &synced_exits);
 
+        // Execution timing. Under NextBarOpen a bar-i decision executes on
+        // bar i+1 at each instrument's own open: the cleaned signal stream is
+        // shifted one bar forward (a last-bar decision falls off the end and
+        // never trades) and fills read the open instead of the close.
+        // SameBarClose is this runner's historical behavior, byte-identical.
+        // SameBarOpenLookahead also fills at the close here: this runner
+        // never had the kernel paths' same-bar-open defect, so there is no
+        // pre-0.11 result for that mode to reproduce.
+        let next_open = self.config.base.resolved_fill_timing() == FillTiming::NextBarOpen;
+        let (clean_entries, clean_exits) = if next_open {
+            (shift_signals(&clean_entries, 1), shift_signals(&clean_exits, 1))
+        } else {
+            (clean_entries, clean_exits)
+        };
+        let fill_price = |ohlcv: &OhlcvData, i: usize| {
+            if next_open {
+                ohlcv.open[i]
+            } else {
+                ohlcv.close[i]
+            }
+        };
+
         // Initialize state
         let mut cash = self.config.base.initial_capital;
         let mut positions: Vec<Option<PositionState>> = vec![None; n_instruments];
@@ -143,7 +165,7 @@ impl BasketBacktest {
             if clean_exits[i] {
                 for (inst_idx, (ohlcv, signals)) in instruments.iter().enumerate() {
                     if let Some(pos) = positions[inst_idx].take() {
-                        let exit_price = ohlcv.close[i];
+                        let exit_price = fill_price(ohlcv, i);
                         let fees =
                             self.fee_model.calculate(exit_price, pos.size, signals.direction);
 
@@ -185,8 +207,8 @@ impl BasketBacktest {
 
             // Check for entry
             if clean_entries[i] && positions.iter().all(|p| p.is_none()) {
-                // Calculate position sizes
-                let prices: Vec<f64> = instruments.iter().map(|(o, _)| o.close[i]).collect();
+                // Calculate position sizes, at the prices the fill pays.
+                let prices: Vec<f64> = instruments.iter().map(|(o, _)| fill_price(o, i)).collect();
                 let weights: Vec<f64> = instruments.iter().map(|(_, s)| s.weight).collect();
                 let symbols: Vec<&str> =
                     instruments.iter().map(|(_, s)| s.symbol.as_str()).collect();
@@ -202,7 +224,7 @@ impl BasketBacktest {
                 for (inst_idx, (ohlcv, signals)) in instruments.iter().enumerate() {
                     let size = sizes[inst_idx];
                     if size > 0.0 {
-                        let entry_price = ohlcv.close[i];
+                        let entry_price = fill_price(ohlcv, i);
                         let fees = self.fee_model.calculate(entry_price, size, signals.direction);
                         cash -= entry_price * size + fees;
 

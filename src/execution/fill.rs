@@ -1,6 +1,6 @@
 //! Order fill simulation models.
 
-use crate::core::types::{Direction, OhlcvBar, Price};
+use crate::core::types::{Direction, FillTiming, OhlcvBar, Price};
 
 /// Fill price model determining at what price orders are executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,6 +23,18 @@ pub enum FillPrice {
 }
 
 impl FillPrice {
+    /// Price source implied by an execution-timing policy.
+    ///
+    /// `NextBarOpen` and `SameBarOpenLookahead` both read the open — the
+    /// policy decides *which bar* that open belongs to, which is the
+    /// kernel's job, not this table's.
+    pub fn for_timing(timing: FillTiming) -> Self {
+        match timing {
+            FillTiming::SameBarClose => FillPrice::Close,
+            FillTiming::NextBarOpen | FillTiming::SameBarOpenLookahead => FillPrice::Open,
+        }
+    }
+
     /// Get execution price from OHLCV bar.
     ///
     /// # Arguments
@@ -131,8 +143,6 @@ impl FillRng {
 pub struct FillModel {
     /// Price model for fills.
     pub fill_price: FillPrice,
-    /// Whether to delay execution to next bar.
-    pub delay_to_next_bar: bool,
     /// Partial fill ratio (1.0 = full fill).
     pub fill_ratio: f64,
     /// Adverse price adjustment applied to limit fills, as a fraction of
@@ -147,12 +157,7 @@ pub struct FillModel {
 
 impl Default for FillModel {
     fn default() -> Self {
-        Self {
-            fill_price: FillPrice::Close,
-            delay_to_next_bar: false,
-            fill_ratio: 1.0,
-            limit_slippage: 0.0,
-        }
+        Self { fill_price: FillPrice::Close, fill_ratio: 1.0, limit_slippage: 0.0 }
     }
 }
 
@@ -160,11 +165,6 @@ impl FillModel {
     /// Create a fill model that executes at close.
     pub fn at_close() -> Self {
         Self { fill_price: FillPrice::Close, ..Self::default() }
-    }
-
-    /// Create a fill model that executes at next bar's open.
-    pub fn at_next_open() -> Self {
-        Self { fill_price: FillPrice::Open, delay_to_next_bar: true, ..Self::default() }
     }
 
     /// Set partial fill ratio.

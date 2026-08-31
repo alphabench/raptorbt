@@ -289,6 +289,34 @@ pub enum ExitReason {
     Squareoff,
 }
 
+/// When a decision made from a bar's data is allowed to execute.
+///
+/// The timing policy and the price source are one choice, deliberately: the
+/// only causally valid prices are the bar the decision was made on (its
+/// close — the decision and the price coincide) or anything later. Naming
+/// the policy keeps the invalid combination — a bar-i decision at bar i's
+/// open — out of the vocabulary except as an explicitly labeled legacy mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FillTiming {
+    /// Decide at bar i's close, fill at bar i's close (zero latency).
+    #[default]
+    SameBarClose,
+    /// Decide at bar i's close, fill at bar i+1's open.
+    ///
+    /// The industry-consensus bar contract: the decision uses everything the
+    /// bar showed, and the earliest tradeable price after that is the next
+    /// bar's open. A signal on the final bar never fills — there is no next
+    /// bar to fill it on.
+    NextBarOpen,
+    /// Pre-0.11 behavior: fill a bar-i decision at bar i's OWN open — a
+    /// price that traded before the information the decision used existed.
+    ///
+    /// Not causally valid. Exists only to reproduce pre-0.11 results, and
+    /// says so in its name.
+    SameBarOpenLookahead,
+}
+
 /// Backtest configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestConfig {
@@ -302,8 +330,20 @@ pub struct BacktestConfig {
     pub stop: StopConfig,
     /// Take-profit configuration.
     pub target: TargetConfig,
-    /// Whether to execute on bar close.
+    /// Whether to execute on bar close. Deprecated in favor of
+    /// `fill_timing`; retained so existing configs keep working.
+    ///
+    /// `true` maps to [`FillTiming::SameBarClose`], `false` to
+    /// [`FillTiming::NextBarOpen`]. Through 0.10 `false` filled a bar's
+    /// signal at that same bar's open — a look-ahead; that behavior is now
+    /// only reachable by explicitly asking for
+    /// [`FillTiming::SameBarOpenLookahead`].
     pub upon_bar_close: bool,
+
+    /// Execution-timing policy. `None` (default) derives it from the
+    /// deprecated `upon_bar_close`; an explicit value wins over the bool.
+    #[serde(default)]
+    pub fill_timing: Option<FillTiming>,
 
     /// Whether `slippage` is actually applied to fills.
     ///
@@ -450,6 +490,7 @@ impl Default for BacktestConfig {
             stop: StopConfig::None,
             target: TargetConfig::None,
             upon_bar_close: true,
+            fill_timing: None,
             apply_slippage: true,
             periods_per_year: None,
             risk_free_rate: 0.0,
@@ -472,6 +513,19 @@ impl Default for BacktestConfig {
 }
 
 impl BacktestConfig {
+    /// The execution-timing policy in force.
+    ///
+    /// An explicit `fill_timing` wins; otherwise the deprecated
+    /// `upon_bar_close` maps onto the *corrected* semantics — `false` means
+    /// next-bar-open, never the pre-0.11 same-bar-open look-ahead.
+    pub fn resolved_fill_timing(&self) -> FillTiming {
+        self.fill_timing.unwrap_or(if self.upon_bar_close {
+            FillTiming::SameBarClose
+        } else {
+            FillTiming::NextBarOpen
+        })
+    }
+
     /// Fee model implied by this config.
     ///
     /// An unparseable `fee_segment` falls back to the flat rate rather than

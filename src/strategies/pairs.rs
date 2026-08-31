@@ -80,6 +80,24 @@ impl PairsBacktest {
         let processor = crate::signals::processor::SignalProcessor::new();
         let (entries, exits) = processor.clean_signals(&signals.entries, &signals.exits);
 
+        // Execution timing. Under NextBarOpen a bar-i decision executes on
+        // bar i+1 at each leg's own open: the cleaned stream shifts one bar
+        // forward (a last-bar decision never trades) and fills read the
+        // open. The hedge ratio is decision-time information and is computed
+        // from the decision bar's window, not the fill bar's — the fill
+        // bar's close does not exist when the ratio is chosen. SameBarClose
+        // is the historical behavior, byte-identical; SameBarOpenLookahead
+        // has no distinct history in this runner and also fills at the
+        // close.
+        let next_open =
+            self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
+        let (entries, exits) = if next_open {
+            let shift = crate::signals::processor::shift_signals;
+            (shift(&entries, 1), shift(&exits, 1))
+        } else {
+            (entries, exits)
+        };
+
         // Initialize state
         let mut cash = self.config.base.initial_capital;
         let mut position: Option<PairsPosition> = None;
@@ -94,26 +112,19 @@ impl PairsBacktest {
         for i in 0..n {
             let leg1_price = leg1_ohlcv.close[i];
             let leg2_price = leg2_ohlcv.close[i];
-
-            // Calculate current hedge ratio
-            let hedge_ratio = if self.config.dynamic_hedge && i >= self.config.hedge_lookback {
-                self.calculate_hedge_ratio(
-                    &leg1_ohlcv.close[i - self.config.hedge_lookback..=i],
-                    &leg2_ohlcv.close[i - self.config.hedge_lookback..=i],
-                )
-            } else {
-                self.config.hedge_ratio
-            };
+            // Fills pay this bar's tradeable price; equity marks at the close.
+            let leg1_fill = if next_open { leg1_ohlcv.open[i] } else { leg1_price };
+            let leg2_fill = if next_open { leg2_ohlcv.open[i] } else { leg2_price };
 
             // Check for exit
             if exits[i] {
                 if let Some(pos) = position.take() {
-                    let (pnl, fees) = self.close_position(&pos, leg1_price, leg2_price);
+                    let (pnl, fees) = self.close_position(&pos, leg1_fill, leg2_fill);
                     let cost_basis = pos.leg1_cost + pos.leg2_cost;
                     let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
                     // Return capital
-                    cash += pos.leg1_size * leg1_price + pos.leg2_size * leg2_price - fees;
+                    cash += pos.leg1_size * leg1_fill + pos.leg2_size * leg2_fill - fees;
 
                     // Record trades for both legs
                     trades.push(Trade {
@@ -122,7 +133,7 @@ impl PairsBacktest {
                         entry_idx: pos.entry_idx,
                         exit_idx: i,
                         entry_price: pos.leg1_entry_price,
-                        exit_price: leg1_price,
+                        exit_price: leg1_fill,
                         size: pos.leg1_size,
                         direction: pos.leg1_direction,
                         pnl: pnl / 2.0, // Split P&L attribution
@@ -144,7 +155,7 @@ impl PairsBacktest {
                         entry_idx: pos.entry_idx,
                         exit_idx: i,
                         entry_price: pos.leg2_entry_price,
-                        exit_price: leg2_price,
+                        exit_price: leg2_fill,
                         size: pos.leg2_size,
                         direction: pos.leg2_direction,
                         pnl: pnl / 2.0,
@@ -170,22 +181,37 @@ impl PairsBacktest {
                     Direction::Short => (Direction::Short, Direction::Long),
                 };
 
-                // Calculate position sizes
-                let allocation = cash * 0.5; // Use 50% per leg
-                let leg1_size = allocation / leg1_price;
-                let leg2_size = (allocation * hedge_ratio) / leg2_price;
+                // Hedge ratio from the decision bar's window: under
+                // NextBarOpen the decision was made on bar i-1, whose close
+                // is the newest price the ratio may see.
+                let decision_idx = if next_open { i - 1 } else { i };
+                let hedge_ratio = if self.config.dynamic_hedge
+                    && decision_idx >= self.config.hedge_lookback
+                {
+                    self.calculate_hedge_ratio(
+                        &leg1_ohlcv.close[decision_idx - self.config.hedge_lookback..=decision_idx],
+                        &leg2_ohlcv.close[decision_idx - self.config.hedge_lookback..=decision_idx],
+                    )
+                } else {
+                    self.config.hedge_ratio
+                };
 
-                let leg1_cost = leg1_size * leg1_price;
-                let leg2_cost = leg2_size * leg2_price;
-                let entry_fees = self.fee_model.calculate(leg1_price, leg1_size, leg1_dir)
-                    + self.fee_model.calculate(leg2_price, leg2_size, leg2_dir);
+                // Calculate position sizes, at the prices the fills pay
+                let allocation = cash * 0.5; // Use 50% per leg
+                let leg1_size = allocation / leg1_fill;
+                let leg2_size = (allocation * hedge_ratio) / leg2_fill;
+
+                let leg1_cost = leg1_size * leg1_fill;
+                let leg2_cost = leg2_size * leg2_fill;
+                let entry_fees = self.fee_model.calculate(leg1_fill, leg1_size, leg1_dir)
+                    + self.fee_model.calculate(leg2_fill, leg2_size, leg2_dir);
 
                 cash -= leg1_cost + leg2_cost + entry_fees;
 
                 position = Some(PairsPosition {
                     entry_idx: i,
-                    leg1_entry_price: leg1_price,
-                    leg2_entry_price: leg2_price,
+                    leg1_entry_price: leg1_fill,
+                    leg2_entry_price: leg2_fill,
                     leg1_size,
                     leg2_size,
                     leg1_direction: leg1_dir,

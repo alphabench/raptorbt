@@ -4,8 +4,9 @@
 //! working ones against each incoming bar. It is deliberately ignorant of
 //! positions and cash: it reports *what matched at which price*, and the
 //! kernel decides whether the fill opens or closes a position (and may still
-//! reject it there). Market orders never rest here — the kernel fills them
-//! on the submission bar, mirroring the signal-entry path.
+//! reject it there). Market orders never fill here — the kernel sweeps them
+//! itself, on the submission bar (same-bar timing) or the bar after
+//! (next-bar-open), mirroring the signal-entry path.
 
 use crate::core::types::{Direction, OhlcvBar, Price, Timestamp};
 use crate::execution::fill::FillModel;
@@ -419,8 +420,14 @@ impl OrderEngine {
             match outcome {
                 Some(outcome) => actions.push(outcome),
                 None => {
-                    // IOC/FOK live for exactly one evaluation bar.
-                    if matches!(order.tif, TimeInForce::Ioc | TimeInForce::Fok) {
+                    // IOC/FOK live for exactly one evaluation bar. Plain
+                    // (parentless) market orders are exempt: they are the
+                    // kernel sweep's responsibility, not this matcher's, and
+                    // under next-bar-open timing they legitimately rest here
+                    // for the one bar between submission and their fill.
+                    let kernel_swept =
+                        matches!(order.kind, OrderKind::Market) && order.parent_id.is_none();
+                    if !kernel_swept && matches!(order.tif, TimeInForce::Ioc | TimeInForce::Fok) {
                         let _ = order.transition(OrderStatus::Canceled);
                         actions.push(MatchOutcome::Cancel { order_id: order.id });
                     }
