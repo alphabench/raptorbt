@@ -1619,3 +1619,165 @@ fn next_bar_open_market_order_fills_at_the_next_bars_open() {
         assert!(kernel.is_in_position());
     }
 }
+
+// ── Short-option margin: the SPAN-style deposit on a sold option ──────────
+//
+// A sold option can lose without limit, so an exchange blocks a deposit
+// scaled to the underlying's value at the strike, not to the premium. These
+// pin that the deposit — `(span_pct + exposure_pct) × strike × multiplier`
+// per contract — sizes the entry, is what gets locked, is what maintenance
+// checks against, and that a bought option stays funded at its premium.
+// With both percentages at their zero default every figure is unchanged.
+
+fn option_kernel(direction: Direction, span_pct: f64, exposure_pct: f64) -> EngineKernel {
+    use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let spec = InstrumentSpec {
+        lot_size: 30.0,
+        span_pct,
+        exposure_pct,
+        ..InstrumentSpec::new(
+            "BANKNIFTY57500CE",
+            InstrumentKind::Option {
+                strike: 57_500.0,
+                right: OptionRight::Call,
+                underlying: Some("BANKNIFTY".to_string()),
+                binary: false,
+            },
+        )
+    };
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "BANKNIFTY57500CE".to_string(),
+        direction,
+        None,
+    )
+    .with_account_mode(AccountMode::Margin { leverage: 1.0 })
+    .with_instrument(spec);
+    kernel.set_cash(400_000.0);
+    kernel
+}
+
+const DEPOSIT_PER_CONTRACT: f64 = (0.0975 + 0.02) * 57_500.0; // 6,756.25
+
+#[test]
+fn a_sold_option_locks_the_deposit_on_strike_notional_not_the_premium() {
+    let mut kernel = option_kernel(Direction::Short, 0.0975, 0.02);
+    enter(&mut kernel, 0, 360.0);
+    // 400,000 / 6,756.25 = 59.2 contracts → one lot of 30.
+    let locked = kernel.locked_margin();
+    assert!((locked - 30.0 * DEPOSIT_PER_CONTRACT).abs() < 1e-6, "locked {locked}");
+    assert_eq!(kernel.cash(), 400_000.0, "the premium is not debited; margin locks, cash stays");
+    let free = kernel.free_capital();
+    assert!((free - (400_000.0 - locked)).abs() < 1e-6, "free {free}");
+}
+
+#[test]
+fn a_sold_option_the_deposit_cannot_cover_is_refused_for_margin_not_size() {
+    let mut kernel = option_kernel(Direction::Short, 0.0975, 0.02);
+    kernel.set_cash(100_000.0);
+    // 100,000 / 6,756.25 = 14.8 contracts — below one lot of 30 — even though
+    // 100,000 of premium notional would have bought nine lots.
+    let events = kernel.step(0, &bar(0, 360.0), StepInput { entry: true, ..StepInput::default() });
+    assert!(
+        matches!(
+            events.as_slice(),
+            [EngineEvent::EntryRejected { reason: RejectReason::InsufficientMargin, .. }]
+        ),
+        "expected an insufficient-margin refusal, got {events:?}"
+    );
+    assert!(!kernel.is_in_position());
+}
+
+#[test]
+fn without_the_model_a_sold_option_is_still_funded_at_its_premium() {
+    // The zero defaults reproduce the earlier behaviour exactly: at leverage
+    // 1.0 a short option locks premium × size, and ₹1 lakh sells nine lots.
+    let mut kernel = option_kernel(Direction::Short, 0.0, 0.0);
+    kernel.set_cash(100_000.0);
+    enter(&mut kernel, 0, 360.0);
+    let locked = kernel.locked_margin();
+    assert!((locked - 270.0 * 360.0).abs() < 1e-6, "locked {locked}");
+}
+
+#[test]
+fn a_bought_option_is_funded_at_its_premium_whatever_the_model_says() {
+    let mut kernel = option_kernel(Direction::Long, 0.0975, 0.02);
+    enter(&mut kernel, 0, 360.0);
+    // A buyer can lose only the premium, so the model never applies to a
+    // long: at leverage 1.0, 400,000 / 360 = 1,111 → 1,110 contracts.
+    let locked = kernel.locked_margin();
+    assert!((locked - 1_110.0 * 360.0).abs() < 1e-6, "locked {locked}");
+}
+
+#[test]
+fn maintenance_on_a_sold_option_is_the_deposit_and_calls_when_equity_falls_under_it() {
+    let mut kernel = option_kernel(Direction::Short, 0.0975, 0.02);
+    enter(&mut kernel, 0, 360.0);
+    let deposit = kernel.locked_margin();
+    assert!((kernel.maintenance_requirement(360.0) - deposit).abs() < 1e-6);
+
+    // Premium moves against the seller: equity 400,000 − (500 − 360) × 30 =
+    // 395,800, still above the deposit — no call.
+    let events = kernel.step(1, &bar(1, 500.0), StepInput::default());
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })), "{events:?}");
+
+    // Premium at 7,000: loss (7,000 − 360) × 30 = 199,200 → equity 200,800,
+    // below the 202,687.50 deposit — the broker calls.
+    let events = kernel.step(2, &bar(2, 7_000.0), StepInput::default());
+    assert!(events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })), "{events:?}");
+}
+
+fn futures_kernel(cash: f64) -> EngineKernel {
+    use crate::instruments::{InstrumentKind, InstrumentSpec};
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let spec = InstrumentSpec {
+        lot_size: 65.0,
+        margin_init: 0.114,
+        ..InstrumentSpec::new("NIFTYFUT", InstrumentKind::Contract { underlying: None })
+    };
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "NIFTYFUT".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_account_mode(AccountMode::Margin { leverage: 1.0 })
+    .with_instrument(spec);
+    kernel.set_cash(cash);
+    kernel
+}
+
+#[test]
+fn a_future_with_an_initial_margin_rate_sizes_and_locks_by_that_rate() {
+    // 200,000 / (24,000 × 0.114 = 2,736) = 73 contracts → one lot of 65.
+    let mut kernel = futures_kernel(200_000.0);
+    enter(&mut kernel, 0, 24_000.0);
+    let locked = kernel.locked_margin();
+    assert!((locked - 65.0 * 24_000.0 * 0.114).abs() < 1e-6, "locked {locked}");
+}
+
+#[test]
+fn a_future_one_lot_of_margin_cannot_cover_is_refused_for_margin() {
+    // 100,000 / 2,736 = 36 contracts — under one lot of 65 — and the reason
+    // names the margin, because it was the rate that starved sizing: the
+    // lot's notional (1.56 million) was never the question.
+    let mut kernel = futures_kernel(100_000.0);
+    let events =
+        kernel.step(0, &bar(0, 24_000.0), StepInput { entry: true, ..StepInput::default() });
+    assert!(
+        matches!(
+            events.as_slice(),
+            [EngineEvent::EntryRejected { reason: RejectReason::InsufficientMargin, .. }]
+        ),
+        "expected an insufficient-margin refusal, got {events:?}"
+    );
+}

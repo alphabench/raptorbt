@@ -90,6 +90,21 @@ pub struct InstrumentSpec {
     /// and assignment differently from a trade-out — Indian STT on exercised
     /// options is the standard example.
     pub settlement_fee: f64,
+    /// Risk-scenario (SPAN-style) margin for a SHORT option, as a fraction of
+    /// the underlying notional at the strike. `0.0` (default) leaves a short
+    /// option funded at its premium, as before.
+    ///
+    /// A sold option can lose far more than the premium it collects, so an
+    /// exchange blocks a deposit scaled to the underlying's value, not to the
+    /// premium. The kernel has no spot series, so the strike stands in for
+    /// spot — the at-the-money case, which is the largest requirement and
+    /// therefore the safe side to err on.
+    #[serde(default)]
+    pub span_pct: f64,
+    /// Exposure margin for a SHORT option, as a fraction of the underlying
+    /// notional at the strike, charged on top of `span_pct`. `0.0` = none.
+    #[serde(default)]
+    pub exposure_pct: f64,
 }
 
 impl InstrumentSpec {
@@ -109,6 +124,26 @@ impl InstrumentSpec {
             activation_ns: None,
             expiration_ns: None,
             settlement_fee: 0.0,
+            span_pct: 0.0,
+            exposure_pct: 0.0,
+        }
+    }
+
+    /// Initial margin per contract for a SHORT option under the SPAN-style
+    /// model, or `None` when the instrument is not an option or the model is
+    /// off (`span_pct` and `exposure_pct` both zero).
+    ///
+    /// `(span_pct + exposure_pct) × strike × multiplier`: the premium received
+    /// is not part of the requirement — it stays in the balance, the way a
+    /// broker credits it and blocks the deposit separately.
+    pub fn short_option_margin_per_contract(&self) -> Option<f64> {
+        let rate = self.span_pct + self.exposure_pct;
+        if rate <= 0.0 {
+            return None;
+        }
+        match &self.kind {
+            InstrumentKind::Option { strike, .. } => Some(rate * strike * self.multiplier),
+            _ => None,
         }
     }
 

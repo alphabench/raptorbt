@@ -22,6 +22,11 @@ pub enum RejectReason {
     Inactive,
     /// An explicit-size order costs more than the available capital.
     InsufficientCapital,
+    /// Capital-fraction sizing produced zero units because the instrument's
+    /// margin requirement (a short option's SPAN-style deposit, a future's
+    /// initial margin) exceeds the available capital — the lot itself was
+    /// affordable on notional, the margin was not.
+    InsufficientMargin,
     /// The margin-call kill-switch has tripped; no further entries.
     MarginCall,
 }
@@ -36,6 +41,7 @@ impl RejectReason {
             RejectReason::Expired => "expired",
             RejectReason::Inactive => "inactive",
             RejectReason::InsufficientCapital => "insufficient_capital",
+            RejectReason::InsufficientMargin => "insufficient_margin",
             RejectReason::MarginCall => "margin_call",
         }
     }

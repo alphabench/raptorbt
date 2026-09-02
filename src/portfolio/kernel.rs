@@ -389,6 +389,44 @@ impl EngineKernel {
         Some(init * 0.5)
     }
 
+    /// Initial margin per contract for an entry, or `None` in cash mode.
+    ///
+    /// The second field says whether an instrument-level margin model set
+    /// the figure (a short option's SPAN-style deposit, a future's
+    /// `margin_init`) rather than the account's plain leverage rate — the
+    /// distinction between "the lot was unaffordable" and "the lot was
+    /// affordable but its margin was not" when sizing lands on zero.
+    ///
+    /// Options are asymmetric. A SOLD option can lose without limit, so when
+    /// the spec carries a `span_pct`/`exposure_pct` model it locks
+    /// `(span_pct + exposure_pct) × strike × multiplier` per contract — the
+    /// premium it collects stays in the balance, not in the requirement. A
+    /// BOUGHT option can lose only its premium and keeps the account's rate
+    /// path (at leverage 1.0, the full premium), exactly as before.
+    fn entry_margin_per_contract(
+        &self,
+        direction: Direction,
+        contract_value: f64,
+    ) -> Option<(f64, bool)> {
+        let rate = self.margin_rate()?;
+        let Some(spec) = &self.spec else {
+            return Some((contract_value * rate, false));
+        };
+        if direction == Direction::Short {
+            if let Some(deposit) = spec.short_option_margin_per_contract() {
+                return Some((deposit, true));
+            }
+        }
+        Some((contract_value * rate, spec.margin_init > 0.0))
+    }
+
+    /// Whether a SHORT option position in this kernel is margined by the
+    /// spec's SPAN-style model rather than by the account's leverage rate.
+    fn short_option_margin_modelled(&self) -> bool {
+        self.margin_rate().is_some()
+            && self.spec.as_ref().is_some_and(|s| s.short_option_margin_per_contract().is_some())
+    }
+
     /// Symbol this kernel simulates.
     pub fn symbol(&self) -> &str {
         // The ledger owns the symbol string; expose it for policy swaps and
@@ -682,10 +720,28 @@ impl EngineKernel {
     /// which a single blended rate would get wrong.
     #[inline]
     pub fn maintenance_requirement(&self, close: Price) -> f64 {
-        match self.maint_rate() {
-            Some(rate) => self.ledger.notional_total(close) * rate,
-            None => 0.0,
+        let rate = self.maint_rate();
+        let modelled_shorts = self.short_option_margin_modelled();
+        if rate.is_none() && !modelled_shorts {
+            return 0.0;
         }
+        let multiplier = self.multiplier();
+        self.ledger
+            .positions()
+            .iter()
+            .map(|managed| {
+                // A sold option's SPAN-style deposit stays blocked for the
+                // life of the position; the broker maintains the deposit,
+                // not a fraction of the premium's notional.
+                if modelled_shorts && managed.position.direction == Direction::Short {
+                    return self.margin.locked_for(managed.id);
+                }
+                match rate {
+                    Some(rate) => close * managed.position.size * multiplier * rate,
+                    None => 0.0,
+                }
+            })
+            .sum()
     }
 
     /// Trip this kernel's margin-call kill-switch, blocking further entries.
@@ -1338,12 +1394,12 @@ impl EngineKernel {
         // Cash mode: size = capital / (price * multiplier * (1 + fee_rate))
         // so notional value + entry fee fits. Margin mode: only the initial
         // margin plus the fee must fit.
-        let margin_rate = self.margin_rate();
         let contract_value = adjusted_price * self.multiplier();
         let fee_rate = self.config.fees;
-        let sizing_denominator = match margin_rate {
+        let funding = self.entry_margin_per_contract(direction, contract_value);
+        let sizing_denominator = match funding {
             None => contract_value * (1.0 + fee_rate),
-            Some(rate) => contract_value * (rate + fee_rate),
+            Some((per_contract, _)) => per_contract + contract_value * fee_rate,
         };
         let raw_size = match explicit_units {
             Some(units) => units,
@@ -1368,8 +1424,14 @@ impl EngineKernel {
             // produced zero units, e.g. a size fraction too small for the
             // instrument's lot size. Deliberately does not touch the risk
             // gate's rejection counter: that metric describes constraint
-            // refusals, not sizing arithmetic.
-            return Some(EngineEvent::EntryRejected { idx, reason: RejectReason::ZeroSize });
+            // refusals, not sizing arithmetic. When an instrument-level
+            // margin model set the requirement, say so: the lot's notional
+            // may well have fit, and "loosen the entry" is the wrong advice.
+            let reason = match funding {
+                Some((_, true)) => RejectReason::InsufficientMargin,
+                _ => RejectReason::ZeroSize,
+            };
+            return Some(EngineEvent::EntryRejected { idx, reason });
         }
 
         // Same per-contract price convention as the exit path: notional
@@ -1383,9 +1445,9 @@ impl EngineKernel {
         // Capital-fraction sizing fits by construction; explicit unit counts
         // (order API) can exceed the account and are refused instead of
         // silently driving cash negative.
-        let funding_cost = match margin_rate {
+        let funding_cost = match funding {
             None => contract_value * size,
-            Some(rate) => contract_value * size * rate,
+            Some((per_contract, _)) => per_contract * size,
         };
         if explicit_units.is_some() && funding_cost + entry_fees > available {
             return Some(EngineEvent::EntryRejected {
@@ -1415,10 +1477,10 @@ impl EngineKernel {
             entry_fees,
             entry_breakdown,
         )?;
-        match margin_rate {
+        match funding {
             None => self.cash -= contract_value * size + entry_fees,
-            Some(rate) => {
-                self.margin.lock(position_id, contract_value * size * rate);
+            Some((per_contract, _)) => {
+                self.margin.lock(position_id, per_contract * size);
                 self.cash -= entry_fees;
             }
         }

@@ -165,11 +165,17 @@ impl PyInstrumentSpec {
         })
     }
 
-    /// A vanilla or binary option contract.
+    /// A vanilla or binary option contract.    ///
+    /// `span_pct` and `exposure_pct` model the deposit an exchange blocks
+    /// against a SOLD option, each as a fraction of the underlying notional
+    /// at the strike. Both default to `0.0`, which leaves a short option
+    /// funded at its premium as in earlier releases. Bought options are
+    /// unaffected: a buyer can lose only the premium.
     #[staticmethod]
     #[pyo3(signature = (symbol, strike, right, expiration_ns, lot_size, multiplier=1.0,
                         price_increment=0.0, underlying=None, binary=false, activation_ns=None,
-                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0))]
+                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0,
+                        span_pct=0.0, exposure_pct=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn option(
         symbol: &str,
@@ -186,7 +192,12 @@ impl PyInstrumentSpec {
         margin_maint: f64,
         maker_fee: f64,
         taker_fee: f64,
+        span_pct: f64,
+        exposure_pct: f64,
     ) -> PyResult<Self> {
+        if span_pct < 0.0 || exposure_pct < 0.0 {
+            return Err(PyValueError::new_err("span_pct and exposure_pct must be >= 0"));
+        }
         let right = match right.to_ascii_lowercase().as_str() {
             "call" | "c" | "ce" => OptionRight::Call,
             "put" | "p" | "pe" => OptionRight::Put,
@@ -199,10 +210,12 @@ impl PyInstrumentSpec {
         if strike <= 0.0 {
             return Err(PyValueError::new_err("strike must be > 0"));
         }
-        let spec = InstrumentSpec::new(
+        let mut spec = InstrumentSpec::new(
             symbol,
             InstrumentKind::Option { strike, right, underlying, binary },
         );
+        spec.span_pct = span_pct;
+        spec.exposure_pct = exposure_pct;
         Ok(Self {
             inner: apply_common(
                 spec,
@@ -321,6 +334,18 @@ impl PyInstrumentSpec {
     #[getter]
     fn margin_init(&self) -> f64 {
         self.inner.margin_init
+    }
+
+    /// SPAN-style deposit fraction for a sold option (0.0 = not modelled).
+    #[getter]
+    fn span_pct(&self) -> f64 {
+        self.inner.span_pct
+    }
+
+    /// Exposure margin fraction for a sold option (0.0 = not modelled).
+    #[getter]
+    fn exposure_pct(&self) -> f64 {
+        self.inner.exposure_pct
     }
 
     #[getter]

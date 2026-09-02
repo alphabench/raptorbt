@@ -45,6 +45,11 @@ impl MarginBook {
         self.locked.insert(position_id, amount);
     }
 
+    /// Margin locked for one open position; 0.0 for an unknown id.
+    pub fn locked_for(&self, position_id: u64) -> f64 {
+        self.locked.get(&position_id).copied().unwrap_or(0.0)
+    }
+
     /// Release a closed position's margin, returning the amount.
     pub fn release(&mut self, position_id: u64) -> f64 {
         self.locked.remove(&position_id).unwrap_or(0.0)

@@ -5,7 +5,53 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-09-02
+
+Sold options reserve an exchange-style deposit, and the reason a sized entry
+came out at zero now says whether margin or lot size was the cause.
+
+**In plain words: selling an option collects a small premium but can lose
+without limit, so a real account must set aside a deposit scaled to the
+underlying's value — many times the premium. A margin-account backtest used
+to charge a sold option only its premium, so a small book could sell far
+more lots than any broker would allow and report a profit no account could
+have earned. An option spec can now carry that deposit, sizing and margin
+use it, and a book too small to carry it books no trade and says so.**
+
+### Added
+
+- **`span_pct` and `exposure_pct` on `InstrumentSpec.option`** — the
+  risk-scenario and exposure components of a sold option's deposit, each as
+  a fraction of the underlying notional at the strike. Per contract the
+  engine reserves `(span_pct + exposure_pct) × strike × multiplier`; the
+  premium collected stays in the balance, the way a broker credits it and
+  blocks the deposit separately. Both default to `0.0`, which leaves a sold
+  option funded at its premium exactly as before — every existing result,
+  and the golden corpus, is byte-identical. Bought options are unaffected:
+  a buyer can lose only the premium, so they keep the account's rate path
+  (the full premium at leverage 1.0).
+  The kernel has no spot series, so the strike stands in for spot — the
+  at-the-money case, the largest requirement and the safe side to err on.
+- **`RejectReason::InsufficientMargin`** (`"insufficient_margin"`, reported
+  to strategies as `InsufficientMargin`) — capital-fraction sizing landed on
+  zero contracts because an instrument-level margin requirement (a sold
+  option's deposit, a future's `margin_init`) exceeded the available
+  capital, as distinct from `ZeroSize`, where the lot's own notional did.
+  Telling a user "loosen the entry" is the one thing that cannot help when
+  the strategy was never reached; now the reason says which floor it was.
+
+### Changed
+
+- **Sizing and margin share one per-contract requirement.** Under a margin
+  account the sizing denominator, the locked initial margin and the
+  maintenance requirement all read the same figure: a sold option's modelled
+  deposit, else `contract_value × margin_init` (or `1/leverage`). A sold
+  option's maintenance requirement IS its locked deposit, so a margin call
+  fires when equity falls below the deposit — the broker's rule — rather
+  than below a fraction of the premium's notional. With the model off,
+  every path reduces to the 0.11 arithmetic.
+
+### Unreleased-since-0.11.0, released here
 
 Premium-only runners can now fill at a real opening premium, and the golden
 corpus covers the multi-leg runners.
