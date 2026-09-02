@@ -59,6 +59,23 @@ class PortfolioContext:
         self.idx: int = 0  # local bar index within the current symbol
         self._bar: Bar | None = None
 
+    # -- account ---------------------------------------------------------------
+
+    @property
+    def equity(self) -> float:
+        """Portfolio equity: the shared balance plus every open position's mark."""
+        return self._session.equity()
+
+    @property
+    def cash(self) -> float:
+        """Shared cash balance (includes margin locked against open positions)."""
+        return self._session.cash()
+
+    @property
+    def free_capital(self) -> float:
+        """Capital a new entry may draw on: cash less locked margin, portfolio-wide."""
+        return self._session.free_capital()
+
     # -- current event -------------------------------------------------------
 
     @property

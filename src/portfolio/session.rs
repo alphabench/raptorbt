@@ -24,6 +24,8 @@
 //! balance, so the strategy owns sizing via `size_frac`. The array runner's
 //! `EqualWeight` budget has no counterpart here yet.
 
+use std::collections::HashMap;
+
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::OhlcvBar;
 use crate::core::types::TickData;
@@ -39,6 +41,7 @@ use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
+use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 // Used by `session_tests.rs` via `use super::*`.
 #[cfg(test)]
 use crate::portfolio::risk::RejectReason;
@@ -531,7 +534,41 @@ impl EventSession {
         let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash(0.0);
         self.account.reconcile(delta_cash, delta_locked);
+        self.regroup_option_margin();
         result
+    }
+
+    /// Re-price every group of option legs that share an underlying and
+    /// expiry, so sold legs that hedge each other lock the group's
+    /// requirement rather than the sum of their naked deposits.
+    ///
+    /// Runs after every applied event and every adoption. In cash mode, or
+    /// with no deposit-modelled option leg open, it does nothing. See
+    /// [`crate::portfolio::option_groups`] for the arithmetic and the
+    /// measurements it is held to.
+    fn regroup_option_margin(&mut self) {
+        if matches!(self.account.mode(), AccountMode::Cash) {
+            return;
+        }
+        let mut groups: HashMap<(String, Option<Timestamp>), Vec<OptionLeg>> = HashMap::new();
+        for (index, kernel) in self.kernels.iter().enumerate() {
+            let legs = kernel.open_option_legs(index);
+            if legs.is_empty() {
+                continue;
+            }
+            let Some(key) = kernel.option_group_key() else { continue };
+            groups.entry(key).or_default().extend(legs);
+        }
+        let mut delta_locked = 0.0;
+        for legs in groups.values() {
+            let Some(requirement) = group_requirement(legs) else { continue };
+            for (kernel, position_id, share) in apportion(legs, requirement.total) {
+                delta_locked += self.kernels[kernel].set_locked_margin(position_id, share);
+            }
+        }
+        if delta_locked != 0.0 {
+            self.account.reconcile(0.0, delta_locked);
+        }
     }
 
     /// Capital available to open new positions across all instruments.
@@ -603,6 +640,7 @@ impl EventSession {
         kernel.set_cash(0.0);
         kernel.set_external_open_count(None);
         self.account.reconcile(delta_cash, delta_locked);
+        self.regroup_option_margin();
 
         // A kernel-local call sees only its own slice of the portfolio, but
         // the account is shared: escalate it so every instrument halts.

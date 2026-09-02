@@ -10,6 +10,7 @@ mod kernel_orders;
 pub mod ledger;
 pub mod monte_carlo;
 pub mod optimize;
+pub mod option_groups;
 pub mod position;
 pub mod rebalance;
 pub mod risk;

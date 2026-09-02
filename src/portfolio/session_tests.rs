@@ -4,6 +4,7 @@
 //! into that module so `super::*` and private items still resolve.
 
 use super::*;
+use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 
 fn bars(start_ts: i64, closes: &[f64]) -> Vec<KernelBar> {
     closes
@@ -934,4 +935,168 @@ fn adoption_survives_a_quote_only_event() {
         session.adopt_position(a, 0, 90.0, 100.0).is_ok(),
         "a quote samples no equity, so adoption after one must still be allowed"
     );
+}
+
+// ── Position-group margin: sold legs that hedge each other ─────────────────
+
+fn option_spec(symbol: &str, strike: f64, right: OptionRight) -> InstrumentSpec {
+    InstrumentSpec {
+        lot_size: 30.0,
+        span_pct: 0.0975,
+        exposure_pct: 0.02,
+        expiration_ns: Some(1_000_000),
+        ..InstrumentSpec::new(
+            symbol,
+            InstrumentKind::Option {
+                strike,
+                right,
+                underlying: Some("BANKNIFTY".to_string()),
+                binary: false,
+            },
+        )
+    }
+}
+
+/// A margin session at leverage 1.0 holding the legs given as
+/// (symbol, strike, right, direction, premium series).
+fn option_session(
+    capital: f64,
+    legs: &[(&str, f64, OptionRight, Direction, &[f64])],
+) -> EventSession {
+    let config =
+        BacktestConfig { fees: 0.0, initial_capital: capital, ..BacktestConfig::default() };
+    let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 1.0 });
+    for (i, (symbol, strike, right, direction, premiums)) in legs.iter().enumerate() {
+        let idx = session.add_instrument(
+            symbol.to_string(),
+            *direction,
+            Some(option_spec(symbol, *strike, *right)),
+            None,
+            PositionPolicy::Net,
+        );
+        // Offset each leg's timestamps so the schedule interleaves legs in order.
+        session.set_bars(idx, bars(i as i64, premiums));
+    }
+    session.seal();
+    session
+}
+
+/// Enter one leg per fraction, in schedule order. Fractions are chosen so
+/// each leg lands on exactly one lot: an unsized entry takes every lot the
+/// pool can carry and starves the leg behind it.
+fn enter_all(session: &mut EventSession, fractions: &[f64]) {
+    for &fraction in fractions {
+        let events = session.apply_current(StepInput {
+            entry: true,
+            size_mult: Some(fraction),
+            ..StepInput::default()
+        });
+        assert!(
+            events.iter().any(|e| matches!(e, EngineEvent::Entered { .. })),
+            "expected an entry, got {events:?}"
+        );
+    }
+}
+
+#[test]
+fn a_sold_straddle_locks_the_group_figure_not_two_naked_deposits() {
+    let mut session = option_session(
+        420_000.0,
+        &[
+            ("CE", 57_000.0, OptionRight::Call, Direction::Short, &[1_006.15, 1_006.15]),
+            ("PE", 57_000.0, OptionRight::Put, Direction::Short, &[551.05, 551.05]),
+        ],
+    );
+    // CE: 0.5 × 4,20,000 / 6,697.5 = 31 → one lot. PE: the pool has
+    // 2,19,075 free and one naked lot needs 2,00,925 → 0.95 lands on one lot.
+    enter_all(&mut session, &[0.5, 0.95]);
+    assert!(session.kernel(0).is_in_position() && session.kernel(1).is_in_position());
+    assert_eq!(session.kernel(0).open_size(), 30.0);
+    assert_eq!(session.kernel(1).open_size(), 30.0);
+    // One lot each. Naked: 2 × (0.1175 × 57,000 × 30) = 4,01,850. Group:
+    // span once 1,66,725 + exposure 68,400 − premium 46,716 = 1,88,409.
+    let locked = 420_000.0 - session.free_capital();
+    assert!((locked - 188_409.0).abs() < 1.0, "locked {locked}");
+    let per_kernel: f64 = (0..2).map(|i| session.kernel(i).locked_margin()).sum();
+    assert!((per_kernel - locked).abs() < 1e-6, "kernels {per_kernel} vs account {locked}");
+}
+
+#[test]
+fn a_new_sold_leg_must_still_be_carriable_on_its_own() {
+    // 4,00,000 carries the first naked deposit (2,00,925) but not a second
+    // before the group benefit exists: the second leg is refused for margin.
+    let mut session = option_session(
+        400_000.0,
+        &[
+            ("CE", 57_000.0, OptionRight::Call, Direction::Short, &[1_006.15]),
+            ("PE", 57_000.0, OptionRight::Put, Direction::Short, &[551.05]),
+        ],
+    );
+    enter_all(&mut session, &[0.51]);
+    assert_eq!(session.kernel(0).open_size(), 30.0);
+    let events = session.apply_current(StepInput {
+        entry: true,
+        size_mult: Some(1.0),
+        ..StepInput::default()
+    });
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::EntryRejected { reason: RejectReason::InsufficientMargin, .. }
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_covered_spread_locks_a_fraction_of_the_naked_deposit() {
+    let mut session = option_session(
+        400_000.0,
+        &[
+            ("SHORT_PUT", 23_850.0, OptionRight::Put, Direction::Short, &[120.0, 120.0]),
+            ("LONG_PUT", 23_800.0, OptionRight::Put, Direction::Long, &[102.05, 102.05]),
+        ],
+    );
+    // Sold put: 0.25 × 4,00,000 / 2,802 = 35 → one lot. Bought put sizes at
+    // its premium: 0.05 × 3,15,925 / 102.05 = 154 → five lots, covering it.
+    enter_all(&mut session, &[0.25, 0.05]);
+    let short_lots = session.kernel(0).open_size();
+    let long_lots = session.kernel(1).open_size();
+    assert_eq!(short_lots, 30.0);
+    assert!(long_lots >= short_lots, "the wing must cover the sold leg, got {long_lots}");
+    // Regrouped: the sold leg's lock is the width plus exposure plus the
+    // net debit, far below its naked deposit (0.1175 × 23,850 × 30 = 84,075).
+    let naked = 0.1175 * 23_850.0 * short_lots;
+    let locked_short = session.kernel(0).locked_margin();
+    assert!(locked_short < naked / 2.0, "sold leg locks {locked_short}, naked {naked}");
+    // The bought wing still locks exactly its premium.
+    let locked_long = session.kernel(1).locked_margin();
+    assert!((locked_long - 102.05 * long_lots).abs() < 1e-6, "{locked_long}");
+}
+
+#[test]
+fn a_hedged_pair_is_not_margin_called_on_a_move_two_naked_deposits_would_be() {
+    let mut session = option_session(
+        410_000.0,
+        &[
+            ("CE", 57_000.0, OptionRight::Call, Direction::Short, &[1_006.15, 5_000.0, 5_000.0]),
+            ("PE", 57_000.0, OptionRight::Put, Direction::Short, &[551.05, 551.05, 551.05]),
+        ],
+    );
+    // CE: 0.5 × 4,10,000 / 6,697.5 = 30 → one lot. PE: 2,09,075 free, one
+    // naked lot needs 2,00,925 → 0.97 lands on one lot.
+    enter_all(&mut session, &[0.5, 0.97]);
+    // The call runs against the seller: loss (5,000 − 1,006.15) × 30 =
+    // 1,19,815 → equity 2,90,185, under two naked deposits (4,01,850) but
+    // over the group figure (1,88,409). No call.
+    let mut calls = 0;
+    while session.current().is_some() {
+        calls += session
+            .apply_current(StepInput::default())
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::MarginCall { .. }))
+            .count();
+    }
+    assert_eq!(calls, 0, "a hedged pair must be maintained at its group figure");
+    assert!(!session.is_halted());
 }

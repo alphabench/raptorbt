@@ -5,6 +5,51 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-02
+
+Sold options that hedge each other are margined as one group.
+
+**In plain words: a sold put protected by a bought put can only lose the
+gap between them, and a sold call beside a sold put on the same index
+cannot both lose at once. An exchange charges such pairs far less than two
+separate deposits. 0.12 charged every sold leg its full deposit, which
+refused spreads a real account carries easily; the portfolio session now
+re-prices sold legs on one underlying and expiry as a group once they are
+open together.**
+
+### Added
+
+- **Position-group margin** (`portfolio::option_groups`). After every
+  applied event the session gathers open, deposit-modelled option legs by
+  `(underlying, expiry)` and locks the group's requirement across its sold
+  legs: a scenario component charged once — the largest sold leg's
+  `span_pct` deposit when some short side is uncovered, the structure's
+  intrinsic worst loss when every short is covered — plus `exposure_pct`
+  on each sold leg's notional, less the net premium the group collected,
+  floored at the structure's worst loss net of premium. Held in tests to
+  within 5% of one broker's basket margin for a sold straddle, a bull put
+  spread and an iron condor (measured 2026-09-02). Bought legs keep locking
+  their premium. Cash accounts and legs without the deposit model are
+  untouched.
+- **`underlying` on `InstrumentSpec.option` decides the group.** Legs with
+  no declared underlying group by their own symbol, i.e. never with
+  another leg.
+- **`ctx.equity`, `ctx.cash` and `ctx.free_capital` on the portfolio
+  strategy context**, the same three the single-strategy context already
+  carried, so a multi-instrument strategy can read what a new entry may
+  draw on without reaching into the session.
+
+### Changed
+
+- **Maintenance follows the group.** A sold leg's maintenance requirement is
+  its group share, so a hedged pair is not margin-called at a level only
+  two naked deposits would have breached.
+- **Sizing a NEW sold leg still uses its naked deposit.** The group benefit
+  arrives once the leg is on — freeing capital for later entries and
+  lowering maintenance — so a leg must be carriable on its own before it
+  may lean on its hedge. This is the conservative order and it is
+  deliberate.
+
 ## [0.12.1] - 2026-09-02
 
 The leverage-rate margin path is bit-identical to 0.11 again.

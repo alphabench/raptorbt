@@ -23,8 +23,9 @@ use crate::execution::orders::{MatchOutcome, OrderEngine, OrderKind, OrderStatus
 use crate::execution::orders::{OrderSide, QtySpec};
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
-use crate::instruments::InstrumentSpec;
+use crate::instruments::{InstrumentKind, InstrumentSpec};
 use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
+use crate::portfolio::option_groups::OptionLeg;
 use crate::portfolio::position::ExitDetails;
 use crate::portfolio::risk::{RejectReason, RiskGate};
 
@@ -750,6 +751,54 @@ impl EngineKernel {
                 }
             })
             .sum()
+    }
+
+    /// This kernel's open option positions as position-group legs, when the
+    /// instrument is an option whose sold side is deposit-modelled. Empty
+    /// otherwise, so a share or a plain future never joins a group.
+    pub fn open_option_legs(&self, kernel_index: usize) -> Vec<OptionLeg> {
+        let Some(spec) = &self.spec else { return Vec::new() };
+        let InstrumentKind::Option { strike, right, .. } = &spec.kind else {
+            return Vec::new();
+        };
+        if spec.short_option_margin_per_contract().is_none() {
+            return Vec::new();
+        }
+        self.ledger
+            .positions()
+            .iter()
+            .map(|managed| OptionLeg {
+                position_id: managed.id,
+                kernel: kernel_index,
+                strike: *strike,
+                right: *right,
+                direction: managed.position.direction,
+                size: managed.position.size,
+                entry_price: managed.position.entry_price,
+                multiplier: self.multiplier(),
+                span_pct: spec.span_pct,
+                exposure_pct: spec.exposure_pct,
+            })
+            .collect()
+    }
+
+    /// The key that says which legs hedge each other: the underlying (or
+    /// the symbol itself when none is declared) and the expiry.
+    pub fn option_group_key(&self) -> Option<(String, Option<Timestamp>)> {
+        let spec = self.spec.as_ref()?;
+        let InstrumentKind::Option { underlying, .. } = &spec.kind else { return None };
+        Some((underlying.clone().unwrap_or_else(|| spec.symbol.clone()), spec.expiration_ns))
+    }
+
+    /// Total open size across this kernel's positions (0.0 when flat).
+    pub fn open_size(&self) -> f64 {
+        self.ledger.positions().iter().map(|p| p.position.size).sum()
+    }
+
+    /// Rewrite one open position's locked margin (the group share the
+    /// session computed), returning the change for the shared account.
+    pub fn set_locked_margin(&mut self, position_id: u64, amount: f64) -> f64 {
+        self.margin.set_locked(position_id, amount)
     }
 
     /// Trip this kernel's margin-call kill-switch, blocking further entries.
