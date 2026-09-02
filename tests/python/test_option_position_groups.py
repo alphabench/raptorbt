@@ -1,8 +1,8 @@
-"""Sold options that hedge each other are margined as one group (0.13.0).
+"""Sold options that hedge each other are margined as one group (0.12.1).
 
 In plain words: a sold call and a sold put on the same underlying and
 expiry cannot both lose at once, and an exchange charges the pair much less
-than two separate deposits. Since 0.13.0 the portfolio session re-prices
+than two separate deposits. Since 0.12.1 the portfolio session re-prices
 sold legs that share an underlying and expiry as one group once they are
 open together, so a hedged book keeps more capital free and is not
 margin-called at a level only two naked deposits would have breached.

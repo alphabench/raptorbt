@@ -5,9 +5,10 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.0] - 2026-09-02
+## [0.12.1] - 2026-09-02
 
-Sold options that hedge each other are margined as one group.
+Sold options that hedge each other are margined as one group, and the
+leverage-rate margin path is bit-identical to 0.11 again.
 
 **In plain words: a sold put protected by a bought put can only lose the
 gap between them, and a sold call beside a sold put on the same index
@@ -49,18 +50,6 @@ open together.**
   lowering maintenance — so a leg must be carriable on its own before it
   may lean on its hedge. This is the conservative order and it is
   deliberate.
-
-## [0.12.1] - 2026-09-02
-
-The leverage-rate margin path is bit-identical to 0.11 again.
-
-**In plain words: 0.12.0 rewrote how a margin account sizes an entry so the
-new sold-option deposit could share the arithmetic. That reordered one
-multiplication on the ordinary leverage path and moved position sizes by
-the last decimal place — invisible to a person, but a downstream parity
-check that compares cash and margin runs bit-for-bit caught it. The rate
-path now evaluates exactly as before; only a modelled deposit takes the
-new arithmetic.**
 
 ### Fixed
 

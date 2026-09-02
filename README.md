@@ -297,7 +297,7 @@ exposure_pct=0.02)` reserves `(span_pct + exposure_pct) × strike ×
 multiplier` per contract instead of the premium, so a book too small to
 carry the deposit books no trade and reports `InsufficientMargin`. Both
 default to `0.0` (premium-funded, as before); bought options always stay
-funded at their premium. Since 0.13.0, sold legs that share an `underlying`
+funded at their premium. Since 0.12.1, sold legs that share an `underlying`
 and expiry are re-priced as one position group once they are open together
 — a straddle pays its scenario deposit once, a vertical or condor pays
 exposure plus its width — so a hedged book keeps the capital a real account
