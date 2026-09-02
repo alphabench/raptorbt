@@ -1781,3 +1781,35 @@ fn a_future_one_lot_of_margin_cannot_cover_is_refused_for_margin() {
         "expected an insufficient-margin refusal, got {events:?}"
     );
 }
+
+#[test]
+fn the_leverage_rate_path_is_bit_identical_to_the_pre_model_arithmetic() {
+    // 0.12.0 rewrote sizing as `per_contract + contract_value × fee` and
+    // moved the rate path by one ULP; a downstream parity test caught it.
+    // The rate path must evaluate `contract_value × (rate + fee)` and
+    // `contract_value × size × rate` exactly as 0.11 did.
+    let config = BacktestConfig { fees: 0.0013, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    )
+    .with_account_mode(AccountMode::Margin { leverage: 7.0 });
+    kernel.set_cash(123_456.78);
+    let price = 987.65;
+    enter(&mut kernel, 0, price);
+    let rate = 1.0 / 7.0;
+    let expected_size = 123_456.78 / (price * (rate + 0.0013));
+    let size = kernel.ledger.positions()[0].position.size;
+    assert_eq!(size.to_bits(), expected_size.to_bits(), "size {size} vs {expected_size}");
+    assert_eq!(
+        kernel.locked_margin().to_bits(),
+        (price * expected_size * rate).to_bits(),
+        "locked margin must be contract_value × size × rate, in that order"
+    );
+}

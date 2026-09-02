@@ -5,6 +5,25 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-09-02
+
+The leverage-rate margin path is bit-identical to 0.11 again.
+
+**In plain words: 0.12.0 rewrote how a margin account sizes an entry so the
+new sold-option deposit could share the arithmetic. That reordered one
+multiplication on the ordinary leverage path and moved position sizes by
+the last decimal place — invisible to a person, but a downstream parity
+check that compares cash and margin runs bit-for-bit caught it. The rate
+path now evaluates exactly as before; only a modelled deposit takes the
+new arithmetic.**
+
+### Fixed
+
+- **Margin-account sizing and locking on the rate path** evaluate
+  `contract_value × (rate + fee)` and `contract_value × size × rate` in
+  the 0.11 order again, pinned by a bit-exact test. The sold-option deposit
+  path (`span_pct`/`exposure_pct`) is unaffected.
+
 ## [0.12.0] - 2026-09-02
 
 Sold options reserve an exchange-style deposit, and the reason a sized entry
