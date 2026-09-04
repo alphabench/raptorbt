@@ -196,6 +196,41 @@ class TestTickExecution:
             without.metrics.total_return_pct
         )
 
+    def test_a_market_order_for_another_symbol_fills_on_that_symbols_next_print(self):
+        """Ordinals are per instrument, and quotes consume them without
+        stepping the kernel. An order placed for BBB from AAA's print
+        carried AAA's ordinal and, whenever BBB's quotes had pushed its
+        ordinals ahead, never met a print with exactly that ordinal: it sat
+        working, unfilled and unacknowledged, to the end of the run."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fills = []
+
+            def on_trade_tick(self, ctx, tick):
+                if ctx.symbol == "AAA" and ctx.idx == 2:
+                    self.submit_order(orders.Market(units=10, side="buy"), symbol="BBB")
+
+            def on_order_filled(self, ctx, event):
+                self.fills.append((ctx.symbol, event.price))
+
+        prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        for quoted in (False, True):
+            bbb = (
+                _ticks(prices, bids=[p - 1 for p in prices], asks=[p + 1 for p in prices])
+                if quoted
+                else _ticks(prices)
+            )
+            strategy = S()
+            run_tick_strategy(
+                strategy, {"AAA": _ticks(prices), "BBB": bbb}, config=_zero_fee_config()
+            )
+            # BBB's print at t=2 is dispatched after AAA's — the first trade
+            # after the order was placed — so that is where it fills, with
+            # or without quotes in BBB's tape.
+            assert strategy.fills == [("BBB", 102.0)], (quoted, strategy.fills)
+
     def test_agrees_with_a_bar_run_when_each_bar_has_one_print(self):
         """Cross-validation against the golden-covered bar path.
 

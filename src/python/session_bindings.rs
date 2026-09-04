@@ -487,8 +487,11 @@ impl PyPortfolioSession {
         reduce_only: bool,
         parent_id: Option<u64>,
     ) -> PyResult<u64> {
+        let session = self.session_mut()?;
+        // On the target's own clock: see `PortfolioSession::submission_idx`.
+        let submitted_idx = session.submission_idx(instrument, submitted_idx);
         submit_order_on(
-            self.session_mut()?.kernel_mut(instrument),
+            session.kernel_mut(instrument),
             side,
             kind,
             submitted_idx,

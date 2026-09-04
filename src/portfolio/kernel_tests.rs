@@ -520,6 +520,50 @@ fn resting_limit_buy_fills_next_bar_and_opens() {
 }
 
 #[test]
+fn market_order_placed_off_this_clock_fills_on_the_next_print() {
+    // Submitted at ordinal 3 — from a quote handler, or from another
+    // instrument's event — the order is swept by the first print at or
+    // after it, here ordinal 8. Under the old equality rule it never filled.
+    let mut kernel = zero_fee_kernel();
+    let id = kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Market,
+        TimeInForce::Gtc,
+        3,
+        3,
+        "mkt-x".into(),
+        None,
+        None,
+    );
+
+    let events = kernel.step_trade(8, &trade(8, 100.0, 1.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::OrderAccepted { .. }, EngineEvent::OrderFilled { order_id, price, .. }, EngineEvent::Entered { .. }] =>
+        {
+            assert_eq!(*order_id, id);
+            assert_eq!(*price, 100.0);
+        }
+        other => panic!("expected accept + fill + entered, got {other:?}"),
+    }
+    // A bar step keeps the equality rule: bar semantics are unchanged.
+    let mut kernel = zero_fee_kernel();
+    kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Market,
+        TimeInForce::Gtc,
+        3,
+        3,
+        "mkt-y".into(),
+        None,
+        None,
+    );
+    let events = kernel.step(8, &bar(8, 100.0), StepInput::default());
+    assert!(events.is_empty(), "a bar sweeps only its own submissions: {events:?}");
+}
+
+#[test]
 fn market_order_fills_on_submission_bar() {
     let mut kernel = zero_fee_kernel();
     let id = kernel.submit_order(

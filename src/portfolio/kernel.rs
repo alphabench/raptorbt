@@ -1147,6 +1147,14 @@ impl EngineKernel {
         // NextBarOpen sweeps the PREVIOUS bar's — a bar-i submission is
         // unreachable by bar i's sweep and fills at bar i+1's open, exactly
         // like a deferred signal.
+        //
+        // A print sweeps every market order submitted at or before its
+        // ordinal. `submitted_idx` is a per-instrument EVENT ordinal, and a
+        // quote consumes one without stepping the kernel: an order placed
+        // from a quote handler, or from another instrument's event (whose
+        // ordinal is unrelated to this one's), never lands on a print with
+        // exactly its ordinal. Requiring equality left such orders working
+        // forever, unfilled and unacknowledged.
         let is_plain_market = |o: &&crate::execution::orders::Order| {
             matches!(o.kind, OrderKind::Market)
                 && o.parent_id.is_none()
@@ -1174,7 +1182,11 @@ impl EngineKernel {
             .orders
             .working()
             .filter(is_plain_market)
-            .filter(|o| if defer_signals { o.submitted_idx < idx } else { o.submitted_idx == idx })
+            .filter(|o| match (defer_signals, mode) {
+                (true, _) => o.submitted_idx < idx,
+                (false, StepMode::Trade) => o.submitted_idx <= idx,
+                (false, StepMode::Bar) => o.submitted_idx == idx,
+            })
             .map(|o| o.id)
             .collect();
         for id in market_ids {

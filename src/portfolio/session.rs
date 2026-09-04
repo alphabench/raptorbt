@@ -435,6 +435,28 @@ impl EventSession {
         self.schedule.get(self.cursor).copied()
     }
 
+    /// The `submitted_idx` an order placed during the current event should
+    /// carry on `instrument`'s own clock.
+    ///
+    /// Ordinals are per instrument, so an order routed to another
+    /// instrument (a hedge leg placed from the index's print, or from a
+    /// timer that fired on it) must not carry the dispatching event's
+    /// ordinal: the two clocks are unrelated, and the order would match
+    /// late, or never. It is stamped with the target's last stepped print
+    /// instead, so it works from that instrument's next print — the first
+    /// evidence of a trade after it was placed. An instrument that has not
+    /// printed yet stamps 0, its first print.
+    pub fn submission_idx(&self, instrument: usize, event_idx: usize) -> usize {
+        match self.current() {
+            Some(entry) if entry.instrument == instrument => event_idx,
+            _ => self
+                .last_seen
+                .get(instrument)
+                .and_then(|seen| seen.map(|(idx, _)| idx))
+                .unwrap_or(0),
+        }
+    }
+
     /// Kernel of an instrument, for order routing and queries.
     pub fn kernel_mut(&mut self, instrument: usize) -> &mut EngineKernel {
         &mut self.kernels[instrument]

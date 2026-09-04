@@ -5,6 +5,30 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**In plain words: on tick data, an order placed for one contract from
+another instrument's event — a hedge leg bought when the index prints, or
+a straddle sold when a 09:20 timer fires — could sit unfilled for the whole
+run without a word, whenever the two instruments' event counts differed
+(which, with quotes in the tape, they always do). Such an order now fills
+on the target's next print, as it always did when placed from that
+instrument's own print.**
+
+### Fixed
+
+- **Market orders routed across instruments on the tick path.** A market
+  order was swept only by a print whose per-instrument ordinal *equalled*
+  the order's `submitted_idx`. Ordinals count quotes as well as prints, so
+  an order stamped with another instrument's ordinal — or placed from a
+  quote handler — almost never met that print and stayed working
+  unacknowledged. `PortfolioSession::submit_order` now stamps a
+  cross-instrument submission with the target's last stepped print, and a
+  print sweeps every market order submitted at or before its ordinal
+  (`kernel_tests::market_order_placed_off_this_clock_fills_on_the_next_print`,
+  `tests/python/test_tick_strategy.py`). Bar semantics are unchanged: a bar
+  still sweeps only its own submissions.
+
 ## [0.12.1] - 2026-09-02
 
 Sold options that hedge each other are margined as one group, and the
