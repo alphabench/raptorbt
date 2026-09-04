@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
 use crate::data::{BookLevel, BookSide, DepthTick};
+use crate::execution::orders::{OrderSide, OrderStatus, QtySpec};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{EventSession, ScheduleData};
@@ -607,6 +608,45 @@ impl PyPortfolioSession {
             .position_snapshots()
             .into_iter()
             .map(super::strategy_bindings::convert_snapshot)
+            .collect())
+    }
+
+    /// Working orders of one instrument as
+    /// `(order_id, client_id, side, kind, status, filled_qty, units)` —
+    /// `units` is `nan` for a capital-fraction or close-all order. Status is
+    /// `accepted`, `triggered` or `partially_filled`.
+    #[allow(clippy::type_complexity)]
+    fn working_orders(
+        &self,
+        instrument: usize,
+    ) -> PyResult<Vec<(u64, String, String, String, String, f64, f64)>> {
+        Ok(self
+            .session_ref()?
+            .kernel(instrument)
+            .open_orders()
+            .into_iter()
+            .map(|o| {
+                let side = match o.side {
+                    OrderSide::Buy => "buy",
+                    OrderSide::Sell => "sell",
+                };
+                let kind = format!("{:?}", o.kind)
+                    .split(' ')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('{')
+                    .to_lowercase();
+                let status = match o.status {
+                    OrderStatus::Triggered => "triggered",
+                    OrderStatus::PartiallyFilled => "partially_filled",
+                    _ => "accepted",
+                };
+                let units = match o.qty {
+                    QtySpec::Units(u) => u,
+                    _ => f64::NAN,
+                };
+                (o.id, o.client_id.clone(), side.into(), kind, status.into(), o.filled_qty, units)
+            })
             .collect())
     }
 

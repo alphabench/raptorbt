@@ -224,6 +224,26 @@ class QuoteTick(NamedTuple):
         return self.ask - self.bid
 
 
+class WorkingOrder(NamedTuple):
+    """One order still working, as :meth:`PortfolioContext.open_orders`
+    reports it. ``filled_qty`` is what has filled so far (partial fills);
+    ``units`` is ``nan`` for a capital-fraction or close-all order."""
+
+    order_id: int
+    client_id: str
+    side: str
+    kind: str
+    status: str
+    filled_qty: float
+    units: float
+    symbol: str | None = None
+
+    @property
+    def remaining(self) -> float:
+        """Units still to fill, or ``nan`` when the order was not in units."""
+        return self.units - self.filled_qty
+
+
 class BookSnapshot(NamedTuple):
     """A visible order book, best level first.
 

@@ -302,7 +302,7 @@ impl EngineKernel {
             fill_price,
             fill_timing,
             deferred: None,
-            fill_model: FillModel { fill_price, limit_slippage, ..FillModel::default() },
+            fill_model: FillModel { fill_price, limit_slippage },
             ledger: PositionLedger::new(symbol, PositionPolicy::Net),
             cash,
             direction,
@@ -1203,8 +1203,12 @@ impl EngineKernel {
         for id in market_ids {
             // Under deferral the order was already acknowledged (and moved
             // to Accepted) on its submission bar.
+            // A partially filled market order is already acknowledged and
+            // simply keeps sweeping; only a fresh submission is acked here.
             if !defer_signals {
-                if let Some(order) = self.orders.get_mut(id) {
+                if let Some(order) =
+                    self.orders.get_mut(id).filter(|o| o.status == OrderStatus::Submitted)
+                {
                     let _ = order.transition(OrderStatus::Accepted);
                     let client_id = order.client_id.clone();
                     events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
@@ -1579,6 +1583,128 @@ impl EngineKernel {
         Some(EngineEvent::Entered { idx, price: adjusted_price, size, direction })
     }
 
+    /// Close `qty` of a position at `exit_price`: the closed slice books a
+    /// trade and releases its share of cash or margin; the rest stays open.
+    /// A `qty` at or above the position's size closes it whole.
+    pub(crate) fn reduce_at(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        position_id: u64,
+        qty: f64,
+        exit_price: Price,
+        reason: ExitReason,
+    ) -> Option<EngineEvent> {
+        let managed = self.ledger.get(position_id)?;
+        let size = managed.position.size;
+        if qty >= size {
+            return self.close_at(idx, bar, position_id, exit_price, reason);
+        }
+        let direction = managed.position.direction;
+        let entry_ts = managed.entry_timestamp;
+        let exit_price = self.slippage_model.apply(exit_price, direction, false, Some(bar.volume));
+        let fee_price = exit_price * self.multiplier();
+        let exit_breakdown = self.fee_model.breakdown(fee_price, qty, direction, false);
+        let fees = match exit_breakdown {
+            Some(b) => b.total(),
+            None => self.fee_model.calculate(fee_price, qty, direction),
+        };
+        let fraction = qty / size;
+        let trade = self.ledger.reduce_position(
+            position_id,
+            qty,
+            ExitDetails {
+                idx,
+                timestamp: bar.timestamp,
+                price: exit_price,
+                entry_timestamp: entry_ts,
+                reason,
+                fees,
+                fee_breakdown: exit_breakdown,
+            },
+        )?;
+        match self.account {
+            AccountMode::Cash => {
+                self.cash += exit_price * trade.size * self.multiplier() - fees;
+            }
+            AccountMode::Margin { .. } => {
+                // Release the closed slice's share of the lock; the rest
+                // stays locked against the remaining size.
+                let locked = self.margin.locked_for(position_id);
+                let _ = self.margin.set_locked(position_id, locked * (1.0 - fraction));
+                let entry_fees = trade.fees - fees;
+                self.cash += trade.pnl + entry_fees;
+            }
+        }
+        Some(EngineEvent::Exited { idx, trade })
+    }
+
+    /// Add a fill slice to the position an order already opened: charge
+    /// entry fees and cash or margin for the slice, average the entry. A
+    /// derived stop/target follows the new average; an explicit one stays.
+    /// Returns `(price, size)` of the slice, or `None` when the slice cannot
+    /// be funded.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_at(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        position_id: u64,
+        entry_price: Price,
+        units: f64,
+        stop_attach: Option<Price>,
+        target_attach: Option<Price>,
+    ) -> Option<(Price, f64)> {
+        let direction = self.ledger.get(position_id)?.position.direction;
+        let price = self.slippage_model.apply(entry_price, direction, true, Some(bar.volume));
+        let size = match self.lot_size {
+            Some(lot) if lot > 0.0 => (units / lot).floor() * lot,
+            _ => units,
+        };
+        let size = match &self.spec {
+            Some(spec) => spec.quantize_size(size),
+            None => size,
+        };
+        if size <= 0.0 {
+            return None;
+        }
+        let contract_value = price * self.multiplier();
+        let entry_fees = match self.fee_model.breakdown(contract_value, size, direction, true) {
+            Some(b) => b.total(),
+            None => self.fee_model.calculate(contract_value, size, direction),
+        };
+        let funding = self.entry_funding(direction);
+        let funding_cost = match funding {
+            None => contract_value * size,
+            Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
+            Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+        };
+        let free = self.free_capital();
+        let available = self.alloted_capital.map(|cap| cap.min(free)).unwrap_or(free);
+        if funding_cost + entry_fees > available {
+            return None;
+        }
+        // Both levels derived from the entry: shift with the average.
+        // Either level explicit: leave both, as the caller fixed them.
+        let shift = stop_attach.is_none() && target_attach.is_none();
+        self.ledger.add_to_position(position_id, price, size, entry_fees, shift)?;
+        match funding {
+            None => self.cash -= contract_value * size + entry_fees,
+            Some(EntryFunding::Rate { rate, .. }) => {
+                let locked = self.margin.locked_for(position_id);
+                let _ = self.margin.set_locked(position_id, locked + contract_value * size * rate);
+                self.cash -= entry_fees;
+            }
+            Some(EntryFunding::Deposit { per_contract }) => {
+                let locked = self.margin.locked_for(position_id);
+                let _ = self.margin.set_locked(position_id, locked + per_contract * size);
+                self.cash -= entry_fees;
+            }
+        }
+        let _ = idx;
+        Some((price, size))
+    }
+
     /// Force-close every position on a margin call.
     ///
     /// Unlike end-of-data finalization or expiry settlement, this is a real
@@ -1705,3 +1831,7 @@ impl EngineKernel {
 #[cfg(test)]
 #[path = "kernel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kernel_partial_tests.rs"]
+mod partial_tests;

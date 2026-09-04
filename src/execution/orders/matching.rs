@@ -342,7 +342,7 @@ impl OrderEngine {
                     fill_model.get_limit_fill_price(trigger, bar, direction, is_entry).map(fill)
                 }
                 OrderKind::StopLimit { trigger, price } => match order.status {
-                    OrderStatus::Triggered => {
+                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
                         fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
                     }
                     _ => {
@@ -355,7 +355,7 @@ impl OrderEngine {
                     }
                 },
                 OrderKind::LimitIfTouched { trigger, price } => match order.status {
-                    OrderStatus::Triggered => {
+                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
                         fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
                     }
                     _ => {
@@ -385,7 +385,7 @@ impl OrderEngine {
                     fill_model.get_stop_fill_price(trigger, bar, direction, is_entry).map(fill)
                 }
                 OrderKind::TrailingStopLimit { offset, limit_offset } => match order.status {
-                    OrderStatus::Triggered => {
+                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
                         let price = order.trail_limit.unwrap_or(bar.close);
                         fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
                     }

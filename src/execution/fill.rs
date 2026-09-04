@@ -143,8 +143,6 @@ impl FillRng {
 pub struct FillModel {
     /// Price model for fills.
     pub fill_price: FillPrice,
-    /// Partial fill ratio (1.0 = full fill).
-    pub fill_ratio: f64,
     /// Adverse price adjustment applied to limit fills, as a fraction of
     /// the limit price. `0.0` (default) fills exactly at the limit.
     ///
@@ -157,7 +155,7 @@ pub struct FillModel {
 
 impl Default for FillModel {
     fn default() -> Self {
-        Self { fill_price: FillPrice::Close, fill_ratio: 1.0, limit_slippage: 0.0 }
+        Self { fill_price: FillPrice::Close, limit_slippage: 0.0 }
     }
 }
 
@@ -165,12 +163,6 @@ impl FillModel {
     /// Create a fill model that executes at close.
     pub fn at_close() -> Self {
         Self { fill_price: FillPrice::Close, ..Self::default() }
-    }
-
-    /// Set partial fill ratio.
-    pub fn with_fill_ratio(mut self, ratio: f64) -> Self {
-        self.fill_ratio = ratio.clamp(0.0, 1.0);
-        self
     }
 
     /// Check if a limit order would be filled.

@@ -38,6 +38,10 @@ pub struct ManagedPosition {
     pub entry_timestamp: Timestamp,
     /// Itemized entry costs, combined with exit costs at close.
     pub entry_breakdown: Option<FeeBreakdown>,
+    /// The typed order that opened this position, when one did; a later
+    /// slice of the same order adds to it instead of being refused as a
+    /// second entry.
+    pub entry_order_id: Option<u64>,
 }
 
 impl ManagedPosition {
@@ -198,8 +202,65 @@ impl PositionLedger {
             position,
             entry_timestamp: timestamp,
             entry_breakdown,
+            entry_order_id: None,
         });
         Some(id)
+    }
+
+    /// Add a fill to an open position: size grows, the entry price becomes
+    /// the size-weighted average, entry fees accumulate. When
+    /// `shift_protective` is set, stop and target move by the change in
+    /// average entry so a level derived from the entry price (a percent or
+    /// ATR stop) keeps its distance; explicit levels are left alone by the
+    /// caller passing `false`. Returns the new average entry price.
+    pub fn add_to_position(
+        &mut self,
+        id: u64,
+        price: Price,
+        size: f64,
+        entry_fees: f64,
+        shift_protective: bool,
+    ) -> Option<Price> {
+        let managed = self.get_mut(id)?;
+        let pos = &mut managed.position;
+        let old_avg = pos.entry_price;
+        let total = pos.size + size;
+        let new_avg = (pos.entry_price * pos.size + price * size) / total;
+        pos.entry_price = new_avg;
+        pos.size = total;
+        pos.entry_fees += entry_fees;
+        if shift_protective {
+            let shift = new_avg - old_avg;
+            pos.stop_price = pos.stop_price.map(|s| s + shift);
+            pos.target_price = pos.target_price.map(|t| t + shift);
+        }
+        // The itemized entry breakdown describes the first slice only;
+        // later slices carry their cost in `entry_fees` and the trade's
+        // fee_breakdown is dropped rather than misreported.
+        managed.entry_breakdown = None;
+        Some(new_avg)
+    }
+
+    /// Close part of a position: a trade record for the `qty` slice (at the
+    /// position's average entry, entry fees prorated) and the remainder
+    /// stays open. `qty >= size` closes it whole via
+    /// [`PositionLedger::close_position`].
+    pub fn reduce_position(&mut self, id: u64, qty: f64, exit: ExitDetails) -> Option<Trade> {
+        let managed = self.get_mut(id)?;
+        if qty >= managed.position.size {
+            return self.close_position(id, exit);
+        }
+        let fraction = qty / managed.position.size;
+        let mut slice = managed.clone();
+        slice.position.size = qty;
+        slice.position.entry_fees = managed.position.entry_fees * fraction;
+        slice.entry_breakdown = None;
+        managed.position.size -= qty;
+        managed.position.entry_fees -= slice.position.entry_fees;
+        managed.entry_breakdown = None;
+        let trade = self.create_trade(&slice, exit);
+        self.trade_counter += 1;
+        Some(trade)
     }
 
     /// Close a position by id and produce its trade record.

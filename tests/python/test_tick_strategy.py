@@ -297,6 +297,42 @@ class TestTickExecution:
         run_tick_strategy(strategy, data, config=config)
         assert strategy.fills == [3], strategy.fills
 
+    def test_partial_fills_span_prints_and_open_orders_shows_the_rest(self):
+        """With partial_fills on, a 100-unit entry fills 40 then 60 across
+        two prints and is ONE position; between them ctx.open_orders()
+        shows the order working with filled_qty=40. The flag is detectable
+        on BacktestConfig, so a stale wheel refuses a caller that needs it."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fills, self.working = [], []
+
+            def on_trade_tick(self, ctx, tick):
+                if ctx.idx == 0:
+                    self.submit_order(orders.Market(units=100, side="buy"))
+                self.working.append([(o.status, o.filled_qty, o.remaining) for o in ctx.open_orders()])
+
+            def on_order_filled(self, ctx, event):
+                self.fills.append(event.size)
+
+        # The submission print itself sweeps the order (same-print market
+        # semantics), so it carries the first 40; the next print the 60.
+        data = {"AAA": {**_ticks([100.0, 110.0, 110.0, 110.0]), "ltq": np.array([40.0, 60.0, 5.0, 5.0])}}
+        config = _zero_fee_config()
+        assert hasattr(config, "partial_fills")
+        config.partial_fills = True
+        strategy = S()
+        result = run_tick_strategy(strategy, data, config=config)
+        assert strategy.fills == [40.0, 60.0]
+        # Seen on the print after the first slice: 40 filled, 60 to go.
+        assert strategy.working[1] == [("partially_filled", 40.0, 60.0)]
+        assert strategy.working[2] == []
+        trades = result.result.trades()
+        assert len(trades) == 1  # closed at end of data as one position
+        assert trades[0].size == pytest.approx(100.0)
+        assert trades[0].entry_price == pytest.approx(106.0)
+
     def test_agrees_with_a_bar_run_when_each_bar_has_one_print(self):
         """Cross-validation against the golden-covered bar path.
 

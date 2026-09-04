@@ -499,6 +499,15 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub queue_fill_model: bool,
 
+    /// Fill typed orders across prints on the tick path: a fill takes at
+    /// most the print's size, the order stays working as `PartiallyFilled`
+    /// for the rest, and an opening order's later slices add to the
+    /// position it opened (weighted-average entry). Off by default: it
+    /// changes fills. Bar events, capital-fraction orders and the signal
+    /// path always fill whole.
+    #[serde(default)]
+    pub partial_fills: bool,
+
     /// Seed for the stochastic-fill RNG; same seed, same fills.
     #[serde(default)]
     pub fill_seed: u64,
@@ -535,6 +544,7 @@ impl Default for BacktestConfig {
             legacy_annualization: false,
             fill_prob_limit: 1.0,
             queue_fill_model: false,
+            partial_fills: false,
             session_tz_offset_ns: 0,
             limit_slippage: 0.0,
             liquidate_on_margin_call: false,

@@ -49,6 +49,7 @@ class BacktestConfig:
     fill_prob_limit: float
     fill_prob_slippage: float
     queue_fill_model: bool
+    partial_fills: bool
     session_tz_offset_ns: int
     limit_slippage: float
     liquidate_on_margin_call: bool
@@ -76,6 +77,7 @@ class BacktestConfig:
         fill_seed: int = ...,
         bar_path_adaptive: bool = ...,
         queue_fill_model: bool = ...,
+        partial_fills: bool = ...,
         session_tz_offset_ns: int = ...,
         limit_slippage: float = ...,
         liquidate_on_margin_call: bool = ...,
@@ -831,6 +833,12 @@ class PortfolioSession:
         ask_qty: float = ...,
         oi: float = ...,
     ) -> int: ...
+    # (order_id, client_id, side, kind, status, filled_qty, units); status is
+    # "accepted", "triggered" or "partially_filled"; units is nan unless the
+    # order was placed in explicit units.
+    def working_orders(
+        self, instrument: int
+    ) -> list[tuple[int, str, str, str, str, float, float]]: ...
     def push_bar(
         self,
         instrument: int,

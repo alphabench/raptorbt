@@ -121,6 +121,9 @@ pub struct PyBacktestConfig {
     /// Fill resting limits from observed queue position (needs depth data).
     #[pyo3(get, set)]
     pub queue_fill_model: bool,
+    /// Fill typed orders across prints on the tick path (partial fills).
+    #[pyo3(get, set)]
+    pub partial_fills: bool,
     /// Offset for the trading date DAY orders expire on (0 = UTC).
     #[pyo3(get, set)]
     pub session_tz_offset_ns: i64,
@@ -172,6 +175,7 @@ impl PyBacktestConfig {
         fill_seed=0,
         bar_path_adaptive=false,
         queue_fill_model=false,
+        partial_fills=false,
         session_tz_offset_ns=0,
         limit_slippage=0.0,
         liquidate_on_margin_call=false,
@@ -197,6 +201,7 @@ impl PyBacktestConfig {
         fill_seed: u64,
         bar_path_adaptive: bool,
         queue_fill_model: bool,
+        partial_fills: bool,
         session_tz_offset_ns: i64,
         limit_slippage: f64,
         liquidate_on_margin_call: bool,
@@ -220,6 +225,7 @@ impl PyBacktestConfig {
             legacy_annualization,
             fill_prob_limit,
             queue_fill_model,
+            partial_fills,
             session_tz_offset_ns,
             limit_slippage,
             liquidate_on_margin_call,
@@ -352,6 +358,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             legacy_annualization: py_config.legacy_annualization,
             fill_prob_limit: py_config.fill_prob_limit,
             queue_fill_model: py_config.queue_fill_model,
+            partial_fills: py_config.partial_fills,
             session_tz_offset_ns: py_config.session_tz_offset_ns,
             limit_slippage: py_config.limit_slippage,
             liquidate_on_margin_call: py_config.liquidate_on_margin_call,

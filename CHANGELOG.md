@@ -28,6 +28,25 @@ instrument's own print.**
   zero. `_TICK_FIELDS` names the arrays, so a caller can detect the
   capability rather than trust a version string.
 
+- **Partial fills on the tick path** (`BacktestConfig.partial_fills`, off
+  by default). A typed order in explicit units fills at most a print's size
+  per print and stays working as `PartiallyFilled` for the rest; a later
+  slice of an opening order adds to the position it opened (size-weighted
+  average entry; a stop or target derived from the entry price moves with
+  the average, explicit levels stay), so a 100-lot entry that prints 40
+  then 60 is one 100-lot position, not a refused second entry. A closing
+  slice books its own trade record at the average entry with entry costs
+  prorated, and the remainder stays open; an exit larger than the position
+  closes what is held and cancels the surplus, never reversing. IOC fills
+  one slice and cancels the rest; FOK fills nothing on a print too small
+  for the whole order; DAY expiry expires the remainder and keeps what
+  filled. Capital-fraction orders, close-all, the signal path and bar events
+  fill whole as before. `ctx.open_orders()` lists what is still working
+  with `filled_qty`; `on_order_filled` fires once per slice; one-cancels-
+  other siblings cancel on the completing slice only. The dead
+  `FillModel.fill_ratio` is gone. Not a real queue rank: a slice is bounded
+  by the print, not by where the order sits in line.
+
 ### Fixed
 
 - **Market orders routed across instruments on the tick path.** A market

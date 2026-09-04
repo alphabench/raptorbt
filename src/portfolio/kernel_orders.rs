@@ -272,7 +272,11 @@ impl EngineKernel {
         }
         let limit_price = match kind {
             OrderKind::Limit { price } => price,
-            OrderKind::StopLimit { price, .. } if status == OrderStatus::Triggered => price,
+            OrderKind::StopLimit { price, .. }
+                if matches!(status, OrderStatus::Triggered | OrderStatus::PartiallyFilled) =>
+            {
+                price
+            }
             _ => return None,
         };
         let direction = match side {
@@ -339,7 +343,8 @@ impl EngineKernel {
         // (queue position, exhausted liquidity); it stays working. Stop and
         // market fills may instead slip one tick against the trader.
         let is_limit_fill = matches!(kind, OrderKind::Limit { .. })
-            || (matches!(kind, OrderKind::StopLimit { .. }) && status == OrderStatus::Triggered);
+            || (matches!(kind, OrderKind::StopLimit { .. })
+                && matches!(status, OrderStatus::Triggered | OrderStatus::PartiallyFilled));
         let mut queue_granted = false;
         if is_limit_fill {
             // The queue model reads the tape; it consumes no randomness, so
@@ -436,6 +441,12 @@ impl EngineKernel {
             OrderSide::Buy => Direction::Long,
             OrderSide::Sell => Direction::Short,
         };
+        // Partial fills: on a print, a slice is at most the print's size.
+        // Only explicit unit counts (and close-all) can be sliced; a
+        // capital fraction resolves once, whole, as it always did.
+        let slicing = self.config.partial_fills && self.stepping_trade && bar.volume > 0.0;
+        let filled_so_far = self.orders.get(id).map(|o| o.filled_qty).unwrap_or(0.0);
+        let slice_of = |remaining: f64| if slicing { remaining.min(bar.volume) } else { remaining };
         let hedging = self.ledger.policy() == PositionPolicy::Independent;
         let held = self.ledger.first().map(|m| m.position.direction);
         let (opens, open_direction) = if hedging {
@@ -469,7 +480,11 @@ impl EngineKernel {
                 );
                 return;
             }
-            if !hedging && self.ledger.is_in_position() {
+            // A later slice of the order that opened the position adds to
+            // it (partial fills); any other order is a second entry.
+            let adds_to =
+                self.ledger.first().filter(|m| m.entry_order_id == Some(id)).map(|m| m.id);
+            if !hedging && self.ledger.is_in_position() && adds_to.is_none() {
                 reject(
                     &mut self.orders,
                     &mut self.risk,
@@ -479,6 +494,53 @@ impl EngineKernel {
                     &client_id,
                     "position_open",
                 );
+                return;
+            }
+            if let (Some(position_id), QtySpec::Units(u)) = (adds_to, qty) {
+                let remaining = u - filled_so_far;
+                let slice = slice_of(remaining);
+                if slice <= 0.0 {
+                    return;
+                }
+                if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Fok))
+                    && slice < remaining
+                {
+                    self.cancel_remainder(idx, id, events);
+                    return;
+                }
+                let raw_price = if matched_price.is_nan() {
+                    self.fill_price_for(bar, open_direction, true)
+                } else {
+                    matched_price
+                };
+                match self.add_at(
+                    idx,
+                    bar,
+                    position_id,
+                    raw_price,
+                    slice,
+                    stop_attach,
+                    target_attach,
+                ) {
+                    Some((price, size)) => {
+                        self.record_fill(idx, id, &client_id, price, size, u, events);
+                        events.push(EngineEvent::Entered {
+                            idx,
+                            price,
+                            size,
+                            direction: open_direction,
+                        });
+                    }
+                    None => reject(
+                        &mut self.orders,
+                        &mut self.risk,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        "unfillable",
+                    ),
+                }
                 return;
             }
             if self.margin.is_halted() {
@@ -511,7 +573,22 @@ impl EngineKernel {
                 matched_price
             };
             let (size_mult, explicit_units) = match qty {
-                QtySpec::Units(u) => (None, Some(u)),
+                QtySpec::Units(u) => {
+                    let remaining = u - filled_so_far;
+                    let slice = slice_of(remaining);
+                    if slice <= 0.0 {
+                        return;
+                    }
+                    if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Fok))
+                        && slice < remaining
+                    {
+                        // Fill-or-kill: a print too small for the whole
+                        // order fills none of it.
+                        self.cancel_remainder(idx, id, events);
+                        return;
+                    }
+                    (None, Some(slice))
+                }
                 QtySpec::CapitalFrac(f) => (Some(f), None),
                 QtySpec::FullPosition => {
                     reject(
@@ -541,18 +618,17 @@ impl EngineKernel {
                 target_attach,
             ) {
                 Some(EngineEvent::Entered { price, size, direction, .. }) => {
-                    if let Some(order) = self.orders.get_mut(id) {
-                        let _ = order.transition(OrderStatus::Filled);
+                    // Remember which order opened it, so a later slice of the
+                    // same order adds instead of being refused.
+                    if let Some(opened) = self.ledger.first_mut() {
+                        opened.entry_order_id = Some(id);
                     }
-                    events.push(EngineEvent::OrderFilled {
-                        idx,
-                        order_id: id,
-                        client_id,
-                        price,
-                        size,
-                    });
+                    let requested = match qty {
+                        QtySpec::Units(u) => u,
+                        _ => size,
+                    };
+                    self.record_fill(idx, id, &client_id, price, size, requested, events);
                     events.push(EngineEvent::Entered { idx, price, size, direction });
-                    self.after_fill(idx, id, events);
                 }
                 Some(EngineEvent::EntryRejected { reason, .. }) => {
                     // `open_at` already reported this; sizing arithmetic is
@@ -589,30 +665,107 @@ impl EngineKernel {
             };
             let position_id = first.id;
             let direction = first.position.direction;
+            let held = first.position.size;
             let raw_price = if matched_price.is_nan() {
                 self.fill_price_for(bar, direction, false)
             } else {
                 matched_price
             };
-            match self.close_at(idx, bar, position_id, raw_price, ExitReason::Order) {
+            // How much this order still wants, capped at what is held: an
+            // exit larger than the position never reverses into a new one.
+            let wanted = match qty {
+                QtySpec::Units(u) => (u - filled_so_far).min(held),
+                _ => held,
+            };
+            let slice = slice_of(wanted);
+            if slice <= 0.0 {
+                return;
+            }
+            if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Fok))
+                && slice < wanted
+            {
+                self.cancel_remainder(idx, id, events);
+                return;
+            }
+            match self.reduce_at(idx, bar, position_id, slice, raw_price, ExitReason::Order) {
                 Some(EngineEvent::Exited { trade, .. }) => {
-                    if let Some(order) = self.orders.get_mut(id) {
-                        let _ = order.transition(OrderStatus::Filled);
-                    }
-                    events.push(EngineEvent::OrderFilled {
+                    // The order is done once it has what it asked for, or
+                    // once nothing is left to close; the surplus of an
+                    // oversized exit is canceled, never left working.
+                    let requested = match qty {
+                        QtySpec::Units(u) => u.min(filled_so_far + held),
+                        _ => held,
+                    };
+                    self.record_fill(
                         idx,
-                        order_id: id,
-                        client_id,
-                        price: trade.exit_price,
-                        size: trade.size,
-                    });
+                        id,
+                        &client_id,
+                        trade.exit_price,
+                        trade.size,
+                        requested,
+                        events,
+                    );
                     events.push(EngineEvent::Exited { idx, trade });
-                    self.after_fill(idx, id, events);
                 }
                 // A close that could not fill is not a refused *entry*, so it
                 // stays out of the rejected-entries count.
                 _ => reject_uncounted(&mut self.orders, events, idx, id, &client_id, "unfillable"),
             }
+        }
+    }
+
+    /// Book one fill slice on an order: advance `filled_qty`, move the order
+    /// to `Filled` when it has `requested`, else to `PartiallyFilled` (an
+    /// IOC order gives up its remainder instead). Contingencies
+    /// (`after_fill`) run only on the completing slice, so a bracket's
+    /// protective sibling keeps working while its partner is partly filled.
+    #[allow(clippy::too_many_arguments)]
+    fn record_fill(
+        &mut self,
+        idx: usize,
+        id: u64,
+        client_id: &str,
+        price: Price,
+        size: f64,
+        requested: f64,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        let mut done = true;
+        let mut ioc_remainder = false;
+        if let Some(order) = self.orders.get_mut(id) {
+            order.filled_qty += size;
+            // Float slop: a slice sized off the same arithmetic as the
+            // request is complete at the request, not one ulp past it.
+            done = order.filled_qty + 1e-9 >= requested;
+            if done {
+                let _ = order.transition(OrderStatus::Filled);
+            } else {
+                let _ = order.transition(OrderStatus::PartiallyFilled);
+                ioc_remainder = order.tif == TimeInForce::Ioc;
+            }
+        }
+        events.push(EngineEvent::OrderFilled {
+            idx,
+            order_id: id,
+            client_id: client_id.to_string(),
+            price,
+            size,
+        });
+        if done {
+            self.after_fill(idx, id, events);
+        } else if ioc_remainder {
+            self.cancel_remainder(idx, id, events);
+        }
+    }
+
+    /// Cancel what is left of an order (IOC after a partial slice, FOK on
+    /// a print too small to fill whole).
+    fn cancel_remainder(&mut self, idx: usize, id: u64, events: &mut Vec<EngineEvent>) {
+        let Some(order) = self.orders.get_mut(id) else { return };
+        let client_id = order.client_id.clone();
+        if order.transition(OrderStatus::Canceled) {
+            self.queue.forget(id);
+            events.push(EngineEvent::OrderCanceled { idx, order_id: id, client_id });
         }
     }
 
