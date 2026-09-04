@@ -5,6 +5,22 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-09-04
+
+**In plain words: 0.13.0 could report a typed order's fill twice when a
+strategy listened for fills — once for the order and once more for the
+position it opened or closed. One fill is reported per fill again.**
+
+### Fixed
+
+- **A typed order's fill event is immediately followed by the position
+  event it caused.** 0.13.0 emitted the fill, then its contingencies
+  (bracket children accepted, one-cancels-other siblings canceled), then
+  the position event; the Python runner reads an `entered`/`exited` that
+  does not directly follow an `order_filled` as a signal-path fill and
+  fires `on_order_filled` for it again. The position event now rides
+  directly behind the fill, as before 0.13.
+
 ## [0.13.0] - 2026-09-04
 
 Tick-path realism: the size behind every print and quote, a queue that

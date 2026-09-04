@@ -523,13 +523,9 @@ impl EngineKernel {
                     target_attach,
                 ) {
                     Some((price, size)) => {
-                        self.record_fill(idx, id, &client_id, price, size, u, events);
-                        events.push(EngineEvent::Entered {
-                            idx,
-                            price,
-                            size,
-                            direction: open_direction,
-                        });
+                        let entered =
+                            EngineEvent::Entered { idx, price, size, direction: open_direction };
+                        self.record_fill(idx, id, &client_id, price, size, u, entered, events);
                     }
                     None => reject(
                         &mut self.orders,
@@ -627,8 +623,8 @@ impl EngineKernel {
                         QtySpec::Units(u) => u,
                         _ => size,
                     };
-                    self.record_fill(idx, id, &client_id, price, size, requested, events);
-                    events.push(EngineEvent::Entered { idx, price, size, direction });
+                    let entered = EngineEvent::Entered { idx, price, size, direction };
+                    self.record_fill(idx, id, &client_id, price, size, requested, entered, events);
                 }
                 Some(EngineEvent::EntryRejected { reason, .. }) => {
                     // `open_at` already reported this; sizing arithmetic is
@@ -696,16 +692,9 @@ impl EngineKernel {
                         QtySpec::Units(u) => u.min(filled_so_far + held),
                         _ => held,
                     };
-                    self.record_fill(
-                        idx,
-                        id,
-                        &client_id,
-                        trade.exit_price,
-                        trade.size,
-                        requested,
-                        events,
-                    );
-                    events.push(EngineEvent::Exited { idx, trade });
+                    let (price, size) = (trade.exit_price, trade.size);
+                    let exited = EngineEvent::Exited { idx, trade };
+                    self.record_fill(idx, id, &client_id, price, size, requested, exited, events);
                 }
                 // A close that could not fill is not a refused *entry*, so it
                 // stays out of the rejected-entries count.
@@ -716,9 +705,12 @@ impl EngineKernel {
 
     /// Book one fill slice on an order: advance `filled_qty`, move the order
     /// to `Filled` when it has `requested`, else to `PartiallyFilled` (an
-    /// IOC order gives up its remainder instead). Contingencies
-    /// (`after_fill`) run only on the completing slice, so a bracket's
-    /// protective sibling keeps working while its partner is partly filled.
+    /// IOC order gives up its remainder instead). The fill event is
+    /// followed IMMEDIATELY by the position event it caused (`position`) —
+    /// that adjacency is what tells a consumer the position change was
+    /// order-driven, not a second fill. Contingencies (`after_fill`) come
+    /// after, and only on the completing slice, so a bracket's protective
+    /// sibling keeps working while its partner is partly filled.
     #[allow(clippy::too_many_arguments)]
     fn record_fill(
         &mut self,
@@ -728,6 +720,7 @@ impl EngineKernel {
         price: Price,
         size: f64,
         requested: f64,
+        position: EngineEvent,
         events: &mut Vec<EngineEvent>,
     ) {
         let mut done = true;
@@ -751,6 +744,7 @@ impl EngineKernel {
             price,
             size,
         });
+        events.push(position);
         if done {
             self.after_fill(idx, id, events);
         } else if ioc_remainder {
