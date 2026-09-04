@@ -5,6 +5,82 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-04
+
+Tick-path realism: the size behind every print and quote, a queue that
+follows the touch, fills that respect what printed, orders that take time
+to reach the venue — and a cross-instrument order that used to vanish.
+
+**In plain words: on tick data the engine now knows how much traded on
+each print and how much is displayed at the best bid and ask, so a
+resting order waits its turn behind real size and a large order fills
+across several prints instead of all at once on a one-lot print; an order
+can be given a delay before it reaches the exchange; and an order placed
+for one contract from another instrument's event — a hedge leg bought when
+the index prints — fills on that contract's next print instead of sitting
+unfilled forever. Every new behaviour is off by default and switched on by
+the caller, so existing backtests are unchanged.**
+
+**In plain words: on tick data, an order placed for one contract from
+another instrument's event — a hedge leg bought when the index prints, or
+a straddle sold when a 09:20 timer fires — could sit unfilled for the whole
+run without a word, whenever the two instruments' event counts differed
+(which, with quotes in the tape, they always do). Such an order now fills
+on the target's next print, as it always did when placed from that
+instrument's own print.**
+
+### Added
+
+- **Print size, L1 sizes and open interest on the tick path.** Tick input
+  takes four optional arrays/keywords — `ltq`, `bid_qty`, `ask_qty`, `oi` —
+  zero-filled when absent. `ltq` is the print's true size and becomes
+  `tick.size` when present (the buy/sell flow deltas were only ever a proxy
+  for it); `bid_qty`/`ask_qty` reach `quote.bid_size`/`quote.ask_size` and
+  size the top-of-book level, so the queue-fill model joins behind displayed
+  size from a quote alone, with no depth snapshot; `oi` rides the print as
+  `tick.oi`. A size the feed did not carry stays unknown (`nan`), never
+  zero. `_TICK_FIELDS` names the arrays, so a caller can detect the
+  capability rather than trust a version string.
+
+- **Partial fills on the tick path** (`BacktestConfig.partial_fills`, off
+  by default). A typed order in explicit units fills at most a print's size
+  per print and stays working as `PartiallyFilled` for the rest; a later
+  slice of an opening order adds to the position it opened (size-weighted
+  average entry; a stop or target derived from the entry price moves with
+  the average, explicit levels stay), so a 100-lot entry that prints 40
+  then 60 is one 100-lot position, not a refused second entry. A closing
+  slice books its own trade record at the average entry with entry costs
+  prorated, and the remainder stays open; an exit larger than the position
+  closes what is held and cancels the surplus, never reversing. IOC fills
+  one slice and cancels the rest; FOK fills nothing on a print too small
+  for the whole order; DAY expiry expires the remainder and keeps what
+  filled. Capital-fraction orders, close-all, the signal path and bar events
+  fill whole as before. `ctx.open_orders()` lists what is still working
+  with `filled_qty`; `on_order_filled` fires once per slice; one-cancels-
+  other siblings cancel on the completing slice only. The dead
+  `FillModel.fill_ratio` is gone. Not a real queue rank: a slice is bounded
+  by the print, not by where the order sits in line.
+
+- **Order-entry latency on the tick path** (`BacktestConfig.order_latency_ns`,
+  default 0). An order placed on the event at `t` is invisible to prints
+  before `t + latency`: it neither matches, expires, nor burns an IOC/FOK
+  evaluation until it has reached the venue. The fill is known when the
+  tape reaches it — the response leg is not modelled. Bars are unaffected.
+
+### Fixed
+
+- **Market orders routed across instruments on the tick path.** A market
+  order was swept only by a print whose per-instrument ordinal *equalled*
+  the order's `submitted_idx`. Ordinals count quotes as well as prints, so
+  an order stamped with another instrument's ordinal — or placed from a
+  quote handler — almost never met that print and stayed working
+  unacknowledged. `PortfolioSession::submit_order` now stamps a
+  cross-instrument submission with the target's last stepped print, and a
+  print sweeps every market order submitted at or before its ordinal
+  (`kernel_tests::market_order_placed_off_this_clock_fills_on_the_next_print`,
+  `tests/python/test_tick_strategy.py`). Bar semantics are unchanged: a bar
+  still sweeps only its own submissions.
+
 ## [0.12.1] - 2026-09-02
 
 Sold options that hedge each other are margined as one group, and the

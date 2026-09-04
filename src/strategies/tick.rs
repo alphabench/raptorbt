@@ -329,6 +329,9 @@ mod tests {
             buy_qty_delta: vec![100.0; n],
             sell_qty_delta: vec![80.0; n],
             oi: vec![0.0; n],
+            ltq: vec![0.0; n],
+            bid_qty: vec![0.0; n],
+            ask_qty: vec![0.0; n],
         }
     }
 
@@ -510,6 +513,9 @@ mod tests {
             buy_qty_delta: vec![],
             sell_qty_delta: vec![],
             oi: vec![],
+            ltq: vec![],
+            bid_qty: vec![],
+            ask_qty: vec![],
         };
         let config = TickBacktestConfig::default();
         let bt = TickBacktest::new(config);
@@ -548,6 +554,9 @@ mod tests {
             buy_qty_delta: vec![0.0; n],
             sell_qty_delta: vec![0.0; n],
             oi: vec![0.0; n],
+            ltq: vec![0.0; n],
+            bid_qty: vec![0.0; n],
+            ask_qty: vec![0.0; n],
         };
         let mut entries = vec![false; n];
         entries[1] = true;

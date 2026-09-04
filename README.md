@@ -1194,8 +1194,18 @@ It does not claim a real queue rank. Market-by-price data cannot tell you
 where you stand in line, nor separate size that executed ahead of you from
 size that was cancelled, so the model falls back to `fill_prob_limit` rather
 than guessing: on bar events (a bar's volume is not volume _at_ the limit
-price) and on a quote-only book (a quote gives the price, not the size). A
-level outside the visible five reads as unknown, never as empty.
+price) and on a quote whose size is unknown. A level outside the visible five
+reads as unknown, never as empty.
+
+Depth snapshots are not required for the model to work. A feed that
+publishes the size at the best bid and ask makes a top-of-book quote as
+queue-capable as a snapshot — pass `bid_qty`/`ask_qty` beside `bid`/`ask`
+(as arrays to `run_tick_strategy`, or keywords to `push_tick`) and an order
+resting at the touch joins behind the displayed size. Two more optional
+arrays ride the same path: `ltq`, the exchange's last traded quantity, which
+becomes `tick.size` when present (the buy/sell flow deltas are only a proxy
+for it), and `oi`, the open interest published with the print (`tick.oi`).
+A size the feed did not carry is unknown (`nan`), never zero.
 
 Books, like quotes, are observation only — they never fill an order, move a
 trailing stop, or mark equity. Displayed size is intent, not a trade.

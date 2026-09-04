@@ -385,19 +385,34 @@ impl EventSession {
         ask: f64,
         buy_qty_delta: f64,
         sell_qty_delta: f64,
+        ltq: f64,
+        bid_qty: f64,
+        ask_qty: f64,
+        oi: f64,
     ) -> usize {
         let mut appended = 0;
         if ltp > 0.0 {
-            let size = buy_qty_delta.abs() + sell_qty_delta.abs();
+            // The exchange's last traded quantity when supplied, else the
+            // flow-delta proxy — the same rule as `tick_data_to_events`.
+            let size = if ltq > 0.0 { ltq } else { buy_qty_delta.abs() + sell_qty_delta.abs() };
             let signed_size = buy_qty_delta.abs() - sell_qty_delta.abs();
             self.push_entry(
                 instrument,
-                ScheduleData::Trade(TradeTick { timestamp, price: ltp, size, signed_size }),
+                ScheduleData::Trade(TradeTick { timestamp, price: ltp, size, signed_size, oi }),
             );
             appended += 1;
         }
         if bid > 0.0 && ask > 0.0 {
-            self.push_entry(instrument, ScheduleData::Quote(QuoteTick { timestamp, bid, ask }));
+            self.push_entry(
+                instrument,
+                ScheduleData::Quote(QuoteTick {
+                    timestamp,
+                    bid,
+                    ask,
+                    bid_size: TickData::displayed(bid_qty),
+                    ask_size: TickData::displayed(ask_qty),
+                }),
+            );
             appended += 1;
         }
         appended
@@ -433,6 +448,28 @@ impl EventSession {
     /// The entry the cursor points at, if any.
     pub fn current(&self) -> Option<ScheduleEntry> {
         self.schedule.get(self.cursor).copied()
+    }
+
+    /// The `submitted_idx` an order placed during the current event should
+    /// carry on `instrument`'s own clock.
+    ///
+    /// Ordinals are per instrument, so an order routed to another
+    /// instrument (a hedge leg placed from the index's print, or from a
+    /// timer that fired on it) must not carry the dispatching event's
+    /// ordinal: the two clocks are unrelated, and the order would match
+    /// late, or never. It is stamped with the target's last stepped print
+    /// instead, so it works from that instrument's next print — the first
+    /// evidence of a trade after it was placed. An instrument that has not
+    /// printed yet stamps 0, its first print.
+    pub fn submission_idx(&self, instrument: usize, event_idx: usize) -> usize {
+        match self.current() {
+            Some(entry) if entry.instrument == instrument => event_idx,
+            _ => self
+                .last_seen
+                .get(instrument)
+                .and_then(|seen| seen.map(|(idx, _)| idx))
+                .unwrap_or(0),
+        }
     }
 
     /// Kernel of an instrument, for order routing and queries.

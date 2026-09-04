@@ -26,12 +26,15 @@ use crate::data::{BookSide, OrderBook};
 /// One resting order's queue estimate.
 #[derive(Debug, Clone, Copy)]
 struct QueueState {
-    /// Size estimated to sit ahead at this price, fixed when the order rested.
+    /// Size estimated to sit ahead at this price when the order rested,
+    /// lowered by later quotes that display less (see [`QueueTracker::on_quote`]).
     ahead: f64,
     /// Print volume observed at this price since.
     traded: f64,
     /// The price the estimate belongs to; a modified order re-queues.
     price: Price,
+    /// The side of the book the order rests on.
+    side: BookSide,
 }
 
 /// Whether a print fills a resting limit.
@@ -68,6 +71,35 @@ impl QueueTracker {
     /// Estimated size still ahead of an order, for diagnostics.
     pub fn ahead_of(&self, order_id: u64) -> Option<f64> {
         self.orders.get(&order_id).map(|s| (s.ahead - s.traded).max(0.0))
+    }
+
+    /// Let a top-of-book quote tighten every resting estimate.
+    ///
+    /// A quote can only ever shorten the queue ahead, never lengthen it —
+    /// size that traded ahead of an order never un-trades. Two things it
+    /// tells us, in the spirit of an L1-only queue model (the kind a
+    /// best-bid/ask feed permits): when the touch is at the order's price
+    /// and displays *less* than the estimate still ahead, the estimate is
+    /// capped at what is displayed (size ahead of us cannot exceed the
+    /// level's total); and when the touch has moved *inside* the order's
+    /// price, the order is alone at the best level and nothing is ahead.
+    /// A touch beyond the order's price says nothing about its level and
+    /// leaves the estimate alone. An unsized quote (`NaN`) is ignored.
+    pub fn on_quote(&mut self, bid: Price, bid_size: f64, ask: Price, ask_size: f64) {
+        for state in self.orders.values_mut() {
+            let (touch, displayed, inside) = match state.side {
+                BookSide::Bid => (bid, bid_size, bid > 0.0 && bid < state.price),
+                BookSide::Ask => (ask, ask_size, ask > 0.0 && ask > state.price),
+            };
+            if inside {
+                state.ahead = state.traded;
+            } else if touch == state.price && displayed.is_finite() && displayed >= 0.0 {
+                let remaining = (state.ahead - state.traded).max(0.0);
+                if displayed < remaining {
+                    state.ahead = state.traded + displayed;
+                }
+            }
+        }
     }
 
     /// Decide whether a print fills a resting limit, updating the estimate.
@@ -111,7 +143,8 @@ impl QueueTracker {
                 let Some(ahead) = initial_queue(book, side, limit_price) else {
                     return QueueVerdict::Unknown;
                 };
-                self.orders.insert(order_id, QueueState { ahead, traded: 0.0, price: limit_price });
+                self.orders
+                    .insert(order_id, QueueState { ahead, traded: 0.0, price: limit_price, side });
                 self.orders.get_mut(&order_id).expect("just inserted")
             }
         };
@@ -227,16 +260,70 @@ mod tests {
     }
 
     #[test]
-    fn a_quote_only_book_cannot_estimate_the_queue() {
+    fn an_unsized_quote_cannot_estimate_the_queue() {
         let mut tracker = QueueTracker::new();
         let mut book = OrderBook::new();
-        book.apply_quote(0, 99.0, 101.0);
+        book.apply_quote(0, 99.0, 101.0, f64::NAN, f64::NAN);
         // The price is visible but its size is not; the caller must fall
         // back rather than guess.
         assert_eq!(
             tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 100.0),
             QueueVerdict::Unknown
         );
+    }
+
+    #[test]
+    fn a_sized_quote_seeds_the_queue_at_the_touch() {
+        // A feed that publishes best-bid size makes an L1 book as
+        // queue-capable as a depth snapshot: join behind what is displayed.
+        let mut tracker = QueueTracker::new();
+        let mut book = OrderBook::new();
+        book.apply_quote(0, 99.0, 101.0, 300.0, 500.0);
+        assert_eq!(
+            tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 100.0),
+            QueueVerdict::Resting
+        );
+        assert_eq!(tracker.ahead_of(1), Some(200.0));
+    }
+
+    #[test]
+    fn a_quote_showing_less_at_our_price_caps_the_queue_ahead() {
+        let mut tracker = QueueTracker::new();
+        let book = depth_book((99.0, 300.0), (101.0, 500.0));
+        // Rest behind 300; 100 prints through, 200 remain ahead.
+        assert_eq!(
+            tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 100.0),
+            QueueVerdict::Resting
+        );
+        assert_eq!(tracker.ahead_of(1), Some(200.0));
+        // The touch now displays only 50 at our price: at most 50 are ahead.
+        tracker.on_quote(99.0, 50.0, 101.0, 500.0);
+        assert_eq!(tracker.ahead_of(1), Some(50.0));
+        // A larger display never lengthens the queue again.
+        tracker.on_quote(99.0, 400.0, 101.0, 500.0);
+        assert_eq!(tracker.ahead_of(1), Some(50.0));
+        // An unsized quote is no evidence.
+        tracker.on_quote(99.0, f64::NAN, 101.0, f64::NAN);
+        assert_eq!(tracker.ahead_of(1), Some(50.0));
+        assert_eq!(
+            tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 60.0),
+            QueueVerdict::FilledInQueue
+        );
+    }
+
+    #[test]
+    fn a_touch_that_moves_inside_our_price_leaves_nothing_ahead() {
+        let mut tracker = QueueTracker::new();
+        let book = depth_book((99.0, 300.0), (101.0, 500.0));
+        tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 10.0);
+        // The bid drops to 98.5: our 99.0 order is now the best bid, alone.
+        tracker.on_quote(98.5, 120.0, 101.0, 500.0);
+        assert_eq!(tracker.ahead_of(1), Some(0.0));
+        // A touch above our price (99.5) says nothing about our level.
+        let mut tracker = QueueTracker::new();
+        tracker.observe_print(2, 99.0, Direction::Long, &book, 99.0, 10.0);
+        tracker.on_quote(99.5, 5.0, 101.0, 500.0);
+        assert_eq!(tracker.ahead_of(2), Some(290.0));
     }
 
     #[test]

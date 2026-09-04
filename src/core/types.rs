@@ -121,6 +121,39 @@ pub struct TickData {
     pub sell_qty_delta: Vec<f64>,
     /// Open interest at each tick (0 if unavailable).
     pub oi: Vec<f64>,
+    /// Last traded quantity of the print (0 if unavailable). When present
+    /// it is the print's true size; `buy_qty_delta`/`sell_qty_delta` are
+    /// then only the flow split.
+    pub ltq: Vec<f64>,
+    /// Displayed size at the best bid (0 if unavailable).
+    pub bid_qty: Vec<f64>,
+    /// Displayed size at the best ask (0 if unavailable).
+    pub ask_qty: Vec<f64>,
+}
+
+impl TickData {
+    /// The print size a row carries: the exchange's last traded quantity
+    /// when the feed supplied one, else the flow-delta proxy.
+    #[inline]
+    pub fn print_size(&self, i: usize) -> f64 {
+        let ltq = self.ltq.get(i).copied().unwrap_or(0.0);
+        if ltq > 0.0 {
+            ltq
+        } else {
+            self.buy_qty_delta[i].abs() + self.sell_qty_delta[i].abs()
+        }
+    }
+
+    /// A displayed size as the book stores it: `NaN` when the feed did not
+    /// carry one, so a quote-only book stays "price known, size unknown".
+    #[inline]
+    pub fn displayed(qty: f64) -> f64 {
+        if qty > 0.0 {
+            qty
+        } else {
+            f64::NAN
+        }
+    }
 }
 
 impl TickData {
@@ -466,6 +499,24 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub queue_fill_model: bool,
 
+    /// Fill typed orders across prints on the tick path: a fill takes at
+    /// most the print's size, the order stays working as `PartiallyFilled`
+    /// for the rest, and an opening order's later slices add to the
+    /// position it opened (weighted-average entry). Off by default: it
+    /// changes fills. Bar events, capital-fraction orders and the signal
+    /// path always fill whole.
+    #[serde(default)]
+    pub partial_fills: bool,
+
+    /// Order-entry latency on the tick path, in nanoseconds: an order
+    /// placed on the event at `t` can match only on events at or after
+    /// `t + order_latency_ns`. Models the time an order takes to reach the
+    /// venue as one constant; the response leg (learning of the fill) is
+    /// not modelled — the fill is known when the tape reaches it. Bars are
+    /// unaffected. `0` (default) keeps same-print semantics.
+    #[serde(default)]
+    pub order_latency_ns: i64,
+
     /// Seed for the stochastic-fill RNG; same seed, same fills.
     #[serde(default)]
     pub fill_seed: u64,
@@ -502,6 +553,8 @@ impl Default for BacktestConfig {
             legacy_annualization: false,
             fill_prob_limit: 1.0,
             queue_fill_model: false,
+            partial_fills: false,
+            order_latency_ns: 0,
             session_tz_offset_ns: 0,
             limit_slippage: 0.0,
             liquidate_on_margin_call: false,

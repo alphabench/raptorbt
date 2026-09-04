@@ -121,6 +121,12 @@ pub struct PyBacktestConfig {
     /// Fill resting limits from observed queue position (needs depth data).
     #[pyo3(get, set)]
     pub queue_fill_model: bool,
+    /// Fill typed orders across prints on the tick path (partial fills).
+    #[pyo3(get, set)]
+    pub partial_fills: bool,
+    /// Order-entry latency on the tick path (ns); 0 = same-print.
+    #[pyo3(get, set)]
+    pub order_latency_ns: i64,
     /// Offset for the trading date DAY orders expire on (0 = UTC).
     #[pyo3(get, set)]
     pub session_tz_offset_ns: i64,
@@ -172,6 +178,8 @@ impl PyBacktestConfig {
         fill_seed=0,
         bar_path_adaptive=false,
         queue_fill_model=false,
+        partial_fills=false,
+        order_latency_ns=0,
         session_tz_offset_ns=0,
         limit_slippage=0.0,
         liquidate_on_margin_call=false,
@@ -197,6 +205,8 @@ impl PyBacktestConfig {
         fill_seed: u64,
         bar_path_adaptive: bool,
         queue_fill_model: bool,
+        partial_fills: bool,
+        order_latency_ns: i64,
         session_tz_offset_ns: i64,
         limit_slippage: f64,
         liquidate_on_margin_call: bool,
@@ -220,6 +230,8 @@ impl PyBacktestConfig {
             legacy_annualization,
             fill_prob_limit,
             queue_fill_model,
+            partial_fills,
+            order_latency_ns,
             session_tz_offset_ns,
             limit_slippage,
             liquidate_on_margin_call,
@@ -352,6 +364,8 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             legacy_annualization: py_config.legacy_annualization,
             fill_prob_limit: py_config.fill_prob_limit,
             queue_fill_model: py_config.queue_fill_model,
+            partial_fills: py_config.partial_fills,
+            order_latency_ns: py_config.order_latency_ns,
             session_tz_offset_ns: py_config.session_tz_offset_ns,
             limit_slippage: py_config.limit_slippage,
             liquidate_on_margin_call: py_config.liquidate_on_margin_call,
@@ -1685,14 +1699,19 @@ pub fn run_tick_backtest<'py>(
         )));
     }
 
+    let timestamps = numpy_to_vec_i64(timestamps);
+    let n_ticks = timestamps.len();
     let tick_data = crate::core::types::TickData {
-        timestamps: numpy_to_vec_i64(timestamps),
+        timestamps,
         ltp: numpy_to_vec_f64(ltp),
         bid: numpy_to_vec_f64(bid),
         ask: numpy_to_vec_f64(ask),
         buy_qty_delta: numpy_to_vec_f64(buy_qty_delta),
         sell_qty_delta: numpy_to_vec_f64(sell_qty_delta),
         oi: numpy_to_vec_f64(oi),
+        ltq: vec![0.0; n_ticks],
+        bid_qty: vec![0.0; n_ticks],
+        ask_qty: vec![0.0; n_ticks],
     };
 
     let entry_signals = numpy_to_vec_bool(entries);

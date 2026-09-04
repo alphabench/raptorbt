@@ -94,9 +94,9 @@ pub enum TimeInForce {
     Gtd { expire_ns: Timestamp },
     /// Match against exactly one bar, then cancel.
     Ioc,
-    /// Fill completely against one bar or cancel. Without partial fills this
-    /// behaves like [`TimeInForce::Ioc`]; the distinction becomes real when
-    /// the position ledger introduces partial fills.
+    /// Fill completely against one bar or cancel. With `partial_fills` on,
+    /// a print smaller than the remainder cancels the order untouched;
+    /// without it, behaves like [`TimeInForce::Ioc`].
     Fok,
     /// Market order queued to fill at the next bar's open.
     AtOpen,
@@ -116,6 +116,9 @@ pub enum OrderStatus {
     Accepted,
     /// Stop trigger touched; a stop-limit now rests as a limit.
     Triggered,
+    /// Working: some of the quantity has filled (`filled_qty`), the rest
+    /// still rests. Only reachable with `partial_fills` on.
+    PartiallyFilled,
     /// Terminal: filled.
     Filled,
     /// Terminal: canceled by the strategy or by IOC/FOK exhaustion.
@@ -183,6 +186,10 @@ pub struct Order {
     pub trail_watermark: Option<Price>,
     /// Trailing stop-limit: the limit price fixed at trigger time.
     pub trail_limit: Option<Price>,
+    /// Units filled so far. Non-zero only while `PartiallyFilled` (or once
+    /// `Filled`); a whole-fill engine leaves it at the full size on fill.
+    #[serde(default)]
+    pub filled_qty: f64,
 }
 
 impl Order {
@@ -210,7 +217,15 @@ impl Order {
             oco_group: None,
             trail_watermark: None,
             trail_limit: None,
+            filled_qty: 0.0,
         }
+    }
+
+    /// Whether the order is a stop-limit style order whose limit is live —
+    /// triggered, or already partly filled at that limit.
+    #[inline]
+    pub fn limit_live(&self) -> bool {
+        matches!(self.status, OrderStatus::Triggered | OrderStatus::PartiallyFilled)
     }
 
     /// Move to a new status, checking the transition is legal.
@@ -234,6 +249,13 @@ impl Order {
                 | (Triggered, Canceled)
                 | (Triggered, Expired)
                 | (Triggered, Rejected)
+                | (Accepted, PartiallyFilled)
+                | (Triggered, PartiallyFilled)
+                | (PartiallyFilled, PartiallyFilled)
+                | (PartiallyFilled, Filled)
+                | (PartiallyFilled, Canceled)
+                | (PartiallyFilled, Expired)
+                | (PartiallyFilled, Rejected)
         );
         if ok {
             self.status = to;
@@ -245,7 +267,7 @@ impl Order {
     /// The price a resting order would currently fill or trigger at.
     #[inline]
     pub fn working_price(&self) -> Option<Price> {
-        let triggered = self.status == OrderStatus::Triggered;
+        let triggered = self.limit_live();
         match self.kind {
             OrderKind::Market | OrderKind::MarketToLimit => None,
             OrderKind::Limit { price } => Some(price),

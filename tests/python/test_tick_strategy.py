@@ -196,6 +196,170 @@ class TestTickExecution:
             without.metrics.total_return_pct
         )
 
+    def test_a_market_order_for_another_symbol_fills_on_that_symbols_next_print(self):
+        """Ordinals are per instrument, and quotes consume them without
+        stepping the kernel. An order placed for BBB from AAA's print
+        carried AAA's ordinal and, whenever BBB's quotes had pushed its
+        ordinals ahead, never met a print with exactly that ordinal: it sat
+        working, unfilled and unacknowledged, to the end of the run."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fills = []
+
+            def on_trade_tick(self, ctx, tick):
+                if ctx.symbol == "AAA" and ctx.idx == 2:
+                    self.submit_order(orders.Market(units=10, side="buy"), symbol="BBB")
+
+            def on_order_filled(self, ctx, event):
+                self.fills.append((ctx.symbol, event.price))
+
+        prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        for quoted in (False, True):
+            bbb = (
+                _ticks(prices, bids=[p - 1 for p in prices], asks=[p + 1 for p in prices])
+                if quoted
+                else _ticks(prices)
+            )
+            strategy = S()
+            run_tick_strategy(
+                strategy, {"AAA": _ticks(prices), "BBB": bbb}, config=_zero_fee_config()
+            )
+            # BBB's print at t=2 is dispatched after AAA's — the first trade
+            # after the order was placed — so that is where it fills, with
+            # or without quotes in BBB's tape.
+            assert strategy.fills == [("BBB", 102.0)], (quoted, strategy.fills)
+
+    def test_ltq_l1_sizes_and_oi_reach_the_hooks(self):
+        """`ltq` is the print's size when present; the flow deltas stand in
+        otherwise. `oi` rides the print and the L1 sizes ride the quote, as
+        `nan` (never 0) when the feed carried none."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints, self.quotes = [], []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints.append((tick.size, tick.oi))
+
+            def on_quote(self, ctx, quote):
+                self.quotes.append((quote.bid_size, quote.ask_size))
+
+        data = {
+            "AAA": {
+                **_ticks([100.0, 101.0], bids=[99.0, 100.0], asks=[101.0, 102.0]),
+                "buy_qty_delta": np.array([5.0, 5.0]),
+                "sell_qty_delta": np.array([2.0, 2.0]),
+                "ltq": np.array([40.0, 0.0]),
+                "oi": np.array([1500.0, 0.0]),
+                "bid_qty": np.array([300.0, 0.0]),
+            }
+        }
+        strategy = S()
+        run_tick_strategy(strategy, data, config=_zero_fee_config())
+        assert strategy.prints == [(40.0, 1500.0), (7.0, 0.0)]
+        assert strategy.quotes[0][0] == 300.0
+        assert all(np.isnan(v) for v in (strategy.quotes[0][1], *strategy.quotes[1]))
+
+    def test_a_sized_quote_alone_lets_the_queue_model_hold_an_order(self):
+        """No depth snapshot: the feed's best-bid size is what a resting
+        limit joins behind. 300 displayed at 99.0; a 100 print does not
+        reach us, the next 250 does."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints = 0
+                self.fills = []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints += 1
+                if self.prints == 1:
+                    self.submit_order(orders.Limit(side="buy", price=99.0, units=10))
+
+            def on_order_filled(self, ctx, event):
+                # Which print the fill landed on: the 100 print (2nd) must
+                # not reach us behind 300 displayed; the 250 print (3rd) does.
+                self.fills.append(self.prints)
+
+        data = {
+            "AAA": {
+                **_ticks([100.0, 99.0, 99.0], bids=[99.0, 99.0, 99.0], asks=[101.0] * 3),
+                "buy_qty_delta": np.array([1.0, 100.0, 250.0]),
+                "bid_qty": np.array([300.0, 300.0, 300.0]),
+            }
+        }
+        config = _zero_fee_config()
+        config.queue_fill_model = True
+        strategy = S()
+        run_tick_strategy(strategy, data, config=config)
+        assert strategy.fills == [3], strategy.fills
+
+    def test_partial_fills_span_prints_and_open_orders_shows_the_rest(self):
+        """With partial_fills on, a 100-unit entry fills 40 then 60 across
+        two prints and is ONE position; between them ctx.open_orders()
+        shows the order working with filled_qty=40. The flag is detectable
+        on BacktestConfig, so a stale wheel refuses a caller that needs it."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fills, self.working = [], []
+
+            def on_trade_tick(self, ctx, tick):
+                if ctx.idx == 0:
+                    self.submit_order(orders.Market(units=100, side="buy"))
+                self.working.append([(o.status, o.filled_qty, o.remaining) for o in ctx.open_orders()])
+
+            def on_order_filled(self, ctx, event):
+                self.fills.append(event.size)
+
+        # The submission print itself sweeps the order (same-print market
+        # semantics), so it carries the first 40; the next print the 60.
+        data = {"AAA": {**_ticks([100.0, 110.0, 110.0, 110.0]), "ltq": np.array([40.0, 60.0, 5.0, 5.0])}}
+        config = _zero_fee_config()
+        assert hasattr(config, "partial_fills")
+        config.partial_fills = True
+        strategy = S()
+        result = run_tick_strategy(strategy, data, config=config)
+        assert strategy.fills == [40.0, 60.0]
+        # Seen on the print after the first slice: 40 filled, 60 to go.
+        assert strategy.working[1] == [("partially_filled", 40.0, 60.0)]
+        assert strategy.working[2] == []
+        trades = result.result.trades()
+        assert len(trades) == 1  # closed at end of data as one position
+        assert trades[0].size == pytest.approx(100.0)
+        assert trades[0].entry_price == pytest.approx(106.0)
+
+    def test_order_entry_latency_delays_the_first_eligible_print(self):
+        """order_latency_ns=250ms: an order placed on the t=0 print cannot
+        fill on the 100 ms or 200 ms prints and fills on the 300 ms one."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints = 0
+                self.fill_on_print = []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints += 1
+                if self.prints == 1:
+                    self.submit_order(orders.Market(units=10, side="buy"))
+
+            def on_order_filled(self, ctx, event):
+                self.fill_on_print.append(self.prints)
+
+        ticks = _ticks([100.0, 100.0, 100.0, 100.0], start_ts=0, step=100_000_000)
+        config = _zero_fee_config()
+        assert hasattr(config, "order_latency_ns")
+        config.order_latency_ns = 250_000_000
+        strategy = S()
+        run_tick_strategy(strategy, {"AAA": ticks}, config=config)
+        # Prints at 0, 100, 200, 300 ms: the fourth is the first past 250 ms.
+        assert strategy.fill_on_print == [4], strategy.fill_on_print
+
     def test_agrees_with_a_bar_run_when_each_bar_has_one_print(self):
         """Cross-validation against the golden-covered bar path.
 

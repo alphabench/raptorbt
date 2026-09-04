@@ -185,13 +185,18 @@ class CompositeBar(NamedTuple):
 class TradeTick(NamedTuple):
     """One trade print.
 
-    ``symbol`` names the instrument in portfolio/tick runs.
+    ``symbol`` names the instrument in portfolio/tick runs. ``size`` is the
+    exchange's last traded quantity when the feed supplied ``ltq``, else the
+    buy/sell flow-delta proxy. ``oi`` is the open interest published with
+    the print (0.0 when the feed carried none — equities have no open
+    interest).
     """
 
     timestamp: int
     price: float
     size: float
     symbol: str | None = None
+    oi: float = 0.0
 
 
 class QuoteTick(NamedTuple):
@@ -205,6 +210,10 @@ class QuoteTick(NamedTuple):
     bid: float
     ask: float
     symbol: str | None = None
+    #: Displayed size at the bid/ask, or ``nan`` when the feed carried none.
+    #: A sized quote lets the queue model join behind what is displayed.
+    bid_size: float = float("nan")
+    ask_size: float = float("nan")
 
     @property
     def mid(self) -> float:
@@ -213,6 +222,26 @@ class QuoteTick(NamedTuple):
     @property
     def spread(self) -> float:
         return self.ask - self.bid
+
+
+class WorkingOrder(NamedTuple):
+    """One order still working, as :meth:`PortfolioContext.open_orders`
+    reports it. ``filled_qty`` is what has filled so far (partial fills);
+    ``units`` is ``nan`` for a capital-fraction or close-all order."""
+
+    order_id: int
+    client_id: str
+    side: str
+    kind: str
+    status: str
+    filled_qty: float
+    units: float
+    symbol: str | None = None
+
+    @property
+    def remaining(self) -> float:
+        """Units still to fill, or ``nan`` when the order was not in units."""
+        return self.units - self.filled_qty
 
 
 class BookSnapshot(NamedTuple):

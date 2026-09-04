@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
 use crate::data::{BookLevel, BookSide, DepthTick};
+use crate::execution::orders::{OrderSide, OrderStatus, QtySpec};
 use crate::portfolio::kernel::{KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{EventSession, ScheduleData};
@@ -150,7 +151,7 @@ impl PyPortfolioSession {
     /// and `ask > 0` yields a quote. The trade precedes the quote of the
     /// same row, since the print is what that book state followed.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (instrument, timestamps, ltp, bid=None, ask=None, buy_qty_delta=None, sell_qty_delta=None))]
+    #[pyo3(signature = (instrument, timestamps, ltp, bid=None, ask=None, buy_qty_delta=None, sell_qty_delta=None, ltq=None, bid_qty=None, ask_qty=None, oi=None))]
     fn set_ticks(
         &mut self,
         instrument: usize,
@@ -160,6 +161,10 @@ impl PyPortfolioSession {
         ask: Option<PyReadonlyArray1<f64>>,
         buy_qty_delta: Option<PyReadonlyArray1<f64>>,
         sell_qty_delta: Option<PyReadonlyArray1<f64>>,
+        ltq: Option<PyReadonlyArray1<f64>>,
+        bid_qty: Option<PyReadonlyArray1<f64>>,
+        ask_qty: Option<PyReadonlyArray1<f64>>,
+        oi: Option<PyReadonlyArray1<f64>>,
     ) -> PyResult<()> {
         let ts = numpy_to_vec_i64(timestamps);
         let ltp = numpy_to_vec_f64(ltp);
@@ -186,7 +191,10 @@ impl PyPortfolioSession {
             ask: optional(ask)?,
             buy_qty_delta: optional(buy_qty_delta)?,
             sell_qty_delta: optional(sell_qty_delta)?,
-            oi: vec![0.0; n],
+            oi: optional(oi)?,
+            ltq: optional(ltq)?,
+            bid_qty: optional(bid_qty)?,
+            ask_qty: optional(ask_qty)?,
         };
         self.session_mut()?.set_ticks(instrument, ticks);
         Ok(())
@@ -269,7 +277,7 @@ impl PyPortfolioSession {
     /// with `ltp > 0` appends a trade print; a row with both `bid > 0` and
     /// `ask > 0` appends a quote after it. Returns how many events were
     /// appended (0–2); drive them with `current_event()`/`apply_current()`.
-    #[pyo3(signature = (instrument, timestamp, ltp, bid=0.0, ask=0.0, buy_qty_delta=0.0, sell_qty_delta=0.0))]
+    #[pyo3(signature = (instrument, timestamp, ltp, bid=0.0, ask=0.0, buy_qty_delta=0.0, sell_qty_delta=0.0, ltq=0.0, bid_qty=0.0, ask_qty=0.0, oi=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn push_tick(
         &mut self,
@@ -280,6 +288,10 @@ impl PyPortfolioSession {
         ask: f64,
         buy_qty_delta: f64,
         sell_qty_delta: f64,
+        ltq: f64,
+        bid_qty: f64,
+        ask_qty: f64,
+        oi: f64,
     ) -> PyResult<usize> {
         Ok(self.session_mut()?.push_tick(
             instrument,
@@ -289,6 +301,10 @@ impl PyPortfolioSession {
             ask,
             buy_qty_delta,
             sell_qty_delta,
+            ltq,
+            bid_qty,
+            ask_qty,
+            oi,
         ))
     }
 
@@ -366,8 +382,9 @@ impl PyPortfolioSession {
 
     /// The pending event, tagged by kind:
     /// `(kind, instrument, local_idx, ts, a, b, c, d, e)` where `kind` is
-    /// `"bar"` (o/h/l/c/v), `"trade"` (price, size, 0, 0, 0) or `"quote"`
-    /// (bid, ask, 0, 0, 0).
+    /// `"bar"` (o/h/l/c/v), `"trade"` (price, size, oi, 0, 0) or `"quote"`
+    /// (bid, ask, bid_size, ask_size, 0) — a size is `NaN` when the feed
+    /// carried none.
     #[allow(clippy::type_complexity)]
     fn current_event(
         &self,
@@ -391,7 +408,7 @@ impl PyPortfolioSession {
                 t.timestamp,
                 t.price,
                 t.size,
-                0.0,
+                t.oi,
                 0.0,
                 0.0,
             ),
@@ -426,8 +443,8 @@ impl PyPortfolioSession {
                 q.timestamp,
                 q.bid,
                 q.ask,
-                0.0,
-                0.0,
+                q.bid_size,
+                q.ask_size,
                 0.0,
             ),
         }))
@@ -487,8 +504,11 @@ impl PyPortfolioSession {
         reduce_only: bool,
         parent_id: Option<u64>,
     ) -> PyResult<u64> {
+        let session = self.session_mut()?;
+        // On the target's own clock: see `PortfolioSession::submission_idx`.
+        let submitted_idx = session.submission_idx(instrument, submitted_idx);
         submit_order_on(
-            self.session_mut()?.kernel_mut(instrument),
+            session.kernel_mut(instrument),
             side,
             kind,
             submitted_idx,
@@ -588,6 +608,45 @@ impl PyPortfolioSession {
             .position_snapshots()
             .into_iter()
             .map(super::strategy_bindings::convert_snapshot)
+            .collect())
+    }
+
+    /// Working orders of one instrument as
+    /// `(order_id, client_id, side, kind, status, filled_qty, units)` —
+    /// `units` is `nan` for a capital-fraction or close-all order. Status is
+    /// `accepted`, `triggered` or `partially_filled`.
+    #[allow(clippy::type_complexity)]
+    fn working_orders(
+        &self,
+        instrument: usize,
+    ) -> PyResult<Vec<(u64, String, String, String, String, f64, f64)>> {
+        Ok(self
+            .session_ref()?
+            .kernel(instrument)
+            .open_orders()
+            .into_iter()
+            .map(|o| {
+                let side = match o.side {
+                    OrderSide::Buy => "buy",
+                    OrderSide::Sell => "sell",
+                };
+                let kind = format!("{:?}", o.kind)
+                    .split(' ')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('{')
+                    .to_lowercase();
+                let status = match o.status {
+                    OrderStatus::Triggered => "triggered",
+                    OrderStatus::PartiallyFilled => "partially_filled",
+                    _ => "accepted",
+                };
+                let units = match o.qty {
+                    QtySpec::Units(u) => u,
+                    _ => f64::NAN,
+                };
+                (o.id, o.client_id.clone(), side.into(), kind, status.into(), o.filled_qty, units)
+            })
             .collect())
     }
 

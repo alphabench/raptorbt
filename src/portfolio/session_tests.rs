@@ -576,6 +576,9 @@ fn tick_data(rows: &[(i64, f64, f64, f64)]) -> TickData {
         buy_qty_delta: rows.iter().map(|_| 1.0).collect(),
         sell_qty_delta: rows.iter().map(|_| 0.0).collect(),
         oi: rows.iter().map(|_| 0.0).collect(),
+        ltq: rows.iter().map(|_| 0.0).collect(),
+        bid_qty: rows.iter().map(|_| 0.0).collect(),
+        ask_qty: rows.iter().map(|_| 0.0).collect(),
     }
 }
 
@@ -817,7 +820,7 @@ fn push_tick_matches_batch_replay() {
         let mut first = true;
         for (ts, ltp, bid, ask) in rows {
             // tick_data() stamps buy/sell deltas of 1.0/0.0 per row.
-            s.push_tick(a, ts, ltp, bid, ask, 1.0, 0.0);
+            s.push_tick(a, ts, ltp, bid, ask, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             while s.current().is_some() {
                 let input = if first {
                     first = false;
@@ -847,7 +850,7 @@ fn pushes_append_behind_warmup_bars() {
     session.set_bars(a, bars(0, &[100.0, 101.0]));
 
     // No explicit seal: the first push seals implicitly.
-    session.push_tick(a, 30, 102.0, 0.0, 0.0, 0.0, 0.0);
+    session.push_tick(a, 30, 102.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
     let mut seen = Vec::new();
     while let Some(entry) = session.current() {
@@ -871,7 +874,7 @@ fn remaining_counts_unapplied_events() {
     assert_eq!(session.remaining(), 0);
 
     // One row carrying both a print and a book appends two events.
-    assert_eq!(session.push_tick(a, 10, 100.0, 99.0, 101.0, 0.0, 0.0), 2);
+    assert_eq!(session.push_tick(a, 10, 100.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 2);
     assert_eq!(session.remaining(), 2);
     session.apply_current(StepInput::default());
     assert_eq!(session.remaining(), 1);
@@ -928,7 +931,7 @@ fn adoption_survives_a_quote_only_event() {
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.seal();
     // ltp = 0.0 means "no trade print", so this appends only the quote.
-    assert_eq!(session.push_tick(a, 1_000, 0.0, 99.0, 101.0, 0.0, 0.0), 1);
+    assert_eq!(session.push_tick(a, 1_000, 0.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 1);
     session.apply_current(StepInput::default());
 
     assert!(

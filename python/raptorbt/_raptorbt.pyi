@@ -49,6 +49,8 @@ class BacktestConfig:
     fill_prob_limit: float
     fill_prob_slippage: float
     queue_fill_model: bool
+    partial_fills: bool
+    order_latency_ns: int
     session_tz_offset_ns: int
     limit_slippage: float
     liquidate_on_margin_call: bool
@@ -76,6 +78,8 @@ class BacktestConfig:
         fill_seed: int = ...,
         bar_path_adaptive: bool = ...,
         queue_fill_model: bool = ...,
+        partial_fills: bool = ...,
+        order_latency_ns: int = ...,
         session_tz_offset_ns: int = ...,
         limit_slippage: float = ...,
         liquidate_on_margin_call: bool = ...,
@@ -793,6 +797,10 @@ class PortfolioSession:
         ask: _F64 | None = ...,
         buy_qty_delta: _F64 | None = ...,
         sell_qty_delta: _F64 | None = ...,
+        ltq: _F64 | None = ...,
+        bid_qty: _F64 | None = ...,
+        ask_qty: _F64 | None = ...,
+        oi: _F64 | None = ...,
     ) -> None: ...
     def set_depth(
         self,
@@ -811,7 +819,8 @@ class PortfolioSession:
     # Each seals first and is idempotent, so batch warmup data merges ahead of
     # the first push. Drive appended events with current_event()/apply_current().
     # push_tick returns how many events it appended (0-2): a trade print, plus
-    # a quote when ask > 0.
+    # a quote when ask > 0. ltq is the print's size when known (else the flow
+    # deltas stand in); bid_qty/ask_qty size the L1 quote; oi rides the print.
     def push_tick(
         self,
         instrument: int,
@@ -821,7 +830,17 @@ class PortfolioSession:
         ask: float = ...,
         buy_qty_delta: float = ...,
         sell_qty_delta: float = ...,
+        ltq: float = ...,
+        bid_qty: float = ...,
+        ask_qty: float = ...,
+        oi: float = ...,
     ) -> int: ...
+    # (order_id, client_id, side, kind, status, filled_qty, units); status is
+    # "accepted", "triggered" or "partially_filled"; units is nan unless the
+    # order was placed in explicit units.
+    def working_orders(
+        self, instrument: int
+    ) -> list[tuple[int, str, str, str, str, float, float]]: ...
     def push_bar(
         self,
         instrument: int,

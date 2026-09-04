@@ -158,6 +158,17 @@ class PortfolioContext:
         """Uncommitted shared cash."""
         return self._session.cash()
 
+    def open_orders(self, symbol: str | None = None) -> list:
+        """Orders still working on ``symbol`` (default: the current one),
+        each with what has filled so far — see :class:`WorkingOrder`."""
+        from raptorbt.strategy.context import WorkingOrder
+
+        sym = symbol or self.symbol
+        return [
+            WorkingOrder(*row, symbol=sym)
+            for row in self._session.working_orders(self._instrument_index(sym))
+        ]
+
     def _instrument_index(self, symbol: str | None) -> int:
         return self._index_of[symbol or self.symbol]
 

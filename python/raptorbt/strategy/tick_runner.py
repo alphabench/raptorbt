@@ -38,7 +38,23 @@ from raptorbt.strategy.portfolio_runner import (
 from raptorbt.strategy.runner import dispatch_events
 from raptorbt.strategy.streams import StreamState
 
-_TICK_FIELDS = ("timestamps", "ltp", "bid", "ask", "buy_qty_delta", "sell_qty_delta")
+# Every array `run_tick_strategy` consumes. The last four are optional in the
+# input and zero-filled when absent: `ltq` (the exchange's last traded
+# quantity — when present it is `tick.size`, else the flow-delta proxy is),
+# `bid_qty`/`ask_qty` (displayed L1 sizes, reaching `quote.bid_size` /
+# `quote.ask_size` and the queue model) and `oi` (open interest, `tick.oi`).
+_TICK_FIELDS = (
+    "timestamps",
+    "ltp",
+    "bid",
+    "ask",
+    "buy_qty_delta",
+    "sell_qty_delta",
+    "ltq",
+    "bid_qty",
+    "ask_qty",
+    "oi",
+)
 
 
 class TickContext(PortfolioContext):
@@ -188,7 +204,7 @@ def drive_tick_events(
             continue
 
         if kind == "quote":
-            quote = QuoteTick(ts, a, b, symbol)
+            quote = QuoteTick(ts, a, b, symbol, c, d)
             ctx._best_bid[symbol] = a
             ctx._best_ask[symbol] = b
             ctx._quote = quote
@@ -199,7 +215,7 @@ def drive_tick_events(
             dispatch_events(strategy, ctx, session.apply_current())
             continue
 
-        tick = TradeTick(ts, a, b, symbol)
+        tick = TradeTick(ts, a, b, symbol, c)
 
         # A bar that completed on this print closed strictly before it, so it
         # dispatches first — the same rule composite bars follow.
@@ -289,6 +305,10 @@ def run_tick_strategy(
             a["ask"],
             a["buy_qty_delta"],
             a["sell_qty_delta"],
+            ltq=a["ltq"],
+            bid_qty=a["bid_qty"],
+            ask_qty=a["ask_qty"],
+            oi=a["oi"],
         )
     for i, symbol in enumerate(symbols):
         levels = (depth or {}).get(symbol)
