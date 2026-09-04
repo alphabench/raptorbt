@@ -5,7 +5,21 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] - 2026-09-04
+
+Tick-path realism: the size behind every print and quote, a queue that
+follows the touch, fills that respect what printed, orders that take time
+to reach the venue — and a cross-instrument order that used to vanish.
+
+**In plain words: on tick data the engine now knows how much traded on
+each print and how much is displayed at the best bid and ask, so a
+resting order waits its turn behind real size and a large order fills
+across several prints instead of all at once on a one-lot print; an order
+can be given a delay before it reaches the exchange; and an order placed
+for one contract from another instrument's event — a hedge leg bought when
+the index prints — fills on that contract's next print instead of sitting
+unfilled forever. Every new behaviour is off by default and switched on by
+the caller, so existing backtests are unchanged.**
 
 **In plain words: on tick data, an order placed for one contract from
 another instrument's event — a hedge leg bought when the index prints, or
