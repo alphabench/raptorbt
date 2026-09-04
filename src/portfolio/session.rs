@@ -385,19 +385,34 @@ impl EventSession {
         ask: f64,
         buy_qty_delta: f64,
         sell_qty_delta: f64,
+        ltq: f64,
+        bid_qty: f64,
+        ask_qty: f64,
+        oi: f64,
     ) -> usize {
         let mut appended = 0;
         if ltp > 0.0 {
-            let size = buy_qty_delta.abs() + sell_qty_delta.abs();
+            // The exchange's last traded quantity when supplied, else the
+            // flow-delta proxy — the same rule as `tick_data_to_events`.
+            let size = if ltq > 0.0 { ltq } else { buy_qty_delta.abs() + sell_qty_delta.abs() };
             let signed_size = buy_qty_delta.abs() - sell_qty_delta.abs();
             self.push_entry(
                 instrument,
-                ScheduleData::Trade(TradeTick { timestamp, price: ltp, size, signed_size }),
+                ScheduleData::Trade(TradeTick { timestamp, price: ltp, size, signed_size, oi }),
             );
             appended += 1;
         }
         if bid > 0.0 && ask > 0.0 {
-            self.push_entry(instrument, ScheduleData::Quote(QuoteTick { timestamp, bid, ask }));
+            self.push_entry(
+                instrument,
+                ScheduleData::Quote(QuoteTick {
+                    timestamp,
+                    bid,
+                    ask,
+                    bid_size: TickData::displayed(bid_qty),
+                    ask_size: TickData::displayed(ask_qty),
+                }),
+            );
             appended += 1;
         }
         appended

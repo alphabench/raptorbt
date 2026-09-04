@@ -15,6 +15,19 @@ run without a word, whenever the two instruments' event counts differed
 on the target's next print, as it always did when placed from that
 instrument's own print.**
 
+### Added
+
+- **Print size, L1 sizes and open interest on the tick path.** Tick input
+  takes four optional arrays/keywords — `ltq`, `bid_qty`, `ask_qty`, `oi` —
+  zero-filled when absent. `ltq` is the print's true size and becomes
+  `tick.size` when present (the buy/sell flow deltas were only ever a proxy
+  for it); `bid_qty`/`ask_qty` reach `quote.bid_size`/`quote.ask_size` and
+  size the top-of-book level, so the queue-fill model joins behind displayed
+  size from a quote alone, with no depth snapshot; `oi` rides the print as
+  `tick.oi`. A size the feed did not carry stays unknown (`nan`), never
+  zero. `_TICK_FIELDS` names the arrays, so a caller can detect the
+  capability rather than trust a version string.
+
 ### Fixed
 
 - **Market orders routed across instruments on the tick path.** A market

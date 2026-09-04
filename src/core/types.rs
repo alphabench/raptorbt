@@ -121,6 +121,39 @@ pub struct TickData {
     pub sell_qty_delta: Vec<f64>,
     /// Open interest at each tick (0 if unavailable).
     pub oi: Vec<f64>,
+    /// Last traded quantity of the print (0 if unavailable). When present
+    /// it is the print's true size; `buy_qty_delta`/`sell_qty_delta` are
+    /// then only the flow split.
+    pub ltq: Vec<f64>,
+    /// Displayed size at the best bid (0 if unavailable).
+    pub bid_qty: Vec<f64>,
+    /// Displayed size at the best ask (0 if unavailable).
+    pub ask_qty: Vec<f64>,
+}
+
+impl TickData {
+    /// The print size a row carries: the exchange's last traded quantity
+    /// when the feed supplied one, else the flow-delta proxy.
+    #[inline]
+    pub fn print_size(&self, i: usize) -> f64 {
+        let ltq = self.ltq.get(i).copied().unwrap_or(0.0);
+        if ltq > 0.0 {
+            ltq
+        } else {
+            self.buy_qty_delta[i].abs() + self.sell_qty_delta[i].abs()
+        }
+    }
+
+    /// A displayed size as the book stores it: `NaN` when the feed did not
+    /// carry one, so a quote-only book stays "price known, size unknown".
+    #[inline]
+    pub fn displayed(qty: f64) -> f64 {
+        if qty > 0.0 {
+            qty
+        } else {
+            f64::NAN
+        }
+    }
 }
 
 impl TickData {

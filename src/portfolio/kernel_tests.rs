@@ -50,7 +50,7 @@ fn set_stop_price_is_noop_when_flat() {
 }
 
 fn trade(ts: i64, price: Price, size: f64) -> TradeTick {
-    TradeTick { timestamp: ts, price, size, signed_size: 0.0 }
+    TradeTick { timestamp: ts, price, size, signed_size: 0.0, oi: 0.0 }
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn step_quote_does_not_move_the_trailing_watermark() {
     kernel.step_trade(0, &trade(0, 100.0, 1.0), StepInput { entry: true, ..Default::default() });
     let before = kernel.position_snapshot().expect("in position");
 
-    let events = kernel.step_quote(&QuoteTick { timestamp: 1, bid: 500.0, ask: 501.0 });
+    let events = kernel.step_quote(&QuoteTick::without_sizes(1, 500.0, 501.0));
     assert!(events.is_empty());
     let after = kernel.position_snapshot().expect("still in position");
     assert_eq!(before.stop_price, after.stop_price);
@@ -102,7 +102,7 @@ fn step_quote_does_not_match_resting_orders() {
         None,
     );
     // A quote straddling the limit must not fill it.
-    kernel.step_quote(&QuoteTick { timestamp: 1, bid: 80.0, ask: 81.0 });
+    kernel.step_quote(&QuoteTick::without_sizes(1, 80.0, 81.0));
     assert!(!kernel.is_in_position());
 
     // The print that follows is the evidence, and does fill it.
@@ -223,6 +223,48 @@ fn queue_model_holds_an_order_behind_displayed_size() {
     assert!(
         events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
         "the queue ahead was exhausted, got {events:?}"
+    );
+}
+
+#[test]
+fn queue_model_joins_behind_a_sized_l1_quote() {
+    // The smallest proof that a feed's best-bid size is enough: no depth
+    // snapshot, only a quote saying 300 are displayed at 99.0.
+    let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+    kernel.step_quote(&QuoteTick {
+        timestamp: 0,
+        bid: 99.0,
+        ask: 101.0,
+        bid_size: 300.0,
+        ask_size: 100.0,
+    });
+    kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 99.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "q1".to_string(),
+        None,
+        None,
+    );
+    let events = kernel.step_trade(1, &trade(1, 99.0, 100.0), StepInput::default());
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })), "100 rests");
+    let events = kernel.step_trade(2, &trade(2, 99.0, 250.0), StepInput::default());
+    assert!(
+        events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+        "300 ahead exhausted by 100 + 250, got {events:?}"
     );
 }
 
@@ -1004,8 +1046,13 @@ fn a_tick_session_slices_on_time_not_on_event_count() {
     let mut fills = 0;
     // Ten prints, all inside the first interval.
     for i in 0..10i64 {
-        let tick =
-            TradeTick { timestamp: i * 1_000_000, price: 100.0, size: 1.0, signed_size: 0.0 };
+        let tick = TradeTick {
+            timestamp: i * 1_000_000,
+            price: 100.0,
+            size: 1.0,
+            signed_size: 0.0,
+            oi: 0.0,
+        };
         let events = kernel.step_trade(i as usize, &tick, StepInput::default());
         fills += events.iter().filter(|e| matches!(e, EngineEvent::OrderFilled { .. })).count();
     }

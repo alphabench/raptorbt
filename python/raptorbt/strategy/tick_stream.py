@@ -166,11 +166,18 @@ class TickStrategyStream:
         ask: float = 0.0,
         buy_qty_delta: float = 0.0,
         sell_qty_delta: float = 0.0,
+        ltq: float = 0.0,
+        bid_qty: float = 0.0,
+        ask_qty: float = 0.0,
+        oi: float = 0.0,
     ) -> int:
         """Feed one tick row; fires every hook it triggers before returning.
 
         ``ltp > 0`` prints a trade; a two-sided book yields a quote after
-        it. Returns how many events were appended (0–2).
+        it. ``ltq`` is the print's own size when the feed has it (else the
+        flow deltas stand in); ``bid_qty``/``ask_qty`` are the displayed L1
+        sizes; ``oi`` the open interest. All four default to "unknown".
+        Returns how many events were appended (0–2).
         """
         self._check_open()
         appended = self._session.push_tick(
@@ -181,6 +188,10 @@ class TickStrategyStream:
             ask,
             buy_qty_delta,
             sell_qty_delta,
+            ltq=ltq,
+            bid_qty=bid_qty,
+            ask_qty=ask_qty,
+            oi=oi,
         )
         if appended:
             self._drain()

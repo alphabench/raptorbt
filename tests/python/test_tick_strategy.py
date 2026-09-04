@@ -231,6 +231,72 @@ class TestTickExecution:
             # or without quotes in BBB's tape.
             assert strategy.fills == [("BBB", 102.0)], (quoted, strategy.fills)
 
+    def test_ltq_l1_sizes_and_oi_reach_the_hooks(self):
+        """`ltq` is the print's size when present; the flow deltas stand in
+        otherwise. `oi` rides the print and the L1 sizes ride the quote, as
+        `nan` (never 0) when the feed carried none."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints, self.quotes = [], []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints.append((tick.size, tick.oi))
+
+            def on_quote(self, ctx, quote):
+                self.quotes.append((quote.bid_size, quote.ask_size))
+
+        data = {
+            "AAA": {
+                **_ticks([100.0, 101.0], bids=[99.0, 100.0], asks=[101.0, 102.0]),
+                "buy_qty_delta": np.array([5.0, 5.0]),
+                "sell_qty_delta": np.array([2.0, 2.0]),
+                "ltq": np.array([40.0, 0.0]),
+                "oi": np.array([1500.0, 0.0]),
+                "bid_qty": np.array([300.0, 0.0]),
+            }
+        }
+        strategy = S()
+        run_tick_strategy(strategy, data, config=_zero_fee_config())
+        assert strategy.prints == [(40.0, 1500.0), (7.0, 0.0)]
+        assert strategy.quotes[0][0] == 300.0
+        assert all(np.isnan(v) for v in (strategy.quotes[0][1], *strategy.quotes[1]))
+
+    def test_a_sized_quote_alone_lets_the_queue_model_hold_an_order(self):
+        """No depth snapshot: the feed's best-bid size is what a resting
+        limit joins behind. 300 displayed at 99.0; a 100 print does not
+        reach us, the next 250 does."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints = 0
+                self.fills = []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints += 1
+                if self.prints == 1:
+                    self.submit_order(orders.Limit(side="buy", price=99.0, units=10))
+
+            def on_order_filled(self, ctx, event):
+                # Which print the fill landed on: the 100 print (2nd) must
+                # not reach us behind 300 displayed; the 250 print (3rd) does.
+                self.fills.append(self.prints)
+
+        data = {
+            "AAA": {
+                **_ticks([100.0, 99.0, 99.0], bids=[99.0, 99.0, 99.0], asks=[101.0] * 3),
+                "buy_qty_delta": np.array([1.0, 100.0, 250.0]),
+                "bid_qty": np.array([300.0, 300.0, 300.0]),
+            }
+        }
+        config = _zero_fee_config()
+        config.queue_fill_model = True
+        strategy = S()
+        run_tick_strategy(strategy, data, config=config)
+        assert strategy.fills == [3], strategy.fills
+
     def test_agrees_with_a_bar_run_when_each_bar_has_one_print(self):
         """Cross-validation against the golden-covered bar path.
 

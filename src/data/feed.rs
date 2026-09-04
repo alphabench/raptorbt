@@ -130,6 +130,7 @@ mod tests {
                 price: 1.0,
                 size: 1.0,
                 signed_size: 0.0,
+                oi: 0.0,
             }),
         }
     }
@@ -138,7 +139,7 @@ mod tests {
         MarketEvent {
             instrument: 0,
             stream,
-            payload: EventPayload::Quote(QuoteTick { timestamp: ts, bid: 1.0, ask: 1.0 }),
+            payload: EventPayload::Quote(QuoteTick::without_sizes(ts, 1.0, 1.0)),
         }
     }
 

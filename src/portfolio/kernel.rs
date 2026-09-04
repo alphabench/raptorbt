@@ -871,7 +871,13 @@ impl EngineKernel {
     /// Returns any acknowledgments queued since the last step, so orders
     /// submitted from a quote handler surface in order.
     pub fn step_quote(&mut self, quote: &QuoteTick) -> Vec<EngineEvent> {
-        self.book.apply_quote(quote.timestamp, quote.bid, quote.ask);
+        self.book.apply_quote(
+            quote.timestamp,
+            quote.bid,
+            quote.ask,
+            quote.bid_size,
+            quote.ask_size,
+        );
         std::mem::take(&mut self.pending_events)
     }
 

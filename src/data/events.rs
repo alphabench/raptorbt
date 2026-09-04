@@ -8,6 +8,17 @@ pub struct QuoteTick {
     pub timestamp: Timestamp,
     pub bid: Price,
     pub ask: Price,
+    /// Displayed size at the bid, or `NaN` when the feed carried none.
+    pub bid_size: f64,
+    /// Displayed size at the ask, or `NaN` when the feed carried none.
+    pub ask_size: f64,
+}
+
+impl QuoteTick {
+    /// A quote whose sizes are unknown (the pre-L1-size shape).
+    pub fn without_sizes(timestamp: Timestamp, bid: Price, ask: Price) -> Self {
+        Self { timestamp, bid, ask, bid_size: f64::NAN, ask_size: f64::NAN }
+    }
 }
 
 /// One trade print.
@@ -21,6 +32,9 @@ pub struct TradeTick {
     /// unknown, not that flow was balanced — consumers that need a
     /// direction fall back to the tick rule.
     pub signed_size: f64,
+    /// Open interest published with the print (0.0 when the feed carried
+    /// none — equities have no open interest).
+    pub oi: f64,
 }
 
 /// One record of one stream.
@@ -102,9 +116,10 @@ pub fn tick_data_to_events(
         let ts = ticks.timestamps[i];
         let ltp = ticks.ltp[i];
         if ltp > 0.0 {
-            // `size` stays the unsigned total, unchanged: every existing
-            // bar's volume depends on it. The signed split rides alongside.
-            let size = ticks.buy_qty_delta[i].abs() + ticks.sell_qty_delta[i].abs();
+            // `size` is the exchange's last traded quantity when the feed
+            // carried one, else the flow-delta proxy (every existing bar's
+            // volume depends on it). The signed split rides alongside.
+            let size = ticks.print_size(i);
             let signed_size = ticks.buy_qty_delta[i].abs() - ticks.sell_qty_delta[i].abs();
             events.push(MarketEvent {
                 instrument,
@@ -114,6 +129,7 @@ pub fn tick_data_to_events(
                     price: ltp,
                     size,
                     signed_size,
+                    oi: ticks.oi[i],
                 }),
             });
         }
@@ -122,7 +138,13 @@ pub fn tick_data_to_events(
             events.push(MarketEvent {
                 instrument,
                 stream: quote_stream,
-                payload: EventPayload::Quote(QuoteTick { timestamp: ts, bid, ask }),
+                payload: EventPayload::Quote(QuoteTick {
+                    timestamp: ts,
+                    bid,
+                    ask,
+                    bid_size: TickData::displayed(ticks.bid_qty[i]),
+                    ask_size: TickData::displayed(ticks.ask_qty[i]),
+                }),
             });
         }
     }
@@ -143,6 +165,9 @@ mod tests {
             buy_qty_delta: vec![5.0, 0.0, 3.0],
             sell_qty_delta: vec![2.0, 0.0, 0.0],
             oi: vec![0.0, 0.0, 0.0],
+            ltq: vec![0.0, 0.0, 0.0],
+            bid_qty: vec![0.0, 0.0, 0.0],
+            ask_qty: vec![0.0, 0.0, 0.0],
         };
         let events = tick_data_to_events(&ticks, 0, 1, 2);
         let trades: Vec<_> =
@@ -159,5 +184,48 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn ltq_is_the_print_size_when_present_and_sizes_reach_the_quote() {
+        let ticks = TickData {
+            timestamps: vec![1, 2],
+            ltp: vec![100.0, 100.0],
+            bid: vec![99.0, 99.0],
+            ask: vec![101.0, 101.0],
+            buy_qty_delta: vec![5.0, 5.0],
+            sell_qty_delta: vec![2.0, 2.0],
+            oi: vec![1_500.0, 0.0],
+            ltq: vec![40.0, 0.0],
+            bid_qty: vec![300.0, 0.0],
+            ask_qty: vec![0.0, 0.0],
+        };
+        let events = tick_data_to_events(&ticks, 0, 1, 2);
+        let trades: Vec<TradeTick> = events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::Trade(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        // Row 0 carried ltq: that is the size. Row 1 did not: the proxy.
+        assert_eq!(trades[0].size, 40.0);
+        assert_eq!(trades[0].oi, 1_500.0);
+        assert_eq!(trades[1].size, 7.0);
+        let quotes: Vec<QuoteTick> = events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::Quote(q) => Some(q),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(quotes[0].bid_size, 300.0);
+        assert!(quotes[0].ask_size.is_nan(), "an absent size stays unknown, never 0");
+        assert!(quotes[1].bid_size.is_nan());
     }
 }

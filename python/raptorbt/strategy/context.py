@@ -185,13 +185,18 @@ class CompositeBar(NamedTuple):
 class TradeTick(NamedTuple):
     """One trade print.
 
-    ``symbol`` names the instrument in portfolio/tick runs.
+    ``symbol`` names the instrument in portfolio/tick runs. ``size`` is the
+    exchange's last traded quantity when the feed supplied ``ltq``, else the
+    buy/sell flow-delta proxy. ``oi`` is the open interest published with
+    the print (0.0 when the feed carried none — equities have no open
+    interest).
     """
 
     timestamp: int
     price: float
     size: float
     symbol: str | None = None
+    oi: float = 0.0
 
 
 class QuoteTick(NamedTuple):
@@ -205,6 +210,10 @@ class QuoteTick(NamedTuple):
     bid: float
     ask: float
     symbol: str | None = None
+    #: Displayed size at the bid/ask, or ``nan`` when the feed carried none.
+    #: A sized quote lets the queue model join behind what is displayed.
+    bid_size: float = float("nan")
+    ask_size: float = float("nan")
 
     @property
     def mid(self) -> float:

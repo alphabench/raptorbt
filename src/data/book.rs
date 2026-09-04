@@ -28,6 +28,16 @@ pub struct BookLevel {
 impl BookLevel {
     pub const EMPTY: Self = Self { price: 0.0, size: 0.0 };
 
+    /// A top-of-book level: sized when the feed displayed a size, else
+    /// unquantified.
+    pub fn l1(price: Price, size: f64) -> Self {
+        if size.is_finite() && size > 0.0 {
+            Self { price, size }
+        } else {
+            Self::unquantified(price)
+        }
+    }
+
     /// A level whose price is known but whose size is not (an L1 quote).
     pub fn unquantified(price: Price) -> Self {
         Self { price, size: f64::NAN }
@@ -108,20 +118,28 @@ impl OrderBook {
 
     /// Apply a top-of-book quote.
     ///
-    /// Sets each side's best price and marks its size unquantified: a quote
-    /// carries no depth. Levels below the touch are dropped, since a new L1
+    /// Sets each side's best price with its displayed size when the feed
+    /// carried one (a finite positive `bid_size`/`ask_size`), else marks
+    /// it unquantified. Levels below the touch are dropped, since a new L1
     /// observation says nothing about whether they still stand.
-    pub fn apply_quote(&mut self, timestamp: Timestamp, bid: Price, ask: Price) {
+    pub fn apply_quote(
+        &mut self,
+        timestamp: Timestamp,
+        bid: Price,
+        ask: Price,
+        bid_size: f64,
+        ask_size: f64,
+    ) {
         self.bids = [BookLevel::EMPTY; BOOK_DEPTH];
         self.asks = [BookLevel::EMPTY; BOOK_DEPTH];
         self.bid_len = 0;
         self.ask_len = 0;
         if bid > 0.0 {
-            self.bids[0] = BookLevel::unquantified(bid);
+            self.bids[0] = BookLevel::l1(bid, bid_size);
             self.bid_len = 1;
         }
         if ask > 0.0 {
-            self.asks[0] = BookLevel::unquantified(ask);
+            self.asks[0] = BookLevel::l1(ask, ask_size);
             self.ask_len = 1;
         }
         self.last_update_ns = timestamp;
@@ -206,7 +224,7 @@ mod tests {
     #[test]
     fn quote_sets_the_touch_and_leaves_size_unquantified() {
         let mut book = OrderBook::new();
-        book.apply_quote(10, 99.0, 101.0);
+        book.apply_quote(10, 99.0, 101.0, f64::NAN, f64::NAN);
         assert_eq!(book.best_bid(), Some(99.0));
         assert_eq!(book.best_ask(), Some(101.0));
         assert_eq!(book.spread(), Some(2.0));
@@ -219,7 +237,7 @@ mod tests {
     #[test]
     fn one_sided_quote_has_no_spread_or_mid() {
         let mut book = OrderBook::new();
-        book.apply_quote(10, 99.0, 0.0);
+        book.apply_quote(10, 99.0, 0.0, f64::NAN, f64::NAN);
         assert_eq!(book.best_bid(), Some(99.0));
         assert_eq!(book.best_ask(), None);
         assert_eq!(book.spread(), None);
@@ -229,7 +247,7 @@ mod tests {
     #[test]
     fn depth_replaces_the_visible_book() {
         let mut book = OrderBook::new();
-        book.apply_quote(10, 99.0, 101.0);
+        book.apply_quote(10, 99.0, 101.0, f64::NAN, f64::NAN);
         let depth = DepthTick::from_levels(
             20,
             &[level(99.0, 500.0), level(98.0, 300.0)],
@@ -284,7 +302,7 @@ mod tests {
             &[level(101.0, 400.0)],
         ));
         // A fresh L1 observation says nothing about whether 98.0 still stands.
-        book.apply_quote(20, 99.5, 100.5);
+        book.apply_quote(20, 99.5, 100.5, f64::NAN, f64::NAN);
         assert_eq!(book.levels(BookSide::Bid).len(), 1);
         assert_eq!(book.size_at(BookSide::Bid, 98.0), None);
     }

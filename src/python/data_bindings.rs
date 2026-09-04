@@ -242,6 +242,9 @@ pub fn bars_from_ticks<'py>(
         buy_qty_delta: buys,
         sell_qty_delta: sells,
         oi: vec![0.0; n],
+        ltq: vec![0.0; n],
+        bid_qty: vec![0.0; n],
+        ask_qty: vec![0.0; n],
     };
     let events = crate::data::tick_data_to_events(&ticks, 0, 0, 1);
 

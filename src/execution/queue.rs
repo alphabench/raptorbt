@@ -227,16 +227,30 @@ mod tests {
     }
 
     #[test]
-    fn a_quote_only_book_cannot_estimate_the_queue() {
+    fn an_unsized_quote_cannot_estimate_the_queue() {
         let mut tracker = QueueTracker::new();
         let mut book = OrderBook::new();
-        book.apply_quote(0, 99.0, 101.0);
+        book.apply_quote(0, 99.0, 101.0, f64::NAN, f64::NAN);
         // The price is visible but its size is not; the caller must fall
         // back rather than guess.
         assert_eq!(
             tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 100.0),
             QueueVerdict::Unknown
         );
+    }
+
+    #[test]
+    fn a_sized_quote_seeds_the_queue_at_the_touch() {
+        // A feed that publishes best-bid size makes an L1 book as
+        // queue-capable as a depth snapshot: join behind what is displayed.
+        let mut tracker = QueueTracker::new();
+        let mut book = OrderBook::new();
+        book.apply_quote(0, 99.0, 101.0, 300.0, 500.0);
+        assert_eq!(
+            tracker.observe_print(1, 99.0, Direction::Long, &book, 99.0, 100.0),
+            QueueVerdict::Resting
+        );
+        assert_eq!(tracker.ahead_of(1), Some(200.0));
     }
 
     #[test]

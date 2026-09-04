@@ -1685,14 +1685,19 @@ pub fn run_tick_backtest<'py>(
         )));
     }
 
+    let timestamps = numpy_to_vec_i64(timestamps);
+    let n_ticks = timestamps.len();
     let tick_data = crate::core::types::TickData {
-        timestamps: numpy_to_vec_i64(timestamps),
+        timestamps,
         ltp: numpy_to_vec_f64(ltp),
         bid: numpy_to_vec_f64(bid),
         ask: numpy_to_vec_f64(ask),
         buy_qty_delta: numpy_to_vec_f64(buy_qty_delta),
         sell_qty_delta: numpy_to_vec_f64(sell_qty_delta),
         oi: numpy_to_vec_f64(oi),
+        ltq: vec![0.0; n_ticks],
+        bid_qty: vec![0.0; n_ticks],
+        ask_qty: vec![0.0; n_ticks],
     };
 
     let entry_signals = numpy_to_vec_bool(entries);
