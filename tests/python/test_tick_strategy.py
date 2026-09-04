@@ -333,6 +333,33 @@ class TestTickExecution:
         assert trades[0].size == pytest.approx(100.0)
         assert trades[0].entry_price == pytest.approx(106.0)
 
+    def test_order_entry_latency_delays_the_first_eligible_print(self):
+        """order_latency_ns=250ms: an order placed on the t=0 print cannot
+        fill on the 100 ms or 200 ms prints and fills on the 300 ms one."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.prints = 0
+                self.fill_on_print = []
+
+            def on_trade_tick(self, ctx, tick):
+                self.prints += 1
+                if self.prints == 1:
+                    self.submit_order(orders.Market(units=10, side="buy"))
+
+            def on_order_filled(self, ctx, event):
+                self.fill_on_print.append(self.prints)
+
+        ticks = _ticks([100.0, 100.0, 100.0, 100.0], start_ts=0, step=100_000_000)
+        config = _zero_fee_config()
+        assert hasattr(config, "order_latency_ns")
+        config.order_latency_ns = 250_000_000
+        strategy = S()
+        run_tick_strategy(strategy, {"AAA": ticks}, config=config)
+        # Prints at 0, 100, 200, 300 ms: the fourth is the first past 250 ms.
+        assert strategy.fill_on_print == [4], strategy.fill_on_print
+
     def test_agrees_with_a_bar_run_when_each_bar_has_one_print(self):
         """Cross-validation against the golden-covered bar path.
 

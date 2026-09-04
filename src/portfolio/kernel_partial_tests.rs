@@ -231,3 +231,44 @@ fn whole_fills_when_the_flag_is_off_and_on_bars() {
     let events = kernel.step(0, &bar(0, 100.0), StepInput::default());
     assert_eq!(fills(&events), vec![100.0], "a bar fills whole even with the flag on");
 }
+
+#[test]
+fn an_order_in_flight_cannot_fill_before_its_latency_elapses() {
+    let config =
+        BacktestConfig { order_latency_ns: 250_000_000, fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+    // A marketable limit placed at t=0 and a market order placed at t=0.
+    let limit = kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 100.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "l".into(),
+        None,
+        None,
+    );
+    let market = submit(&mut kernel, OrderSide::Buy, QtySpec::Units(10.0), TimeInForce::Gtc, "m");
+    let _ = (limit, market);
+    // 100 ms later: still in flight, nothing fills.
+    let events = kernel.step_trade(1, &print(100_000_000, 100.0, 1_000.0), StepInput::default());
+    assert!(fills(&events).is_empty(), "{events:?}");
+    // 300 ms later: arrived, both fill on this print.
+    let events = kernel.step_trade(2, &print(300_000_000, 100.0, 1_000.0), StepInput::default());
+    assert_eq!(
+        fills(&events).len(),
+        1,
+        "netting: the first fill opens, the second is refused: {events:?}"
+    );
+    assert!(kernel.is_in_position());
+}

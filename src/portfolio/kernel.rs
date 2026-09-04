@@ -292,6 +292,7 @@ impl EngineKernel {
         let cash = config.initial_capital;
         let config_seed = config.fill_seed;
         let tz_offset_ns = config.session_tz_offset_ns;
+        let order_latency_ns = config.order_latency_ns;
         let limit_slippage = config.limit_slippage;
         let fill_timing = config.resolved_fill_timing();
 
@@ -318,7 +319,7 @@ impl EngineKernel {
             alloted_capital: inst_config.and_then(|ic| ic.alloted_capital),
             lot_size: inst_config.and_then(|ic| ic.lot_size),
             spec: None,
-            orders: OrderEngine::with_tz_offset(tz_offset_ns),
+            orders: OrderEngine::with_tz_offset(tz_offset_ns).with_latency(order_latency_ns),
             pending_events: Vec::new(),
             book: OrderBook::new(),
             queue: QueueTracker::new(),
@@ -1195,7 +1196,13 @@ impl EngineKernel {
             .filter(is_plain_market)
             .filter(|o| match (defer_signals, mode) {
                 (true, _) => o.submitted_idx < idx,
-                (false, StepMode::Trade) => o.submitted_idx <= idx,
+                // On the tick path an order in flight (entry latency) is
+                // invisible to prints before it reaches the venue.
+                (false, StepMode::Trade) => {
+                    o.submitted_idx <= idx
+                        && bar.timestamp
+                            >= o.submitted_ts.saturating_add(self.config.order_latency_ns)
+                }
                 (false, StepMode::Bar) => o.submitted_idx == idx,
             })
             .map(|o| o.id)

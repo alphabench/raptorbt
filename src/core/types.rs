@@ -508,6 +508,15 @@ pub struct BacktestConfig {
     #[serde(default)]
     pub partial_fills: bool,
 
+    /// Order-entry latency on the tick path, in nanoseconds: an order
+    /// placed on the event at `t` can match only on events at or after
+    /// `t + order_latency_ns`. Models the time an order takes to reach the
+    /// venue as one constant; the response leg (learning of the fill) is
+    /// not modelled — the fill is known when the tape reaches it. Bars are
+    /// unaffected. `0` (default) keeps same-print semantics.
+    #[serde(default)]
+    pub order_latency_ns: i64,
+
     /// Seed for the stochastic-fill RNG; same seed, same fills.
     #[serde(default)]
     pub fill_seed: u64,
@@ -545,6 +554,7 @@ impl Default for BacktestConfig {
             fill_prob_limit: 1.0,
             queue_fill_model: false,
             partial_fills: false,
+            order_latency_ns: 0,
             session_tz_offset_ns: 0,
             limit_slippage: 0.0,
             liquidate_on_margin_call: false,

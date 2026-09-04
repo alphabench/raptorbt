@@ -47,6 +47,12 @@ instrument's own print.**
   `FillModel.fill_ratio` is gone. Not a real queue rank: a slice is bounded
   by the print, not by where the order sits in line.
 
+- **Order-entry latency on the tick path** (`BacktestConfig.order_latency_ns`,
+  default 0). An order placed on the event at `t` is invisible to prints
+  before `t + latency`: it neither matches, expires, nor burns an IOC/FOK
+  evaluation until it has reached the venue. The fill is known when the
+  tape reaches it — the response leg is not modelled. Bars are unaffected.
+
 ### Fixed
 
 - **Market orders routed across instruments on the tick path.** A market

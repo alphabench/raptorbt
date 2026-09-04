@@ -60,6 +60,9 @@ pub struct OrderEngine {
     /// Offset applied before deriving the trading date for DAY expiry.
     /// `0` is UTC, which is what `Default` yields.
     tz_offset_ns: i64,
+    /// Entry latency on the tick path: an order is invisible to prints
+    /// before `submitted_ts + latency`. `0` (default) = same print.
+    order_latency_ns: i64,
 }
 
 impl OrderEngine {
@@ -70,6 +73,12 @@ impl OrderEngine {
     /// An engine whose DAY orders expire on a trading date offset from UTC.
     pub fn with_tz_offset(tz_offset_ns: i64) -> Self {
         Self { tz_offset_ns, ..Self::default() }
+    }
+
+    /// Set the tick-path order-entry latency (see `order_latency_ns`).
+    pub fn with_latency(mut self, order_latency_ns: i64) -> Self {
+        self.order_latency_ns = order_latency_ns.max(0);
+        self
     }
 
     /// Tag an order as a slice of an execution schedule.
@@ -265,6 +274,7 @@ impl OrderEngine {
         let mut expiries = Vec::new();
         let mut actions = Vec::new();
         let tz = self.tz_offset_ns;
+        let latency = self.order_latency_ns;
 
         // Parent states for one-triggers-other gating, resolved up front so
         // the mutable iteration below stays borrow-clean. Held children of a
@@ -274,6 +284,14 @@ impl OrderEngine {
 
         for order in &mut self.orders {
             if order.status.is_terminal() || order.submitted_idx >= idx {
+                continue;
+            }
+            // Still in flight to the venue: this print cannot see it, so it
+            // neither matches, expires, nor burns its IOC/FOK evaluation.
+            if mode == MatchMode::Trade
+                && latency > 0
+                && bar.timestamp < order.submitted_ts.saturating_add(latency)
+            {
                 continue;
             }
 

@@ -50,6 +50,7 @@ class BacktestConfig:
     fill_prob_slippage: float
     queue_fill_model: bool
     partial_fills: bool
+    order_latency_ns: int
     session_tz_offset_ns: int
     limit_slippage: float
     liquidate_on_margin_call: bool
@@ -78,6 +79,7 @@ class BacktestConfig:
         bar_path_adaptive: bool = ...,
         queue_fill_model: bool = ...,
         partial_fills: bool = ...,
+        order_latency_ns: int = ...,
         session_tz_offset_ns: int = ...,
         limit_slippage: float = ...,
         liquidate_on_margin_call: bool = ...,
