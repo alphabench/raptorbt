@@ -878,6 +878,11 @@ impl EngineKernel {
             quote.bid_size,
             quote.ask_size,
         );
+        if self.config.queue_fill_model {
+            // Observation still, not a fill: a quote can only shorten what
+            // a resting order believes is queued ahead of it.
+            self.queue.on_quote(quote.bid, quote.bid_size, quote.ask, quote.ask_size);
+        }
         std::mem::take(&mut self.pending_events)
     }
 

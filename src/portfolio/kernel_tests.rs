@@ -269,6 +269,55 @@ fn queue_model_joins_behind_a_sized_l1_quote() {
 }
 
 #[test]
+fn queue_model_follows_the_touch_between_prints() {
+    // Rest behind 300 at 99.0; 100 print through. Then the quote shows
+    // only 50 displayed at 99.0: at most 50 are ahead, so a 60 print fills.
+    let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let mut kernel = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "TEST".to_string(),
+        Direction::Long,
+        None,
+    );
+    kernel.step_quote(&QuoteTick {
+        timestamp: 0,
+        bid: 99.0,
+        ask: 101.0,
+        bid_size: 300.0,
+        ask_size: 100.0,
+    });
+    kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 99.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "q2".to_string(),
+        None,
+        None,
+    );
+    let events = kernel.step_trade(1, &trade(1, 99.0, 100.0), StepInput::default());
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })));
+    kernel.step_quote(&QuoteTick {
+        timestamp: 2,
+        bid: 99.0,
+        ask: 101.0,
+        bid_size: 50.0,
+        ask_size: 100.0,
+    });
+    let events = kernel.step_trade(3, &trade(3, 99.0, 60.0), StepInput::default());
+    assert!(
+        events.iter().any(|e| matches!(e, EngineEvent::OrderFilled { .. })),
+        "the quote capped the queue at 50; 60 printed, got {events:?}"
+    );
+}
+
+#[test]
 fn queue_model_fills_when_the_level_trades_through() {
     let config = BacktestConfig { queue_fill_model: true, ..BacktestConfig::default() };
     let fee_model = config.fee_model();
