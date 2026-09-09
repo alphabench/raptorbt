@@ -757,6 +757,28 @@ pub struct PyBacktestMetrics {
     /// `metrics::trade_stats::total_turnover`.
     #[pyo3(get)]
     pub total_turnover: f64,
+    // Diagnostics. `None` throughout means "not measured on this path", never
+    // a measured zero -- see the field docs on `core::types::BacktestMetrics`.
+    #[pyo3(get)]
+    pub return_skew: Option<f64>,
+    #[pyo3(get)]
+    pub return_kurtosis: Option<f64>,
+    #[pyo3(get)]
+    pub tail_ratio: Option<f64>,
+    #[pyo3(get)]
+    pub cost_to_gross_profit_pct: Option<f64>,
+    #[pyo3(get)]
+    pub breakeven_cost_multiple: Option<f64>,
+    #[pyo3(get)]
+    pub return_consistency_pct: Option<f64>,
+    #[pyo3(get)]
+    pub avg_drawdown_pct: Option<f64>,
+    #[pyo3(get)]
+    pub mae_mfe_coverage_pct: Option<f64>,
+    #[pyo3(get)]
+    pub avg_mae_pnl: Option<f64>,
+    #[pyo3(get)]
+    pub mfe_capture_ratio: Option<f64>,
 }
 
 #[pymethods]
@@ -801,6 +823,14 @@ impl PyBacktestMetrics {
         dict.set_item("Sortino Ratio", self.sortino_ratio)?;
         dict.set_item("Calmar Ratio", self.calmar_ratio)?;
         dict.set_item("Omega Ratio", self.omega_ratio)?;
+        // A curated subset, not a mirror of the attribute surface: this is
+        // what a human prints or loads into a dataframe, and a dict that grows
+        // to forty keys stops summarising anything. Three of the diagnostics
+        // earn a place here -- the cost gate, the exit-quality figure and the
+        // drawdown-texture one. The rest stay attributes.
+        dict.set_item("Cost / Gross Profit [%]", self.cost_to_gross_profit_pct)?;
+        dict.set_item("MFE Capture Ratio", self.mfe_capture_ratio)?;
+        dict.set_item("Avg Drawdown [%]", self.avg_drawdown_pct)?;
         Ok(dict.into())
     }
 }
@@ -2542,6 +2572,16 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         payoff_ratio: finite(result.metrics.payoff_ratio),
         recovery_factor: finite(result.metrics.recovery_factor),
         total_turnover: result.metrics.total_turnover,
+        return_skew: result.metrics.return_skew,
+        return_kurtosis: result.metrics.return_kurtosis,
+        tail_ratio: result.metrics.tail_ratio,
+        cost_to_gross_profit_pct: result.metrics.cost_to_gross_profit_pct,
+        breakeven_cost_multiple: result.metrics.breakeven_cost_multiple,
+        return_consistency_pct: result.metrics.return_consistency_pct,
+        avg_drawdown_pct: result.metrics.avg_drawdown_pct,
+        mae_mfe_coverage_pct: result.metrics.mae_mfe_coverage_pct,
+        avg_mae_pnl: result.metrics.avg_mae_pnl,
+        mfe_capture_ratio: result.metrics.mfe_capture_ratio,
     };
 
     let trades: Vec<PyTrade> = result.trades.into_iter().map(convert_trade).collect();

@@ -808,6 +808,113 @@ pub struct BacktestMetrics {
     /// traded, at `price * |size|` — the same base the fee models charge
     /// on. 0.0 on result paths that carry no trade list.
     pub total_turnover: f64,
+
+    // ---------------------------------------------------------------------
+    // Diagnostics. Every field below is `Option` so that "not measured" is
+    // distinguishable from a measured zero — 0.0 is a legitimate value for
+    // most of them. Paths that build metrics with `..Default::default()`
+    // therefore report `None` without having to spell each one out.
+    // ---------------------------------------------------------------------
+    /// Skewness of the per-bar return series (Fisher-Pearson, sample
+    /// bias-corrected — `scipy.stats.skew(bias=False)`).
+    ///
+    /// Sharpe assumes returns are symmetric and they rarely are. A high Sharpe
+    /// with strongly negative skew is the signature of a strategy collecting
+    /// small gains in front of a rare large loss. `None` for fewer than three
+    /// return samples, or a return series with no variance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_skew: Option<f64>,
+    /// **Excess** kurtosis of the per-bar return series (Gaussian is 0.0, not
+    /// 3.0), sample bias-corrected — `scipy.stats.kurtosis(fisher=True,
+    /// bias=False)`.
+    ///
+    /// Stated as excess because the alternative convention differs by exactly
+    /// 3.0 and nothing in a bare number says which one you are reading. Fat
+    /// tails mean the observed `max_drawdown_pct` understates what the
+    /// strategy can actually lose. `None` for fewer than four return samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_kurtosis: Option<f64>,
+    /// Ratio of the right tail to the left: `|p95| / |p5|` of the per-bar
+    /// returns, at linear-interpolation percentiles (NumPy's default).
+    ///
+    /// Above 1.0 the good days outrun the bad ones. `None` for fewer than 20
+    /// samples — below that a 5th percentile is the minimum wearing a hat —
+    /// or when the 5th percentile is 0.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_ratio: Option<f64>,
+    /// Costs as a percentage of gross profit — `total_fees_paid` over the sum
+    /// of winning closed trades' P&L, before costs.
+    ///
+    /// The overfit tell: an edge that hands most of its gross profit to
+    /// brokerage is one slippage assumption away from being unprofitable.
+    /// Larger is worse. `None` when there is no gross profit to divide by,
+    /// which is a statement about the strategy, not about its costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_to_gross_profit_pct: Option<f64>,
+    /// How many times current costs the run could absorb before net P&L
+    /// reaches zero — `net profit / total_fees_paid`.
+    ///
+    /// `3.4` means costs could triple before the edge dies, which is directly
+    /// comparable against the gap between backtested and live slippage.
+    /// `None` when no costs were charged, or when the run did not make money
+    /// — a negative multiple reads like headroom and is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakeven_cost_multiple: Option<f64>,
+    /// Share of moving bars that moved up: `count(r > 0) / count(r != 0)`.
+    ///
+    /// The equity curve's batting average, which is a different question from
+    /// `win_rate_pct` (the *trades'* batting average). Winning most trades
+    /// while winning few bars means the losers are being held a long time.
+    /// Flat bars are excluded, so a strategy that is usually out of the market
+    /// is judged on the bars it was actually exposed. `None` when no bar moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_consistency_pct: Option<f64>,
+    /// Mean drawdown across the samples that were *underwater*, in the same
+    /// percentage points as `max_drawdown_pct`.
+    ///
+    /// Conditional on being underwater on purpose: averaged over every sample
+    /// including the zeros it would just be a worse `ulcer_index`. Read against
+    /// `max_drawdown_pct` it separates one bad week (18% max, 2% average) from
+    /// chronic pain (18% max, 11% average). `None` when the run never fell
+    /// below its high-water mark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_drawdown_pct: Option<f64>,
+    /// Share of closed trades whose excursions were measured, as a percentage.
+    ///
+    /// **Read this before `avg_mae_pnl` or `mfe_capture_ratio`.** MAE/MFE are
+    /// tracked per position, so paths that synthesize a trade rather than
+    /// closing a tracked one — spread, basket and pairs legs — report `None`
+    /// per trade and are excluded from both aggregates. This says how much of
+    /// the trade list they actually describe. `None` when there are no closed
+    /// trades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mae_mfe_coverage_pct: Option<f64>,
+    /// Mean maximum adverse excursion over measured closed trades, in money.
+    ///
+    /// How far the average trade went against you before it resolved. Never
+    /// positive. Read against `expectancy` it says where a stop can sit: a
+    /// stop tighter than this average would have closed trades that went on to
+    /// work. Gross of costs and on the same contract multiplier as `pnl`,
+    /// matching `Trade::mae_pnl`. `None` when no closed trade was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_mae_pnl: Option<f64>,
+    /// Share of the favourable move that winning trades kept: the sum of
+    /// winners' gross P&L over the sum of their maximum favourable excursions.
+    ///
+    /// 0.35 means the exits give back roughly two thirds of every good move,
+    /// which points at the exit rule rather than the entry signal. Three
+    /// deliberate restrictions: it is a ratio of sums rather than a mean of
+    /// per-trade ratios (one trade with a near-zero MFE would otherwise
+    /// dominate); it covers winners only, since a loser contributes negative
+    /// P&L over a positive excursion and the mean of that is meaningless
+    /// rather than merely noisy; and the numerator is gross (`pnl + fees`)
+    /// because `mfe_pnl` is measured before costs.
+    ///
+    /// Normally in `0.0..=1.0`. A value above 1.0 is not clamped: it means the
+    /// bar-resolution excursion missed an intra-bar extreme, which is a
+    /// diagnostic worth seeing. `None` when no measured winner exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfe_capture_ratio: Option<f64>,
 }
 
 /// Complete backtest result.

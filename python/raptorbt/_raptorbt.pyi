@@ -229,6 +229,28 @@ class BacktestMetrics:
     # Exit legs that never traded (EndOfData, Settlement) contribute nothing.
     # 0.0 on result paths that carry no trade list. Added in 0.10.0.
     total_turnover: float
+    # Diagnostics, added in 0.13.2. None means "not measured on this path",
+    # never a measured zero -- most of these have 0.0 as a legitimate value.
+    # Shape of the per-bar return distribution. Kurtosis is EXCESS (Gaussian
+    # 0.0, not 3.0); both are sample bias-corrected, as scipy's bias=False.
+    return_skew: float | None
+    return_kurtosis: float | None
+    tail_ratio: float | None
+    # Cost pressure: what share of gross profit went to costs, and how many
+    # times current costs the run could absorb before net P&L reaches zero.
+    cost_to_gross_profit_pct: float | None
+    breakeven_cost_multiple: float | None
+    # Share of moving bars that moved up -- the equity curve's batting average,
+    # which is a different question from win_rate_pct over trades.
+    return_consistency_pct: float | None
+    # Mean drawdown across underwater samples only, in max_drawdown_pct's units.
+    avg_drawdown_pct: float | None
+    # Read mae_mfe_coverage_pct BEFORE the two below it: excursions are not
+    # measured on synthesized trades (spread, basket and pairs legs), and this
+    # says how much of the trade list the aggregates actually describe.
+    mae_mfe_coverage_pct: float | None
+    avg_mae_pnl: float | None
+    mfe_capture_ratio: float | None
 
     def to_dict(self) -> dict[str, Any]: ...
 

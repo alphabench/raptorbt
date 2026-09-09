@@ -123,4 +123,10 @@ def test_to_dict_carries_the_new_drawdown_shape_keys():
     d = _run().metrics.to_dict()
     assert "Ulcer Index" in d
     assert "Time Under Water [%]" in d
-    assert len(d) == 28
+    # `to_dict` is a curated subset of the attribute surface, not a mirror of
+    # it, so this count moves only when a key is deliberately added. 0.13.2
+    # added three diagnostics: cost pressure, exit quality, drawdown texture.
+    assert "Cost / Gross Profit [%]" in d
+    assert "MFE Capture Ratio" in d
+    assert "Avg Drawdown [%]" in d
+    assert len(d) == 31
