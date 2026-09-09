@@ -12,7 +12,7 @@
 RaptorBT is a high-performance backtesting engine written in Rust with Python bindings via PyO3. It runs single-instrument, basket, pairs, options, spread, multi-strategy, and tick-level backtests over any OHLCV or tick arrays — from any broker, market, or asset class — and returns a full performance report in sub-millisecond time.
 
 <p align="center">
-  <strong>Sub-millisecond backtests</strong> · <strong>&lt;1 MB compiled engine</strong> · <strong>Bit-for-bit deterministic</strong>
+  <strong>~13M bars/sec</strong> · <strong>Sweeps across every core</strong> · <strong>Bit-for-bit deterministic</strong>
 </p>
 
 ---
@@ -88,16 +88,19 @@ RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphaben
 ## Overview
 
 RaptorBT compiles to a single native extension and runs entirely in Rust, so a
-full backtest with all 38 metrics finishes in well under a millisecond on
-typical bar counts. Measured on an Apple M4 (raptorbt 0.4.0):
+full backtest with all 48 metrics finishes in under a millisecond at the bar
+counts most strategies use. Measured on an Apple M4 (raptorbt 0.13.2,
+Python 3.12):
 
-| Metric                        | RaptorBT     |
-| ----------------------------- | ------------ |
-| **Compiled engine size**      | <1 MB        |
-| **Backtest speed (1K bars)**  | ~0.03 ms     |
-| **Backtest speed (10K bars)** | ~0.25 ms     |
-| **Backtest speed (50K bars)** | ~1.4 ms      |
-| **Memory usage**              | Low (native) |
+| Metric                           | RaptorBT      |
+| -------------------------------- | ------------- |
+| **Compiled engine size**         | 1.75 MB       |
+| **Backtest speed (1K bars)**     | ~0.075 ms     |
+| **Backtest speed (10K bars)**    | ~0.77 ms      |
+| **Backtest speed (50K bars)**    | ~3.85 ms      |
+| **Sustained throughput**         | ~13M bars/sec |
+| **184-combo sweep, 10 cores**    | 170 ms, 7.7x  |
+| **Peak memory, 184-combo sweep** | 56 MB         |
 
 See [Performance](#performance) for the full method and how to reproduce these
 numbers on your own hardware.
@@ -110,9 +113,11 @@ numbers on your own hardware.
 - **Tick-Level Simulation**: Full tick resolution for intraday options momentum, scalping, and microstructure strategies
 - **Live-feed ready**: Push events as they arrive with `TickStrategyStream`, and seed a run with positions the account already holds via position adoption
 - **Portfolio Construction**: Ledoit-Wolf covariance, a constrained optimizer — long-only by default, long/short with gross and net exposure budgets (v0.6.3) — factor panels with rank-IC validation, risk contributions, and rebalance-cost simulation
+- **Parallel Parameter Sweeps**: `batch_single_backtest` runs many signal sets over one price series across every core — 7.7x on ten cores, bit-identical to a serial loop
 - **Batch Spread Backtesting**: Run multiple spread backtests in parallel via Rayon with GIL released
 - **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
-- **38 Metrics**: Sharpe, Sortino, Calmar, Omega, Ulcer Index, Time Under Water, SQN, Payoff Ratio, Recovery Factor, and more
+- **48 Metrics**: Sharpe, Sortino, Calmar, Omega, Ulcer Index, Time Under Water, SQN, Payoff Ratio, Recovery Factor, and more
+- **Diagnostics that say *why***: return skew and excess kurtosis (is a high Sharpe really a short-vol payoff?), cost-to-gross-profit and breakeven cost multiple (do fees eat the edge, and how much room is left?), average MAE and MFE capture (where should the stop sit, and is the exit giving the move back?)
 - **20 Indicator & Tick Functions**: 12 classic technical indicators (SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend, Rolling Min/Max) plus 8 tick microstructure/feature functions
 - **Stop/Target Management**: Fixed, ATR-based, and trailing stops with risk-reward targets
 - **Deterministic**: Identical inputs produce bit-for-bit identical results across runs — no JIT compilation variance
@@ -124,7 +129,7 @@ numbers on your own hardware.
 
 ### Benchmark Results
 
-Measured on an Apple M4 (10 cores, raptorbt 0.7.0, Python 3.11) with
+Measured on an Apple M4 (10 cores, 24 GB, raptorbt 0.13.2, Python 3.12) with
 random-walk price data and an SMA-crossover strategy. Each figure is the fastest
 of several hundred `run_single_backtest` repetitions, so it reflects engine time
 rather than scheduler noise. Reproduce any row with `uv run python
@@ -133,40 +138,79 @@ checkable.
 
 | Data size       | Time     | Throughput   |
 | --------------- | -------- | ------------ |
-| 1,000 bars      | 0.069 ms | 15M bars/sec |
-| 5,000 bars      | 0.36 ms  | 14M bars/sec |
-| 10,000 bars     | 0.72 ms  | 14M bars/sec |
-| 50,000 bars     | 3.59 ms  | 14M bars/sec |
-| 93,750 bars     | 6.90 ms  | 14M bars/sec |
-| 1,875,000 bars  | 156 ms   | 12M bars/sec |
-| 25,000,000 bars | 1.82 s   | 14M bars/sec |
+| 1,000 bars      | 0.075 ms | 13M bars/sec |
+| 5,000 bars      | 0.38 ms  | 13M bars/sec |
+| 10,000 bars     | 0.77 ms  | 13M bars/sec |
+| 50,000 bars     | 3.85 ms  | 13M bars/sec |
+| 93,750 bars     | 7.19 ms  | 13M bars/sec |
+| 1,875,000 bars  | 158 ms   | 12M bars/sec |
+| 25,000,000 bars | 1.92 s   | 13M bars/sec |
 
 The 1,875,000-bar row is the one worth dwelling on: that is roughly **twenty
 years of Indian one-minute intraday data**, backtested in about a sixth of a
-second. Throughput stays essentially flat from a thousand bars to twenty-five
-million, so scaling is linear — the engine does not fall off a cliff when the
-data stops fitting in cache.
+second. Throughput holds between 11M and 13M bars/sec across the whole range,
+from a thousand bars to twenty-five million — a spread of about 15%, against a
+25,000x change in input size. Scaling is linear: the engine does not fall off a
+cliff when the data stops fitting in cache.
+
+Every row runs the full metric set — all 48 fields, including the return-shape
+and cost diagnostics added in 0.13.2. Against the published 0.13.1 wheel on this
+same harness, small runs are unchanged (0.072 → 0.075 ms at 1,000 bars) and
+large ones are faster: **1.875M bars 165 → 158 ms, and 25M bars 2.43 s → 1.92 s,
+a 21% improvement**. Trade counts are identical at every size. The large-run
+gain is the binding no longer duplicating its input — see **Memory** below.
 
 Other paths, measured the same way:
 
 | Path                                                 | Result                                                           |
 | ---------------------------------------------------- | ---------------------------------------------------------------- |
-| Tick engine                                          | 175–242M ticks/sec, every tick traversed to the end of the array |
-| 500 option spreads in parallel                       | 42,848/sec, 6.9x faster than serial, bit-for-bit identical to it |
-| 190-combo parameter sweep over a year of minute bars | 1.47 s wall, 67 MB peak RSS                                      |
-| Determinism                                          | 20 runs across 3 processes → one SHA-256                         |
-| Compiled engine                                      | 1.59 MB                                                          |
-| Metrics per backtest                                 | 38 attributes (28 in `to_dict()`)                                |
+| Tick engine                                          | 107–221M ticks/sec, every tick traversed to the end of the array |
+| 500 option spreads in parallel                       | 40,817/sec, 7.6x faster than serial, bit-for-bit identical to it |
+| 184-combo sweep, one Python loop                     | 1.51 s wall, 56 MB peak RSS                                      |
+| 184-combo sweep, `batch_single_backtest`             | 170 ms, **7.7x faster**, bit-identical to the serial loop        |
+| 25M-bar run, peak memory over a 1.25 GB input        | 1.13 GB (was 2.16 GB before the input copy was removed)          |
+| Determinism                                          | 20 runs → one SHA-256                                            |
+| Compiled engine                                      | 1.75 MB                                                          |
+| Metrics per backtest                                 | 48 attributes (31 in `to_dict()`)                                |
 
-> **These numbers are not comparable to the 0.6.4 ones published earlier.** They
-> come from a different harness, not a slower engine — the 0.6.4 figures were
-> produced by a one-off script that was not kept. Running the published 0.6.4
-> wheel and this 0.7.0 build side by side on the harness now in `benches/`, on
-> identical inputs, gives 71.0 µs and 70.5 µs respectively for 1,000 bars with
-> identical results. 0.7.0 is marginally faster. Compare within one harness
-> only; that is why the harness now ships with the code.
+The tick row is a range because tick throughput, unlike bar throughput, does
+not stay flat: ~197M ticks/sec at 10,000 ticks and ~221M at 100,000, falling to
+~164M at a million and 100–130M at ten million as the arrays outgrow cache. The
+ten-million row is also the least repeatable — it is the one measurement here
+that varies by more than a few percent between runs. Every figure is verified to
+traverse to the last tick before it is published: a truncated run would time a
+prefix of the array and report an inflated ticks/sec, so the harness asserts the
+final trade's exit index lands at the end of the input.
+
+> **Compare within one harness only.** These figures come from
+> `benches/python/run_all.py` at 0.13.2. Numbers published against 0.6.4 and
+> earlier came from a one-off script that was not kept and are not comparable to
+> them — that is why the harness now ships with the code. The `spreads` and
+> `sweep` rows are measured standalone (`run_all.py spreads`, `run_all.py
+> sweep`): the first competes with Rayon for the same cores, and the second
+> reads a whole-process peak-RSS high-water mark that anything running before it
+> would inflate.
 
 Timings will vary with your CPU, data, and signal density.
+
+### Memory
+
+The engine reads NumPy's buffers directly rather than copying them, so a run's
+peak memory is roughly its input plus the curves it produces, not twice its
+input. On a 25-million-bar backtest over a 1.25 GB input, peak RSS is **1.13 GB
+above baseline, down from 2.16 GB** — close to exactly the duplicate that is no
+longer made. The same change is most of why that run got 21% faster.
+
+Two consequences worth knowing:
+
+- Arrays must be **C-contiguous**, which is what ordinary NumPy code produces.
+  A non-contiguous view (a strided slice, a transpose) is rejected rather than
+  silently copied — `np.ascontiguousarray` fixes it.
+- The arrays must stay alive and unmodified for the duration of the call. That
+  is automatic in normal use, since the call holds the GIL.
+
+The tick path and the spread path's premium arrays still copy; converting them
+is the same fix and has not been done yet.
 
 ### Determinism
 
@@ -179,6 +223,11 @@ produced the same total return every time, to the last decimal:
 Total return:           -30.6192%  (seed=42, 500 bars, periodic entries/exits)
 Max difference across 5 runs: 0.0000000000%
 ```
+
+The harness makes the stronger version of this claim: it hashes the full equity
+curve and every trade's entry index, exit index and P&L on a 50,000-bar run, and
+20 repetitions collapse to a single SHA-256 digest. Not just a stable summary
+number — a stable curve, trade for trade.
 
 (The exact return depends on your data and signals — the point is that it does
 not change between runs.)
@@ -1246,11 +1295,11 @@ velocity = raptorbt.tick_velocity(ts_ns, 60.0)              # ticks/min over las
 
 ## Metrics
 
-Every backtest returns a `BacktestMetrics` object exposing **38 metric fields**
+Every backtest returns a `BacktestMetrics` object exposing **48 metric fields**
 (listed in full under [BacktestMetrics](#pybacktestmetrics)). `metrics.to_dict()`
-returns a subset of 28 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
+returns a subset of 31 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
 `"Total Return [%]"`) for quick display; read fields directly off the object to
-access all 38. The most useful are grouped below.
+access all 48. The most useful are grouped below.
 
 ### Core Performance
 
@@ -1335,6 +1384,63 @@ access all 38. The most useful are grouped below.
 | `total_fees_paid` | Total transaction costs            |
 | `open_trade_pnl`  | Unrealized PnL from open positions |
 | `exposure_pct`    | Percentage of time in market, capped at 100% |
+
+### Diagnostics — why a strategy behaves the way it does
+
+New in 0.13.2. Every field is `float | None`, and **`None` means *not measured*
+on that path, never a measured zero** — 0.0 is a legitimate value for most of
+them.
+
+| Metric                     | Description                                                              |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `return_skew`              | Skewness of per-bar returns (Fisher-Pearson, bias-corrected)             |
+| `return_kurtosis`          | **Excess** kurtosis — Gaussian is 0.0, not 3.0                           |
+| `tail_ratio`               | 95th percentile over 5th, in absolute value — above 1.0 the right tail outruns the left |
+| `cost_to_gross_profit_pct` | Costs as a share of gross profit; larger is worse                        |
+| `breakeven_cost_multiple`  | How many times current costs the run could absorb before net P&L hits 0  |
+| `return_consistency_pct`   | Share of *moving* bars that moved up (the curve's batting average)       |
+| `avg_drawdown_pct`         | Mean drawdown across underwater samples only                             |
+| `mae_mfe_coverage_pct`     | Share of closed trades whose excursions were measured — **read first**   |
+| `avg_mae_pnl`              | Mean maximum adverse excursion, in money; never positive                 |
+| `mfe_capture_ratio`        | Share of the favourable move winners kept                                |
+
+What they are for:
+
+- **Is the Sharpe real?** Sharpe assumes symmetric returns. A high Sharpe with
+  strongly negative `return_skew` is the signature of a strategy collecting
+  small gains in front of a rare large loss. A high `return_kurtosis` means the
+  observed `max_drawdown_pct` understates what the strategy can lose.
+- **Do costs eat it?** `cost_to_gross_profit_pct` is the overfit tell — an edge
+  handing most of its gross profit to brokerage is one slippage assumption from
+  unprofitable. `breakeven_cost_multiple` of `3.4` says costs could triple
+  before the edge dies, directly comparable against backtest-vs-live slippage.
+- **One bad week, or chronic?** `max_drawdown_pct` 18% with `avg_drawdown_pct`
+  2% is one bad stretch; 18% with 11% is a strategy that lives underwater. Same
+  headline risk, opposite sizing decision.
+- **Where should the stop go?** `avg_mae_pnl` is how far the average trade goes
+  against you before it works. A stop tighter than that closes trades that
+  would have won.
+- **Entry or exit?** `mfe_capture_ratio` of 0.35 means the exits give back two
+  thirds of every favourable move — the exit rule is the bottleneck, not the
+  signal.
+
+Conventions are pinned deliberately, because a silent disagreement with another
+library is the failure mode: kurtosis is excess; skew and kurtosis are sample
+bias-corrected (`scipy.stats` with `bias=False`); `tail_ratio` uses
+linear-interpolation percentiles (NumPy's default); `avg_drawdown_pct` is
+conditional on being underwater.
+
+`mfe_capture_ratio` is a **ratio of sums over winning trades, gross of costs**.
+Each restriction matters: a mean of per-trade ratios lets one trade with a
+near-zero excursion dominate, and including losers puts negative P&L over a
+positive excursion, which produces a negative "capture" that means nothing. A
+value above 1.0 is not clamped — it says the bar-resolution excursion missed an
+intra-bar extreme, which is worth seeing.
+
+Excursions are `None` per trade on paths that synthesize a trade rather than
+closing a tracked position (spread, basket and pairs legs), so those trades are
+excluded from the aggregates and `mae_mfe_coverage_pct` reports how much of the
+trade list the two figures actually describe.
 
 ---
 
@@ -1570,6 +1676,65 @@ results = raptorbt.batch_spread_backtest(
 
 Runs all spread backtests in parallel via Rayon. Timestamps and underlying close are shared across all items and converted once. The GIL is released during execution for maximum Python concurrency.
 
+### BatchSingleItem
+
+```python
+item = raptorbt.BatchSingleItem(
+    item_id: str,                        # Label; returned alongside this item's result
+    entries: np.ndarray,                 # bool entry signals
+    exits: np.ndarray,                   # bool exit signals
+    direction: int = 1,                  # 1 long, -1 short
+    weight: float = 1.0,
+    symbol: str = "UNKNOWN",
+    config: BacktestConfig = None,       # Per-item override; None uses the batch config
+    position_sizes: np.ndarray = None,
+    instrument_config: InstrumentConfig = None,
+)
+```
+
+### batch_single_backtest
+
+```python
+results = raptorbt.batch_single_backtest(
+    timestamps: np.ndarray,              # int64 nanoseconds (shared)
+    open: np.ndarray,                    # OHLCV, shared across every item
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+    items: List[BatchSingleItem],        # One per parameter set
+    config: BacktestConfig = None,       # Default config for items without one
+) -> List[Tuple[str, BacktestResult]]    # (item_id, result), in input order
+```
+
+The parameter-sweep entry point: one price series, many signal sets, every core.
+The OHLCV arrays are converted once and shared by reference; each item runs on
+its own Rayon thread with the GIL released. **184 combinations over 93,750 bars:
+1.31 s down a Python loop, 170 ms batched — 7.7x on ten cores.**
+
+Results are bit-identical to calling `run_single_backtest` in a loop, which is
+the point rather than a bonus: a sweep whose numbers moved with the thread count
+would make comparing two parameter sets meaningless. Results come back in input
+order, so they can be zipped against the parameters that produced them.
+
+An item whose signals do not match the shared series length, or whose direction
+is neither 1 nor -1, raises `ValueError` naming that item — before any worker
+starts.
+
+```python
+import numpy as np, raptorbt
+
+combos = [(f, s) for f in range(5, 55, 5) for s in range(20, 220, 10) if f < s]
+items = [
+    raptorbt.BatchSingleItem(f"{fast}_{slow}", *signals_for(close, fast, slow))
+    for fast, slow in combos
+]
+for item_id, result in raptorbt.batch_single_backtest(
+    ts, o, h, l, c, v, items, config
+):
+    print(item_id, result.metrics.sharpe_ratio, result.metrics.mfe_capture_ratio)
+```
+
 ### simulate_portfolio_mc
 
 ```python
@@ -1708,7 +1873,11 @@ exits = np.zeros(n, dtype=bool);  exits[10::20] = True
 
 config = raptorbt.BacktestConfig(initial_capital=100000, fees=0.001)
 result = raptorbt.run_single_backtest(
-    timestamps=np.arange(n, dtype=np.int64),
+    # Timestamps are int64 nanoseconds, and annualization is derived from the
+    # elapsed wall-clock span they describe. A bare np.arange(n) is 500
+    # *nanoseconds* of history, which inflates Sharpe by orders of magnitude —
+    # space the bars a real interval apart.
+    timestamps=np.arange(n, dtype=np.int64) * 86_400_000_000_000,  # daily bars
     open=close,
     high=close,
     low=close,

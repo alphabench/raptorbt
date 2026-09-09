@@ -16,7 +16,81 @@ both report the same number. These two do.**
 loss went. A 8% dip lasting a week and an 8% dip lasting a year are the same
 number under max drawdown; the second is the one people abandon.**
 
+**Trying many parameter sets at once — the most common thing anyone does with a
+backtester — now uses every core instead of one, 7.7x on a ten-core machine.
+Large runs also stopped copying their own input, so a 25-million-bar backtest
+uses a gigabyte less memory and finishes 21% sooner.**
+
+**And a result now answers *why* a strategy behaves as it does: whether a high
+Sharpe is really a short-volatility payoff, whether costs are eating the edge
+and how much room is left before they kill it, where a stop can sit, and whether
+the exit is giving back the move the entry found.**
+
 ### Added
+
+- **`batch_single_backtest` — parameter sweeps across every core.** Takes one
+  price series and a list of `BatchSingleItem`s, converts the shared OHLCV
+  once, then runs the items on Rayon with the GIL released. Each item carries
+  its own signals and may override the batch config, direction, symbol,
+  position sizes and instrument config.
+
+  184 SMA-crossover combinations over 93,750 bars on ten cores: **1.31 s down a
+  Python loop, 170 ms batched — 7.7x.** It also stops re-copying the same
+  price data once per combination.
+
+  Results are **bit-identical to the serial loop**, which is the point rather
+  than a bonus: a sweep whose numbers shifted with the thread count would make
+  comparing two parameter sets meaningless. Order is preserved, so results zip
+  against the parameters that produced them. A bad item — signals that do not
+  match the shared length, or a direction that is neither 1 nor -1 — raises
+  `ValueError` naming that item before any worker starts, because a panic on a
+  Rayon thread crosses PyO3 as `PanicException`, which a caller can neither
+  catch as `ValueError` nor trace to the argument at fault.
+
+- **Ten diagnostic metrics, each tied to a decision.** `BacktestMetrics` now
+  carries 48 fields, 31 in `to_dict()`.
+
+  *Is the edge real?* `return_skew` and `return_kurtosis` describe the shape
+  Sharpe assumes away; `tail_ratio` compares the two tails. High Sharpe with
+  strongly negative skew is a short-volatility payoff wearing a good number.
+
+  *Do costs eat it?* `cost_to_gross_profit_pct` is the overfit tell.
+  `breakeven_cost_multiple` says how many times current costs the run could
+  absorb before net P&L reaches zero — directly comparable against the gap
+  between backtested and live slippage.
+
+  *Is it grinding?* `return_consistency_pct` is the equity curve's batting
+  average, a different question from `win_rate_pct` over trades.
+  `avg_drawdown_pct` separates one bad week from chronic pain at the same
+  headline `max_drawdown_pct`.
+
+  *Where should the stop go, and is the exit the problem?* `avg_mae_pnl` is how
+  far the average trade goes against you before it works — a stop tighter than
+  that closes trades that would have won. `mfe_capture_ratio` is the share of
+  the favourable move winners keep; 0.35 points at the exit rule rather than
+  the entry signal. `mae_mfe_coverage_pct` must be read first: excursions are
+  absent on synthesized legs, and coverage says how much of the trade list the
+  two aggregates describe rather than letting a subset pass for the whole.
+
+  Every field is `Option`. `None` means **not measured on this path**, never a
+  measured zero — 0.0 is a legitimate value for most of them, which is exactly
+  the ambiguity `ulcer_index`'s bare `f64` was forced into when it had to
+  report 0.0 on a path that never computed it.
+
+  Conventions are pinned in the doc comments and tested against `scipy`,
+  because a silent disagreement with another library is the failure mode here:
+  kurtosis is **excess** (Gaussian 0.0, not 3.0); skew and kurtosis are sample
+  bias-corrected (`bias=False`); `tail_ratio` uses linear-interpolation
+  percentiles matching NumPy; `avg_drawdown_pct` is conditional on being
+  underwater, since averaging the zeros in would just be a worse ulcer index.
+
+  `mfe_capture_ratio` carries three deliberate restrictions: a ratio of sums
+  rather than a mean of per-trade ratios (one near-zero excursion would
+  otherwise dominate), winners only (a loser puts negative P&L over a positive
+  excursion; the naive form returns −2.38 on a real fixture), and a gross
+  numerator, since `mfe_pnl` is measured before costs. A value above 1.0 is not
+  clamped — it means bar-resolution excursion missed an intra-bar extreme,
+  which is a diagnostic worth seeing.
 
 - **`Trade.mae_pnl` / `Trade.mfe_pnl` — maximum adverse and favourable
   excursion**, plus `Trade.mae_price` / `Trade.mfe_price`, the prices at those
@@ -80,13 +154,88 @@ number under max drawdown; the second is the one people abandon.**
   caller's code meant.
 
 - **The metric counts in `README.md` were stale**, reading 33 fields / 24 in
-  `to_dict()` from a release that added fields without updating them. Now 38
-  and 28, checked against the built wheel.
+  `to_dict()` from a release that added fields without updating them. Now 48
+  and 31, checked against the built wheel — along with every other published
+  figure, all re-measured for this release.
+
+- **`batch_spread_backtest`'s type stub was wrong.** It returns
+  `(strategy_id, result)` pairs but was declared `list[BacktestResult]`, so a
+  caller following the stub indexes a tuple and gets `AttributeError` on the
+  first `.metrics`. Both batch functions now carry fully typed stubs.
+
+- **Sortino and Omega had no value pinning, and one ATR branch had no test at
+  all.** `omega_ratio` was asserted nowhere in the suite — not in the golden
+  digest, not in the class-vs-array equivalence check, and every Rust caller
+  discards it as `_omega`. `sortino_ratio` was pinned only relationally: the
+  two paths had to agree with each other, but nothing said what either should
+  equal. Both now ride the golden digest, shown to fail by injection before
+  they counted. Separately, the ATR precompute fires when *either* the stop or
+  the target is ATR-based, but only the stop limb was exercised; the new
+  `atr_target_fixed_stop` fixture covers the other.
+
+- **Known, not fixed: the spread path drops metrics it could compute.** It
+  builds its metrics through `StreamingMetrics::finalize`, which receives only
+  the return series — while its caller holds a real drawdown curve and a real
+  trade list and puts both into the result it returns. So a spread result can
+  report 379 underwater samples in its own `drawdown_curve` while
+  `time_under_water_pct` reads 0.0, and carry three trades while
+  `total_turnover` and `exposure_pct` read 0.0. This predates 0.13.2 (the last
+  two are 0.0 on 0.13.1 as well). The current behaviour is now pinned by a test
+  whose comments say plainly that it records a bug, so a fix has a baseline.
+  Fixing it means routing that path through the shared estimator, which would
+  also stop annualizing minute bars at 252 — a real change to published Sharpe,
+  and so its own release.
 
 - **`ulcer_index` had no value-pinning test.** Its only assertion was that the
   result is positive, which every arithmetic error preserves — including
   dividing the sum of squares by the count of underwater samples instead of the
   curve length, which roughly doubles the metric on a mostly-flat curve.
+
+### Performance
+
+All figures Apple M4, ten cores, against the published 0.13.1 wheel on the
+harness in `benches/`. The golden corpus is byte-identical across every change
+below — none of them alters a result.
+
+- **NumPy buffers are read, not duplicated.** `OhlcvData`'s series are now
+  `Cow`, so the six pyfunctions that build one borrow the caller's arrays for
+  the duration of the call instead of copying them. A NumPy array is already a
+  contiguous `f64` buffer and `PyReadonlyArray1` holds the GIL and a read lock
+  on it, so the copy bought nothing and cost a full duplicate of the input.
+
+  On 25 million bars over a 1.25 GB input: **peak RSS 2.16 GB → 1.13 GB above
+  baseline** (about the input size, as expected) and **2.43 s → 1.92 s, 21%
+  faster**. 1.875M bars 165 → 158 ms. Small runs are unchanged, as expected —
+  the copy was never a large share of one.
+
+  Arrays must be C-contiguous, which ordinary NumPy code produces; a strided
+  view is refused rather than silently copied. The tick path and the spread
+  path's premium arrays still copy — the same fix, not yet done.
+
+- **Sharpe, Sortino and Omega no longer copy the return series.**
+  `risk_metrics` allocated two full copies of the per-bar returns — one to drop
+  NaNs, one to hold the negative subset — to produce three scalars, then walked
+  the filtered series five more times. Both allocations are gone; NaN is
+  skipped inline and one pass accumulates everything the ratios need. 30 MB of
+  transient heap on a 1.875M-bar run, and roughly a tenth of total runtime, on
+  work that never touches a bar.
+
+  Two passes over the slice, not one, and deliberately so: the variance is
+  taken about a known mean, and folding it into a single sum-of-squares pass
+  would change the floating-point result. The point is that it does not.
+
+- **No ATR array is allocated when no stop asked for one.** A run with no
+  ATR-based stop or target still allocated and zero-filled one `f64` per bar so
+  the loop could read 0.0 out of it — 200 MB on a 25M-bar run, written once and
+  never read. Peak RSS at 8M bars: 1351 → 1301 MB against a 61 MB array
+  avoided. Time is unchanged; a zero-fill is cheap in time and real in memory,
+  so this is a memory fix and is not claimed as a speed one.
+
+- **The distribution-shape metrics cost nothing extra.** Their central moments
+  ride the pass `risk_metrics` already makes, and `tail_ratio` selects its
+  order statistics in O(n) rather than sorting a copy of the series. The first
+  cut of these metrics ran 210 ms against 0.13.1's 168 ms at 1.875M bars; the
+  shipped version is within noise of it.
 
 ### Changed
 
