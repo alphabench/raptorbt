@@ -127,7 +127,13 @@ impl PortfolioEngine {
         let effective_target =
             inst_config.and_then(|ic| ic.target.as_ref()).unwrap_or(&self.config.target);
 
-        // Pre-calculate ATR for ATR-based stops
+        // Pre-calculate ATR for ATR-based stops.
+        //
+        // `None` when no stop or target is ATR-based, rather than a zero-filled
+        // array: the run then reads 0.0 per bar from the `map_or` below instead
+        // of from `n` f64s nothing ever wrote a real value into. On a 25M-bar
+        // run that array was 200 MB, allocated and written on every run that
+        // does not use an ATR stop -- which is most of them.
         let atr_values = if matches!(effective_stop, StopConfig::Atr { .. })
             || matches!(effective_target, TargetConfig::Atr { .. })
         {
@@ -138,9 +144,13 @@ impl PortfolioEngine {
                     _ => 14,
                 },
             };
-            atr(&ohlcv.high, &ohlcv.low, &ohlcv.close, period).unwrap_or_else(|_| vec![0.0; n])
+            // A failed ATR still yields zeros rather than aborting the run --
+            // the golden `atr_stop_rr_target` fixture encodes that behaviour.
+            Some(
+                atr(&ohlcv.high, &ohlcv.low, &ohlcv.close, period).unwrap_or_else(|_| vec![0.0; n]),
+            )
         } else {
-            vec![0.0; n]
+            None
         };
 
         // Main simulation loop — the per-bar body lives in EngineKernel::step
@@ -159,7 +169,7 @@ impl PortfolioEngine {
             let input = StepInput {
                 entry: entries[i],
                 exit: exits[i],
-                atr: atr_values.get(i).copied().unwrap_or(0.0),
+                atr: atr_values.as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
                 size_mult: signals.position_sizes.as_ref().map(|sizes| sizes[i]),
                 ..StepInput::default()
             };

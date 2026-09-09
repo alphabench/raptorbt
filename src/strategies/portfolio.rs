@@ -172,7 +172,7 @@ impl PortfolioBacktest {
                 let input = StepInput {
                     entry: false,
                     exit: cleaned[idx].1[i],
-                    atr: atr_series[idx].get(i).copied().unwrap_or(0.0),
+                    atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
                     size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
                     ..StepInput::default()
                 };
@@ -214,7 +214,7 @@ impl PortfolioBacktest {
                 let input = StepInput {
                     entry: true,
                     exit: false,
-                    atr: atr_series[idx].get(i).copied().unwrap_or(0.0),
+                    atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
                     size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
                     ..StepInput::default()
                 };
@@ -333,7 +333,7 @@ impl PortfolioBacktest {
         instruments: &[(OhlcvData, CompiledSignals)],
         instrument_configs: Option<&HashMap<String, InstrumentConfig>>,
         n_bars: usize,
-    ) -> Vec<Vec<f64>> {
+    ) -> Vec<Option<Vec<f64>>> {
         use crate::core::types::{StopConfig, TargetConfig};
 
         instruments
@@ -349,10 +349,15 @@ impl PortfolioBacktest {
                     .copied()
                     .unwrap_or(self.config.base.target);
 
+                // `None` rather than a zero-filled array when this instrument
+                // has no ATR-based stop or target -- see the matching comment
+                // in `PortfolioEngine::run_single_with_instrument_config`. Here
+                // the saving is per instrument, so a book of 50 symbols was
+                // allocating 50 such arrays.
                 let needs_atr = matches!(stop, StopConfig::Atr { .. })
                     || matches!(target, TargetConfig::Atr { .. });
                 if !needs_atr {
-                    return vec![0.0; n_bars];
+                    return None;
                 }
 
                 let period = match stop {
@@ -362,8 +367,10 @@ impl PortfolioBacktest {
                         _ => 14,
                     },
                 };
-                atr(&ohlcv.high, &ohlcv.low, &ohlcv.close, period)
-                    .unwrap_or_else(|_| vec![0.0; n_bars])
+                Some(
+                    atr(&ohlcv.high, &ohlcv.low, &ohlcv.close, period)
+                        .unwrap_or_else(|_| vec![0.0; n_bars]),
+                )
             })
             .collect()
     }
