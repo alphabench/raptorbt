@@ -188,7 +188,7 @@ class TestMarginAccount:
             leverage=10.0,
         )
         assert strategy.margin_calls == 1
-        assert "MarginCall" in strategy.rejects
+        assert "margin_call" in strategy.rejects
 
 
 class TestStochasticFill:

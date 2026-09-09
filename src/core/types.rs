@@ -952,6 +952,16 @@ pub struct BacktestResult {
     pub trades: Vec<Trade>,
     /// Daily returns.
     pub returns: Vec<f64>,
+    /// What became of every order the run placed, in submission order.
+    ///
+    /// A result reports the trades a strategy made; this reports the ones it
+    /// tried to make. An entry refused for margin, a limit that rested and
+    /// expired, a stop rejected because a position was already open — none
+    /// of those produce a trade, and without them a run that never got into
+    /// the market is indistinguishable from one whose idea was wrong.
+    ///
+    /// Empty for a run that placed no typed orders.
+    pub orders: Vec<crate::execution::orders::OrderRecord>,
 }
 
 impl BacktestResult {
@@ -963,7 +973,19 @@ impl BacktestResult {
         trades: Vec<Trade>,
         returns: Vec<f64>,
     ) -> Self {
-        Self { metrics, equity_curve, drawdown_curve, trades, returns }
+        Self { metrics, equity_curve, drawdown_curve, trades, returns, orders: Vec::new() }
+    }
+
+    /// Attach the run's order log.
+    ///
+    /// A builder rather than a sixth positional argument: most construction
+    /// sites (spread, basket and pairs strategies) synthesise a result and
+    /// have no order book, and threading an empty vector through all of them
+    /// would say "this run placed no orders" where the truth is "this path
+    /// does not track them".
+    pub fn with_orders(mut self, orders: Vec<crate::execution::orders::OrderRecord>) -> Self {
+        self.orders = orders;
+        self
     }
 }
 

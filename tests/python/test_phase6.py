@@ -147,7 +147,7 @@ class TestPortfolioSession:
         }
         strategy = S()
         run_portfolio_strategy(strategy, data, config=_zero_fee_config())
-        assert strategy.rejects == [("BBB", "ZeroSize")]
+        assert strategy.rejects == [("BBB", "zero_size")]
 
     def test_typed_orders_route_by_symbol(self):
         class S(Strategy):

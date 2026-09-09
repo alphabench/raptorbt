@@ -7,7 +7,10 @@
 //! session exposed to Python) loop this type, so the accounting has exactly one
 //! implementation.
 
+use std::collections::HashMap;
+
 use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Trade};
+use crate::execution::orders::OrderRecord;
 use crate::execution::{FeeModel, FillPrice, SlippageModel};
 use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
@@ -28,6 +31,10 @@ pub struct SingleRunner {
     returns: Vec<f64>,
     timestamps: Vec<i64>,
     trades: Vec<Trade>,
+    /// What became of every order, keyed by id. A map because one order is
+    /// mutated across several events (accepted, then triggered, then filled
+    /// in slices); the book supplies submission order at `finish`.
+    order_events: HashMap<u64, OrderRecord>,
     streaming: StreamingMetrics,
     peak_equity: f64,
     last_bar: Option<(usize, KernelBar)>,
@@ -66,6 +73,7 @@ impl SingleRunner {
             returns: Vec::new(),
             timestamps: Vec::new(),
             trades: Vec::new(),
+            order_events: HashMap::new(),
             streaming: StreamingMetrics::new(),
             peak_equity: initial_capital,
             last_bar: None,
@@ -121,9 +129,22 @@ impl SingleRunner {
         let events = self.kernel.step(idx, bar, input);
 
         for event in &events {
-            if let EngineEvent::Exited { trade, .. } = event {
-                self.streaming.update(trade.return_pct / 100.0);
-                self.trades.push((**trade).clone());
+            match event {
+                EngineEvent::Exited { trade, .. } => {
+                    self.streaming.update(trade.return_pct / 100.0);
+                    self.trades.push((**trade).clone());
+                }
+                // Fills and rejections carry what the book cannot: the price
+                // and size of each slice, and the reason an order was
+                // refused. Everything else about the order is read from the
+                // book at `finish`.
+                EngineEvent::OrderFilled { idx, order_id, price, size, .. } => {
+                    self.order_fill(*order_id, *idx, *price, *size);
+                }
+                EngineEvent::OrderRejected { order_id, reason, .. } => {
+                    self.order_reject(*order_id, reason);
+                }
+                _ => {}
             }
         }
 
@@ -152,6 +173,68 @@ impl SingleRunner {
     }
 
     /// Force-close any open position and compute final metrics.
+    /// Fold one fill slice onto the order's record.
+    ///
+    /// The record is seeded from the book here rather than at submission, so
+    /// an order is only materialised once something happened to it; the
+    /// remaining orders are picked up wholesale at `finish`.
+    fn order_fill(&mut self, order_id: u64, idx: usize, price: f64, size: f64) {
+        let seed = self
+            .kernel
+            .order_book()
+            .iter()
+            .find(|o| o.id == order_id)
+            .map(|o| OrderRecord::from_order(o, self.kernel.symbol()));
+        if let Some(mut seed) = seed {
+            // Zero the seed ONCE, as it is created: `record_fill` folds each
+            // slice in, and the book's own `filled_qty` already holds the
+            // total. Resetting on every slice instead would keep only the
+            // last fill, which is exactly the partial-fill case this record
+            // exists to describe.
+            seed.filled_qty = 0.0;
+            seed.avg_fill_price = None;
+            let record = self.order_events.entry(order_id).or_insert(seed);
+            record.record_fill(idx, price, size);
+        }
+    }
+
+    /// Record why an order was refused. The reason lives only in the event.
+    fn order_reject(&mut self, order_id: u64, reason: &str) {
+        let seed = self
+            .kernel
+            .order_book()
+            .iter()
+            .find(|o| o.id == order_id)
+            .map(|o| OrderRecord::from_order(o, self.kernel.symbol()));
+        if let Some(seed) = seed {
+            let record = self.order_events.entry(order_id).or_insert(seed);
+            record.reject_reason = Some(reason.to_string());
+        }
+    }
+
+    /// Every order the run placed, in submission order.
+    ///
+    /// Reconciled against the book, not assembled from events alone: an order
+    /// that rested and expired emits no fill and no rejection, and omitting
+    /// it would report "nothing happened" for exactly the case a user is
+    /// asking about. Fill and reject detail is layered on where it exists.
+    fn order_log(&self) -> Vec<OrderRecord> {
+        self.kernel
+            .order_book()
+            .iter()
+            .map(|order| match self.order_events.get(&order.id) {
+                Some(seen) => {
+                    let mut record = seen.clone();
+                    // The book holds the final status; the event map holds
+                    // what happened along the way.
+                    record.status = order.status.as_str();
+                    record
+                }
+                None => OrderRecord::from_order(order, self.kernel.symbol()),
+            })
+            .collect()
+    }
+
     pub fn finish(mut self) -> BacktestResult {
         if self.kernel.is_in_position() {
             if let Some((idx, bar)) = self.last_bar {
@@ -161,6 +244,9 @@ impl SingleRunner {
                 }
             }
         }
+
+        // Built before the result takes ownership of the parts.
+        let order_log = self.order_log();
 
         let metrics = compute_backtest_metrics_with_config(
             &self.equity_curve,
@@ -178,6 +264,7 @@ impl SingleRunner {
             self.trades,
             self.returns,
         )
+        .with_orders(order_log)
     }
 
     /// Mark-to-market equity after the most recent step, or initial capital

@@ -91,7 +91,7 @@ class TestPortfolioMaxPositions:
         # Signal-path rejections surface the Debug form of the reason;
         # resting-order rejections surface the snake_case form.
         assert any(
-            reason in ("MaxPositions", "max_positions")
+            reason == "max_positions"
             for _, reason in strategy.rejects
         ), f"expected a max_positions rejection, got {strategy.rejects}"
 
@@ -135,11 +135,11 @@ class TestPortfolioDrawdownHalt:
         # The untouched symbol is halted by the portfolio-level gate, and the
         # reason is the drawdown, not a margin call.
         assert any(
-            symbol == "BBB" and reason == "DrawdownHalt"
+            symbol == "BBB" and reason == "drawdown_halt"
             for symbol, reason in strategy.rejects
         ), f"expected a drawdown rejection on BBB, got {strategy.rejects}"
         assert not any(
-            reason == "MarginCall" for _, reason in strategy.rejects
+            reason == "margin_call" for _, reason in strategy.rejects
         ), "a cash-account drawdown halt must not report a margin call"
 
     def test_no_halt_on_a_clean_run(self):

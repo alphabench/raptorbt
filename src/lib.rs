@@ -49,6 +49,7 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<python::bindings::PyBacktestResult>()?;
     m.add_class::<python::bindings::PyBacktestMetrics>()?;
     m.add_class::<python::bindings::PyTrade>()?;
+    m.add_class::<python::bindings::PyOrder>()?;
     m.add_class::<python::bindings::PyPortfolioResult>()?;
     m.add_class::<python::bindings::PyInstrumentSummary>()?;
 

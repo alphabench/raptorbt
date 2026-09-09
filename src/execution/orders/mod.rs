@@ -9,4 +9,6 @@ pub mod matching;
 pub mod order;
 
 pub use matching::{MatchOutcome, OrderEngine};
-pub use order::{Order, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce, TrailOffset};
+pub use order::{
+    Order, OrderKind, OrderRecord, OrderSide, OrderStatus, QtySpec, TimeInForce, TrailOffset,
+};

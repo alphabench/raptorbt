@@ -97,7 +97,7 @@ class TestSoldOptionDeposit:
         result, strategy = _run(100_000.0, _spec())
         assert result.result.trades() == []
         assert strategy.rejects, "the refusal must be surfaced, not silently skipped"
-        assert all(r.lower() == "insufficientmargin" for r in strategy.rejects), strategy.rejects
+        assert all(r == "insufficient_margin" for r in strategy.rejects), strategy.rejects
 
     def test_the_zero_default_still_funds_a_sold_option_at_its_premium(self):
         """Unchanged behaviour: without the model ₹1 lakh sells nine lots."""

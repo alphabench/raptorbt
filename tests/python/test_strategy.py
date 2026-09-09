@@ -431,4 +431,4 @@ def test_zero_size_entry_fires_on_order_rejected(daily):
         instrument_config=inst,
     )
     assert res.metrics.total_trades == 0
-    assert rejections == ["ZeroSize"]
+    assert rejections == ["zero_size"]

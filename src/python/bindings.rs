@@ -654,6 +654,104 @@ pub struct PyTrade {
     pub mfe_pnl: Option<f64>,
 }
 
+/// Python-exposed order record.
+#[pyclass(name = "Order")]
+#[derive(Debug, Clone)]
+pub struct PyOrder {
+    #[pyo3(get)]
+    pub id: u64,
+    #[pyo3(get)]
+    pub client_id: String,
+    #[pyo3(get)]
+    pub symbol: String,
+    /// "buy" | "sell".
+    #[pyo3(get)]
+    pub side: String,
+    /// "market", "limit", "stop_market", ... — the shape, not its prices.
+    #[pyo3(get)]
+    pub kind: String,
+    /// "gtc", "day", "ioc", ...
+    #[pyo3(get)]
+    pub tif: String,
+    /// Final state: "filled", "canceled", "expired", "rejected", ...
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub submitted_idx: usize,
+    #[pyo3(get)]
+    pub submitted_ts: i64,
+    /// Units asked for, or None when the request named a capital fraction
+    /// rather than a number — "not stated", never a zero request.
+    #[pyo3(get)]
+    pub requested_qty: Option<f64>,
+    /// Units filled, summed across slices. 0.0 for an order that never
+    /// filled, which is measured rather than missing.
+    #[pyo3(get)]
+    pub filled_qty: f64,
+    /// Size-weighted mean fill price, or None if it never filled.
+    #[pyo3(get)]
+    pub avg_fill_price: Option<f64>,
+    #[pyo3(get)]
+    pub last_fill_idx: Option<usize>,
+    /// How many separate fills it took; more than one is a partial-fill
+    /// sequence.
+    #[pyo3(get)]
+    pub fill_slices: u32,
+    #[pyo3(get)]
+    pub limit_price: Option<f64>,
+    #[pyo3(get)]
+    pub trigger_price: Option<f64>,
+    /// Why the engine refused it, as a stable snake_case identifier
+    /// ("insufficient_margin", "max_positions", ...). None when it was not
+    /// rejected.
+    #[pyo3(get)]
+    pub reject_reason: Option<String>,
+    #[pyo3(get)]
+    pub parent_id: Option<u64>,
+    #[pyo3(get)]
+    pub oco_group: Option<u64>,
+}
+
+#[pymethods]
+impl PyOrder {
+    fn __repr__(&self) -> String {
+        match &self.reject_reason {
+            Some(reason) => format!(
+                "Order(id={}, {} {}, status={}, rejected={})",
+                self.id, self.side, self.symbol, self.status, reason
+            ),
+            None => format!(
+                "Order(id={}, {} {}, status={}, filled={})",
+                self.id, self.side, self.symbol, self.status, self.filled_qty
+            ),
+        }
+    }
+}
+
+pub(crate) fn convert_order(o: crate::execution::orders::OrderRecord) -> PyOrder {
+    PyOrder {
+        id: o.id,
+        client_id: o.client_id,
+        symbol: o.symbol,
+        side: o.side.to_string(),
+        kind: o.kind.to_string(),
+        tif: o.tif.to_string(),
+        status: o.status.to_string(),
+        submitted_idx: o.submitted_idx,
+        submitted_ts: o.submitted_ts,
+        requested_qty: o.requested_qty,
+        filled_qty: o.filled_qty,
+        avg_fill_price: o.avg_fill_price,
+        last_fill_idx: o.last_fill_idx,
+        fill_slices: o.fill_slices,
+        limit_price: o.limit_price,
+        trigger_price: o.trigger_price,
+        reject_reason: o.reject_reason,
+        parent_id: o.parent_id,
+        oco_group: o.oco_group,
+    }
+}
+
 #[pymethods]
 impl PyTrade {
     fn __repr__(&self) -> String {
@@ -846,6 +944,7 @@ pub struct PyBacktestResult {
     drawdown_curve: Vec<f64>,
     trades: Vec<PyTrade>,
     returns: Vec<f64>,
+    orders: Vec<PyOrder>,
 }
 
 #[pymethods]
@@ -868,6 +967,12 @@ impl PyBacktestResult {
     /// Get list of trades.
     fn trades(&self) -> Vec<PyTrade> {
         self.trades.clone()
+    }
+
+    /// Every order the run placed, in submission order — including the ones
+    /// that never filled. Empty for a run that placed no typed orders.
+    fn orders(&self) -> Vec<PyOrder> {
+        self.orders.clone()
     }
 
     fn __repr__(&self) -> String {
@@ -2596,12 +2701,14 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
     };
 
     let trades: Vec<PyTrade> = result.trades.into_iter().map(convert_trade).collect();
+    let orders: Vec<PyOrder> = result.orders.into_iter().map(convert_order).collect();
 
     PyBacktestResult {
         metrics,
         equity_curve: result.equity_curve,
         drawdown_curve: result.drawdown_curve,
         trades,
+        orders,
         returns: result.returns,
     }
 }

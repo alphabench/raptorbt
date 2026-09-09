@@ -485,6 +485,11 @@ impl EngineKernel {
 
     /// Entries refused by the risk gate.
     #[inline]
+    /// Every order this run has seen, in submission order.
+    pub fn order_book(&self) -> &[crate::execution::orders::Order] {
+        self.orders.book()
+    }
+
     pub fn rejected_entries(&self) -> usize {
         self.risk.rejected_entries()
     }

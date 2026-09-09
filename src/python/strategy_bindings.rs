@@ -133,7 +133,14 @@ impl From<EngineEvent> for PyEngineEvent {
             EngineEvent::EntryRejected { idx, reason } => Self {
                 kind: "entry_rejected".to_string(),
                 idx,
-                reject_reason: Some(format!("{reason:?}")),
+                // `as_str()`, not the Debug form. Both this event and
+                // `OrderRejected` reach the same Python handler and are
+                // counted in one dict keyed by this string, so a Debug
+                // `"MaxPositions"` here and an `as_str()` `"max_positions"`
+                // there split ONE cause into two buckets that each
+                // undercount. `as_str()` is documented as the stable
+                // identifier for reporting; this was the one site not using it.
+                reject_reason: Some(reason.as_str().to_string()),
                 ..empty
             },
             EngineEvent::OrderAccepted { idx, order_id, client_id } => Self {

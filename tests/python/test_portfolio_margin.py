@@ -179,7 +179,7 @@ class TestPortfolioMargin:
         assert result.halted_at is not None
         # The untouched symbol was halted by the shared account.
         assert any(
-            symbol == "BBB" and reason == "MarginCall"
+            symbol == "BBB" and reason == "margin_call"
             for symbol, reason in strategy.rejects
         )
 

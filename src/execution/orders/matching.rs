@@ -66,6 +66,15 @@ pub struct OrderEngine {
 }
 
 impl OrderEngine {
+    /// Every order this session has seen, in submission order.
+    ///
+    /// The authoritative book: an order that rested and expired without ever
+    /// producing an event is here, which is exactly the case a result must
+    /// not silently omit.
+    pub fn book(&self) -> &[Order] {
+        &self.orders
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

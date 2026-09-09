@@ -528,7 +528,16 @@ impl SpreadBacktest {
             &self.config.base,
         );
 
-        BacktestResult { metrics: final_metrics, equity_curve, drawdown_curve, trades, returns }
+        // A spread result is synthesised from leg P&L; this path runs no
+        // order book, so there are no orders to report.
+        BacktestResult {
+            metrics: final_metrics,
+            equity_curve,
+            drawdown_curve,
+            trades,
+            returns,
+            orders: Vec::new(),
+        }
     }
 
     /// Check if max loss threshold is hit.
@@ -741,6 +750,9 @@ impl SpreadBacktest {
             drawdown_curve: vec![0.0; n],
             trades: Vec::new(),
             returns: vec![0.0; n],
+            // This path synthesises a result from leg P&L; it runs no
+            // order book, so there are no orders to report.
+            orders: Vec::new(),
         }
     }
 }

@@ -254,6 +254,42 @@ class BacktestMetrics:
 
     def to_dict(self) -> dict[str, Any]: ...
 
+class Order:
+    """What became of one order the run placed, including one that never
+    filled. A backtest reports the trades it made; this reports the ones it
+    tried to make and could not."""
+
+    id: int
+    client_id: str
+    symbol: str
+    # "buy" | "sell"
+    side: str
+    # "market", "limit", "stop_market", ... — the shape, not its prices.
+    kind: str
+    # "gtc", "day", "ioc", ...
+    tif: str
+    # "filled", "canceled", "expired", "rejected", ...
+    status: str
+    submitted_idx: int
+    submitted_ts: int
+    # Units asked for; None when the request named a capital fraction rather
+    # than a number — "not stated", never a zero request.
+    requested_qty: float | None
+    # Units filled, summed across slices. 0.0 for an order that never filled,
+    # which is a measurement and not a gap.
+    filled_qty: float
+    avg_fill_price: float | None
+    last_fill_idx: int | None
+    # More than one means a partial-fill sequence.
+    fill_slices: int
+    limit_price: float | None
+    trigger_price: float | None
+    # Stable snake_case identifier ("insufficient_margin", "max_positions",
+    # ...). None when the order was not rejected.
+    reject_reason: str | None
+    parent_id: int | None
+    oco_group: int | None
+
 class BacktestResult:
     metrics: BacktestMetrics
 
@@ -263,6 +299,9 @@ class BacktestResult:
     def equity_curve(self) -> npt.NDArray[np.float64]: ...
     def drawdown_curve(self) -> npt.NDArray[np.float64]: ...
     def trades(self) -> list[Trade]: ...
+    # Every order placed, in submission order, including ones that never
+    # filled. Empty for a run that placed no typed orders.
+    def orders(self) -> list[Order]: ...
     def returns(self) -> npt.NDArray[np.float64]: ...
 
 class InstrumentSummary:

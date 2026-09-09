@@ -1809,6 +1809,45 @@ configured `fee_breakdown["total"]` equals `fees` — the reported costs and the
 equity curve are the same money. An option left to expire carries
 `exit_fees == 0.0`: it is never traded out, so it owes no exit-side charge.
 
+### The order log
+
+**In plain words: what happened to every order the strategy placed, including
+the ones that never filled.** A result reports the trades that happened; this
+reports the ones that were attempted. An entry refused for margin, a limit
+that rested all day and expired, a stop refused because a position was already
+open — none of those produce a trade, so without the log a strategy that never
+got into the market is indistinguishable from one whose idea was wrong.
+
+```python
+for order in result.orders():
+    if order.reject_reason:
+        ...                          # the engine refused it, and says why
+    elif order.filled_qty == 0.0:
+        ...                          # it rested and never filled
+    elif order.fill_slices > 1:
+        ...                          # it filled across several prints
+```
+
+Each record carries `id`, `client_id`, `symbol`, `side`, `kind`, `tif` and the
+final `status`; `requested_qty` and `filled_qty`; `avg_fill_price` (size
+weighted) with `last_fill_idx` and `fill_slices`; `limit_price` and
+`trigger_price`; `parent_id` and `oco_group`; and `reject_reason`.
+
+Three conventions:
+
+- The log is reconciled against the order book, not assembled from events, so
+  an order that expired without ever filling or being refused still appears.
+- `requested_qty` is `None` when the order named a capital fraction rather than
+  a number — the size is not known until the engine prices it, and `0.0` would
+  read as "asked for nothing". `filled_qty` is `0.0` for an unfilled order,
+  which is a measurement, and `avg_fill_price` is `None`, because no price
+  exists.
+- `reject_reason` is the stable snake_case identifier (`"insufficient_margin"`,
+  `"max_positions"`, `"zero_size"`, …), the same vocabulary every refusal event
+  uses.
+
+`result.orders()` is empty for a run that placed no typed orders.
+
 ### Maximum adverse and favourable excursion
 
 **In plain words: how far a trade went against you before it worked, and how far

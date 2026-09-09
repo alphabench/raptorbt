@@ -12,6 +12,16 @@ pub enum OrderSide {
 }
 
 impl OrderSide {
+    /// Stable identifier for reporting, in the same snake_case as every
+    /// other name that crosses into a result.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrderSide::Buy => "buy",
+            OrderSide::Sell => "sell",
+        }
+    }
+
     /// The opposite side.
     #[inline]
     pub fn flip(self) -> Self {
@@ -130,6 +140,21 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// Stable identifier for reporting.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrderStatus::Submitted => "submitted",
+            OrderStatus::Accepted => "accepted",
+            OrderStatus::Triggered => "triggered",
+            OrderStatus::PartiallyFilled => "partially_filled",
+            OrderStatus::Filled => "filled",
+            OrderStatus::Canceled => "canceled",
+            OrderStatus::Expired => "expired",
+            OrderStatus::Rejected => "rejected",
+        }
+    }
+
     /// Whether this is an end state.
     #[inline]
     pub fn is_terminal(self) -> bool {
@@ -140,6 +165,64 @@ impl OrderStatus {
                 | OrderStatus::Expired
                 | OrderStatus::Rejected
         )
+    }
+}
+
+impl OrderKind {
+    /// Stable identifier for reporting. The prices a kind carries are
+    /// reported separately, so this names the shape only.
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OrderKind::Market => "market",
+            OrderKind::Limit { .. } => "limit",
+            OrderKind::StopMarket { .. } => "stop_market",
+            OrderKind::StopLimit { .. } => "stop_limit",
+            OrderKind::MarketIfTouched { .. } => "market_if_touched",
+            OrderKind::LimitIfTouched { .. } => "limit_if_touched",
+            OrderKind::MarketToLimit => "market_to_limit",
+            OrderKind::TrailingStopMarket { .. } => "trailing_stop_market",
+            OrderKind::TrailingStopLimit { .. } => "trailing_stop_limit",
+        }
+    }
+
+    /// The resting limit price this kind names, if any.
+    #[inline]
+    pub fn limit_price(&self) -> Option<Price> {
+        match self {
+            OrderKind::Limit { price }
+            | OrderKind::StopLimit { price, .. }
+            | OrderKind::LimitIfTouched { price, .. } => Some(*price),
+            _ => None,
+        }
+    }
+
+    /// The trigger price this kind names, if any.
+    #[inline]
+    pub fn trigger_price(&self) -> Option<Price> {
+        match self {
+            OrderKind::StopMarket { trigger }
+            | OrderKind::StopLimit { trigger, .. }
+            | OrderKind::MarketIfTouched { trigger }
+            | OrderKind::LimitIfTouched { trigger, .. } => Some(*trigger),
+            _ => None,
+        }
+    }
+}
+
+impl TimeInForce {
+    /// Stable identifier for reporting.
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimeInForce::Gtc => "gtc",
+            TimeInForce::Day => "day",
+            TimeInForce::Gtd { .. } => "gtd",
+            TimeInForce::Ioc => "ioc",
+            TimeInForce::Fok => "fok",
+            TimeInForce::AtOpen => "at_open",
+            TimeInForce::AtClose => "at_close",
+        }
     }
 }
 
@@ -190,6 +273,128 @@ pub struct Order {
     /// `Filled`); a whole-fill engine leaves it at the full size on fill.
     #[serde(default)]
     pub filled_qty: f64,
+}
+
+/// What became of one order, once the run is over.
+///
+/// The engine's own account of an order that was placed — including one that
+/// never filled. A backtest reports the trades it made; without this it
+/// cannot report the trades it *tried* to make and could not, which is often
+/// the whole explanation for a result. A strategy that looks like it has no
+/// edge may simply have been refused two thirds of its entries.
+///
+/// `Order` carries almost all of this already; the two things it cannot know
+/// are why the engine refused it (that lives in the event, not the book) and
+/// what it actually filled at across possibly several slices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderRecord {
+    pub id: u64,
+    pub client_id: String,
+    /// Instrument the order was placed on.
+    pub symbol: String,
+    /// `"buy"` / `"sell"`.
+    pub side: &'static str,
+    /// `"market"`, `"limit"`, `"stop_market"`, … — the order kind, named.
+    pub kind: &'static str,
+    /// Time in force: `"gtc"`, `"day"`, `"ioc"`, …
+    pub tif: &'static str,
+    /// Terminal (or final observed) state: `"filled"`, `"canceled"`,
+    /// `"expired"`, `"rejected"`, `"accepted"`, …
+    pub status: &'static str,
+    pub submitted_idx: usize,
+    pub submitted_ts: Timestamp,
+    /// Units asked for, when the request named a number. `None` for a
+    /// capital-fraction or whole-position request, where the size is only
+    /// known once the engine prices it — "not stated", never a zero request.
+    #[serde(default)]
+    pub requested_qty: Option<f64>,
+    /// Units actually filled, summed across slices. `0.0` for an order that
+    /// never filled, which is a measurement and not a gap.
+    #[serde(default)]
+    pub filled_qty: f64,
+    /// Size-weighted mean fill price across every slice, or `None` when the
+    /// order never filled.
+    #[serde(default)]
+    pub avg_fill_price: Option<Price>,
+    /// Bar index of the last fill slice, or `None` when it never filled.
+    #[serde(default)]
+    pub last_fill_idx: Option<usize>,
+    /// How many separate fills it took. `1` is a clean fill; more is a
+    /// partial-fill sequence.
+    #[serde(default)]
+    pub fill_slices: u32,
+    /// Limit price, for the kinds that carry one.
+    #[serde(default)]
+    pub limit_price: Option<Price>,
+    /// Trigger price, for stop and if-touched kinds.
+    #[serde(default)]
+    pub trigger_price: Option<Price>,
+    /// Why the engine refused it, as the stable snake_case identifier
+    /// (`"insufficient_margin"`, `"max_positions"`, …). `None` for an order
+    /// that was not rejected — never an empty string, which would read as a
+    /// rejection with no stated cause.
+    #[serde(default)]
+    pub reject_reason: Option<String>,
+    /// One-triggers-other parent, when this order was held for one.
+    #[serde(default)]
+    pub parent_id: Option<u64>,
+    /// One-cancels-other group, when it had siblings.
+    #[serde(default)]
+    pub oco_group: Option<u64>,
+}
+
+impl OrderRecord {
+    /// The book's account of an order, before the event stream adds why it
+    /// was refused and what it filled at.
+    ///
+    /// `symbol` is not on `Order` — one book serves one instrument, so the
+    /// caller supplies it.
+    pub fn from_order(order: &Order, symbol: &str) -> Self {
+        Self {
+            id: order.id,
+            client_id: order.client_id.clone(),
+            symbol: symbol.to_string(),
+            side: order.side.as_str(),
+            kind: order.kind.as_str(),
+            tif: order.tif.as_str(),
+            status: order.status.as_str(),
+            submitted_idx: order.submitted_idx,
+            submitted_ts: order.submitted_ts,
+            // Only an explicit unit request states a size up front. A
+            // capital fraction is not known until the engine prices it, and
+            // reporting 0.0 there would read as "asked for nothing".
+            requested_qty: match order.qty {
+                QtySpec::Units(u) => Some(u),
+                _ => None,
+            },
+            filled_qty: order.filled_qty,
+            avg_fill_price: None,
+            last_fill_idx: None,
+            fill_slices: 0,
+            limit_price: order.kind.limit_price(),
+            trigger_price: order.kind.trigger_price(),
+            reject_reason: None,
+            parent_id: order.parent_id,
+            oco_group: order.oco_group,
+        }
+    }
+
+    /// Fold one fill slice in, keeping a size-weighted mean price.
+    ///
+    /// Weighted, not last-wins: an order that filled 90 units at 100 and 10
+    /// at 130 paid 103 on average, and reporting 130 would misstate every
+    /// partial fill.
+    pub fn record_fill(&mut self, idx: usize, price: Price, size: f64) {
+        let prior = self.avg_fill_price.unwrap_or(0.0) * self.filled_qty;
+        self.filled_qty += size;
+        self.avg_fill_price = if self.filled_qty > 0.0 {
+            Some((prior + price * size) / self.filled_qty)
+        } else {
+            None
+        };
+        self.last_fill_idx = Some(idx);
+        self.fill_slices += 1;
+    }
 }
 
 impl Order {

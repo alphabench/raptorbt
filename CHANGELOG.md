@@ -5,6 +5,54 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-09-10
+
+**In plain words: a result now says what happened to every order the strategy
+placed, including the ones that never filled. A backtest could always tell you
+the trades it made; it could not tell you the trades it tried to make and
+could not — an entry refused for margin, a limit that rested all day and
+expired, a stop refused because a position was already open. None of those
+produce a trade, so a strategy that never got into the market looked exactly
+like one whose idea was wrong.**
+
+### Added
+
+- **`BacktestResult.orders()` — the order log.** One `Order` record per order
+  the run placed, in submission order, carrying its id and client id, symbol,
+  side, kind, time-in-force and final status; the units requested and the
+  units actually filled; a size-weighted average fill price and how many
+  slices it took; the limit and trigger prices it named; its OTO parent and
+  OCO group; and, when the engine refused it, why.
+
+  The log is reconciled against the order book rather than assembled from
+  events alone, so an order that rested and expired — emitting no fill and no
+  rejection — still appears. That is the case the log exists for.
+
+  `requested_qty` is `None` when the request named a capital fraction rather
+  than a number: the size is not known until the engine prices it, and `0.0`
+  there would read as "asked for nothing". `filled_qty` is `0.0` for an order
+  that never filled, which is a measurement; `avg_fill_price` is `None`,
+  because there is no price. Empty for a run that placed no typed orders.
+
+- **`OrderSide::as_str`, `OrderKind::as_str`, `TimeInForce::as_str`,
+  `OrderStatus::as_str`** — stable snake_case identifiers for reporting, and
+  `OrderKind::limit_price` / `trigger_price` for the prices a kind carries.
+
+### Changed
+
+- **BREAKING (string values): every refusal now reports the same name.**
+  `RejectReason` has always had `as_str()` as its "stable identifier for
+  reporting", and order-level refusals used it. Entry-level refusals did not —
+  they were Debug-formatted, so the same cause arrived as `"MaxPositions"` on
+  one event and `"max_positions"` on another. Callers that count refusals by
+  reason therefore split one cause across two keys and undercounted both.
+
+  Both now use `as_str()`. A caller matching on the Debug spelling
+  (`"InsufficientMargin"`, `"ZeroSize"`, `"MarginCall"`, …) must switch to the
+  snake_case form. Two tests in this repo had already worked around the split
+  by accepting either spelling or lower-casing before comparing; both now
+  assert the single value.
+
 ## [0.13.2] - 2026-09-09
 
 **In plain words: every trade now reports how far it went against you before

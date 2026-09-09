@@ -425,7 +425,7 @@ class TestTickExecution:
             strategy, data, config=_zero_fee_config(max_positions=1)
         )
 
-        assert "MaxPositions" in strategy.rejects
+        assert "max_positions" in strategy.rejects
         assert result.rejected_entries > 0
 
 
