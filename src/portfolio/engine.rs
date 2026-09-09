@@ -642,20 +642,54 @@ pub fn risk_metrics(
         return (0.0, 0.0, 1.0);
     }
 
-    // Filter out NaN values
-    let valid_returns: Vec<f64> = returns.iter().filter(|r| !r.is_nan()).copied().collect();
+    // NaN is skipped inline rather than collected into a filtered Vec. The
+    // arithmetic below is unchanged -- same values, same summation order, so
+    // the results are bit-identical -- but two n-length allocations go away
+    // (this one and the downside filter), which on a 1.875M-bar run was 30 MB
+    // of transient heap to produce three scalars.
+    //
+    // Two passes over the slice, deliberately: the variance is taken about a
+    // known mean. Folding it into a single sum-of-squares pass would change
+    // the floating-point result, which the golden corpus pins.
+    let mut count: usize = 0;
+    let mut sum = 0.0;
+    for &r in returns {
+        if !r.is_nan() {
+            count += 1;
+            sum += r;
+        }
+    }
 
-    if valid_returns.len() < 2 {
+    if count < 2 {
         return (0.0, 0.0, 1.0);
     }
 
-    let n_valid = valid_returns.len() as f64;
+    let n_valid = count as f64;
+    let mean = sum / n_valid;
 
-    // Calculate mean return
-    let mean = valid_returns.iter().sum::<f64>() / n_valid;
+    // Second pass carries every remaining accumulator: the deviation sum for
+    // the variance, the downside sum of squares for Sortino, and the signed
+    // sums for Omega.
+    let mut sq_dev = 0.0;
+    let mut downside_sq = 0.0;
+    let mut sum_positive = 0.0;
+    let mut sum_negative = 0.0;
+    let mut has_downside = false;
+    for &r in returns {
+        if r.is_nan() {
+            continue;
+        }
+        sq_dev += (r - mean).powi(2);
+        if r > 0.0 {
+            sum_positive += r;
+        } else if r < 0.0 {
+            downside_sq += r.powi(2);
+            has_downside = true;
+            sum_negative += r.abs();
+        }
+    }
 
-    // Calculate standard deviation
-    let variance = valid_returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n_valid - 1.0);
+    let variance = sq_dev / (n_valid - 1.0);
     let std_dev = variance.sqrt();
 
     // Excess return over the per-period risk-free rate.
@@ -669,10 +703,8 @@ pub fn risk_metrics(
         if std_dev > 0.0 { (excess_mean / std_dev) * periods_per_year.sqrt() } else { 0.0 };
 
     // Sortino Ratio - uses downside deviation (only negative returns)
-    let downside_returns: Vec<f64> = valid_returns.iter().filter(|&&r| r < 0.0).copied().collect();
-
-    let downside_variance = if !downside_returns.is_empty() {
-        downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n_valid // Divide by total count, not downside count
+    let downside_variance = if has_downside {
+        downside_sq / n_valid // Divide by total count, not downside count
     } else {
         0.0
     };
@@ -687,10 +719,7 @@ pub fn risk_metrics(
     };
 
     // Omega Ratio = sum of returns above threshold / |sum of returns below threshold|
-    // With threshold = 0
-    let sum_positive: f64 = valid_returns.iter().filter(|&&r| r > 0.0).sum();
-    let sum_negative: f64 = valid_returns.iter().filter(|&&r| r < 0.0).map(|r| r.abs()).sum();
-
+    // With threshold = 0. Both sums are accumulated in the pass above.
     let omega_ratio = if sum_negative > 0.0 {
         sum_positive / sum_negative
     } else if sum_positive > 0.0 {
