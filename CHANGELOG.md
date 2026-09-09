@@ -173,18 +173,40 @@ the exit is giving back the move the entry found.**
   the target is ATR-based, but only the stop limb was exercised; the new
   `atr_target_fixed_stop` fixture covers the other.
 
-- **Known, not fixed: the spread path drops metrics it could compute.** It
-  builds its metrics through `StreamingMetrics::finalize`, which receives only
-  the return series — while its caller holds a real drawdown curve and a real
-  trade list and puts both into the result it returns. So a spread result can
-  report 379 underwater samples in its own `drawdown_curve` while
-  `time_under_water_pct` reads 0.0, and carry three trades while
-  `total_turnover` and `exposure_pct` read 0.0. This predates 0.13.2 (the last
-  two are 0.0 on 0.13.1 as well). The current behaviour is now pinned by a test
-  whose comments say plainly that it records a bug, so a fix has a baseline.
-  Fixing it means routing that path through the shared estimator, which would
-  also stop annualizing minute bars at 252 — a real change to published Sharpe,
-  and so its own release.
+- **The spread path reported zeros for metrics it had the data for.** It built
+  its metrics through `StreamingMetrics::finalize`, which receives only the
+  return series — while the same expression handed a real drawdown curve and a
+  real trade list to the result it returned. So a spread result could report
+  250 of 300 samples underwater in its own `drawdown_curve` while
+  `time_under_water_pct` read 0.0, and carry seven trades while
+  `total_turnover` and `exposure_pct` read 0.0. It now uses
+  `compute_backtest_metrics_with_config`, the estimator every other runner
+  shares.
+
+  **This changes published spread numbers.** On the golden fixtures:
+  `ulcer_index` 0.0 → 0.0826886, `time_under_water_pct` 0.0 → 83.333333,
+  `avg_drawdown_pct` `None` → 0.0809098, `total_turnover` 0.0 → 16424.70,
+  `exposure_pct` 0.0 → 38.0.
+
+  Sharpe and Sortino move too, and by more: **−0.139244 → −2.696442**, a factor
+  of 19.365. The accumulator hardcodes 252 periods/year, which assumes one bar
+  is one trading day; these are minute bars, so each minute was annualized as a
+  day. 19.365 is exactly `sqrt(94500/252)`, where 94,500 is 375 NSE session
+  minutes × 252 sessions — the default session spec. The old figure was the
+  wrong one.
+
+  A position still open at the end is now counted as open, not closed
+  (`total_closed_trades` 7 → 6 on the fixture). The accumulator hardcoded
+  `total_open_trades: 0`; `EndOfData` means the position never traded out, and
+  every other runner reports it open.
+
+- **A spread run's equity curve stopped one exit fee short of the account.**
+  The final sample was pushed before the end-of-data close, so it omitted that
+  close's costs — the curve said 99,954.93 where the account held 99,953.68.
+  The final value reached the metrics separately, so `total_return_pct` was
+  right while the curve backing it was not, and integrating the curve gave a
+  different answer from the reported return. Only the last sample changes, and
+  the curve keeps its length.
 
 - **`ulcer_index` had no value-pinning test.** Its only assertion was that the
   result is positive, which every arithmetic error preserves — including
