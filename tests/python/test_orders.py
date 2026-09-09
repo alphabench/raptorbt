@@ -251,3 +251,56 @@ class TestOrderFlow:
         r2 = run_strategy_backtest(Sma, **data)
         assert np.array_equal(r1.equity_curve(), r2.equity_curve())
         assert len(r1.trades()) == 1
+
+
+
+class TestFillReportedOnce:
+    """One fill, one ``on_order_filled`` — even when the fill has consequences.
+
+    A bracket's target leg fills and, in the same step, cancels its
+    one-cancels-other sibling. 0.13.0 emitted that cancel BETWEEN the fill
+    event and the position event it caused; the runner reads a position
+    event that does not directly follow ``order_filled`` as a signal-path
+    fill and fires ``on_order_filled`` for it again, so the strategy saw
+    three fills for two. Attached ``stop_price``/``target_price`` levels
+    never show this: they close the position without an order event in
+    between. The shape needs one-triggers-other children linked
+    one-cancels-other — exactly what ``submit_bracket`` builds.
+    """
+
+    def test_a_bracket_target_fill_is_reported_once_and_precedes_the_close(self):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fills = []
+                self.stream = []
+
+            def on_bar(self, ctx):
+                if ctx.idx == 1:
+                    self.submit_bracket(
+                        orders.Market(side="buy", units=10),
+                        stop_trigger=90.0,
+                        target_price=104.0,
+                    )
+
+            def on_order_filled(self, ctx, event):
+                self.fills.append((ctx.idx, event.client_order_id))
+                self.stream.append(("fill", ctx.idx))
+
+            def on_order_canceled(self, ctx, event):
+                self.stream.append(("cancel", ctx.idx))
+
+            def on_position_closed(self, ctx, event):
+                self.stream.append(("closed", ctx.idx))
+
+        # Bar 1 fills the entry at 100; bar 3 trades through 104, so the
+        # target fills and the stop sibling is canceled in the same step.
+        data = _bars([100.0, 100.0, 101.0, 105.0, 105.0], lows=[99.0] * 5, highs=[101.0, 101.0, 102.0, 106.0, 106.0])
+        strategy = S()
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        assert len(strategy.fills) == 2, strategy.fills
+        # The close rides directly behind its fill; the sibling's cancel comes after.
+        exit_bar = strategy.fills[1][0]
+        tail = [e for e in strategy.stream if e[1] == exit_bar]
+        assert tail[:2] == [("fill", exit_bar), ("closed", exit_bar)], tail
+        assert ("cancel", exit_bar) in tail
