@@ -83,6 +83,8 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     // Register batch spread backtest
     m.add_class::<python::bindings::PyBatchSpreadItem>()?;
     m.add_function(wrap_pyfunction!(python::bindings::batch_spread_backtest, m)?)?;
+    m.add_class::<python::bindings::PyBatchSingleItem>()?;
+    m.add_function(wrap_pyfunction!(python::bindings::batch_single_backtest, m)?)?;
 
     // Register Monte Carlo simulation
     m.add_function(wrap_pyfunction!(python::bindings::simulate_portfolio_mc, m)?)?;

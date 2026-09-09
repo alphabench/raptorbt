@@ -1601,6 +1601,180 @@ pub fn batch_spread_backtest(
     Ok(results.into_iter().map(|(id, result)| (id, convert_result(result))).collect())
 }
 
+/// One signal set for [`batch_single_backtest`].
+///
+/// Eagerly copies its arrays under the GIL at construction, so the item holds
+/// no GIL-bound types and the batch loop can release the GIL (same pattern as
+/// [`PyBatchSpreadItem`]).
+#[pyclass(name = "BatchSingleItem")]
+#[derive(Clone)]
+pub struct PyBatchSingleItem {
+    /// Caller's label for this run; returned alongside its result.
+    #[pyo3(get, set)]
+    pub item_id: String,
+    pub entries: Vec<bool>,
+    pub exits: Vec<bool>,
+    pub position_sizes: Option<Vec<f64>>,
+    #[pyo3(get, set)]
+    pub direction: i32,
+    #[pyo3(get, set)]
+    pub weight: f64,
+    #[pyo3(get, set)]
+    pub symbol: String,
+    /// Per-item config override. `None` uses the batch-level config.
+    pub config: Option<PyBacktestConfig>,
+    pub instrument_config: Option<PyInstrumentConfig>,
+}
+
+#[pymethods]
+impl PyBatchSingleItem {
+    #[new]
+    #[pyo3(signature = (item_id, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN",
+        config=None, position_sizes=None, instrument_config=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        item_id: String,
+        entries: PyReadonlyArray1<bool>,
+        exits: PyReadonlyArray1<bool>,
+        direction: i32,
+        weight: f64,
+        symbol: &str,
+        config: Option<&PyBacktestConfig>,
+        position_sizes: Option<PyReadonlyArray1<f64>>,
+        instrument_config: Option<&PyInstrumentConfig>,
+    ) -> Self {
+        Self {
+            item_id,
+            entries: numpy_to_vec_bool(entries),
+            exits: numpy_to_vec_bool(exits),
+            position_sizes: position_sizes.map(numpy_to_vec_f64),
+            direction,
+            weight,
+            symbol: symbol.to_string(),
+            config: config.cloned(),
+            instrument_config: instrument_config.cloned(),
+        }
+    }
+}
+
+/// Run many single-instrument backtests over one price series, in parallel.
+///
+/// This is the parameter-sweep shape: the OHLCV arrays are converted **once**
+/// and shared by reference across Rayon threads, and each item carries only
+/// its own signals and optional config overrides. Calling
+/// [`run_single_backtest`] in a Python loop instead re-converts the same six
+/// price arrays on every call and runs on a single core.
+///
+/// Results are returned in input order and are bit-identical to running the
+/// same items serially -- each item gets its own engine and shares no mutable
+/// state. Returns a Vec of (item_id, PyBacktestResult) tuples.
+#[pyfunction]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, items, config=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn batch_single_backtest(
+    py: Python<'_>,
+    timestamps: PyReadonlyArray1<i64>,
+    open: PyReadonlyArray1<f64>,
+    high: PyReadonlyArray1<f64>,
+    low: PyReadonlyArray1<f64>,
+    close: PyReadonlyArray1<f64>,
+    volume: PyReadonlyArray1<f64>,
+    items: Vec<PyBatchSingleItem>,
+    config: Option<&PyBacktestConfig>,
+) -> PyResult<Vec<(String, PyBacktestResult)>> {
+    use rayon::prelude::*;
+
+    // Shared price data: converted once, under the GIL, then borrowed by every
+    // worker. This is the whole point of the batch entry point.
+    let ohlcv = OhlcvData {
+        timestamps: numpy_to_vec_i64(timestamps),
+        open: numpy_to_vec_f64(open),
+        high: numpy_to_vec_f64(high),
+        low: numpy_to_vec_f64(low),
+        close: numpy_to_vec_f64(close),
+        volume: numpy_to_vec_f64(volume),
+    };
+    let n = ohlcv.len();
+    let base_config = config.map(BacktestConfig::from).unwrap_or_default();
+
+    struct PreparedItem {
+        item_id: String,
+        signals: CompiledSignals,
+        config: BacktestConfig,
+        instrument_config: Option<InstrumentConfig>,
+    }
+
+    // Validate here, before the parallel region. A mismatched length or a bad
+    // direction must surface as a ValueError naming the item -- a panic on a
+    // Rayon worker crosses PyO3 as PanicException, which is neither catchable
+    // as ValueError nor traceable to the argument that was wrong.
+    let prepared: Vec<PreparedItem> = items
+        .into_iter()
+        .map(|item| {
+            if item.entries.len() != n || item.exits.len() != n {
+                return Err(PyValueError::new_err(format!(
+                    "item '{}': entries ({}) and exits ({}) must match the shared \
+                     price series length ({n})",
+                    item.item_id,
+                    item.entries.len(),
+                    item.exits.len()
+                )));
+            }
+            if let Some(sizes) = &item.position_sizes {
+                if sizes.len() != n {
+                    return Err(PyValueError::new_err(format!(
+                        "item '{}': position_sizes ({}) must match the shared \
+                         price series length ({n})",
+                        item.item_id,
+                        sizes.len()
+                    )));
+                }
+            }
+            let direction = Direction::from_int(item.direction).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "item '{}': direction must be 1 (long) or -1 (short), got {}",
+                    item.item_id, item.direction
+                ))
+            })?;
+
+            Ok(PreparedItem {
+                item_id: item.item_id,
+                signals: CompiledSignals {
+                    symbol: item.symbol,
+                    entries: item.entries,
+                    exits: item.exits,
+                    position_sizes: item.position_sizes,
+                    direction,
+                    weight: item.weight,
+                },
+                config: item
+                    .config
+                    .as_ref()
+                    .map(BacktestConfig::from)
+                    .unwrap_or_else(|| base_config.clone()),
+                instrument_config: item.instrument_config.as_ref().map(InstrumentConfig::from),
+            })
+        })
+        .collect::<PyResult<_>>()?;
+
+    let results: Vec<(String, crate::core::types::BacktestResult)> = py.allow_threads(|| {
+        prepared
+            .into_par_iter()
+            .map(|item| {
+                let backtest = SingleBacktest::new(item.config);
+                let result = backtest.run_with_instrument_config(
+                    &ohlcv,
+                    &item.signals,
+                    item.instrument_config.as_ref(),
+                );
+                (item.item_id, result)
+            })
+            .collect()
+    });
+
+    Ok(results.into_iter().map(|(id, result)| (id, convert_result(result))).collect())
+}
+
 // The argument list IS the Python signature; collapsing it into a
 // struct would change the public API for no reader benefit.
 #[allow(clippy::too_many_arguments)]

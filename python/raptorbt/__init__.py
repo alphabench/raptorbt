@@ -39,7 +39,9 @@ from raptorbt._raptorbt import (
     run_spread_backtest,
     run_tick_backtest,
     # Batch backtest
+    BatchSingleItem,
     BatchSpreadItem,
+    batch_single_backtest,
     batch_spread_backtest,
     # Monte Carlo simulation
     simulate_portfolio_mc,
@@ -158,7 +160,9 @@ __all__ = [
     "run_spread_backtest",
     "run_tick_backtest",
     # Batch backtest
+    "BatchSingleItem",
     "BatchSpreadItem",
+    "batch_single_backtest",
     "batch_spread_backtest",
     # Portfolio math
     "RiskModel",

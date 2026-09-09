@@ -266,6 +266,24 @@ class BatchSpreadItem:
     target_profit: float | None
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
+class BatchSingleItem:
+    item_id: str
+    direction: int
+    weight: float
+    symbol: str
+    def __init__(
+        self,
+        item_id: str,
+        entries: _Bool,
+        exits: _Bool,
+        direction: int = ...,
+        weight: float = ...,
+        symbol: str = ...,
+        config: BacktestConfig | None = ...,
+        position_sizes: _F64 | None = ...,
+        instrument_config: InstrumentConfig | None = ...,
+    ) -> None: ...
+
 def run_single_backtest(
     timestamps: _I64,
     open: _F64,
@@ -403,7 +421,26 @@ def run_tick_backtest(
     # rate, which cannot express per-order brokerage at any rate.
     fee_segment: str | None = ...,
 ) -> BacktestResult: ...
-def batch_spread_backtest(*args: Any, **kwargs: Any) -> list[BacktestResult]: ...
+# Returns (strategy_id, result) pairs, not bare results: the id is what lets a
+# caller match a result back to the item that produced it. Declared as
+# `list[BacktestResult]` through 0.13.1, which is simply wrong -- indexing a
+# tuple as a result raises AttributeError at the first `.metrics`.
+def batch_spread_backtest(
+    timestamps: _I64,
+    underlying_close: _F64,
+    items: Sequence[BatchSpreadItem],
+    config: BacktestConfig | None = ...,
+) -> list[tuple[str, BacktestResult]]: ...
+def batch_single_backtest(
+    timestamps: _I64,
+    open: _F64,
+    high: _F64,
+    low: _F64,
+    close: _F64,
+    volume: _F64,
+    items: Sequence[BatchSingleItem],
+    config: BacktestConfig | None = ...,
+) -> list[tuple[str, BacktestResult]]: ...
 def simulate_portfolio_mc(
     returns: _F64,
     weights: _F64,
