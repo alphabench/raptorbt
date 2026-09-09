@@ -550,6 +550,12 @@ impl StreamingMetrics {
             // place a drawdown or a trade in wall-clock time. None is the
             // honest answer; a caller falls back to the bar counts.
             max_drawdown_duration_secs: None,
+            // The accumulator keeps a running peak but no drawdown history, so
+            // it cannot compute an RMS or count underwater samples. 0.0 means
+            // "not measured here" -- callers with a drawdown curve get the real
+            // figures from PortfolioEngine::calculate_metrics.
+            ulcer_index: 0.0,
+            time_under_water_pct: 0.0,
             win_rate_pct,
             profit_factor,
             expectancy,

@@ -88,7 +88,7 @@ RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphaben
 ## Overview
 
 RaptorBT compiles to a single native extension and runs entirely in Rust, so a
-full backtest with all 33 metrics finishes in well under a millisecond on
+full backtest with all 38 metrics finishes in well under a millisecond on
 typical bar counts. Measured on an Apple M4 (raptorbt 0.4.0):
 
 | Metric                        | RaptorBT     |
@@ -112,7 +112,7 @@ numbers on your own hardware.
 - **Portfolio Construction**: Ledoit-Wolf covariance, a constrained optimizer — long-only by default, long/short with gross and net exposure budgets (v0.6.3) — factor panels with rank-IC validation, risk contributions, and rebalance-cost simulation
 - **Batch Spread Backtesting**: Run multiple spread backtests in parallel via Rayon with GIL released
 - **Monte Carlo Simulation**: Correlated multi-asset forward projection via GBM + Cholesky decomposition
-- **33 Metrics**: Sharpe, Sortino, Calmar, Omega, SQN, Payoff Ratio, Recovery Factor, and more
+- **38 Metrics**: Sharpe, Sortino, Calmar, Omega, Ulcer Index, Time Under Water, SQN, Payoff Ratio, Recovery Factor, and more
 - **20 Indicator & Tick Functions**: 12 classic technical indicators (SMA, EMA, RSI, MACD, Stochastic, ATR, Bollinger Bands, ADX, VWAP, Supertrend, Rolling Min/Max) plus 8 tick microstructure/feature functions
 - **Stop/Target Management**: Fixed, ATR-based, and trailing stops with risk-reward targets
 - **Deterministic**: Identical inputs produce bit-for-bit identical results across runs — no JIT compilation variance
@@ -156,7 +156,7 @@ Other paths, measured the same way:
 | 190-combo parameter sweep over a year of minute bars | 1.47 s wall, 67 MB peak RSS                                      |
 | Determinism                                          | 20 runs across 3 processes → one SHA-256                         |
 | Compiled engine                                      | 1.59 MB                                                          |
-| Metrics per backtest                                 | 33 attributes (24 in `to_dict()`)                                |
+| Metrics per backtest                                 | 38 attributes (28 in `to_dict()`)                                |
 
 > **These numbers are not comparable to the 0.6.4 ones published earlier.** They
 > come from a different harness, not a slower engine — the 0.6.4 figures were
@@ -1246,11 +1246,11 @@ velocity = raptorbt.tick_velocity(ts_ns, 60.0)              # ticks/min over las
 
 ## Metrics
 
-Every backtest returns a `BacktestMetrics` object exposing **33 metric fields**
+Every backtest returns a `BacktestMetrics` object exposing **38 metric fields**
 (listed in full under [BacktestMetrics](#pybacktestmetrics)). `metrics.to_dict()`
-returns a subset of 24 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
+returns a subset of 28 of them under human-readable labels (e.g. `"Sharpe Ratio"`,
 `"Total Return [%]"`) for quick display; read fields directly off the object to
-access all 33. The most useful are grouped below.
+access all 38. The most useful are grouped below.
 
 ### Core Performance
 
@@ -1269,6 +1269,16 @@ access all 33. The most useful are grouped below.
 | `max_drawdown_pct`           | Maximum peak-to-trough decline                     |
 | `max_drawdown_duration`      | Longest drawdown period (bars)                     |
 | `max_drawdown_duration_secs` | The same stretch in seconds; `None` without timestamps |
+| `ulcer_index`                | RMS of the drawdown curve — depth weighted by duration |
+| `time_under_water_pct`       | Share of samples below the running high-water mark |
+
+> **Depth is not the whole story.** `max_drawdown_pct` is one order statistic:
+> a -8% pit lasting five bars and a -8% pit lasting two hundred report the same
+> number, and the second is the one people abandon. `ulcer_index` weights each
+> shortfall by how long it persisted (same percentage points, never larger than
+> `max_drawdown_pct`); `time_under_water_pct` isolates persistence by
+> discarding depth entirely. All three fold the same drawdown curve that
+> `drawdown_curve()` returns.
 
 > **Bars are not days.** A bar is one day on daily data and one tick on a tick
 > run, so `max_drawdown_duration` cannot be rendered as a duration on its own —
@@ -1593,14 +1603,14 @@ result.trades()          # List[Trade]
 
 ### BacktestMetrics
 
-33 read-only fields — see the [Metrics](#metrics) section for the full table with
-descriptions. `metrics.to_dict()` returns 24 of them under human-readable labels
+38 read-only fields — see the [Metrics](#metrics) section for the full table with
+descriptions. `metrics.to_dict()` returns 28 of them under human-readable labels
 (e.g. `"Sharpe Ratio"`) for quick display; read fields off the object directly
 for the complete set.
 
 ```python
 m = result.metrics
-m.total_return_pct, m.sharpe_ratio, m.max_drawdown_pct   # etc. — 33 fields total
+m.total_return_pct, m.sharpe_ratio, m.max_drawdown_pct   # etc. — 38 fields total
 stats = m.to_dict()
 ```
 

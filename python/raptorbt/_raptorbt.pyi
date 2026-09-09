@@ -179,6 +179,15 @@ class BacktestMetrics:
     max_drawdown_pct: float
     max_drawdown_duration: int
     max_drawdown_duration_secs: float | None
+    # Root mean square of the drawdown curve, in the same percentage points as
+    # max_drawdown_pct. Weights a long shallow drawdown more heavily than a
+    # brief deep one, which max_drawdown_pct cannot distinguish. Computed from
+    # the same curve drawdown_curve() returns. Added in 0.13.2.
+    ulcer_index: float
+    # Share of equity samples strictly below the running high-water mark. The
+    # companion to exposure_pct: how much of the run you were behind rather
+    # than how much of it you were invested. Added in 0.13.2.
+    time_under_water_pct: float
     win_rate_pct: float
     expectancy: float
     sqn: float
@@ -194,10 +203,13 @@ class BacktestMetrics:
     best_trade_pct: float
     worst_trade_pct: float
     avg_trade_return_pct: float
-    avg_win_pct: float
-    avg_loss_pct: float
-    avg_winning_duration: float
-    avg_losing_duration: float
+    # None when the population is empty -- no trade won, or none lost. An
+    # average over an empty set is undefined; 0.0 there would read as "the
+    # losers broke even", a claim about trades that do not exist.
+    avg_win_pct: float | None
+    avg_loss_pct: float | None
+    avg_winning_duration: float | None
+    avg_losing_duration: float | None
     max_consecutive_wins: int
     max_consecutive_losses: int
     avg_holding_period: float
@@ -223,10 +235,13 @@ class BacktestMetrics:
 class BacktestResult:
     metrics: BacktestMetrics
 
-    def equity_curve(self) -> list[float]: ...
-    def drawdown_curve(self) -> list[float]: ...
+    # These three return numpy arrays, not lists: `+` concatenates a list and
+    # adds elementwise on an array, so the declared type decides what the
+    # caller's code means.
+    def equity_curve(self) -> npt.NDArray[np.float64]: ...
+    def drawdown_curve(self) -> npt.NDArray[np.float64]: ...
     def trades(self) -> list[Trade]: ...
-    def returns(self) -> list[float]: ...
+    def returns(self) -> npt.NDArray[np.float64]: ...
 
 class InstrumentSummary:
     symbol: str

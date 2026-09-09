@@ -686,6 +686,14 @@ pub struct PyBacktestMetrics {
     /// duration on its own.
     #[pyo3(get)]
     pub max_drawdown_duration_secs: Option<f64>,
+    /// Root mean square of the drawdown curve, same percentage points as
+    /// `max_drawdown_pct`. Weights a drawdown by how long it lasted, which
+    /// `max_drawdown_pct` alone cannot express.
+    #[pyo3(get)]
+    pub ulcer_index: f64,
+    /// Share of equity samples strictly below the running high-water mark.
+    #[pyo3(get)]
+    pub time_under_water_pct: f64,
     #[pyo3(get)]
     pub win_rate_pct: f64,
     #[pyo3(get)]
@@ -773,6 +781,8 @@ impl PyBacktestMetrics {
         // Bars above, seconds here. The bar count is a duration only on daily
         // data; on a tick run it is a count of ticks.
         dict.set_item("Max Drawdown Duration [s]", self.max_drawdown_duration_secs)?;
+        dict.set_item("Ulcer Index", self.ulcer_index)?;
+        dict.set_item("Time Under Water [%]", self.time_under_water_pct)?;
         dict.set_item("Total Trades", self.total_trades)?;
         dict.set_item("Total Closed Trades", self.total_closed_trades)?;
         dict.set_item("Total Open Trades", self.total_open_trades)?;
@@ -2328,6 +2338,8 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         max_drawdown_pct: result.metrics.max_drawdown_pct,
         max_drawdown_duration: result.metrics.max_drawdown_duration,
         max_drawdown_duration_secs: result.metrics.max_drawdown_duration_secs,
+        ulcer_index: result.metrics.ulcer_index,
+        time_under_water_pct: result.metrics.time_under_water_pct,
         win_rate_pct: result.metrics.win_rate_pct,
         profit_factor: finite(result.metrics.profit_factor),
         expectancy: result.metrics.expectancy,

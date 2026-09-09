@@ -12,6 +12,10 @@ it worked, and how far in your favour before it failed. A realized loss alone
 cannot tell a bad entry apart from a good one that was stopped too early —
 both report the same number. These two do.**
 
+**And a run now reports how *long* it spent losing, not only how deep the worst
+loss went. A 8% dip lasting a week and an 8% dip lasting a year are the same
+number under max drawdown; the second is the one people abandon.**
+
 ### Added
 
 - **`Trade.mae_pnl` / `Trade.mfe_pnl` — maximum adverse and favourable
@@ -31,6 +35,58 @@ both report the same number. These two do.**
   position (spread, basket and pairs legs). `None` means "not measured" and must
   not be read as a zero excursion; a flat trade that genuinely never moved
   reports `0.0`, which is a measurement.
+
+- **`BacktestMetrics.ulcer_index` — the root mean square of the drawdown
+  curve**, in the same percentage points as `max_drawdown_pct`. Max drawdown is
+  a single order statistic: it answers "how deep" and cannot distinguish a
+  -8% pit lasting five bars from a -8% pit lasting two hundred. Ulcer weights
+  every shortfall by how long it persisted, so it is `0.0` only for a curve
+  that never fell, and it can never exceed `max_drawdown_pct`.
+
+- **`BacktestMetrics.time_under_water_pct` — the share of equity samples
+  strictly below the running high-water mark.** The companion to
+  `exposure_pct`: that says how much of the run was spent in the market, this
+  says how much of it was spent behind. Depth is discarded — a -0.01% sample
+  and a -40% sample each count once — which is the point, since it isolates
+  persistence from severity.
+
+  Both fold the *same* streamed drawdown curve that `max_drawdown_pct` folds,
+  so all three describe one curve. The pre-existing helper
+  `metrics::drawdown::ulcer_index` rebuilds a curve seeded from the first
+  equity sample rather than from initial capital, and is deliberately not used
+  on this path; the two disagree whenever a run opens away from its funding
+  level.
+
+  `StreamingMetrics::finalize` reports `0.0` for both: that accumulator keeps a
+  running peak but no drawdown history, so it cannot compute an RMS or count
+  underwater samples. `0.0` there means "not measured on this path", matching
+  the existing convention for `exposure_pct` and `total_turnover`. Every
+  strategy path that produces a drawdown curve — single, multi, basket, pairs,
+  options, tick — gets the real figures.
+
+  Metric count is now 38 fields, 28 of them in `to_dict()`.
+
+### Fixed
+
+- **Type stubs corrected for six long-standing mismatches.** Nothing checks
+  `_raptorbt.pyi` against the bindings, so these were silently wrong for
+  several releases. `avg_win_pct`, `avg_loss_pct`, `avg_winning_duration` and
+  `avg_losing_duration` are `Option<f64>` in the bindings but were declared
+  bare `float` — the stub told callers they could always format them, which
+  raises `TypeError` on exactly the runs (no winners, or no losers) the `None`
+  was introduced to describe. And `equity_curve()`, `drawdown_curve()` and
+  `returns()` return NumPy arrays, not `list[float]`: `+` concatenates a list
+  and adds elementwise on an array, so the declared type decided what a
+  caller's code meant.
+
+- **The metric counts in `README.md` were stale**, reading 33 fields / 24 in
+  `to_dict()` from a release that added fields without updating them. Now 38
+  and 28, checked against the built wheel.
+
+- **`ulcer_index` had no value-pinning test.** Its only assertion was that the
+  result is positive, which every arithmetic error preserves — including
+  dividing the sum of squares by the count of underwater samples instead of the
+  curve length, which roughly doubles the metric on a mostly-flat curve.
 
 ### Changed
 

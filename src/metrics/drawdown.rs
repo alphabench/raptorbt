@@ -384,11 +384,73 @@ mod tests {
     }
 
     #[test]
-    fn test_ulcer_index() {
+    fn ulcer_index_matches_a_hand_computed_curve() {
+        // Drawdowns: 0, 5, 10, 5, 0 percent. Mean of squares = 150/5 = 30.
         let equity = vec![100.0, 95.0, 90.0, 95.0, 100.0];
-        let ui = ulcer_index(&equity);
+        assert!((ulcer_index(&equity) - 30.0f64.sqrt()).abs() < 1e-12);
+    }
 
-        // Should be positive (there were drawdowns)
-        assert!(ui > 0.0);
+    #[test]
+    fn ulcer_index_divides_by_the_full_length_including_the_zeros() {
+        // Two of four samples are at the high-water mark. Dividing by the
+        // underwater count instead of the length would give sqrt(50) here
+        // rather than sqrt(25) -- a ~1.41x overstatement on this curve, and
+        // roughly 2x on a curve that is mostly flat.
+        let equity = vec![100.0, 100.0, 90.0, 100.0];
+        // dd = [0, 0, 10, 0]; mean of squares = 100/4 = 25.
+        assert!((ulcer_index(&equity) - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ulcer_index_punishes_a_long_shallow_drawdown_more_than_a_brief_deep_one() {
+        // The reason this metric exists. Both curves bottom at -10%, so
+        // max_drawdown cannot tell them apart; the second holds that loss for
+        // ten samples instead of one.
+        let brief =
+            vec![100.0, 90.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0];
+        let long = vec![100.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 90.0, 100.0];
+
+        assert!((max_drawdown(&brief) - max_drawdown(&long)).abs() < 1e-12);
+        assert!(ulcer_index(&long) > ulcer_index(&brief) * 2.0);
+    }
+
+    #[test]
+    fn ulcer_index_never_exceeds_max_drawdown() {
+        // An RMS over a series bounded by its own maximum cannot exceed it.
+        // This pins the percentage-point scaling: a fraction-vs-percent slip
+        // in either function breaks it by 100x.
+        let equity = vec![100.0, 110.0, 105.0, 120.0, 100.0, 118.0, 95.0];
+        assert!(ulcer_index(&equity) <= max_drawdown(&equity) + 1e-12);
+    }
+
+    #[test]
+    fn an_empty_curve_reports_no_ulcer_rather_than_a_nan() {
+        // 0.0/0.0 would ship a NaN across the PyO3 boundary, where it is not
+        // JSON-serializable.
+        assert_eq!(ulcer_index(&[]), 0.0);
+        assert!(!ulcer_index(&[100.0]).is_nan());
+    }
+
+    #[test]
+    fn drawdown_periods_counts_a_high_water_plateau_as_underwater() {
+        // Records current behaviour, which OVERSTATES time under water:
+        // `dd_start` is set to `peak_idx`, and `peak_idx` only advances on a
+        // strictly new high, so a flat stretch at the high-water mark is
+        // folded into the following drawdown.
+        //
+        // Here exactly one sample (index 4, at 105) is below its running peak,
+        // but the reported span runs 1..=4. Flat equity is the normal state of
+        // a backtest holding no position, so summing durations off these
+        // tuples inflates badly.
+        //
+        // This is why `time_under_water_pct` in PortfolioEngine::calculate_metrics
+        // counts samples off the streamed drawdown curve instead of using this
+        // function. Fixing it changes a public function's return values and is
+        // deferred to a release that can carry the caller audit.
+        let equity = vec![100.0, 110.0, 110.0, 110.0, 105.0, 120.0];
+        let periods = drawdown_periods(&equity);
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].0, 1, "start is pinned to the plateau, not the decline");
+        assert_eq!(periods[0].1, 4);
     }
 }

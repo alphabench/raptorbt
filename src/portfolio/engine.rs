@@ -189,6 +189,30 @@ impl PortfolioEngine {
         let total_return_pct = (end_value - start_value) / start_value * 100.0;
         let max_drawdown_pct = drawdown_curve.iter().fold(0.0f64, |a, &b| a.max(b));
 
+        // Ulcer and time-under-water fold the SAME streamed curve that
+        // max_drawdown_pct folds, deliberately not
+        // `metrics::drawdown::ulcer_index(equity_curve)`. That helper rebuilds
+        // the curve with `calculate_drawdown_curve`, which seeds its peak from
+        // `equity_curve[0]`; the streamed curve in `portfolio::runner` seeds
+        // `peak_equity` from `config.initial_capital`. When the first equity
+        // sample differs from initial capital the two curves disagree, and a
+        // caller would see an ulcer describing a curve that no other reported
+        // drawdown figure describes. Do not "simplify" this into the helper.
+        let ulcer_index = if drawdown_curve.is_empty() {
+            0.0
+        } else {
+            (drawdown_curve.iter().map(|d| d * d).sum::<f64>() / drawdown_curve.len() as f64).sqrt()
+        };
+
+        // `> 0.0` matches `calculate_max_drawdown_duration` exactly, so "under
+        // water" means one thing in this file.
+        let time_under_water_pct = if drawdown_curve.is_empty() {
+            0.0
+        } else {
+            drawdown_curve.iter().filter(|&&d| d > 0.0).count() as f64 / drawdown_curve.len() as f64
+                * 100.0
+        };
+
         // Calculate max drawdown duration
         let max_drawdown_duration = self.calculate_max_drawdown_duration(drawdown_curve);
 
@@ -460,6 +484,8 @@ impl PortfolioEngine {
             max_drawdown_pct,
             max_drawdown_duration,
             max_drawdown_duration_secs: self.max_drawdown_duration_secs(drawdown_curve, timestamps),
+            ulcer_index,
+            time_under_water_pct,
             win_rate_pct,
             profit_factor,
             expectancy,
@@ -846,6 +872,105 @@ mod tests {
     /// Time in the market cannot exceed the time the backtest ran. Summing the
     /// holding periods of *concurrent* positions against one equity curve
     /// reported 123.5% on a real run.
+    #[test]
+    fn ulcer_describes_the_same_curve_as_max_drawdown() {
+        // The invariant that must survive refactoring. `calculate_metrics` folds
+        // the STREAMED drawdown curve, whose peak is seeded from
+        // `config.initial_capital` (runner.rs). The convenience helper
+        // `metrics::drawdown::ulcer_index(equity)` rebuilds a curve seeded from
+        // `equity[0]` instead. Here the run opens BELOW initial capital, so the
+        // two disagree -- and the reported ulcer must match the curve every
+        // other reported drawdown figure describes.
+        let engine =
+            PortfolioEngine::new(BacktestConfig { initial_capital: 100.0, ..Default::default() });
+
+        // Equity opens at 90 (already 10% under the 100 the run was funded
+        // with) and recovers. Streamed curve: [10, 5, 0]. Helper's curve,
+        // seeded from equity[0]=90: [0, 0, 0].
+        let equity_curve = vec![90.0, 95.0, 100.0];
+        let drawdown_curve = vec![10.0, 5.0, 0.0];
+        let timestamps: Vec<i64> = vec![0, 1, 2];
+
+        let metrics = engine.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &[0.0, 0.0555, 0.0526],
+            &[],
+            &timestamps,
+            &StreamingMetrics::new(),
+        );
+
+        let expected = ((100.0f64 + 25.0 + 0.0) / 3.0).sqrt();
+        assert!(
+            (metrics.ulcer_index - expected).abs() < 1e-12,
+            "ulcer must fold the streamed curve, got {}",
+            metrics.ulcer_index
+        );
+
+        // The helper answers a different question on this run. If this ever
+        // stops differing, the test has lost its teeth -- rebuild the case.
+        assert!(
+            (crate::metrics::drawdown::ulcer_index(&equity_curve) - metrics.ulcer_index).abs()
+                > 1e-6,
+            "the two curves must genuinely disagree for this test to mean anything"
+        );
+
+        // Two of three samples are under water.
+        assert!((metrics.time_under_water_pct - 200.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn time_under_water_counts_samples_not_drawdown_spans() {
+        let engine =
+            PortfolioEngine::new(BacktestConfig { initial_capital: 100.0, ..Default::default() });
+
+        // A high-water plateau followed by one dip. `drawdown_periods` would
+        // report a span of 4 here (see its own test); counting samples gives
+        // the true answer, 1 of 6.
+        let equity_curve = vec![100.0, 110.0, 110.0, 110.0, 105.0, 120.0];
+        let drawdown_curve = vec![0.0, 0.0, 0.0, 0.0, 4.545454545454546, 0.0];
+        let timestamps: Vec<i64> = (0..6).collect();
+
+        let metrics = engine.calculate_metrics(
+            &equity_curve,
+            &drawdown_curve,
+            &[0.0; 6],
+            &[],
+            &timestamps,
+            &StreamingMetrics::new(),
+        );
+
+        assert!((metrics.time_under_water_pct - 100.0 / 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn time_under_water_spans_the_full_range_from_never_to_always() {
+        let engine =
+            PortfolioEngine::new(BacktestConfig { initial_capital: 100.0, ..Default::default() });
+        let ts: Vec<i64> = (0..4).collect();
+
+        let rising = engine.calculate_metrics(
+            &[100.0, 101.0, 102.0, 103.0],
+            &[0.0, 0.0, 0.0, 0.0],
+            &[0.0; 4],
+            &[],
+            &ts,
+            &StreamingMetrics::new(),
+        );
+        assert_eq!(rising.time_under_water_pct, 0.0);
+        assert_eq!(rising.ulcer_index, 0.0);
+
+        let falling = engine.calculate_metrics(
+            &[99.0, 98.0, 97.0, 96.0],
+            &[1.0, 2.0, 3.0, 4.0],
+            &[0.0; 4],
+            &[],
+            &ts,
+            &StreamingMetrics::new(),
+        );
+        assert_eq!(falling.time_under_water_pct, 100.0);
+    }
+
     #[test]
     fn exposure_never_exceeds_one_hundred_percent() {
         fn trade_over(id: u64, entry_idx: usize, exit_idx: usize) -> Trade {

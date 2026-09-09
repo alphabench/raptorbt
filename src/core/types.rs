@@ -728,6 +728,22 @@ pub struct BacktestMetrics {
     /// bar count only when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_drawdown_duration_secs: Option<f64>,
+    /// Root mean square of the drawdown curve, in the same percentage points
+    /// as `max_drawdown_pct`.
+    ///
+    /// Max drawdown is one order statistic: it answers "how deep" and cannot
+    /// tell a -8% pit lasting five bars from a -8% pit lasting two hundred.
+    /// The second is the one holders abandon. This weights every observation's
+    /// shortfall by how long it persisted, so it is 0.0 only for a curve that
+    /// never fell. Computed from the same curve `max_drawdown_pct` folds, not
+    /// by rebuilding one from the equity series.
+    pub ulcer_index: f64,
+    /// Share of equity samples strictly below the running high-water mark.
+    ///
+    /// The companion to `exposure_pct`: that says how much of the run was
+    /// spent in the market, this says how much of it was spent behind. Depth
+    /// is discarded -- a -0.01% sample and a -40% sample each count once.
+    pub time_under_water_pct: f64,
     /// Win rate percentage.
     pub win_rate_pct: f64,
     /// Profit factor.
