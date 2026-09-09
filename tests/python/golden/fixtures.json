@@ -32271,12 +32271,12 @@
    "0x1.8697c9049eae2p+16",
    "0x1.86628bcca346ep+16",
    "0x1.8660d8e22dab6p+16",
-   "0x1.8672eebb18b24p+16"
+   "0x1.8671acfe4056ep+16"
   ],
   "max_drawdown_pct": "0x1.41984dbaf9d84p-3",
   "omega": "0x1.ed2c03551bac4p-1",
-  "sharpe": "-0x1.1d2bc7ed11e1dp-3",
-  "sortino": "-0x1.7406ed6817388p-3",
+  "sharpe": "-0x1.5925023ad53c5p+1",
+  "sortino": "-0x1.c304f6d5c9c49p+1",
   "total_return_pct": "-0x1.7b7cfbe4a4dd3p-5",
   "trades": [
    {
@@ -32652,12 +32652,12 @@
    "0x1.8674feca5a4a4p+16",
    "0x1.8652dd4812801p+16",
    "0x1.86512a5d9ce49p+16",
-   "0x1.8663403687eb7p+16"
+   "0x1.8661fe79af901p+16"
   ],
   "max_drawdown_pct": "0x1.4b8eebbafe1a5p-3",
   "omega": "0x1.e59a41c42a705p-1",
-  "sharpe": "-0x1.7c2f6e860dde1p-3",
-  "sortino": "-0x1.e9460fbbcc728p-3",
+  "sharpe": "-0x1.cc2419c74accdp+1",
+  "sortino": "-0x1.2894994c8fe40p+2",
   "total_return_pct": "-0x1.fbf3e9ff7c6a7p-5",
   "trades": [
    {

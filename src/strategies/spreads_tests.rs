@@ -443,8 +443,20 @@ fn a_position_open_at_the_end_is_still_recorded_as_a_trade() {
     // Entered at 90, ran to the final bar at 60: a 2250 gain on a short.
     assert_eq!(trade.pnl, 2250.0);
 
-    // And it is counted, not merely listed.
-    assert_eq!(result.metrics.total_closed_trades, 1);
+    // And it is counted, not merely listed -- as an OPEN trade, because it
+    // never traded out. Through 0.13.2 this path reported it closed, because
+    // its metrics came from an accumulator that hardcoded
+    // `total_open_trades: 0` and called every trade closed. Every other runner
+    // treats `EndOfData` as still-open, and this one now agrees with them.
+    assert_eq!(result.metrics.total_trades, 1);
+    assert_eq!(result.metrics.total_open_trades, 1);
+    assert_eq!(result.metrics.total_closed_trades, 0);
+    assert!(
+        (result.metrics.open_trade_pnl - trade.pnl).abs() < 1e-9,
+        "the open position's P&L must be reported as open: {} vs {}",
+        result.metrics.open_trade_pnl,
+        trade.pnl
+    );
 
     // The recorded P&L is the P&L that moved equity.
     let equity_gain = result.metrics.end_value - 500_000.0;

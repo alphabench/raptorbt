@@ -234,12 +234,15 @@ def test_excursion_aggregates_are_none_without_closed_trades():
     assert res.metrics.mfe_capture_ratio is None
 
 
-def test_spread_path_reports_no_excursions_and_carries_a_known_defect():
-    """Two different things, and only the first is by design.
+def test_spread_path_reports_no_excursions_but_measures_everything_else():
+    """MAE/MFE are per-position, so a synthesized spread leg genuinely has none.
 
-    MAE/MFE are per-position, so a synthesized spread leg genuinely has none.
-    But this path also drops figures it demonstrably could compute -- see the
-    inline notes below. Pinned so the fix has a baseline.
+    Everything else on this path IS measured. Through 0.13.2 it was not: the
+    runner built a real drawdown curve and a real trade list, put both in the
+    result, and then computed metrics from the return series alone -- so a
+    result could report 250 of 300 samples underwater in its own curve while
+    `time_under_water_pct` read 0.0. It now uses the same estimator as every
+    other runner, so the figures describe the data sitting beside them.
     """
     n = 400
     ts = np.arange(n, dtype=np.int64) * 60_000_000_000
@@ -266,20 +269,31 @@ def test_spread_path_reports_no_excursions_and_carries_a_known_defect():
     assert res.metrics.avg_mae_pnl is None
     assert res.metrics.mfe_capture_ratio is None
 
-    # The rest documents a KNOWN DEFECT rather than a property worth having.
-    # This path builds its metrics through StreamingMetrics::finalize, which
-    # receives only `returns` -- while its caller holds a real drawdown curve
-    # and a real trade list and puts both in the result it returns. So the
-    # result below contradicts itself, and these assertions pin the current
-    # behaviour so a fix has a baseline, not because it is correct.
-    dd = np.asarray(res.drawdown_curve())
-    assert (dd > 0).sum() > 0, "curve really is underwater"
-    assert res.metrics.time_under_water_pct == 0.0  # ...yet reports 0.0
-    assert res.metrics.total_turnover == 0.0  # ...with trades in hand
-    assert res.metrics.avg_drawdown_pct is None
-    assert res.metrics.cost_to_gross_profit_pct is None
-    assert res.metrics.mae_mfe_coverage_pct is None
+    # Coverage is 0%, not None: there ARE closed trades, and none of them
+    # carried an excursion. That is a different statement from "this path
+    # cannot measure", and the two must not collapse into one value.
+    assert res.metrics.mae_mfe_coverage_pct == pytest.approx(0.0)
 
-    # What this path does see -- the return series -- is computed for real.
+    # Everything derivable from the curve and the trade list is now derived
+    # from them, and agrees with them.
+    dd = np.asarray(res.drawdown_curve())
+    underwater = dd[dd > 0]
+    assert len(underwater) > 0, "curve really is underwater"
+    assert res.metrics.time_under_water_pct == pytest.approx(
+        len(underwater) / len(dd) * 100.0
+    )
+    assert res.metrics.avg_drawdown_pct == pytest.approx(underwater.mean())
+    assert res.metrics.max_drawdown_pct == pytest.approx(dd.max())
+    assert res.metrics.total_turnover > 0.0
+    assert res.metrics.exposure_pct > 0.0
     assert res.metrics.return_skew is not None
     assert res.metrics.return_kurtosis is not None
+
+    # And the equity curve ends where the account ends -- it used to stop one
+    # exit fee short, so integrating the curve disagreed with the reported
+    # return.
+    eq = np.asarray(res.equity_curve())
+    assert res.metrics.end_value == pytest.approx(eq[-1], abs=1e-9)
+    assert res.metrics.total_return_pct == pytest.approx(
+        (eq[-1] - res.metrics.start_value) / res.metrics.start_value * 100.0
+    )

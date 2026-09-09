@@ -336,6 +336,17 @@ impl StreamingMetrics {
         self.current_drawdown
     }
 
+    /// The running high-water mark of equity.
+    ///
+    /// Exposed so a caller that adjusts its final equity sample can recompute
+    /// that sample's drawdown against the same peak, without calling
+    /// `update_equity` again -- which would advance `bars_since_peak` a second
+    /// time for one bar.
+    #[inline]
+    pub fn peak_equity(&self) -> f64 {
+        self.peak_equity
+    }
+
     /// Get maximum drawdown percentage.
     #[inline]
     pub fn max_drawdown_pct(&self) -> f64 {
