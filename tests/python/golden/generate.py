@@ -118,6 +118,12 @@ def result_digest(result):
             for t in result.trades()
         ],
         "sharpe": float.hex(result.metrics.sharpe_ratio),
+        # Sortino and Omega ride the same fold as Sharpe, and until 0.13.2
+        # neither was asserted anywhere: Omega had no test at all, and Sortino
+        # only a relational one (array path == class path). A refactor of
+        # `risk_metrics` isolated to either branch would have shipped silently.
+        "sortino": float.hex(result.metrics.sortino_ratio),
+        "omega": float.hex(result.metrics.omega_ratio),
         "total_return_pct": float.hex(result.metrics.total_return_pct),
         "max_drawdown_pct": float.hex(result.metrics.max_drawdown_pct),
     }
@@ -143,6 +149,16 @@ def config_variants():
     c.set_atr_stop(2.0, 14)
     c.set_risk_reward_target(2.0)
     variants.append(("atr_stop_rr_target", c, None, 1))
+
+    # ATR on the TARGET with a non-ATR stop. The variant above reaches the ATR
+    # precompute through `StopConfig::Atr`; this one reaches it only through
+    # `TargetConfig::Atr`, which is the other limb of the `||` that decides
+    # whether the engine computes ATR at all -- and the limb that also supplies
+    # the period when the stop is not ATR-based. Nothing covered it before.
+    c = BacktestConfig()
+    c.set_fixed_stop(0.03)
+    c.set_atr_target(3.0, 10)
+    variants.append(("atr_target_fixed_stop", c, None, 1))
 
     c = BacktestConfig()
     c.fee_segment = "NFO-FUT"
