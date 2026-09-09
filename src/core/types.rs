@@ -1,5 +1,7 @@
 //! Core data types for RaptorBT.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 /// Type alias for price values.
@@ -48,17 +50,30 @@ pub struct OhlcvBar {
 }
 
 /// OHLCV data series.
+///
+/// Each series is a [`Cow`], so the same type covers data the engine owns and
+/// data it is only borrowing for the duration of a call. The Python bindings
+/// take the second path: a NumPy array is already a contiguous `f64` buffer
+/// that is guaranteed to outlive the call, so copying it into a `Vec` bought
+/// nothing and cost a full duplicate of the input — 1.25 GB on a 25M-bar run,
+/// which is why peak memory used to be roughly twice the input size.
+///
+/// Nothing in the crate stores an `OhlcvData` beyond the call that built it,
+/// mutates one after construction outside tests, or moves one across a thread
+/// boundary, so a borrow is always sound here. Tests still assign whole
+/// series (`ohlcv.close = ...`); `Cow` accepts an owned `Vec` directly, so
+/// those keep working unchanged.
 #[derive(Debug, Clone)]
-pub struct OhlcvData {
-    pub timestamps: Vec<Timestamp>,
-    pub open: Vec<Price>,
-    pub high: Vec<Price>,
-    pub low: Vec<Price>,
-    pub close: Vec<Price>,
-    pub volume: Vec<f64>,
+pub struct OhlcvData<'a> {
+    pub timestamps: Cow<'a, [Timestamp]>,
+    pub open: Cow<'a, [Price]>,
+    pub high: Cow<'a, [Price]>,
+    pub low: Cow<'a, [Price]>,
+    pub close: Cow<'a, [Price]>,
+    pub volume: Cow<'a, [f64]>,
 }
 
-impl OhlcvData {
+impl OhlcvData<'_> {
     /// Create new OHLCV data from vectors.
     pub fn new(
         timestamps: Vec<Timestamp>,
@@ -68,7 +83,14 @@ impl OhlcvData {
         close: Vec<Price>,
         volume: Vec<f64>,
     ) -> Self {
-        Self { timestamps, open, high, low, close, volume }
+        Self {
+            timestamps: Cow::Owned(timestamps),
+            open: Cow::Owned(open),
+            high: Cow::Owned(high),
+            low: Cow::Owned(low),
+            close: Cow::Owned(close),
+            volume: Cow::Owned(volume),
+        }
     }
 
     /// Get the number of bars.

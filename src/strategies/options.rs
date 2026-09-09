@@ -399,7 +399,7 @@ impl OptionsBacktest {
             &equity_curve,
             &drawdown_curve,
             &returns,
-            spot_ohlcv.timestamps.as_slice(),
+            &spot_ohlcv.timestamps[..],
             &trades,
         );
 

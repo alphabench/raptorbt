@@ -312,7 +312,7 @@ impl PairsBacktest {
             &equity_curve,
             &drawdown_curve,
             &returns,
-            leg1_ohlcv.timestamps.as_slice(),
+            &leg1_ohlcv.timestamps[..],
             &trades,
         );
 
@@ -473,7 +473,7 @@ struct PairsPosition {
 mod tests {
     use super::*;
 
-    fn sample_pairs_data() -> (OhlcvData, OhlcvData, CompiledSignals) {
+    fn sample_pairs_data() -> (OhlcvData<'static>, OhlcvData<'static>, CompiledSignals) {
         let n = 20;
 
         // Leg 1: Trending up
@@ -483,7 +483,7 @@ mod tests {
             high: (101..101 + n).map(|x| x as f64).collect(),
             low: (99..99 + n).map(|x| x as f64).collect(),
             close: (100..100 + n).map(|x| x as f64 + 0.5).collect(),
-            volume: vec![1000.0; n],
+            volume: vec![1000.0; n].into(),
         };
 
         // Leg 2: Correlated but with different magnitude
@@ -493,7 +493,7 @@ mod tests {
             high: (51..51 + n).map(|x| x as f64).collect(),
             low: (49..49 + n).map(|x| x as f64).collect(),
             close: (50..50 + n).map(|x| x as f64 + 0.2).collect(),
-            volume: vec![2000.0; n],
+            volume: vec![2000.0; n].into(),
         };
 
         let mut entries = vec![false; n];

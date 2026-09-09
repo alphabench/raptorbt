@@ -25,14 +25,14 @@ fn config(fill_timing: FillTiming) -> BacktestConfig {
     }
 }
 
-fn flat_ohlcv(n: usize, price: f64) -> OhlcvData {
+fn flat_ohlcv(n: usize, price: f64) -> OhlcvData<'static> {
     OhlcvData {
         timestamps: (0..n as i64).map(|i| i * 1_000_000_000).collect(),
-        open: vec![price; n],
-        high: vec![price; n],
-        low: vec![price; n],
-        close: vec![price; n],
-        volume: vec![1000.0; n],
+        open: vec![price; n].into(),
+        high: vec![price; n].into(),
+        low: vec![price; n].into(),
+        close: vec![price; n].into(),
+        volume: vec![1000.0; n].into(),
     }
 }
 
@@ -58,18 +58,18 @@ fn signals(n: usize, entry_at: usize, exit_at: Option<usize>) -> CompiledSignals
 /// A causal trader learns "bar 5 closed at 200" only when it closes; the
 /// cheapest price available from that moment on is 150, and the run ends at
 /// 150 — no causal strategy acting on this signal can make money.
-fn rally_fixture() -> OhlcvData {
+fn rally_fixture() -> OhlcvData<'static> {
     let mut ohlcv = flat_ohlcv(12, 150.0);
-    ohlcv.open[5] = 100.0;
-    ohlcv.low[5] = 100.0;
-    ohlcv.high[5] = 200.0;
-    ohlcv.close[5] = 200.0;
+    ohlcv.open.to_mut()[5] = 100.0;
+    ohlcv.low.to_mut()[5] = 100.0;
+    ohlcv.high.to_mut()[5] = 200.0;
+    ohlcv.close.to_mut()[5] = 200.0;
     // Bars before the signal sit at 150 too.
     for i in 0..5 {
-        ohlcv.open[i] = 150.0;
-        ohlcv.high[i] = 150.0;
-        ohlcv.low[i] = 150.0;
-        ohlcv.close[i] = 150.0;
+        ohlcv.open.to_mut()[i] = 150.0;
+        ohlcv.high.to_mut()[i] = 150.0;
+        ohlcv.low.to_mut()[i] = 150.0;
+        ohlcv.close.to_mut()[i] = 150.0;
     }
     ohlcv
 }
@@ -104,13 +104,13 @@ fn next_bar_open_books_the_crash_the_exit_reacted_to() {
     // exit signal exists *because* of the 50 close, so a causal trader
     // cannot get out above 50.
     let mut ohlcv = flat_ohlcv(12, 150.0);
-    ohlcv.low[8] = 50.0;
-    ohlcv.close[8] = 50.0;
+    ohlcv.low.to_mut()[8] = 50.0;
+    ohlcv.close.to_mut()[8] = 50.0;
     for i in 9..12 {
-        ohlcv.open[i] = 50.0;
-        ohlcv.high[i] = 50.0;
-        ohlcv.low[i] = 50.0;
-        ohlcv.close[i] = 50.0;
+        ohlcv.open.to_mut()[i] = 50.0;
+        ohlcv.high.to_mut()[i] = 50.0;
+        ohlcv.low.to_mut()[i] = 50.0;
+        ohlcv.close.to_mut()[i] = 50.0;
     }
 
     let engine = PortfolioEngine::new(config(FillTiming::NextBarOpen));
@@ -179,13 +179,13 @@ fn deferred_entry_can_stop_out_within_its_fill_bar() {
 
     // Signal at bar 4; bar 5 opens at 150 and collapses through the stop.
     let mut ohlcv = flat_ohlcv(12, 150.0);
-    ohlcv.low[5] = 100.0;
-    ohlcv.close[5] = 110.0;
+    ohlcv.low.to_mut()[5] = 100.0;
+    ohlcv.close.to_mut()[5] = 110.0;
     for i in 6..12 {
-        ohlcv.open[i] = 110.0;
-        ohlcv.high[i] = 110.0;
-        ohlcv.low[i] = 110.0;
-        ohlcv.close[i] = 110.0;
+        ohlcv.open.to_mut()[i] = 110.0;
+        ohlcv.high.to_mut()[i] = 110.0;
+        ohlcv.low.to_mut()[i] = 110.0;
+        ohlcv.close.to_mut()[i] = 110.0;
     }
 
     let result = PortfolioEngine::new(cfg).run_single(&ohlcv, &signals(12, 4, None));
@@ -215,7 +215,7 @@ fn same_bar_close_semantics_are_unchanged() {
 // leg's own open on the bar after the decision. Their default (and
 // historical) behavior is same-bar-close, which stays byte-identical.
 
-fn stepped_ohlcv(n: usize) -> OhlcvData {
+fn stepped_ohlcv(n: usize) -> OhlcvData<'static> {
     // Distinct open vs close on every bar so a wrong price source is
     // always visible: bar i opens at 100+i and closes at 200+i.
     OhlcvData {
@@ -224,7 +224,7 @@ fn stepped_ohlcv(n: usize) -> OhlcvData {
         high: (0..n).map(|i| 300.0 + i as f64).collect(),
         low: (0..n).map(|i| 90.0 + i as f64).collect(),
         close: (0..n).map(|i| 200.0 + i as f64).collect(),
-        volume: vec![1000.0; n],
+        volume: vec![1000.0; n].into(),
     }
 }
 
@@ -279,7 +279,7 @@ fn pairs_next_bar_open_fills_both_legs_at_their_next_open() {
     let leg1 = stepped_ohlcv(10);
     let mut leg2 = stepped_ohlcv(10);
     // Different open levels per leg so each leg's own series is provably used.
-    for v in leg2.open.iter_mut() {
+    for v in leg2.open.to_mut().iter_mut() {
         *v += 50.0;
     }
     let result = PairsBacktest::new(cfg).run(&leg1, &leg2, &signals(10, 3, Some(6)));

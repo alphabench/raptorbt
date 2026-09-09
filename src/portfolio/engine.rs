@@ -1025,26 +1025,30 @@ mod tests {
     use super::*;
     use crate::core::types::Direction;
 
-    fn sample_ohlcv() -> OhlcvData {
+    fn sample_ohlcv() -> OhlcvData<'static> {
         OhlcvData {
             timestamps: (0..20).map(|i| i as i64).collect(),
             open: vec![
                 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0, 101.0,
                 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0,
-            ],
+            ]
+            .into(),
             high: vec![
                 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 102.0,
                 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0,
-            ],
+            ]
+            .into(),
             low: vec![
                 99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0, 100.0, 99.0, 100.0,
                 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0,
-            ],
+            ]
+            .into(),
             close: vec![
                 100.5, 101.5, 102.5, 103.5, 104.5, 105.0, 104.0, 103.0, 102.0, 101.0, 100.5, 101.5,
                 102.5, 103.5, 104.5, 105.5, 106.5, 107.5, 108.5, 109.5,
-            ],
-            volume: vec![1000.0; 20],
+            ]
+            .into(),
+            volume: vec![1000.0; 20].into(),
         }
     }
 
@@ -1439,7 +1443,7 @@ mod tests {
         };
 
         let mut ohlcv = sample_ohlcv();
-        ohlcv.timestamps = vec![0; 20];
+        ohlcv.timestamps = vec![0i64; 20].into();
 
         let engine = PortfolioEngine::new(config);
         let result = engine.run_single(&ohlcv, &sample_signals());
@@ -1490,8 +1494,8 @@ mod tests {
         // Create data where stop would be hit
         let mut ohlcv = sample_ohlcv();
         // Add a big drop after entry
-        ohlcv.low[3] = 95.0; // Big drop
-        ohlcv.close[3] = 96.0;
+        ohlcv.low.to_mut()[3] = 95.0; // Big drop
+        ohlcv.close.to_mut()[3] = 96.0;
 
         let signals = sample_signals();
         let result = engine.run_single(&ohlcv, &signals);

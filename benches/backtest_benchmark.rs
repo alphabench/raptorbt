@@ -6,7 +6,7 @@ use raptorbt::indicators::trend::{ema, sma};
 use raptorbt::portfolio::engine::PortfolioEngine;
 
 /// Generate sample OHLCV data.
-fn generate_sample_data(n: usize) -> OhlcvData {
+fn generate_sample_data(n: usize) -> OhlcvData<'static> {
     let mut open = vec![100.0; n];
     let mut high = vec![101.0; n];
     let mut low = vec![99.0; n];
@@ -23,11 +23,11 @@ fn generate_sample_data(n: usize) -> OhlcvData {
 
     OhlcvData {
         timestamps: (0..n as i64).collect(),
-        open,
-        high,
-        low,
-        close,
-        volume: vec![1000.0; n],
+        open: open.into(),
+        high: high.into(),
+        low: low.into(),
+        close: close.into(),
+        volume: vec![1000.0; n].into(),
     }
 }
 

@@ -414,14 +414,14 @@ mod tests {
     const DAY: i64 = 86_400_000_000_000;
 
     /// Flat-priced instrument, so P&L never obscures capital accounting.
-    fn flat_instrument(_symbol: &str, price: f64, n: usize) -> OhlcvData {
+    fn flat_instrument(_symbol: &str, price: f64, n: usize) -> OhlcvData<'static> {
         OhlcvData {
             timestamps: (0..n as i64).map(|i| i * DAY).collect(),
-            open: vec![price; n],
-            high: vec![price; n],
-            low: vec![price; n],
-            close: vec![price; n],
-            volume: vec![1_000_000.0; n],
+            open: vec![price; n].into(),
+            high: vec![price; n].into(),
+            low: vec![price; n].into(),
+            close: vec![price; n].into(),
+            volume: vec![1_000_000.0; n].into(),
         }
     }
 
@@ -437,7 +437,7 @@ mod tests {
     }
 
     /// Three instruments all signalling entry on bar 1.
-    fn three_way_entry(n: usize) -> Vec<(OhlcvData, CompiledSignals)> {
+    fn three_way_entry(n: usize) -> Vec<(OhlcvData<'static>, CompiledSignals)> {
         ["A", "B", "C"]
             .iter()
             .map(|sym| {
@@ -526,11 +526,11 @@ mod tests {
         }
         let a = OhlcvData {
             timestamps: (0..n as i64).map(|i| i * DAY).collect(),
-            open: a_close.clone(),
-            high: a_close.clone(),
-            low: a_close.clone(),
-            close: a_close,
-            volume: vec![1_000_000.0; n],
+            open: a_close.clone().into(),
+            high: a_close.clone().into(),
+            low: a_close.clone().into(),
+            close: a_close.into(),
+            volume: vec![1_000_000.0; n].into(),
         };
         let mut a_entries = vec![false; n];
         a_entries[1] = true;

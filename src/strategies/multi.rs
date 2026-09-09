@@ -312,7 +312,7 @@ mod tests {
     use super::*;
     use crate::core::Direction;
 
-    fn sample_strategies() -> (OhlcvData, Vec<CompiledSignals>) {
+    fn sample_strategies() -> (OhlcvData<'static>, Vec<CompiledSignals>) {
         let n = 20;
 
         let ohlcv = OhlcvData {
@@ -321,7 +321,7 @@ mod tests {
             high: (101..101 + n).map(|x| x as f64).collect(),
             low: (99..99 + n).map(|x| x as f64).collect(),
             close: (100..100 + n).map(|x| x as f64 + 0.5).collect(),
-            volume: vec![1000.0; n],
+            volume: vec![1000.0; n].into(),
         };
 
         // Strategy 1: Early entry

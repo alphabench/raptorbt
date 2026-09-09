@@ -313,7 +313,7 @@ impl BasketBacktest {
             &equity_curve,
             &drawdown_curve,
             &returns,
-            instruments.first().map(|(o, _)| o.timestamps.as_slice()).unwrap_or(&[]),
+            instruments.first().map(|(o, _)| &o.timestamps[..]).unwrap_or(&[]),
             &trades,
         );
 
@@ -484,7 +484,7 @@ mod tests {
     use super::*;
     use crate::core::Direction;
 
-    fn sample_instruments() -> Vec<(OhlcvData, CompiledSignals)> {
+    fn sample_instruments() -> Vec<(OhlcvData<'static>, CompiledSignals)> {
         let n = 20;
 
         let ohlcv1 = OhlcvData {
@@ -493,7 +493,7 @@ mod tests {
             high: (101..101 + n).map(|x| x as f64).collect(),
             low: (99..99 + n).map(|x| x as f64).collect(),
             close: (100..100 + n).map(|x| x as f64 + 0.5).collect(),
-            volume: vec![1000.0; n],
+            volume: vec![1000.0; n].into(),
         };
 
         let ohlcv2 = OhlcvData {
@@ -502,7 +502,7 @@ mod tests {
             high: (51..51 + n).map(|x| x as f64).collect(),
             low: (49..49 + n).map(|x| x as f64).collect(),
             close: (50..50 + n).map(|x| x as f64 + 0.25).collect(),
-            volume: vec![2000.0; n],
+            volume: vec![2000.0; n].into(),
         };
 
         let mut entries1 = vec![false; n];

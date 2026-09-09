@@ -5,7 +5,7 @@ use raptorbt::core::types::{
 };
 use raptorbt::portfolio::engine::PortfolioEngine;
 
-fn sample_ohlcv() -> OhlcvData {
+fn sample_ohlcv() -> OhlcvData<'static> {
     // Create trending sample data
     let n = 100;
     let mut close = vec![100.0];
@@ -25,11 +25,11 @@ fn sample_ohlcv() -> OhlcvData {
 
     OhlcvData {
         timestamps: (0..n as i64).collect(),
-        open,
-        high,
-        low,
-        close,
-        volume: vec![1000.0; n],
+        open: open.into(),
+        high: high.into(),
+        low: low.into(),
+        close: close.into(),
+        volume: vec![1000.0; n].into(),
     }
 }
 
@@ -240,8 +240,8 @@ fn test_short_direction() {
         open: close.iter().skip(1).chain(std::iter::once(&close[n - 1])).cloned().collect(),
         high: close.iter().map(|c| c + 1.0).collect(),
         low: close.iter().map(|c| c - 1.0).collect(),
-        close: close.clone(),
-        volume: vec![1000.0; n],
+        close: close.clone().into(),
+        volume: vec![1000.0; n].into(),
     };
 
     // Entry at bar 10, exit at bar 50

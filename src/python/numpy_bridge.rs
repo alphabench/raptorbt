@@ -23,6 +23,28 @@ pub fn numpy_to_vec_i64(arr: PyReadonlyArray1<i64>) -> Vec<i64> {
     arr.as_slice().unwrap().to_vec()
 }
 
+/// Borrow a numpy `f64` array as a slice, without copying it.
+///
+/// `PyReadonlyArray1` holds the GIL and a read lock on the buffer for as long
+/// as it lives, so the slice cannot be resized or freed underneath us; tying
+/// the returned lifetime to that guard is what makes the borrow sound. The
+/// caller must therefore keep the guard alive for as long as the slice is used
+/// — bind it to a variable, do not pass a temporary.
+///
+/// Panics on a non-contiguous array, which is the same contract
+/// [`numpy_to_vec_f64`] has always had (`as_slice().unwrap()`); NumPy arrays
+/// arriving from ordinary Python code are C-contiguous.
+pub fn numpy_as_slice_f64<'a>(arr: &'a PyReadonlyArray1<'_, f64>) -> &'a [f64] {
+    arr.as_slice().expect("numpy array must be contiguous")
+}
+
+/// Borrow a numpy `i64` array as a slice, without copying it.
+///
+/// See [`numpy_as_slice_f64`] for the lifetime contract.
+pub fn numpy_as_slice_i64<'a>(arr: &'a PyReadonlyArray1<'_, i64>) -> &'a [i64] {
+    arr.as_slice().expect("numpy array must be contiguous")
+}
+
 /// Convert numpy bool array to Vec<bool>.
 pub fn numpy_to_vec_bool(arr: PyReadonlyArray1<bool>) -> Vec<bool> {
     arr.as_slice().unwrap().to_vec()

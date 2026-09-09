@@ -80,11 +80,11 @@ fn costed_run(
     let spot = vec![17_800.0; n];
     let ohlcv = OhlcvData {
         timestamps: (0..n as i64).map(|i| i * 60_000_000_000).collect(),
-        open: spot.clone(),
-        high: spot.clone(),
-        low: spot.clone(),
-        close: spot.clone(),
-        volume: vec![0.0; n],
+        open: spot.clone().into(),
+        high: spot.clone().into(),
+        low: spot.clone().into(),
+        close: spot.clone().into(),
+        volume: vec![0.0; n].into(),
     };
 
     let mut entries = vec![false; n];

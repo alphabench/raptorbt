@@ -81,12 +81,12 @@ impl SingleBacktest {
         symbol: &str,
     ) -> BacktestResult {
         let ohlcv = OhlcvData {
-            timestamps: timestamps.to_vec(),
-            open: open.to_vec(),
-            high: high.to_vec(),
-            low: low.to_vec(),
-            close: close.to_vec(),
-            volume: volume.to_vec(),
+            timestamps: timestamps.to_vec().into(),
+            open: open.to_vec().into(),
+            high: high.to_vec().into(),
+            low: low.to_vec().into(),
+            close: close.to_vec().into(),
+            volume: volume.to_vec().into(),
         };
 
         let dir = crate::core::types::Direction::from_int(direction)
@@ -130,26 +130,30 @@ mod tests {
     use super::*;
     use crate::core::types::{Direction, StopConfig, TargetConfig};
 
-    fn sample_data() -> (OhlcvData, CompiledSignals) {
+    fn sample_data() -> (OhlcvData<'static>, CompiledSignals) {
         let ohlcv = OhlcvData {
             timestamps: (0..20).map(|i| i as i64).collect(),
             open: vec![
                 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0, 101.0,
                 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0,
-            ],
+            ]
+            .into(),
             high: vec![
                 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 102.0,
                 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0,
-            ],
+            ]
+            .into(),
             low: vec![
                 99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 103.0, 102.0, 101.0, 100.0, 99.0, 100.0,
                 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0,
-            ],
+            ]
+            .into(),
             close: vec![
                 100.5, 101.5, 102.5, 103.5, 104.5, 105.0, 104.0, 103.0, 102.0, 101.0, 100.5, 101.5,
                 102.5, 103.5, 104.5, 105.5, 106.5, 107.5, 108.5, 109.5,
-            ],
-            volume: vec![1000.0; 20],
+            ]
+            .into(),
+            volume: vec![1000.0; 20].into(),
         };
 
         let signals = CompiledSignals {
