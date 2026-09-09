@@ -272,6 +272,13 @@ impl OptionsBacktest {
                         exit_fees,
                         fee_breakdown,
                         exit_reason: ExitReason::Signal,
+                        // This path synthesises the trade record rather than closing a
+                        // tracked Position, so no bar-by-bar extremes exist for it.
+                        // None means "not measured", never a zero excursion.
+                        mae_price: None,
+                        mfe_price: None,
+                        mae_pnl: None,
+                        mfe_pnl: None,
                     });
 
                     trade_counter += 1;
@@ -360,6 +367,13 @@ impl OptionsBacktest {
                 exit_fees,
                 fee_breakdown,
                 exit_reason: ExitReason::EndOfData,
+                // This path synthesises the trade record rather than closing a
+                // tracked Position, so no bar-by-bar extremes exist for it.
+                // None means "not measured", never a zero excursion.
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
             });
 
             // Closing out is a real trade, so it is paid for out of the curve.

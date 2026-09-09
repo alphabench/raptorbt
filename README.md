@@ -1623,12 +1623,50 @@ for trade in result.trades():
     print(trade.exit_fees)    # Charged when it closed; 0 if left to expire
     print(trade.fee_breakdown)  # Itemized components, or None on a flat rate
     print(trade.exit_reason)  # "Signal", "StopLoss", "TakeProfit", "TrailingStop", "EndOfData", "Settlement", "TimeExit"
+    print(trade.mae_pnl)      # Worst unrealized loss while open (<= 0), or None
+    print(trade.mfe_pnl)      # Best unrealized profit while open (>= 0), or None
+    print(trade.mae_price)    # Price at that worst point, or None
+    print(trade.mfe_price)    # Price at that best point, or None
 ```
 
 `fees` always equals `entry_fees + exit_fees`, and when an itemized schedule is
 configured `fee_breakdown["total"]` equals `fees` — the reported costs and the
 equity curve are the same money. An option left to expire carries
 `exit_fees == 0.0`: it is never traded out, so it owes no exit-side charge.
+
+### Maximum adverse and favourable excursion
+
+**In plain words: how far a trade went against you before it worked, and how far
+in your favour before it failed.** A realized loss alone cannot tell a bad entry
+apart from a good one that was stopped too early — both report the same number.
+The excursions do.
+
+```python
+for trade in result.trades():
+    if trade.mae_pnl is None:
+        continue                      # this path did not track extremes
+    if trade.pnl > 0 and trade.mae_pnl < 0:
+        ...                           # a winner that first dipped: a tighter
+                                      # stop would have cut it
+    if trade.pnl <= 0 and trade.mfe_pnl > 0:
+        ...                           # a loser that first led: a target would
+                                      # have banked it
+```
+
+Three properties hold for every measured trade:
+
+- `mae_pnl <= 0 <= mfe_pnl`, in the same money and on the same contract
+  multiplier as `pnl`, before costs.
+- `mae_pnl <= (pnl + fees) <= mfe_pnl` — gross P&L is realized somewhere inside
+  the band the trade actually travelled.
+- They are **measured** bar by bar while the position was open, not
+  reconstructed afterwards from an OHLC window. The resolution is therefore the
+  bar: a run on 5-minute bars knows the worst 5-minute extreme, not the worst
+  tick inside it, and the engine makes no finer claim.
+
+`None` means the trade came from a path that does not track intra-trade extremes
+— a synthesized spread, basket or pairs leg. Read it as "not measured", never as
+a zero excursion.
 
 ---
 

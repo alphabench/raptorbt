@@ -160,6 +160,18 @@ class Trade:
     # Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
     fee_breakdown: dict[str, float] | None
     exit_reason: str
+    # Intra-trade extremes, measured bar by bar while the position was open.
+    # None on paths that synthesise a trade instead of closing a tracked
+    # position (spreads, baskets, pairs, options rollups): "not measured",
+    # never a zero excursion. Resolution is the bar, not the tick.
+    mae_price: float | None
+    mfe_price: float | None
+    # Maximum Adverse Excursion: unrealised loss at the worst point, in money,
+    # before costs. Never positive.
+    mae_pnl: float | None
+    # Maximum Favourable Excursion: unrealised profit at the best point, in
+    # money, before costs. Never negative.
+    mfe_pnl: float | None
 
 class BacktestMetrics:
     total_return_pct: float

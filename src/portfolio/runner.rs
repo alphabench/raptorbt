@@ -123,7 +123,7 @@ impl SingleRunner {
         for event in &events {
             if let EngineEvent::Exited { trade, .. } = event {
                 self.streaming.update(trade.return_pct / 100.0);
-                self.trades.push(trade.clone());
+                self.trades.push((**trade).clone());
             }
         }
 

@@ -867,6 +867,10 @@ mod tests {
                 exit_fees: 0.0,
                 fee_breakdown: None,
                 exit_reason: ExitReason::Signal,
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
             }
         }
 
@@ -986,6 +990,10 @@ mod tests {
             exit_fees: 0.0,
             fee_breakdown: None,
             exit_reason: ExitReason::Signal,
+            mae_price: None,
+            mfe_price: None,
+            mae_pnl: None,
+            mfe_pnl: None,
         };
 
         let timestamps: Vec<i64> = (0..10).map(|i| i as i64 * ONE_SEC).collect();

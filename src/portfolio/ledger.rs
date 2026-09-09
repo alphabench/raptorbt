@@ -296,6 +296,11 @@ impl PositionLedger {
         let cost_basis = pos.entry_price * pos.size * self.contract_multiplier;
         let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
+        // Same shared definition as the per-symbol manager; this path tracks
+        // extremes too (see `update_extremes` in the price-update loop).
+        let (adverse_price, favourable_price, mae_pnl, mfe_pnl) =
+            pos.excursions(self.contract_multiplier);
+
         Trade {
             id: self.trade_counter,
             symbol: self.symbol.clone(),
@@ -314,6 +319,10 @@ impl PositionLedger {
             exit_fees,
             fee_breakdown,
             exit_reason,
+            mae_price: Some(adverse_price),
+            mfe_price: Some(favourable_price),
+            mae_pnl: Some(mae_pnl),
+            mfe_pnl: Some(mfe_pnl),
         }
     }
 

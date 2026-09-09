@@ -5,6 +5,40 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-09-09
+
+**In plain words: every trade now reports how far it went against you before
+it worked, and how far in your favour before it failed. A realized loss alone
+cannot tell a bad entry apart from a good one that was stopped too early —
+both report the same number. These two do.**
+
+### Added
+
+- **`Trade.mae_pnl` / `Trade.mfe_pnl` — maximum adverse and favourable
+  excursion**, plus `Trade.mae_price` / `Trade.mfe_price`, the prices at those
+  points. Measured bar by bar while the position is open, from watermarks the
+  engine already tracked for trailing stops, so there is no added work in the
+  bar loop. `mae_pnl <= 0 <= mfe_pnl`, both in the same money and on the same
+  contract multiplier as `pnl`, before costs, and gross P&L always falls inside
+  the band: `mae_pnl <= (pnl + fees) <= mfe_pnl`.
+
+  Their resolution is the bar, not the tick: a run on 5-minute bars knows the
+  worst 5-minute extreme, not the worst moment inside it. That is a real limit
+  and the engine makes no finer claim — reconstructing intra-bar order from an
+  OHLC window cannot know whether the high or the low came first.
+
+  `None` on paths that synthesize a trade rather than closing a tracked
+  position (spread, basket and pairs legs). `None` means "not measured" and must
+  not be read as a zero excursion; a flat trade that genuinely never moved
+  reports `0.0`, which is a measurement.
+
+### Changed
+
+- **`EngineEvent::Exited` now carries its `Trade` boxed.** A `Trade` is by far
+  the largest thing any event variant holds, and an unboxed one made every
+  event in every queue pay its width. Rust callers that match on the variant
+  and pass the trade by value need `*trade`; field access is unchanged.
+
 ## [0.13.1] - 2026-09-04
 
 **In plain words: 0.13.0 could report a typed order's fill twice when a

@@ -77,7 +77,11 @@ pub enum EngineEvent {
     /// A position was opened.
     Entered { idx: usize, price: Price, size: f64, direction: Direction },
     /// A position was closed, producing a completed trade.
-    Exited { idx: usize, trade: Trade },
+    ///
+    /// The trade is boxed to keep `EngineEvent` small: a `Trade` is by far the
+    /// largest thing any variant carries, and an unboxed one made every event
+    /// in every queue pay its width.
+    Exited { idx: usize, trade: Box<Trade> },
     /// An entry signal was refused by the risk gate.
     EntryRejected { idx: usize, reason: RejectReason },
     /// An order started working (resting kinds) or was acknowledged
@@ -1366,7 +1370,7 @@ impl EngineKernel {
 
         self.credit_close(position_id, &trade, fees, exit_price);
 
-        Some(EngineEvent::Exited { idx, trade })
+        Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
     }
 
     /// Credit a closed position back to the account.
@@ -1429,7 +1433,7 @@ impl EngineKernel {
                 },
             ) {
                 self.credit_close(position_id, &trade, settle_fee, settle_price);
-                events.push(EngineEvent::Exited { idx, trade });
+                events.push(EngineEvent::Exited { idx, trade: Box::new(trade) });
             }
         }
         events
@@ -1643,7 +1647,7 @@ impl EngineKernel {
                 self.cash += trade.pnl + entry_fees;
             }
         }
-        Some(EngineEvent::Exited { idx, trade })
+        Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
     }
 
     /// Add a fill slice to the position an order already opened: charge

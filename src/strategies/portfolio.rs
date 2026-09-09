@@ -182,7 +182,7 @@ impl PortfolioBacktest {
                     if let EngineEvent::Exited { trade, .. } = event {
                         per_instrument_trades[idx] += 1;
                         per_instrument_pnl[idx] += trade.pnl;
-                        trades.push(trade);
+                        trades.push(*trade);
                     }
                 }
                 // Whatever the exit produced returns to the pool.

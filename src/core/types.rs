@@ -275,6 +275,29 @@ pub struct Trade {
     pub fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
     /// Exit reason.
     pub exit_reason: ExitReason,
+    /// Worst price the trade reached against the position before it closed.
+    ///
+    /// `None` on any path that does not track intra-trade extremes (a
+    /// synthesised trade, a ledger rollup). `None` means "not measured" and
+    /// never 0.0: a fabricated zero would read as "this trade never went
+    /// against me", which is the opposite of an unknown.
+    #[serde(default)]
+    pub mae_price: Option<Price>,
+    /// Best price the trade reached in the position's favour before it closed.
+    #[serde(default)]
+    pub mfe_price: Option<Price>,
+    /// Maximum Adverse Excursion: unrealised loss at `mae_price`, in money,
+    /// on the same multiplier and sign convention as `pnl`. Never positive.
+    ///
+    /// Measured bar by bar during the run, not inferred from OHLC afterwards.
+    /// Its resolution is the bar: a 5m run knows the worst 5m extreme, not the
+    /// worst tick within it.
+    #[serde(default)]
+    pub mae_pnl: Option<f64>,
+    /// Maximum Favourable Excursion: unrealised profit at `mfe_price`, in
+    /// money, on the same multiplier as `pnl`. Never negative.
+    #[serde(default)]
+    pub mfe_pnl: Option<f64>,
 }
 
 impl Trade {
@@ -889,6 +912,35 @@ impl Position {
         }
         let price_change = current_price - self.entry_price;
         price_change * self.size * self.direction.multiplier()
+    }
+
+    /// Intra-trade extremes as (adverse price, favourable price, MAE, MFE).
+    ///
+    /// One definition shared by every path that closes a position, so the
+    /// per-symbol manager and the multi-position ledger cannot drift into
+    /// reporting excursions two different ways.
+    ///
+    /// `contract_multiplier` is the caller's point value; the direction sign
+    /// is applied here. Direction decides which watermark hurt: a long suffers
+    /// at the low and profits at the high, a short the other way round. Fees
+    /// are deliberately not deducted -- an excursion measures how far price
+    /// travelled while the position was open, not what the round trip cost.
+    pub fn excursions(&self, contract_multiplier: f64) -> (Price, Price, f64, f64) {
+        let (adverse_price, favourable_price) = match self.direction {
+            Direction::Long => (self.lowest_since_entry, self.highest_since_entry),
+            Direction::Short => (self.highest_since_entry, self.lowest_since_entry),
+        };
+        let multiplier = self.direction.multiplier() * contract_multiplier;
+        let excursion = |price: Price| (price - self.entry_price) * self.size * multiplier;
+        // Clamped so the documented invariants hold even when a single bar's
+        // high/low straddles the entry fill: MAE is never positive, MFE never
+        // negative.
+        (
+            adverse_price,
+            favourable_price,
+            excursion(adverse_price).min(0.0),
+            excursion(favourable_price).max(0.0),
+        )
     }
 }
 

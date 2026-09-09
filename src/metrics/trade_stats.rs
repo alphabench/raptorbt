@@ -294,6 +294,10 @@ mod tests {
                 exit_fees: 0.0,
                 fee_breakdown: None,
                 exit_reason: ExitReason::Signal,
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
             },
             Trade {
                 id: 2,
@@ -313,6 +317,10 @@ mod tests {
                 exit_fees: 0.0,
                 fee_breakdown: None,
                 exit_reason: ExitReason::StopLoss,
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
             },
             Trade {
                 id: 3,
@@ -332,6 +340,10 @@ mod tests {
                 exit_fees: 0.0,
                 fee_breakdown: None,
                 exit_reason: ExitReason::TakeProfit,
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
             },
         ]
     }

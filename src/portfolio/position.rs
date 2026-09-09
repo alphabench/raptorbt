@@ -140,6 +140,11 @@ impl PositionManager {
         let cost_basis = pos.entry_price * pos.size * self.contract_multiplier;
         let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
+        // Intra-trade extremes, from the one shared definition on Position so
+        // this path and the ledger's cannot drift.
+        let (adverse_price, favourable_price, mae_pnl, mfe_pnl) =
+            pos.excursions(self.contract_multiplier);
+
         Trade {
             id: self.trade_counter,
             symbol: self.symbol.clone(),
@@ -158,6 +163,10 @@ impl PositionManager {
             exit_fees,
             fee_breakdown,
             exit_reason,
+            mae_price: Some(adverse_price),
+            mfe_price: Some(favourable_price),
+            mae_pnl: Some(mae_pnl),
+            mfe_pnl: Some(mfe_pnl),
         }
     }
 
@@ -270,6 +279,114 @@ impl PositionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long that dipped before it won reports the dip as MAE and the peak
+    /// as MFE, both in money and both on the right side of zero.
+    #[test]
+    fn test_excursions_long() {
+        let mut pm = PositionManager::new("TEST".to_string());
+        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None, 0.0));
+
+        // Price dips to 95 then runs to 120 before exiting at 110.
+        pm.update_price(100.0, 95.0);
+        pm.update_price(120.0, 110.0);
+
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 5,
+                timestamp: 1005,
+                price: 110.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 0.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
+
+        // (95 - 100) * 10 = -50 adverse; (120 - 100) * 10 = +200 favourable.
+        assert!((trade.mae_pnl.unwrap() - -50.0).abs() < 1e-10);
+        assert!((trade.mfe_pnl.unwrap() - 200.0).abs() < 1e-10);
+        assert!((trade.mae_price.unwrap() - 95.0).abs() < 1e-10);
+        assert!((trade.mfe_price.unwrap() - 120.0).abs() < 1e-10);
+    }
+
+    /// A short inverts which watermark hurt: the high is adverse, the low is
+    /// favourable. A sign error here would report a winning short as a loss.
+    #[test]
+    fn test_excursions_short() {
+        let mut pm = PositionManager::new("TEST".to_string());
+        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Short, None, None, 0.0));
+
+        pm.update_price(108.0, 100.0);
+        pm.update_price(100.0, 90.0);
+
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 5,
+                timestamp: 1005,
+                price: 92.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 0.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
+
+        // Short: high 108 is adverse -> (108-100)*10*(-1) = -80.
+        //        low  90  is favourable -> (90-100)*10*(-1) = +100.
+        assert!((trade.mae_pnl.unwrap() - -80.0).abs() < 1e-10);
+        assert!((trade.mfe_pnl.unwrap() - 100.0).abs() < 1e-10);
+        assert!((trade.mae_price.unwrap() - 108.0).abs() < 1e-10);
+        assert!((trade.mfe_price.unwrap() - 90.0).abs() < 1e-10);
+    }
+
+    /// A trade that never moved reports zero on both sides -- measured, not
+    /// missing. The clamps keep MAE <= 0 <= MFE even then.
+    #[test]
+    fn test_excursions_flat_trade_is_zero_not_none() {
+        let mut pm = PositionManager::new("TEST".to_string());
+        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Long, None, None, 0.0));
+
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 1,
+                timestamp: 1001,
+                price: 100.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 0.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
+
+        assert_eq!(trade.mae_pnl, Some(0.0));
+        assert_eq!(trade.mfe_pnl, Some(0.0));
+    }
+
+    /// The contract multiplier scales excursions exactly as it scales pnl, so
+    /// a derivative's MAE is in the same money as its P&L.
+    #[test]
+    fn test_excursions_respect_contract_multiplier() {
+        let mut pm = PositionManager::new("TEST".to_string());
+        pm.set_contract_multiplier(50.0);
+        assert!(pm.open_position(0, 1000, 100.0, 2.0, Direction::Long, None, None, 0.0));
+        pm.update_price(100.0, 98.0);
+
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 2,
+                timestamp: 1002,
+                price: 101.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 0.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
+
+        // (98 - 100) * 2 * 50 = -200.
+        assert!((trade.mae_pnl.unwrap() - -200.0).abs() < 1e-10);
+    }
 
     #[test]
     fn test_open_close_position() {

@@ -645,6 +645,13 @@ impl SpreadBacktest {
             exit_fees,
             fee_breakdown,
             exit_reason,
+            // This path synthesises the trade record rather than closing a
+            // tracked Position, so no bar-by-bar extremes exist for it.
+            // None means "not measured", never a zero excursion.
+            mae_price: None,
+            mfe_price: None,
+            mae_pnl: None,
+            mfe_pnl: None,
         }
     }
 

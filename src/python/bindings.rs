@@ -630,6 +630,27 @@ pub struct PyTrade {
     pub fee_breakdown: Option<HashMap<String, f64>>,
     #[pyo3(get)]
     pub exit_reason: String,
+    /// Worst price reached against the position while it was open.
+    ///
+    /// `None` on paths that synthesise a trade instead of closing a tracked
+    /// position (spreads, baskets, pairs, options rollups). `None` means "not
+    /// measured" -- never read it as a zero excursion.
+    #[pyo3(get)]
+    pub mae_price: Option<f64>,
+    /// Best price reached in the position's favour while it was open.
+    #[pyo3(get)]
+    pub mfe_price: Option<f64>,
+    /// Maximum Adverse Excursion in money: the unrealised loss at the worst
+    /// point of the trade, before costs. Never positive.
+    ///
+    /// Measured bar by bar during the run. Its resolution is the bar, so a 5m
+    /// run knows the worst 5m extreme, not the worst tick inside it.
+    #[pyo3(get)]
+    pub mae_pnl: Option<f64>,
+    /// Maximum Favourable Excursion in money: the unrealised profit at the
+    /// best point of the trade, before costs. Never negative.
+    #[pyo3(get)]
+    pub mfe_pnl: Option<f64>,
 }
 
 #[pymethods]
@@ -2289,6 +2310,10 @@ pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
             ])
         }),
         exit_reason: format!("{:?}", t.exit_reason),
+        mae_price: t.mae_price,
+        mfe_price: t.mfe_price,
+        mae_pnl: t.mae_pnl,
+        mfe_pnl: t.mfe_pnl,
     }
 }
 

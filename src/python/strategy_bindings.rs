@@ -127,7 +127,7 @@ impl From<EngineEvent> for PyEngineEvent {
                 price: Some(trade.exit_price),
                 size: Some(trade.size),
                 direction: Some(trade.direction as i32),
-                trade: Some(convert_trade(trade)),
+                trade: Some(convert_trade(*trade)),
                 ..empty
             },
             EngineEvent::EntryRejected { idx, reason } => Self {

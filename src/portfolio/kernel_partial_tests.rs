@@ -154,7 +154,7 @@ fn a_closing_order_reduces_across_prints_and_never_reverses() {
     let trades: Vec<&Trade> = events
         .iter()
         .filter_map(|e| match e {
-            EngineEvent::Exited { trade, .. } => Some(trade),
+            EngineEvent::Exited { trade, .. } => Some(&**trade),
             _ => None,
         })
         .collect();
