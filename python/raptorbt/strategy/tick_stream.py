@@ -7,9 +7,14 @@ triggers fires before ``push_tick`` returns, so the caller reads positions
 and queued state synchronously.
 
 Semantics are identical to :func:`raptorbt.run_tick_strategy` — both drive
-the same dispatch loop — with one addition: pushed or warmup *bars* execute
-(they match orders and mark equity), exactly as in the bar runner. Bars
-aggregated from prints via ``primary_bars`` remain a view only.
+the same dispatch loop — with two additions. Pushed or warmup *bars* execute
+(they match orders and mark equity), exactly as in the bar runner; bars
+aggregated from prints via ``primary_bars`` remain a view only. And a print
+the session refuses (``ltp == 0`` and no two-sided book — an index that has
+not ticked, a quote-only row) still advances that symbol's clock: alerts
+and timers due by its timestamp fire inside that push, instead of waiting
+for the next accepted print. The batch runner never sees such rows, so it
+cannot fire on them; feed it rows that carry a price.
 
 Typical shape::
 
@@ -36,6 +41,7 @@ from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.portfolio_runner import apply_commands_on
 from raptorbt.strategy.tick_runner import (
     TickContext,
+    advance_clock,
     drive_tick_events,
     setup_tick_strategy,
 )
@@ -151,6 +157,9 @@ class TickStrategyStream:
         self._apply_commands = apply_commands_on(
             strategy, session, self.ctx, self._symbols, self._id_map
         )
+        # Intents (enter / close_position) a timer queued for a symbol
+        # between its prints, waiting for that symbol's next print.
+        self._held_intents: dict[str, list] = {}
         # Prime indicators and strategy state from the warmup history now,
         # so the stream is warm before the first live event.
         self._drain()
@@ -178,6 +187,11 @@ class TickStrategyStream:
         flow deltas stand in); ``bid_qty``/``ask_qty`` are the displayed L1
         sizes; ``oi`` the open interest. All four default to "unknown".
         Returns how many events were appended (0–2).
+
+        A row that yields no event still carries a timestamp, and alerts or
+        timers due by it fire before this returns. Orders they submit are
+        routed to their instrument at once and match from its next print;
+        intents they queue are held for this symbol's next print.
         """
         self._check_open()
         appended = self._session.push_tick(
@@ -195,6 +209,8 @@ class TickStrategyStream:
         )
         if appended:
             self._drain()
+        else:
+            self._mark_time(symbol, timestamp)
         return appended
 
     def push_bar(
@@ -267,4 +283,26 @@ class TickStrategyStream:
             self._streams,
             self._primary,
             self._apply_commands,
+            before_trade=self._release_held_intents,
         )
+
+    def _mark_time(self, symbol: str, timestamp: int) -> None:
+        """A refused print still proves the market reached its instant.
+
+        Fire what is due on this symbol's clock now. Commands (submit_order,
+        cancel, close by id) are routed at once; with no event in flight the
+        session stamps them on the target's last print, so they match from
+        its next one. Intents have no symbol of their own and ride a print,
+        so they are held for this symbol's next trade event rather than
+        left on the queue for whichever symbol prints first.
+        """
+        advance_clock(self._strategy, self.ctx, self._clocks, symbol, timestamp)
+        self._apply_commands(self._index_of[symbol], 0, timestamp)
+        queued = self._strategy.drain_orders()
+        if queued:
+            self._held_intents.setdefault(symbol, []).extend(queued)
+
+    def _release_held_intents(self, symbol: str) -> None:
+        held = self._held_intents.pop(symbol, None)
+        if held:
+            self._strategy._pending_orders[:0] = held

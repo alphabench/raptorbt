@@ -154,14 +154,41 @@ def setup_tick_strategy(strategy, ctx, symbols, primary_bars):
     return clocks, streams, primary
 
 
+def advance_clock(strategy, ctx, clocks, symbol, ts):
+    """Move one symbol's clock to ``ts`` and fire every alert or timer due.
+
+    The one place time reaches a strategy. Called for each schedule event
+    before its data handler, and by the live stream for a print the session
+    refused (no trade, no two-sided book): that print still proves the
+    market reached its instant, so a schedule due by then must not wait for
+    the next accepted print.
+    """
+    ctx.symbol = symbol
+    strategy.clock = clocks[symbol]
+    for time_event in strategy.clock._advance(ts):
+        strategy.on_time_event(ctx, time_event)
+
+
 def drive_tick_events(
-    strategy, ctx, session, symbols, clocks, streams, primary, apply_commands
+    strategy,
+    ctx,
+    session,
+    symbols,
+    clocks,
+    streams,
+    primary,
+    apply_commands,
+    before_trade=None,
 ):
     """Drain every pending schedule event through the strategy's hooks.
 
     Shared by the batch tick runner and the live stream: both produce the
     same schedule shapes, so one dispatch loop keeps their semantics
     identical. Returns once the session has no pending event.
+
+    ``before_trade(symbol)``, when given, runs just before a print's queued
+    intents are drained — the stream uses it to hand back intents a timer
+    queued for that symbol between prints.
     """
     while True:
         current = session.current_event()
@@ -169,13 +196,10 @@ def drive_tick_events(
             break
         kind, instrument, local_idx, ts, a, b, c, d, e = current
         symbol = symbols[instrument]
-        ctx.symbol = symbol
         ctx.idx = local_idx
 
         # Clock first: scheduled times precede the data revealing them.
-        strategy.clock = clocks[symbol]
-        for time_event in strategy.clock._advance(ts):
-            strategy.on_time_event(ctx, time_event)
+        advance_clock(strategy, ctx, clocks, symbol, ts)
 
         if kind == "bar":
             # Real bars in a tick session: warmup history or a pushed live
@@ -239,6 +263,8 @@ def drive_tick_events(
         ctx._tick = None
         apply_commands(instrument, local_idx, ts)
 
+        if before_trade is not None:
+            before_trade(symbol)
         events = session.apply_current(**drain_intents(strategy, symbol, local_idx))
         dispatch_events(strategy, ctx, events)
 

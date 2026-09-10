@@ -273,3 +273,119 @@ class TestLifecycle:
         stream = TickStrategyStream(EnterOnce(), ["AAA"], config=_zero_fee_config())
         with pytest.raises(KeyError):
             stream.push_tick("BBB", 0, 100.0)
+
+
+class TestARefusedPrintStillTellsTheTime:
+    """A print with no price and no book yields no event, but it carries a
+    timestamp: the market reached that instant. A schedule due by then must
+    fire inside that push — not on the next print the session accepts,
+    which for a quiet index can be minutes later."""
+
+    def test_an_alert_fires_on_a_quote_less_print(self):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_time_alert("entry", at_ns=5)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append((ctx.symbol, event.name, event.ts_fired))
+
+        strategy = S()
+        stream = TickStrategyStream(strategy, ["AAA"], config=_zero_fee_config())
+        stream.push_tick("AAA", 1, 100.0)
+        assert strategy.fired == []
+
+        appended = stream.push_tick("AAA", 5, 0.0, 0.0, 0.0)
+        assert appended == 0, "a priceless, bookless row is still not an event"
+        assert strategy.fired == [("AAA", "entry", 5)], (
+            "the alert was due at 5 and the market was proven to be at 5"
+        )
+
+        # The next accepted print does not fire it a second time.
+        stream.push_tick("AAA", 9, 101.0)
+        assert strategy.fired == [("AAA", "entry", 5)]
+
+    def test_a_timer_fires_once_per_symbol_whichever_row_reveals_the_time(self):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_timer("beat", interval_ns=4, start_ns=4)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append((ctx.symbol, event.ts_fired))
+
+        strategy = S()
+        stream = TickStrategyStream(strategy, ["AAA", "BBB"], config=_zero_fee_config())
+        stream.push_tick("AAA", 4, 0.0)  # refused: AAA's clock still moves
+        stream.push_tick("BBB", 4, 50.0)  # accepted: BBB's clock moves
+        stream.push_tick("AAA", 6, 100.0)  # accepted: beat already fired for AAA
+        assert sorted(strategy.fired) == [("AAA", 4), ("BBB", 4)]
+
+    def test_an_order_submitted_on_a_quote_less_print_fills_on_the_next(self):
+        from raptorbt.strategy import orders
+
+        class S(Strategy):
+            def on_start(self, ctx):
+                self.clock.set_time_alert("entry", at_ns=5)
+
+            def on_time_event(self, ctx, event):
+                self.submit_order(orders.Market(side="buy", units=10.0), symbol="AAA")
+
+        stream = TickStrategyStream(S(), ["AAA"], config=_zero_fee_config())
+        stream.push_tick("AAA", 1, 100.0)
+        stream.push_tick("AAA", 5, 0.0, 0.0, 0.0)
+        assert not stream.positions("AAA"), "nothing to fill against yet"
+        working = stream._session.working_orders(0)
+        assert len(working) == 1 and working[0][3] == "market", (
+            "the order is already resting, placed when the alert was due"
+        )
+        stream.push_tick("AAA", 9, 104.0)
+        assert stream.positions("AAA"), "the order matched on the next print"
+        result = stream.finish()
+        trade = result.result.trades()[0]
+        assert trade.entry_price == pytest.approx(104.0)
+
+    def test_an_intent_queued_between_prints_waits_for_its_own_symbol(self):
+        """close_position() names no symbol; it must close the symbol whose
+        clock fired, not whichever symbol prints first afterwards."""
+
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = []
+
+            def on_start(self, ctx):
+                self.clock.set_time_alert("flatten", at_ns=5)
+
+            def on_trade_tick(self, ctx, tick):
+                if ctx.position is None and tick.timestamp < 5:
+                    self.enter(size_frac=0.4)
+
+            def on_time_event(self, ctx, event):
+                self.fired.append((ctx.symbol, event.ts_fired))
+                if ctx.symbol == "AAA":
+                    self.close_position()
+
+        strategy = S()
+        stream = TickStrategyStream(strategy, ["AAA", "BBB"], config=_zero_fee_config())
+        stream.push_tick("AAA", 1, 100.0)
+        stream.push_tick("BBB", 1, 50.0)
+        stream.push_tick("AAA", 2, 100.0)
+        stream.push_tick("BBB", 2, 50.0)
+        assert stream.positions("AAA") and stream.positions("BBB")
+
+        stream.push_tick("AAA", 5, 0.0, 0.0, 0.0)  # AAA's flatten fires here
+        assert strategy.fired == [("AAA", 5)]
+        stream.push_tick("BBB", 6, 51.0)  # BBB prints first: it must stay open
+        assert stream.positions("BBB"), "BBB was never told to close"
+        assert stream.positions("AAA"), "AAA has not printed since; nothing to fill"
+
+        stream.push_tick("AAA", 7, 102.0)
+        assert not stream.positions("AAA"), "AAA closed on its own next print"
+        assert stream.positions("BBB")

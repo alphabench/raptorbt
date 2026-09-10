@@ -578,7 +578,9 @@ New in 0.5.0:
   `set_timer(name, interval_ns, start_ns=None, stop_ns=None)` (recurring;
   one firing per bar, gaps collapse); due events reach `on_time_event`
   _before_ the bar's data handlers. Bar-granular by design: events carry
-  `ts_scheduled` and `ts_fired`.
+  `ts_scheduled` and `ts_fired`. On a `TickStrategyStream`, a pushed row the
+  session refuses (no price, no two-sided book) still advances that symbol's
+  clock, so a schedule due by its timestamp fires inside that push.
 - **Cache** — `self.cache`, an event-sourced mirror (no per-query engine
   calls): `order(client_id)` / `orders_open()` / `is_order_open()`,
   `closed_trades()`, `realized_pnl(symbol=None)`.
@@ -1116,6 +1118,15 @@ stream.push_depth("RELIANCE", timestamp_ns, bid_prices, bid_sizes,
 
 result = stream.finish()      # closes out and computes metrics
 ```
+
+A pushed row with `ltp == 0` and no two-sided book yields no event —
+`push_tick` returns 0 — but it still names an instant the market reached, and
+alerts or timers due by then fire inside that push rather than waiting for
+the next accepted print (for a quiet index, minutes later). Orders such a
+timer submits are routed to their instrument at once and match from its next
+print; `enter()` / `close_position()` intents, which name no symbol, are held
+for that symbol's next print so another symbol's print cannot pick them up.
+The batch runner never sees such rows and cannot fire on them.
 
 `warmup_bars` is replayed during construction, so indicators are primed before
 the first live push. Those bars **execute** — they match orders and mark
