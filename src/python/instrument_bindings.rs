@@ -8,6 +8,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::errors::Fail;
+use super::schedule_bindings::PySessionSchedule;
 use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 
 /// Python-exposed instrument market definition.
@@ -57,12 +59,37 @@ fn apply_common(
     Ok(spec)
 }
 
+fn non_empty(field: &str, value: Option<String>) -> PyResult<Option<String>> {
+    match value {
+        Some(v) if v.trim().is_empty() => {
+            Err(Fail::new("invalid_instrument_metadata", format!("{field} must not be empty"))
+                .op("InstrumentSpec")
+                .param(field)
+                .into())
+        }
+        other => Ok(other),
+    }
+}
+
+/// Attach the venue, currency and session every factory accepts.
+fn with_meta(
+    mut spec: InstrumentSpec,
+    venue: Option<String>,
+    currency: Option<String>,
+    session: Option<&PySessionSchedule>,
+) -> PyResult<InstrumentSpec> {
+    spec.venue = non_empty("venue", venue)?;
+    spec.currency = non_empty("currency", currency)?;
+    spec.session = session.map(|s| s.inner.clone());
+    Ok(spec)
+}
+
 #[pymethods]
 impl PyInstrumentSpec {
     /// A cash equity / spot instrument.
     #[staticmethod]
     #[pyo3(signature = (symbol, price_increment=0.0, lot_size=1.0, size_increment=0.0,
-                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0))]
+                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None))]
     #[allow(clippy::too_many_arguments)]
     fn equity(
         symbol: &str,
@@ -73,21 +100,29 @@ impl PyInstrumentSpec {
         margin_maint: f64,
         maker_fee: f64,
         taker_fee: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         let spec = InstrumentSpec::new(symbol, InstrumentKind::Cash);
         Ok(Self {
-            inner: apply_common(
-                spec,
-                price_increment,
-                size_increment,
-                lot_size,
-                1.0,
-                margin_init,
-                margin_maint,
-                maker_fee,
-                taker_fee,
-                None,
-                None,
+            inner: with_meta(
+                apply_common(
+                    spec,
+                    price_increment,
+                    size_increment,
+                    lot_size,
+                    1.0,
+                    margin_init,
+                    margin_maint,
+                    maker_fee,
+                    taker_fee,
+                    None,
+                    None,
+                )?,
+                venue,
+                currency,
+                session,
             )?,
         })
     }
@@ -96,7 +131,7 @@ impl PyInstrumentSpec {
     #[staticmethod]
     #[pyo3(signature = (symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0,
                         underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0,
-                        maker_fee=0.0, taker_fee=0.0))]
+                        maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None))]
     #[allow(clippy::too_many_arguments)]
     fn futures_contract(
         symbol: &str,
@@ -110,21 +145,29 @@ impl PyInstrumentSpec {
         margin_maint: f64,
         maker_fee: f64,
         taker_fee: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         let spec = InstrumentSpec::new(symbol, InstrumentKind::Contract { underlying });
         Ok(Self {
-            inner: apply_common(
-                spec,
-                price_increment,
-                0.0,
-                lot_size,
-                multiplier,
-                margin_init,
-                margin_maint,
-                maker_fee,
-                taker_fee,
-                activation_ns,
-                Some(expiration_ns),
+            inner: with_meta(
+                apply_common(
+                    spec,
+                    price_increment,
+                    0.0,
+                    lot_size,
+                    multiplier,
+                    margin_init,
+                    margin_maint,
+                    maker_fee,
+                    taker_fee,
+                    activation_ns,
+                    Some(expiration_ns),
+                )?,
+                venue,
+                currency,
+                session,
             )?,
         })
     }
@@ -133,7 +176,7 @@ impl PyInstrumentSpec {
     #[staticmethod]
     #[pyo3(signature = (symbol, lot_size=1.0, multiplier=1.0, price_increment=0.0,
                         size_increment=0.0, underlying=None, margin_init=0.0, margin_maint=0.0,
-                        maker_fee=0.0, taker_fee=0.0))]
+                        maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None))]
     #[allow(clippy::too_many_arguments)]
     fn perpetual(
         symbol: &str,
@@ -146,21 +189,29 @@ impl PyInstrumentSpec {
         margin_maint: f64,
         maker_fee: f64,
         taker_fee: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         let spec = InstrumentSpec::new(symbol, InstrumentKind::Contract { underlying });
         Ok(Self {
-            inner: apply_common(
-                spec,
-                price_increment,
-                size_increment,
-                lot_size,
-                multiplier,
-                margin_init,
-                margin_maint,
-                maker_fee,
-                taker_fee,
-                None,
-                None,
+            inner: with_meta(
+                apply_common(
+                    spec,
+                    price_increment,
+                    size_increment,
+                    lot_size,
+                    multiplier,
+                    margin_init,
+                    margin_maint,
+                    maker_fee,
+                    taker_fee,
+                    None,
+                    None,
+                )?,
+                venue,
+                currency,
+                session,
             )?,
         })
     }
@@ -175,7 +226,7 @@ impl PyInstrumentSpec {
     #[pyo3(signature = (symbol, strike, right, expiration_ns, lot_size, multiplier=1.0,
                         price_increment=0.0, underlying=None, binary=false, activation_ns=None,
                         margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0,
-                        span_pct=0.0, exposure_pct=0.0))]
+                        span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None))]
     #[allow(clippy::too_many_arguments)]
     fn option(
         symbol: &str,
@@ -194,6 +245,9 @@ impl PyInstrumentSpec {
         taker_fee: f64,
         span_pct: f64,
         exposure_pct: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         if span_pct < 0.0 || exposure_pct < 0.0 {
             return Err(PyValueError::new_err("span_pct and exposure_pct must be >= 0"));
@@ -217,18 +271,23 @@ impl PyInstrumentSpec {
         spec.span_pct = span_pct;
         spec.exposure_pct = exposure_pct;
         Ok(Self {
-            inner: apply_common(
-                spec,
-                price_increment,
-                0.0,
-                lot_size,
-                multiplier,
-                margin_init,
-                margin_maint,
-                maker_fee,
-                taker_fee,
-                activation_ns,
-                Some(expiration_ns),
+            inner: with_meta(
+                apply_common(
+                    spec,
+                    price_increment,
+                    0.0,
+                    lot_size,
+                    multiplier,
+                    margin_init,
+                    margin_maint,
+                    maker_fee,
+                    taker_fee,
+                    activation_ns,
+                    Some(expiration_ns),
+                )?,
+                venue,
+                currency,
+                session,
             )?,
         })
     }
@@ -236,7 +295,7 @@ impl PyInstrumentSpec {
     /// A spot currency pair.
     #[staticmethod]
     #[pyo3(signature = (symbol, price_increment=0.0, size_increment=0.0, lot_size=1.0,
-                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0))]
+                        margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None))]
     #[allow(clippy::too_many_arguments)]
     fn currency_pair(
         symbol: &str,
@@ -247,35 +306,84 @@ impl PyInstrumentSpec {
         margin_maint: f64,
         maker_fee: f64,
         taker_fee: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         let spec = InstrumentSpec::new(symbol, InstrumentKind::CurrencyPair);
         Ok(Self {
-            inner: apply_common(
-                spec,
-                price_increment,
-                size_increment,
-                lot_size,
-                1.0,
-                margin_init,
-                margin_maint,
-                maker_fee,
-                taker_fee,
-                None,
-                None,
+            inner: with_meta(
+                apply_common(
+                    spec,
+                    price_increment,
+                    size_increment,
+                    lot_size,
+                    1.0,
+                    margin_init,
+                    margin_maint,
+                    maker_fee,
+                    taker_fee,
+                    None,
+                    None,
+                )?,
+                venue,
+                currency,
+                session,
             )?,
         })
     }
 
     /// A non-tradable reference index.
     #[staticmethod]
-    #[pyo3(signature = (symbol, price_increment=0.0))]
-    fn index(symbol: &str, price_increment: f64) -> PyResult<Self> {
+    #[pyo3(signature = (symbol, price_increment=0.0, venue=None, currency=None, session=None))]
+    fn index(
+        symbol: &str,
+        price_increment: f64,
+        venue: Option<String>,
+        currency: Option<String>,
+        session: Option<&PySessionSchedule>,
+    ) -> PyResult<Self> {
         let mut spec = InstrumentSpec::new(symbol, InstrumentKind::Index);
         if price_increment < 0.0 {
             return Err(PyValueError::new_err("price_increment must be >= 0"));
         }
         spec.price_increment = price_increment;
-        Ok(Self { inner: spec })
+        Ok(Self { inner: with_meta(spec, venue, currency, session)? })
+    }
+
+    /// Listing venue, or None. Metadata only.
+    #[getter]
+    fn venue(&self) -> Option<String> {
+        self.inner.venue.clone()
+    }
+
+    #[setter]
+    fn set_venue(&mut self, venue: Option<String>) -> PyResult<()> {
+        self.inner.venue = non_empty("venue", venue)?;
+        Ok(())
+    }
+
+    /// Quote currency, or None. Metadata only: nothing is converted.
+    #[getter]
+    fn currency(&self) -> Option<String> {
+        self.inner.currency.clone()
+    }
+
+    #[setter]
+    fn set_currency(&mut self, currency: Option<String>) -> PyResult<()> {
+        self.inner.currency = non_empty("currency", currency)?;
+        Ok(())
+    }
+
+    /// Trading calendar, or None for an instrument that trades at any time.
+    #[getter]
+    fn session(&self) -> Option<PySessionSchedule> {
+        self.inner.session.clone().map(|inner| PySessionSchedule { inner })
+    }
+
+    #[setter]
+    fn set_session(&mut self, session: Option<&PySessionSchedule>) {
+        self.inner.session = session.map(|s| s.inner.clone());
     }
 
     #[getter]

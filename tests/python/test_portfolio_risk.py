@@ -8,7 +8,7 @@ gate, so a limit of N allowed N positions *per symbol*.
 
 import numpy as np
 
-from raptorbt import BacktestConfig, Strategy, run_portfolio_strategy
+from raptorbt import BacktestConfig, Strategy
 
 
 def _bars(closes, start_ts=0, step=1):
@@ -61,9 +61,9 @@ def _three_symbols():
 
 
 class TestPortfolioMaxPositions:
-    def test_max_positions_is_portfolio_wide(self):
+    def test_max_positions_is_portfolio_wide(self, portfolio_runner):
         strategy = _EnterEverything()
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             strategy, _three_symbols(), config=_config(max_positions=2)
         )
 
@@ -75,16 +75,16 @@ class TestPortfolioMaxPositions:
             s.rejected_entries for s in result.per_instrument
         )
 
-    def test_unconstrained_allows_every_symbol(self):
+    def test_unconstrained_allows_every_symbol(self, portfolio_runner):
         strategy = _EnterEverything()
-        result = run_portfolio_strategy(strategy, _three_symbols(), config=_config())
+        result = portfolio_runner(strategy, _three_symbols(), config=_config())
 
         assert strategy.max_concurrent == 3, "all three symbols should hold at once"
         assert result.rejected_entries == 0
 
-    def test_on_order_rejected_reports_max_positions(self):
+    def test_on_order_rejected_reports_max_positions(self, portfolio_runner):
         strategy = _EnterEverything()
-        run_portfolio_strategy(
+        portfolio_runner(
             strategy, _three_symbols(), config=_config(max_positions=1)
         )
 
@@ -95,17 +95,17 @@ class TestPortfolioMaxPositions:
             for _, reason in strategy.rejects
         ), f"expected a max_positions rejection, got {strategy.rejects}"
 
-    def test_tighter_limit_opens_fewer_positions(self):
+    def test_tighter_limit_opens_fewer_positions(self, portfolio_runner):
         loose = _EnterEverything()
-        run_portfolio_strategy(loose, _three_symbols(), config=_config(max_positions=3))
+        portfolio_runner(loose, _three_symbols(), config=_config(max_positions=3))
         tight = _EnterEverything()
-        run_portfolio_strategy(tight, _three_symbols(), config=_config(max_positions=1))
+        portfolio_runner(tight, _three_symbols(), config=_config(max_positions=1))
 
         assert tight.max_concurrent < loose.max_concurrent
 
 
 class TestPortfolioDrawdownHalt:
-    def test_drawdown_kill_switch_halts_portfolio(self):
+    def test_drawdown_kill_switch_halts_portfolio(self, portfolio_runner):
         class S(Strategy):
             def __init__(self, config=None):
                 super().__init__(config)
@@ -126,7 +126,7 @@ class TestPortfolioDrawdownHalt:
             "BBB": _bars([50.0, 50.0, 50.0, 50.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             strategy, data, config=_config(max_drawdown_pct=15.0)
         )
 
@@ -142,9 +142,9 @@ class TestPortfolioDrawdownHalt:
             reason == "margin_call" for _, reason in strategy.rejects
         ), "a cash-account drawdown halt must not report a margin call"
 
-    def test_no_halt_on_a_clean_run(self):
+    def test_no_halt_on_a_clean_run(self, portfolio_runner):
         strategy = _EnterEverything()
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             strategy, _three_symbols(), config=_config(max_drawdown_pct=50.0)
         )
 
@@ -152,15 +152,15 @@ class TestPortfolioDrawdownHalt:
         assert result.halted_at is None
 
 
-def test_session_and_array_paths_agree_on_max_positions():
+def test_session_and_array_paths_agree_on_max_positions(portfolio_runner):
     """The two portfolio APIs must enforce the same limit the same way."""
 
     strategy = _EnterEverything()
-    constrained = run_portfolio_strategy(
+    constrained = portfolio_runner(
         strategy, _three_symbols(), config=_config(max_positions=1)
     )
     unconstrained_strategy = _EnterEverything()
-    unconstrained = run_portfolio_strategy(
+    unconstrained = portfolio_runner(
         unconstrained_strategy, _three_symbols(), config=_config()
     )
 

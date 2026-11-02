@@ -1,7 +1,8 @@
 //! Fee calculation models.
 
 use crate::core::types::{Direction, Price};
-use crate::execution::indian_costs::{self, FeeBreakdown, Segment};
+use crate::execution::costs::{FeeBreakdown, FeeRates};
+use crate::execution::indian_costs::Segment;
 
 /// Fee model for calculating transaction costs.
 #[derive(Debug, Clone)]
@@ -23,6 +24,16 @@ pub enum FeeModel {
     /// Unlike the other variants this produces a per-component breakdown, so
     /// the equity curve and the reported costs are the same numbers.
     Indian { segment: Segment },
+    /// Itemised costs from a row of a fee schedule: the rates a user loaded,
+    /// or a built-in row resolved once for a venue and segment. Same
+    /// computation as `Indian`, and the same breakdown.
+    Rates(FeeRates),
+}
+
+/// A long entry buys and a long exit sells; a short is the reverse.
+#[inline]
+fn is_buy(direction: Direction, is_entry: bool) -> bool {
+    matches!((direction, is_entry), (Direction::Long, true) | (Direction::Short, false))
 }
 
 impl Default for FeeModel {
@@ -78,8 +89,9 @@ impl FeeModel {
             }
             FeeModel::Custom { base, per_share } => base + size.abs() * per_share,
             FeeModel::Indian { segment } => {
-                indian_costs::calculate_side(*segment, trade_value, _direction, true).total()
+                segment.rates().charge(is_buy(_direction, true), trade_value).total()
             }
+            FeeModel::Rates(rates) => rates.charge(is_buy(_direction, true), trade_value).total(),
         }
     }
 
@@ -97,12 +109,12 @@ impl FeeModel {
         is_entry: bool,
     ) -> Option<FeeBreakdown> {
         match self {
-            FeeModel::Indian { segment } => Some(indian_costs::calculate_side(
-                *segment,
-                price * size.abs(),
-                direction,
-                is_entry,
-            )),
+            FeeModel::Indian { segment } => {
+                Some(segment.rates().charge(is_buy(direction, is_entry), price * size.abs()))
+            }
+            FeeModel::Rates(rates) => {
+                Some(rates.charge(is_buy(direction, is_entry), price * size.abs()))
+            }
             _ => None,
         }
     }
@@ -135,33 +147,6 @@ impl FeeModel {
         direction: Direction,
     ) -> f64 {
         self.calculate(entry_price, size, direction) + self.calculate(exit_price, size, direction)
-    }
-}
-
-/// Broker-specific fee configurations.
-pub struct BrokerFees;
-
-impl BrokerFees {
-    /// Interactive Brokers tiered pricing (approximate).
-    pub fn interactive_brokers() -> FeeModel {
-        FeeModel::Custom { base: 1.0, per_share: 0.005 }
-    }
-
-    /// Zero commission broker (like Robinhood).
-    pub fn zero_commission() -> FeeModel {
-        FeeModel::None
-    }
-
-    /// Indian broker (Zerodha-like).
-    pub fn india_equity() -> FeeModel {
-        // 0.03% or Rs 20 per trade, whichever is lower
-        // Simplified as 0.03%
-        FeeModel::Percentage(0.0003)
-    }
-
-    /// Crypto exchange (typical).
-    pub fn crypto_exchange() -> FeeModel {
-        FeeModel::Percentage(0.001) // 0.1% maker/taker
     }
 }
 

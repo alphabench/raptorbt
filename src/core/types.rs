@@ -353,7 +353,8 @@ pub enum ExitReason {
     Order,
     /// Option expiry settlement.
     Settlement,
-    /// Force-closed by a margin call. Unlike a settlement this is a real
+    /// Force-closed by a margin call or a risk-limit flatten (daily loss,
+    /// halt). Unlike a settlement this is a real
     /// trade-out and pays exit costs.
     Liquidation,
     /// Max hold time exceeded (tick backtest).
@@ -446,6 +447,11 @@ pub struct BacktestConfig {
     /// duty, GST, SEBI, exchange) instead of the flat `fees` fraction, and
     /// reports the breakdown. `None` keeps the flat `fees` rate.
     pub fee_segment: Option<String>,
+
+    /// Rates resolved from a fee schedule for `fee_segment`. When set they
+    /// price the run in place of the built-in preset `fee_segment` names; the
+    /// bindings fill it, refusing a schedule that has no such row.
+    pub fee_rates: Option<crate::execution::costs::FeeRates>,
 
     /// Maximum concurrent open positions. `None` is unlimited.
     ///
@@ -571,6 +577,42 @@ pub struct BacktestConfig {
     /// close). `false` (default) keeps the legacy stop-first assumption.
     #[serde(default)]
     pub bar_path_adaptive: bool,
+
+    /// Reject an order or entry whose resolved quantity is above this.
+    /// `None` (or a non-positive value) disables it. Equal passes.
+    #[serde(default)]
+    pub max_order_qty: Option<f64>,
+
+    /// Reject an order or entry whose notional (units x price x contract
+    /// multiplier) is above this. Reported as `order_size`. `None` disables.
+    #[serde(default)]
+    pub max_order_notional: Option<f64>,
+
+    /// Per-instrument cap on the net position after a fill. A fill that would
+    /// take it above the cap is rejected as `max_position`. `None` disables.
+    #[serde(default)]
+    pub max_position_qty: Option<f64>,
+
+    /// Cap on gross notional exposure across instruments. An entry that would
+    /// take it above the cap is rejected as `max_exposure`. `None` disables.
+    #[serde(default)]
+    pub max_gross_exposure: Option<f64>,
+
+    /// Daily loss limit in money. Once the day's realised plus unrealised P&L
+    /// is at or below minus this, new entries are refused as `daily_loss`
+    /// until the next day. `None` disables.
+    #[serde(default)]
+    pub max_daily_loss: Option<f64>,
+
+    /// Daily loss limit as a percent of the day's starting equity. If both
+    /// daily limits are set, whichever is reached first applies.
+    #[serde(default)]
+    pub max_daily_loss_pct: Option<f64>,
+
+    /// Close open positions when the daily loss limit is reached, instead of
+    /// only refusing new entries.
+    #[serde(default)]
+    pub flatten_on_daily_loss: bool,
 }
 
 fn default_one() -> f64 {
@@ -593,6 +635,7 @@ impl Default for BacktestConfig {
             session_minutes: None,
             squareoff_time_minutes: None,
             fee_segment: None,
+            fee_rates: None,
             max_positions: None,
             max_drawdown_pct: None,
             legacy_annualization: false,
@@ -606,6 +649,13 @@ impl Default for BacktestConfig {
             fill_prob_slippage: 0.0,
             fill_seed: 0,
             bar_path_adaptive: false,
+            max_order_qty: None,
+            max_order_notional: None,
+            max_position_qty: None,
+            max_gross_exposure: None,
+            max_daily_loss: None,
+            max_daily_loss_pct: None,
+            flatten_on_daily_loss: false,
         }
     }
 }
@@ -631,6 +681,9 @@ impl BacktestConfig {
     pub fn fee_model(&self) -> crate::execution::FeeModel {
         use crate::execution::{indian_costs::Segment, FeeModel};
 
+        if let Some(rates) = self.fee_rates {
+            return FeeModel::Rates(rates);
+        }
         let Some(spec) = self.fee_segment.as_deref() else {
             return FeeModel::percentage(self.fees);
         };
@@ -647,7 +700,8 @@ impl BacktestConfig {
         };
 
         match Segment::parse(seg, ty.as_deref(), intraday) {
-            Some(segment) => FeeModel::indian(segment),
+            // Resolved once here, so charging a fill reads a plain struct.
+            Some(segment) => FeeModel::Rates(segment.rates()),
             None => FeeModel::percentage(self.fees),
         }
     }
@@ -655,6 +709,28 @@ impl BacktestConfig {
     /// Pre-trade risk constraints declared by this config.
     pub fn risk_gate(&self) -> crate::portfolio::risk::RiskGate {
         crate::portfolio::risk::RiskGate::new(self.max_positions, self.max_drawdown_pct)
+            .with_daily_loss(
+                self.max_daily_loss,
+                self.max_daily_loss_pct,
+                self.flatten_on_daily_loss,
+                self.initial_capital,
+            )
+    }
+
+    /// Order-size, position-size and exposure limits declared by this config.
+    pub fn size_limits(&self) -> crate::portfolio::risk::SizeLimits {
+        crate::portfolio::risk::SizeLimits::new(
+            self.max_order_qty,
+            self.max_order_notional,
+            self.max_position_qty,
+            self.max_gross_exposure,
+        )
+    }
+
+    /// The local calendar date of `timestamp`, the daily-loss day when the instrument has no session schedule; see [`crate::portfolio::risk::day_of`].
+    #[inline]
+    pub fn day_of(&self, timestamp: i64) -> i64 {
+        crate::portfolio::risk::day_of(timestamp, self.session_tz_offset_ns)
     }
 
     /// How intraday returns map onto trading time.
@@ -962,6 +1038,11 @@ pub struct BacktestResult {
     ///
     /// Empty for a run that placed no typed orders.
     pub orders: Vec<crate::execution::orders::OrderRecord>,
+    /// Whether a latching halt (the drawdown limit, or an explicit halt)
+    /// stopped new entries during the run.
+    pub halted: bool,
+    /// Bars stepped when that halt latched.
+    pub halted_at: Option<usize>,
 }
 
 impl BacktestResult {
@@ -973,7 +1054,23 @@ impl BacktestResult {
         trades: Vec<Trade>,
         returns: Vec<f64>,
     ) -> Self {
-        Self { metrics, equity_curve, drawdown_curve, trades, returns, orders: Vec::new() }
+        Self {
+            metrics,
+            equity_curve,
+            drawdown_curve,
+            trades,
+            returns,
+            orders: Vec::new(),
+            halted: false,
+            halted_at: None,
+        }
+    }
+
+    /// Record whether a latching halt stopped the run, and when.
+    pub fn with_halt(mut self, halted: bool, halted_at: Option<usize>) -> Self {
+        self.halted = halted;
+        self.halted_at = halted_at;
+        self
     }
 
     /// Attach the run's order log.

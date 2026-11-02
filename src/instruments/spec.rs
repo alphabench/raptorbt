@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::{Direction, Price, Timestamp};
 
 /// Which side an option contract is on.
@@ -105,6 +106,19 @@ pub struct InstrumentSpec {
     /// notional at the strike, charged on top of `span_pct`. `0.0` = none.
     #[serde(default)]
     pub exposure_pct: f64,
+    /// Listing venue (an exchange code such as `"NSE"`). Metadata only.
+    #[serde(default)]
+    pub venue: Option<String>,
+    /// Quote currency (`"INR"`). Metadata only: the engine does no currency
+    /// conversion, and every amount stays in the units of the price series.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Trading calendar. `None` (default) leaves the instrument tradable at
+    /// every timestamp, exactly as before; with a schedule the kernel refuses
+    /// orders outside the session, skips matching outside it, squares off
+    /// at the schedule's square-off minute and expires DAY orders at the close.
+    #[serde(default)]
+    pub session: Option<SessionSchedule>,
 }
 
 impl InstrumentSpec {
@@ -126,6 +140,9 @@ impl InstrumentSpec {
             settlement_fee: 0.0,
             span_pct: 0.0,
             exposure_pct: 0.0,
+            venue: None,
+            currency: None,
+            session: None,
         }
     }
 
@@ -184,6 +201,31 @@ impl InstrumentSpec {
             }
         };
         rounded * self.price_increment
+    }
+
+    /// Snap an executed fill price to the price grid.
+    ///
+    /// A market-style fill (`limit_priced == false`) snaps against the
+    /// trader: a buy rounds up, a sell rounds down, so slippage can never
+    /// produce a better-than-grid price. A limit or target fill
+    /// (`limit_priced == true`) is expected to sit on the grid already; if it
+    /// does not, it snaps in the trader's favour (buy down, sell up) so the
+    /// fill never crosses its own limit.
+    ///
+    /// A price within float noise of a tick (`< 1e-9` ticks, relative) is
+    /// treated as on the grid and returned untouched, so an on-grid price never
+    /// moves by a whole tick. A zero increment is a no-op.
+    pub fn snap_fill(&self, price: Price, buy: bool, limit_priced: bool) -> Price {
+        if self.price_increment <= 0.0 {
+            return price;
+        }
+        let ticks = price / self.price_increment;
+        let nearest = ticks.round();
+        if (ticks - nearest).abs() < 1e-9 * nearest.abs().max(1.0) {
+            return price;
+        }
+        let snapped = if buy != limit_priced { ticks.ceil() } else { ticks.floor() };
+        snapped * self.price_increment
     }
 
     /// Quantize a position size down to the size increment.
@@ -248,6 +290,7 @@ mod tests {
         assert_eq!(spec.quantize_size(123.456), 123.456);
         assert!(spec.is_live_at(0));
         assert!(spec.is_live_at(i64::MAX));
+        assert!(spec.venue.is_none() && spec.currency.is_none() && spec.session.is_none());
     }
 
     #[test]
@@ -262,6 +305,30 @@ mod tests {
         assert!((spec.quantize_protective(100.02, Direction::Short) - 100.05).abs() < 1e-9);
         // Already on-tick prices are unchanged.
         assert!((spec.quantize_protective(100.05, Direction::Long) - 100.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fill_snaps_against_the_trader_and_limits_in_their_favour() {
+        let spec = InstrumentSpec {
+            price_increment: 0.05,
+            ..InstrumentSpec::new("X", InstrumentKind::Cash)
+        };
+        let eq = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Market-style: buy up, sell down.
+        assert!(eq(spec.snap_fill(100.01, true, false), 100.05));
+        assert!(eq(spec.snap_fill(100.04, false, false), 100.0));
+        // Limit-priced: buy down, sell up (never crosses the limit).
+        assert!(eq(spec.snap_fill(100.04, true, true), 100.0));
+        assert!(eq(spec.snap_fill(100.01, false, true), 100.05));
+        // On-grid prices never move, including float-noise cases.
+        for &p in &[100.05, 100.1, 99.95, 0.15, 1234.55] {
+            for &(buy, limit) in &[(true, false), (false, false), (true, true), (false, true)] {
+                assert!(eq(spec.snap_fill(p, buy, limit), p), "{p} {buy} {limit}");
+            }
+        }
+        // No increment: bit-identical.
+        let none = InstrumentSpec::new("X", InstrumentKind::Cash);
+        assert_eq!(none.snap_fill(100.0123, true, false), 100.0123);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "raptorbt"
-version = "0.13.4"
+version = "2.0.0-dev.0"
 edition = "2021"
 description = "High-performance Rust backtesting engine with Python bindings. Bar-level and tick-level simulation with sub-millisecond execution and a minimal footprint."
 authors = ["Alphabench <contact@alphabench.in>"]
@@ -24,11 +24,12 @@ default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-pyo3 = { version = "0.20" }
-numpy = "0.20"
+pyo3 = "0.30"
+numpy = "0.30"
 rayon = "1.8"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 # Conic interior-point QP solver for the portfolio optimizer. Pure Rust (no C
 # toolchain, so maturin cross-builds are unaffected), deterministic, and it
 # reports Infeasible/NumericalError as hard statuses -- which is what lets the
@@ -38,6 +39,7 @@ clarabel = "0.11"
 [dev-dependencies]
 criterion = "0.5"
 approx = "0.5"
+proptest = "1.12"
 
 [[bench]]
 name = "backtest_benchmark"

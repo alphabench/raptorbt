@@ -8,14 +8,33 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::errors::Fail;
+use super::schedule_bindings::PySessionSchedule;
+use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::{OhlcvBar, TickData};
-use crate::data::{builder_for_with, AggregationUnit, BarBuilder, BarSpec, SourceRecord};
+use crate::data::{
+    builder_for_session, AggregationUnit, BarBuilder, BarSpec, BarStamp, SourceRecord,
+};
 
 use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64, vec_to_numpy_f64, vec_to_numpy_i64};
 
 fn parse_spec(step: u32, unit: &str) -> PyResult<BarSpec> {
-    let unit = AggregationUnit::parse(unit).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    BarSpec::new(step, unit).map_err(|e| PyValueError::new_err(e.to_string()))
+    let unit = AggregationUnit::parse(unit)
+        .map_err(|e| Fail::new("invalid_bar_spec", e.to_string()).param("unit").value(unit))?;
+    BarSpec::new(step, unit)
+        .map_err(|e| Fail::new("invalid_bar_spec", e.to_string()).param("step").value(step as i64))
+        .map_err(PyErr::from)
+}
+
+fn parse_stamp(stamp: &str) -> PyResult<BarStamp> {
+    BarStamp::parse(stamp).map_err(|e| {
+        PyErr::from(
+            Fail::new("invalid_bar_stamp", e.to_string())
+                .param("stamp")
+                .value(stamp)
+                .valid(["open", "close"]),
+        )
+    })
 }
 
 fn make_builder_with(
@@ -23,9 +42,10 @@ fn make_builder_with(
     unit: &str,
     tz_offset_ns: i64,
     brick_size: f64,
-) -> PyResult<Box<dyn BarBuilder + Send>> {
+    session: Option<&SessionSchedule>,
+) -> PyResult<Box<dyn BarBuilder + Send + Sync>> {
     let params = crate::data::BuilderParams { brick_size };
-    builder_for_with(parse_spec(step, unit)?, tz_offset_ns, params)
+    builder_for_session(parse_spec(step, unit)?, tz_offset_ns, params, session)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -35,13 +55,27 @@ fn make_builder_with(
 /// completed bar is returned as `(timestamp, open, high, low, close,
 /// volume)` when its boundary is crossed. Time bars are stamped with their
 /// window-end timestamp, so a bar labeled `t` contains only data before `t`.
+///
+/// `stamp` says what the timestamp of a pushed *bar* means: `"open"` (the bar
+/// starts at `t`, the default) or `"close"` (it ends at `t`, so a bar stamped
+/// exactly on a window boundary belongs to the window that boundary ends).
+/// Trades are instants and ignore it.
+///
+/// `session` is an optional `SessionSchedule`. Daily and longer bars then cut
+/// at the schedule's own midnight (its `tz_offset_ns` replaces the
+/// `tz_offset_ns` argument) and records on holidays and weekends are ignored,
+/// so such a date produces no bar. Other units are unaffected.
 #[pyclass(name = "BarAggregator")]
 pub struct PyBarAggregator {
-    builder: Box<dyn BarBuilder + Send>,
+    builder: Box<dyn BarBuilder + Send + Sync>,
     #[pyo3(get)]
     step: u32,
     #[pyo3(get)]
     unit: String,
+    #[pyo3(get)]
+    stamp: String,
+    unit_kind: AggregationUnit,
+    bar_stamp: BarStamp,
 }
 
 type BarTuple = (i64, f64, f64, f64, f64, f64);
@@ -53,12 +87,29 @@ fn to_tuple(bar: OhlcvBar) -> BarTuple {
 #[pymethods]
 impl PyBarAggregator {
     #[new]
-    #[pyo3(signature = (step, unit, tz_offset_ns=0, brick_size=0.0))]
-    fn new(step: u32, unit: &str, tz_offset_ns: i64, brick_size: f64) -> PyResult<Self> {
+    #[pyo3(signature = (step, unit, tz_offset_ns=0, brick_size=0.0, stamp="open", session=None))]
+    fn new(
+        step: u32,
+        unit: &str,
+        tz_offset_ns: i64,
+        brick_size: f64,
+        stamp: &str,
+        session: Option<&PySessionSchedule>,
+    ) -> PyResult<Self> {
+        let bar_stamp = parse_stamp(stamp)?;
         Ok(Self {
-            builder: make_builder_with(step, unit, tz_offset_ns, brick_size)?,
+            builder: make_builder_with(
+                step,
+                unit,
+                tz_offset_ns,
+                brick_size,
+                session.map(|s| &s.inner),
+            )?,
             step,
             unit: unit.to_string(),
+            stamp: stamp.to_string(),
+            unit_kind: parse_spec(step, unit)?.unit,
+            bar_stamp,
         })
     }
 
@@ -73,6 +124,7 @@ impl PyBarAggregator {
         close: f64,
         volume: f64,
     ) -> Option<BarTuple> {
+        let timestamp = self.bar_stamp.bucket_ts(self.unit_kind, timestamp);
         let rec = SourceRecord { timestamp, open, high, low, close, volume, signed_volume: 0.0 };
         self.builder.push(&rec).map(to_tuple)
     }
@@ -111,12 +163,12 @@ impl PyBarAggregator {
 }
 
 type BarArrays<'py> = (
-    &'py PyArray1<i64>,
-    &'py PyArray1<f64>,
-    &'py PyArray1<f64>,
-    &'py PyArray1<f64>,
-    &'py PyArray1<f64>,
-    &'py PyArray1<f64>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
 );
 
 fn bars_to_arrays(py: Python<'_>, bars: Vec<OhlcvBar>) -> BarArrays<'_> {
@@ -151,9 +203,11 @@ fn bars_to_arrays(py: Python<'_>, bars: Vec<OhlcvBar>) -> BarArrays<'_> {
 ///
 /// Includes the final in-progress bar (flushed at end of data). Supported
 /// units: time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
-/// `"volume"`, `"value"`.
+/// `"volume"`, `"value"`. `stamp` is `"open"` (default) or `"close"`: what
+/// the input timestamps mean; the output bars are stamped at window end
+/// either way.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, step, unit, tz_offset_ns=0, brick_size=0.0))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, step, unit, tz_offset_ns=0, brick_size=0.0, stamp="open"))]
 #[allow(clippy::too_many_arguments)]
 pub fn aggregate_bars<'py>(
     py: Python<'py>,
@@ -167,7 +221,10 @@ pub fn aggregate_bars<'py>(
     unit: &str,
     tz_offset_ns: i64,
     brick_size: f64,
+    stamp: &str,
 ) -> PyResult<BarArrays<'py>> {
+    let bar_stamp = parse_stamp(stamp)?;
+    let unit_kind = parse_spec(step, unit)?.unit;
     let ts = numpy_to_vec_i64(timestamps);
     let o = numpy_to_vec_f64(open);
     let h = numpy_to_vec_f64(high);
@@ -176,14 +233,14 @@ pub fn aggregate_bars<'py>(
     let v = numpy_to_vec_f64(volume);
     let n = ts.len();
     if [o.len(), h.len(), l.len(), c.len(), v.len()].iter().any(|&len| len != n) {
-        return Err(PyValueError::new_err("all input arrays must share one length"));
+        return Err(Fail::new("length_mismatch", "all input arrays must share one length").into());
     }
 
-    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size)?;
+    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size, None)?;
     let mut out = Vec::new();
     for i in 0..n {
         let rec = SourceRecord {
-            timestamp: ts[i],
+            timestamp: bar_stamp.bucket_ts(unit_kind, ts[i]),
             open: o[i],
             high: h[i],
             low: l[i],
@@ -229,7 +286,7 @@ pub fn bars_from_ticks<'py>(
     let sells = numpy_to_vec_f64(sell_qty_delta);
     let n = ts.len();
     if [prices.len(), buys.len(), sells.len()].iter().any(|&len| len != n) {
-        return Err(PyValueError::new_err("all input arrays must share one length"));
+        return Err(Fail::new("length_mismatch", "all input arrays must share one length").into());
     }
 
     // Route through the shared conversion so bar-building and the future
@@ -248,7 +305,7 @@ pub fn bars_from_ticks<'py>(
     };
     let events = crate::data::tick_data_to_events(&ticks, 0, 0, 1);
 
-    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size)?;
+    let mut builder = make_builder_with(step, unit, tz_offset_ns, brick_size, None)?;
     let mut out = Vec::new();
     for event in events {
         if let crate::data::EventPayload::Trade(trade) = event.payload {

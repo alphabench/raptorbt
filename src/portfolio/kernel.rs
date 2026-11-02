@@ -24,10 +24,51 @@ use crate::execution::orders::{OrderSide, QtySpec};
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::instruments::{InstrumentKind, InstrumentSpec};
-use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
+use crate::portfolio::kernel_session::SessionState;
+use crate::portfolio::ledger::{marked_value, PositionLedger, PositionPolicy};
 use crate::portfolio::option_groups::OptionLeg;
 use crate::portfolio::position::ExitDetails;
-use crate::portfolio::risk::{RejectReason, RiskGate};
+use crate::portfolio::risk::{RejectReason, RiskGate, SizeLimits};
+
+/// Follow each risk-limit refusal with a `RiskRejected` event carrying the
+/// same reason. Only the five risk-limit reasons qualify, so a run without the
+/// limits sees the event list unchanged.
+fn with_risk_events(events: Vec<EngineEvent>) -> Vec<EngineEvent> {
+    if !events.iter().any(|e| match e {
+        EngineEvent::EntryRejected { reason, .. } => reason.is_risk_limit(),
+        EngineEvent::OrderRejected { reason, .. } => RejectReason::is_risk_limit_str(reason),
+        _ => false,
+    }) {
+        return events;
+    }
+    let mut out = Vec::with_capacity(events.len() + 1);
+    for event in events {
+        let extra = match &event {
+            EngineEvent::EntryRejected { idx, reason } if reason.is_risk_limit() => {
+                Some(EngineEvent::RiskRejected {
+                    idx: *idx,
+                    reason: reason.as_str(),
+                    order_id: None,
+                    client_id: String::new(),
+                })
+            }
+            EngineEvent::OrderRejected { idx, order_id, client_id, reason }
+                if RejectReason::is_risk_limit_str(reason) =>
+            {
+                Some(EngineEvent::RiskRejected {
+                    idx: *idx,
+                    reason,
+                    order_id: Some(*order_id),
+                    client_id: client_id.clone(),
+                })
+            }
+            _ => None,
+        };
+        out.push(event);
+        out.extend(extra);
+    }
+    out
+}
 
 /// How an entry is funded under the margin account.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +148,15 @@ pub enum EngineEvent {
     /// A schedule released its last slice, or was canceled. "Completed"
     /// means fully released, not necessarily fully filled.
     AlgoCompleted { idx: usize, algo_id: u64, client_id: String },
+    /// An entry or order was refused by one of the risk limits
+    /// (`order_size`, `max_position`, `max_exposure`, `daily_loss`,
+    /// `killed`). Follows the `EntryRejected` / `OrderRejected` event that
+    /// reports the same refusal, which keeps firing as before.
+    RiskRejected { idx: usize, reason: &'static str, order_id: Option<u64>, client_id: String },
+    /// A risk limit stopped trading: the day's loss limit was reached
+    /// (`reason` is `"daily_loss"`) or the strategy was halted (`reason` is
+    /// the halt reason, `"manual"` by default).
+    RiskHalted { idx: usize, reason: String },
 }
 
 /// Per-bar inputs that vary independently of the bar itself.
@@ -145,12 +195,14 @@ pub struct StepInput {
 /// new intent runs — so a bar's own fill logic can never see an intent that
 /// bar created. That ordering, not convention, is what rules the look-ahead
 /// out.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct DeferredIntent {
     /// A signal entry, with the per-bar payload it was decided with.
     entry: Option<DeferredEntry>,
     /// A signal exit for every open position.
     exit: bool,
+    /// Strategy-requested closes of specific positions.
+    closes: Vec<u64>,
 }
 
 /// The decision-time payload of a deferred signal entry.
@@ -242,6 +294,11 @@ pub struct EngineKernel {
     /// Open-position count the risk gate should see, when a portfolio owns
     /// it. `None` (the default) means count this kernel's own ledger.
     external_open_count: Option<usize>,
+    /// Order-size, position-size and exposure limits from the config.
+    limits: SizeLimits,
+    /// Gross notional held by the *other* instruments of a portfolio, when a
+    /// portfolio owns this kernel and `max_gross_exposure` is set.
+    external_exposure: Option<f64>,
 
     effective_stop: StopConfig,
     effective_target: TargetConfig,
@@ -273,6 +330,8 @@ pub struct EngineKernel {
     /// Whether the current step is driven by a trade print. Only a print
     /// carries volume at a price, which is what the queue model consumes.
     pub(crate) stepping_trade: bool,
+    /// Square-off bookkeeping for an instrument with a trading calendar.
+    pub(crate) session_state: SessionState,
 }
 
 impl EngineKernel {
@@ -299,6 +358,7 @@ impl EngineKernel {
         let order_latency_ns = config.order_latency_ns;
         let limit_slippage = config.limit_slippage;
         let fill_timing = config.resolved_fill_timing();
+        let limits = config.size_limits();
 
         Self {
             config,
@@ -318,6 +378,8 @@ impl EngineKernel {
             fill_rng: FillRng::new(config_seed),
             risk: RiskGate::unconstrained(),
             external_open_count: None,
+            limits,
+            external_exposure: None,
             effective_stop,
             effective_target,
             alloted_capital: inst_config.and_then(|ic| ic.alloted_capital),
@@ -330,6 +392,7 @@ impl EngineKernel {
             algos: AlgoEngine::new(),
             underlying_price: None,
             stepping_trade: false,
+            session_state: SessionState::default(),
         }
     }
 
@@ -381,8 +444,7 @@ impl EngineKernel {
         match self.account {
             AccountMode::Cash => None,
             AccountMode::Margin { leverage } => {
-                let from_spec = self.spec.as_ref().map(|s| s.margin_init).filter(|&m| m > 0.0);
-                Some(from_spec.unwrap_or(1.0 / leverage.max(1.0)))
+                Some(crate::accounts::margin_model::initial_rate(self.spec.as_ref(), leverage))
             }
         }
     }
@@ -465,6 +527,7 @@ impl EngineKernel {
             self.lot_size = Some(spec.lot_size);
         }
         self.ledger.set_contract_multiplier(spec.multiplier);
+        self.orders.set_session(spec.session.clone());
         self.spec = Some(spec);
     }
 
@@ -600,6 +663,21 @@ impl EngineKernel {
         self.ledger.is_in_position()
     }
 
+    /// Whether a signal entry decided on an earlier bar is waiting to fill
+    /// at the next step's open (NextBarOpen).
+    #[inline]
+    pub fn has_pending_entry(&self) -> bool {
+        self.deferred.as_ref().is_some_and(|d| d.entry.is_some())
+    }
+
+    /// Drop a waiting deferred entry that the caller's shared gates refused,
+    /// so it cannot fill on some later bar.
+    pub fn clear_pending_entry(&mut self) {
+        if let Some(d) = self.deferred.as_mut() {
+            d.entry = None;
+        }
+    }
+
     /// Overwrite the earliest open position's stop price; no-op when flat.
     ///
     /// `None` removes the stop. The new price is checked on the next
@@ -671,9 +749,8 @@ impl EngineKernel {
 
     /// Mark-to-market equity at the given price.
     ///
-    /// Cash mode marks positions at full value (historical model); margin
-    /// mode marks balance plus direction-aware unrealized PnL, which prices
-    /// shorts correctly.
+    /// Cash mode marks longs at market value and shorts at collateral plus
+    /// unrealized gain; margin mode marks balance plus unrealized PnL.
     #[inline]
     pub fn equity(&self, close: Price) -> f64 {
         match self.account {
@@ -715,6 +792,169 @@ impl EngineKernel {
     #[inline]
     pub fn set_external_open_count(&mut self, count: Option<usize>) {
         self.external_open_count = count;
+    }
+
+    /// Set the gross notional held by the portfolio's other instruments, for
+    /// `max_gross_exposure`. `None` counts only this kernel's own positions.
+    #[inline]
+    pub fn set_external_exposure(&mut self, exposure: Option<f64>) {
+        self.external_exposure = exposure;
+    }
+
+    /// Whether `max_gross_exposure` is set, so a portfolio knows to supply
+    /// [`EngineKernel::set_external_exposure`].
+    #[inline]
+    pub fn tracks_exposure(&self) -> bool {
+        self.limits.tracks_exposure()
+    }
+
+    /// Gross notional of this kernel's open positions marked at `mark`.
+    pub fn gross_notional(&self, mark: Price) -> f64 {
+        let multiplier = self.multiplier();
+        self.ledger.positions().iter().map(|m| m.position.size * mark * multiplier).sum()
+    }
+
+    /// Signed net size of this kernel's open positions.
+    fn net_size(&self) -> f64 {
+        self.ledger
+            .positions()
+            .iter()
+            .map(|m| match m.position.direction {
+                Direction::Long => m.position.size,
+                Direction::Short => -m.position.size,
+            })
+            .sum()
+    }
+
+    /// Check a fill of `size` units at `contract_value` per unit against the
+    /// order-size, position-size and exposure limits. `check_order` is false
+    /// for the later slices of an order already checked whole.
+    fn check_size_limits(
+        &self,
+        bar: &KernelBar,
+        direction: Direction,
+        size: f64,
+        contract_value: f64,
+        check_order: bool,
+    ) -> Result<(), RejectReason> {
+        if !self.limits.is_active() {
+            return Ok(());
+        }
+        if check_order {
+            self.limits.check_order(size, size * contract_value)?;
+        }
+        let before = self.net_size();
+        let after = match direction {
+            Direction::Long => before + size,
+            Direction::Short => before - size,
+        };
+        self.limits.check_position(before, after)?;
+        if self.limits.tracks_exposure() {
+            let existing = self.gross_notional(bar.close) + self.external_exposure.unwrap_or(0.0);
+            self.limits.check_exposure(existing, size * contract_value)?;
+        }
+        Ok(())
+    }
+
+    /// Check an explicit-units order as a whole, before its first slice
+    /// fills: a partly filled order must not be rejected midway for being
+    /// too large.
+    pub(crate) fn check_whole_order(
+        &self,
+        direction: Direction,
+        units: f64,
+        price: Price,
+    ) -> Result<(), RejectReason> {
+        if !self.limits.is_active() {
+            return Ok(());
+        }
+        self.limits.check_order(units, units * price * self.multiplier())?;
+        let before = self.net_size();
+        let after = match direction {
+            Direction::Long => before + units,
+            Direction::Short => before - units,
+        };
+        self.limits.check_position(before, after)
+    }
+
+    /// Refuse a would-be fill, counting it like any other constraint refusal.
+    fn refuse(&mut self, idx: usize, reason: RejectReason) -> Option<EngineEvent> {
+        self.risk.record_rejection();
+        Some(EngineEvent::EntryRejected { idx, reason })
+    }
+
+    /// Latch an explicit halt on this kernel: entries are refused as `Killed`.
+    #[inline]
+    pub fn kill(&mut self) {
+        self.risk.kill();
+    }
+
+    /// Whether an explicit halt has been latched.
+    #[inline]
+    pub fn is_killed(&self) -> bool {
+        self.risk.is_killed()
+    }
+
+    /// Whether new entries are refused for the day's loss.
+    #[inline]
+    pub fn is_day_blocked(&self) -> bool {
+        self.risk.is_day_blocked()
+    }
+
+    /// Whether a daily-loss breach should also close open positions.
+    #[inline]
+    pub fn flatten_on_daily_loss(&self) -> bool {
+        self.risk.flatten_on_daily_loss()
+    }
+
+    /// Feed the end-of-event equity to the daily-loss limit. Returns true on
+    /// the edge where the limit is first reached for the day.
+    #[inline]
+    pub fn observe_day(&mut self, timestamp: i64, equity: f64) -> bool {
+        self.observe_day_in(self.risk_day(timestamp), equity)
+    }
+
+    /// [`EngineKernel::observe_day`] for a day the caller already decided,
+    /// as a portfolio book does for all its kernels.
+    #[inline]
+    pub fn observe_day_in(&mut self, day: Option<i64>, equity: f64) -> bool {
+        self.risk.daily_active() && self.risk.on_day_equity(day, equity)
+    }
+
+    /// The trading day of `timestamp` for the daily-loss limit: the session
+    /// day when the instrument has a session schedule (`None` on a weekend
+    /// or holiday, so the day does not roll), else the local calendar date
+    /// from `session_tz_offset_ns`.
+    pub fn risk_day(&self, timestamp: i64) -> Option<i64> {
+        match self.spec.as_ref().and_then(|s| s.session.as_ref()) {
+            Some(schedule) => schedule.session_day(timestamp),
+            None => Some(self.config.day_of(timestamp)),
+        }
+    }
+
+    /// Cancel every working order and drop any waiting signal entry, then
+    /// optionally close every position at `bar`'s close. The shared tail of a
+    /// halt and of a daily-loss flatten. Position cash comes back through the
+    /// kernel's own cash, so a portfolio must lend and drain around the call.
+    pub fn halt_cleanup(
+        &mut self,
+        idx: usize,
+        bar: Option<&KernelBar>,
+        cancel_orders: bool,
+        flatten: bool,
+    ) -> Vec<EngineEvent> {
+        if cancel_orders {
+            self.deferred = None;
+            self.pending_closes.clear();
+            self.cancel_all_orders(idx);
+        }
+        let mut events = std::mem::take(&mut self.pending_events);
+        if flatten {
+            if let Some(bar) = bar {
+                events.extend(self.liquidate_all(idx, bar));
+            }
+        }
+        events
     }
 
     /// The open-position count the risk gate is checked against.
@@ -824,6 +1064,12 @@ impl EngineKernel {
     #[inline]
     pub fn risk_halted(&self) -> bool {
         self.risk.is_halted()
+    }
+
+    /// Whether the drawdown limit, rather than an explicit kill, has tripped.
+    #[inline]
+    pub fn drawdown_halted(&self) -> bool {
+        self.risk.is_drawdown_halted()
     }
 
     /// Whether this kernel's margin-call kill-switch has tripped.
@@ -942,12 +1188,34 @@ impl EngineKernel {
         input: StepInput,
         mode: StepMode,
     ) -> Vec<EngineEvent> {
+        // The first event of a new trading day lifts the previous day's
+        // loss block before any entry on it is judged.
+        if self.risk.daily_active() {
+            if let Some(day) = self.risk_day(bar.timestamp) {
+                self.risk.roll_day(day);
+            }
+        }
+        let events = self.step_events(idx, bar, input, mode);
+        if self.limits.is_active() || self.risk.is_killed() || self.risk.daily_active() {
+            return with_risk_events(events);
+        }
+        events
+    }
+
+    fn step_events(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        input: StepInput,
+        mode: StepMode,
+    ) -> Vec<EngineEvent> {
         self.stepping_trade = mode == StepMode::Trade;
         // Carried for order-path opens, which have no StepInput of their own.
         self.last_atr = input.atr;
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
+        let gate = self.session_gate(bar.timestamp, mode);
 
         // Expiry settlement pre-empts everything: the contract no longer
         // trades at this bar, so neither exits-by-signal nor entries apply.
@@ -983,10 +1251,21 @@ impl EngineKernel {
                         };
                         let price = self.fill_price_for(bar, direction, false);
                         if let Some(event) =
-                            self.close_at(idx, bar, position_id, price, ExitReason::Signal)
+                            self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
                         {
                             events.push(event);
                         }
+                    }
+                }
+                for position_id in intent.closes {
+                    let Some(managed) = self.ledger.get(position_id) else {
+                        continue; // already closed by a stop, target or exit
+                    };
+                    let price = self.fill_price_for(bar, managed.position.direction, false);
+                    if let Some(event) =
+                        self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
+                    {
+                        events.push(event);
                     }
                 }
                 if let Some(entry) = intent.entry {
@@ -1006,6 +1285,9 @@ impl EngineKernel {
                                 idx,
                                 reason: RejectReason::Inactive,
                             });
+                        } else if let Some(reason) = self.session_refusal(gate.data_open) {
+                            self.risk.record_rejection();
+                            events.push(EngineEvent::EntryRejected { idx, reason });
                         } else if self.margin.is_halted() {
                             self.risk.record_rejection();
                             events.push(EngineEvent::EntryRejected {
@@ -1066,9 +1348,14 @@ impl EngineKernel {
             }
         }
 
-        // Strategy-requested closes of specific positions (hedging API),
-        // filled like signal exits at the configured fill-price model.
-        let requested: Vec<u64> = std::mem::take(&mut self.pending_closes);
+        // Strategy-requested closes of specific positions, filled like
+        // signal exits at the configured fill-price model. Under NextBarOpen
+        // they are decisions of this bar and fill at the next bar's open,
+        // exactly like the untargeted exit.
+        let mut requested: Vec<u64> = std::mem::take(&mut self.pending_closes);
+        if defer_signals && !requested.is_empty() {
+            self.deferred.get_or_insert_with(DeferredIntent::default).closes.append(&mut requested);
+        }
         for position_id in requested {
             if self.ledger.get(position_id).is_none() {
                 continue; // already closed by a stop/target this bar
@@ -1078,9 +1365,18 @@ impl EngineKernel {
                 None => continue,
             };
             let price = self.fill_price_for(bar, direction, false);
-            if let Some(event) = self.close_at(idx, bar, position_id, price, ExitReason::Signal) {
+            if let Some(event) =
+                self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
+            {
                 events.push(event);
             }
+        }
+
+        // Session square-off: the first event at or after the cutoff flattens
+        // the book, after the position's own protective exits and before
+        // resting orders can open anything new.
+        if self.session_state.squareoff_now {
+            events.extend(self.squareoff_all(idx, bar));
         }
 
         // Margin maintenance: mark against this bar's close; a breach halts
@@ -1111,7 +1407,17 @@ impl EngineKernel {
             self.apply_match_outcome(idx, bar, outcome, &mut events);
         }
 
-        if defer_signals && input.entry {
+        // An entry decided while the market is closed (or on the square-off
+        // event) is refused on the spot, not parked for the next open.
+        let refused = if input.entry && (defer_signals || !self.ledger.is_in_position()) {
+            self.session_refusal(gate.decision_open)
+        } else {
+            None
+        };
+        if let Some(reason) = refused {
+            self.risk.record_rejection();
+            events.push(EngineEvent::EntryRejected { idx, reason });
+        } else if defer_signals && input.entry {
             // Stash the decision-time payload; the position-state and risk
             // gates run at fill time, at the top of the next bar step,
             // against the state that bar actually sees.
@@ -1203,6 +1509,8 @@ impl EngineKernel {
             .orders
             .working()
             .filter(is_plain_market)
+            // Nothing sweeps while the session is closed; the order waits.
+            .filter(|_| gate.data_open)
             .filter(|o| match (defer_signals, mode) {
                 (true, _) => o.submitted_idx < idx,
                 // On the tick path an order in flight (entry latency) is
@@ -1313,12 +1621,137 @@ impl EngineKernel {
         }
 
         let reason = exit_reason?;
-        self.close_at(idx, bar, position_id, exit_price, reason)
+        self.close_at(idx, bar, position_id, exit_price, reason, reason == ExitReason::TakeProfit)
+    }
+
+    /// Round a unit count down to the lot size, then the size increment.
+    fn quantize_units(&self, raw_size: f64) -> f64 {
+        let size = match self.lot_size {
+            Some(lot) if lot > 0.0 => (raw_size / lot).floor() * lot,
+            _ => raw_size,
+        };
+        match &self.spec {
+            Some(spec) => spec.quantize_size(size),
+            None => size,
+        }
+    }
+
+    /// Per-unit funding plus proportional fee, the divisor of capital-fraction sizing.
+    fn sizing_denominator(
+        funding: Option<EntryFunding>,
+        contract_value: f64,
+        fee_rate: f64,
+    ) -> f64 {
+        match funding {
+            None => contract_value * (1.0 + fee_rate),
+            Some(EntryFunding::Rate { rate, .. }) => contract_value * (rate + fee_rate),
+            Some(EntryFunding::Deposit { per_contract }) => {
+                per_contract + contract_value * fee_rate
+            }
+        }
+    }
+
+    /// Entry cost of `size` contracts: funding plus the active model's fee.
+    fn entry_cost(
+        &self,
+        size: f64,
+        contract_value: f64,
+        direction: Direction,
+        funding: Option<EntryFunding>,
+    ) -> f64 {
+        let funding_cost = match funding {
+            None => contract_value * size,
+            Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
+            Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+        };
+        funding_cost + self.fee_model.calculate_side(contract_value, size, direction, true)
+    }
+
+    /// Largest lot- and step-aligned size whose entry cost (funding plus the
+    /// active fee model's actual fee) fits in `budget`.
+    ///
+    /// For a model whose fee is not proportional to notional, start from the
+    /// flat-rate size, refine with the fee rate the model charges at that
+    /// size, then step down until the real cost fits. The result never
+    /// exceeds `budget` after fees; it may fall a step short of the optimum.
+    fn size_within_fees(
+        &self,
+        budget: f64,
+        contract_value: f64,
+        direction: Direction,
+        funding: Option<EntryFunding>,
+    ) -> f64 {
+        let mut size = self.quantize_units(
+            budget / Self::sizing_denominator(funding, contract_value, self.config.fees),
+        );
+        if contract_value > 0.0 {
+            for _ in 0..4 {
+                if size <= 0.0 {
+                    break;
+                }
+                let fee = self.fee_model.calculate_side(contract_value, size, direction, true);
+                let effective = fee / (contract_value * size);
+                size = self.quantize_units(
+                    budget / Self::sizing_denominator(funding, contract_value, effective),
+                );
+            }
+        }
+        for _ in 0..64 {
+            if size <= 0.0 {
+                return 0.0;
+            }
+            let cost = self.entry_cost(size, contract_value, direction, funding);
+            if cost <= budget {
+                return size;
+            }
+            let proportional = self.quantize_units(size * budget / cost);
+            size = if proportional < size {
+                proportional
+            } else {
+                let step = match (self.lot_size, &self.spec) {
+                    (Some(lot), _) if lot > 0.0 => lot,
+                    (_, Some(spec)) if spec.size_increment > 0.0 => spec.size_increment,
+                    _ => size * 1e-12,
+                };
+                self.quantize_units(size - step)
+            };
+        }
+        0.0
+    }
+
+    /// The price a fill actually executes at: slippage (skipped for
+    /// limit-priced fills), then the instrument's price grid. Market-style
+    /// fills snap against the trader, limit-priced ones in their favour; see
+    /// [`InstrumentSpec::snap_fill`]. Without a price increment the result is
+    /// the slipped price untouched.
+    fn executed_price(
+        &self,
+        raw: Price,
+        direction: Direction,
+        is_entry: bool,
+        limit_priced: bool,
+        bar: &KernelBar,
+    ) -> Price {
+        let price = if limit_priced {
+            raw
+        } else {
+            self.slippage_model.apply(raw, direction, is_entry, Some(bar.volume))
+        };
+        match &self.spec {
+            Some(spec) => {
+                spec.snap_fill(price, (direction == Direction::Long) == is_entry, limit_priced)
+            }
+            None => price,
+        }
     }
 
     /// Apply a close at a determined raw price: slippage, fees, position
     /// close, cash credit. Shared by the signal path ([`Self::try_exit`])
     /// and order-driven closes, so both produce identical arithmetic.
+    ///
+    /// `limit_priced` marks a resting-limit or fixed-target fill: its price is
+    /// already the limit (adjusted only by `limit_slippage`), so the global
+    /// slippage model must not make it worse than the limit.
     pub(crate) fn close_at(
         &mut self,
         idx: usize,
@@ -1326,6 +1759,7 @@ impl EngineKernel {
         position_id: u64,
         exit_price: Price,
         reason: ExitReason,
+        limit_priced: bool,
     ) -> Option<EngineEvent> {
         let managed = self.ledger.get(position_id)?;
         let direction = managed.position.direction;
@@ -1333,7 +1767,7 @@ impl EngineKernel {
         let entry_ts = managed.entry_timestamp;
         let entry_breakdown = managed.entry_breakdown;
 
-        let exit_price = self.slippage_model.apply(exit_price, direction, false, Some(bar.volume));
+        let exit_price = self.executed_price(exit_price, direction, false, limit_priced, bar);
 
         // calculate_side, not calculate: STT lands on the sell leg and stamp
         // duty on the buy leg, so entry and exit are not symmetric.
@@ -1380,14 +1814,20 @@ impl EngineKernel {
 
     /// Credit a closed position back to the account.
     ///
-    /// Cash mode returns the marked value minus exit fees (historical
-    /// arithmetic, golden-pinned). Margin mode releases the locked margin
+    /// Cash mode returns the marked value (collateral plus gain for a short)
+    /// minus exit fees. Margin mode releases the locked margin
     /// and books realized PnL: `trade.pnl + entry_fees` equals gross PnL
     /// minus exit fees, and entry fees were already debited at entry.
     fn credit_close(&mut self, position_id: u64, trade: &Trade, exit_fees: f64, exit_price: Price) {
         match self.account {
             AccountMode::Cash => {
-                self.cash += exit_price * trade.size * self.multiplier() - exit_fees;
+                self.cash += marked_value(
+                    trade.direction,
+                    trade.entry_price,
+                    exit_price,
+                    trade.size,
+                    self.multiplier(),
+                ) - exit_fees;
             }
             AccountMode::Margin { .. } => {
                 self.margin.release(position_id);
@@ -1462,6 +1902,7 @@ impl EngineKernel {
             input.atr,
             input.stop_price_override,
             input.target_price_override,
+            false,
         )
     }
 
@@ -1482,9 +1923,9 @@ impl EngineKernel {
         atr: f64,
         stop_override: Option<Price>,
         target_override: Option<Price>,
+        limit_priced: bool,
     ) -> Option<EngineEvent> {
-        let adjusted_price =
-            self.slippage_model.apply(entry_price, direction, true, Some(bar.volume));
+        let adjusted_price = self.executed_price(entry_price, direction, true, limit_priced, bar);
 
         // Per-instrument capital cap, never exceeding free capital on hand
         // (all cash in cash mode; cash minus locked margin in margin mode).
@@ -1493,32 +1934,25 @@ impl EngineKernel {
 
         // Cash mode: size = capital / (price * multiplier * (1 + fee_rate))
         // so notional value + entry fee fits. Margin mode: only the initial
-        // margin plus the fee must fit.
+        // margin plus the fee must fit. The fee comes from the ACTIVE fee
+        // model: a flat percentage solves in closed form; any other model
+        // (itemised, per-share, fixed, tiered) is sized by `size_within_fees`.
         let contract_value = adjusted_price * self.multiplier();
-        let fee_rate = self.config.fees;
         let funding = self.entry_funding(direction);
-        let sizing_denominator = match funding {
-            None => contract_value * (1.0 + fee_rate),
-            Some(EntryFunding::Rate { rate, .. }) => contract_value * (rate + fee_rate),
-            Some(EntryFunding::Deposit { per_contract }) => {
-                per_contract + contract_value * fee_rate
+        let size = match explicit_units {
+            Some(units) => self.quantize_units(units),
+            None => {
+                let budget = size_mult.map_or(available, |mult| mult * available);
+                match self.fee_model {
+                    FeeModel::Percentage(rate) => self.quantize_units(
+                        budget / Self::sizing_denominator(funding, contract_value, rate),
+                    ),
+                    FeeModel::None => self.quantize_units(
+                        budget / Self::sizing_denominator(funding, contract_value, 0.0),
+                    ),
+                    _ => self.size_within_fees(budget, contract_value, direction, funding),
+                }
             }
-        };
-        let raw_size = match explicit_units {
-            Some(units) => units,
-            None => match size_mult {
-                Some(mult) => mult * available / sizing_denominator,
-                None => available / sizing_denominator,
-            },
-        };
-
-        let size = match self.lot_size {
-            Some(lot) if lot > 0.0 => (raw_size / lot).floor() * lot,
-            _ => raw_size,
-        };
-        let size = match &self.spec {
-            Some(spec) => spec.quantize_size(size),
-            None => size,
         };
 
         if size <= 0.0 {
@@ -1538,6 +1972,10 @@ impl EngineKernel {
                 _ => RejectReason::ZeroSize,
             };
             return Some(EngineEvent::EntryRejected { idx, reason });
+        }
+
+        if let Err(reason) = self.check_size_limits(bar, direction, size, contract_value, true) {
+            return self.refuse(idx, reason);
         }
 
         // Same per-contract price convention as the exit path: notional
@@ -1602,6 +2040,7 @@ impl EngineKernel {
     /// Close `qty` of a position at `exit_price`: the closed slice books a
     /// trade and releases its share of cash or margin; the rest stays open.
     /// A `qty` at or above the position's size closes it whole.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn reduce_at(
         &mut self,
         idx: usize,
@@ -1610,15 +2049,16 @@ impl EngineKernel {
         qty: f64,
         exit_price: Price,
         reason: ExitReason,
+        limit_priced: bool,
     ) -> Option<EngineEvent> {
         let managed = self.ledger.get(position_id)?;
         let size = managed.position.size;
         if qty >= size {
-            return self.close_at(idx, bar, position_id, exit_price, reason);
+            return self.close_at(idx, bar, position_id, exit_price, reason, limit_priced);
         }
         let direction = managed.position.direction;
         let entry_ts = managed.entry_timestamp;
-        let exit_price = self.slippage_model.apply(exit_price, direction, false, Some(bar.volume));
+        let exit_price = self.executed_price(exit_price, direction, false, limit_priced, bar);
         let fee_price = exit_price * self.multiplier();
         let exit_breakdown = self.fee_model.breakdown(fee_price, qty, direction, false);
         let fees = match exit_breakdown {
@@ -1641,7 +2081,13 @@ impl EngineKernel {
         )?;
         match self.account {
             AccountMode::Cash => {
-                self.cash += exit_price * trade.size * self.multiplier() - fees;
+                self.cash += marked_value(
+                    trade.direction,
+                    trade.entry_price,
+                    exit_price,
+                    trade.size,
+                    self.multiplier(),
+                ) - fees;
             }
             AccountMode::Margin { .. } => {
                 // Release the closed slice's share of the lock; the rest
@@ -1670,9 +2116,10 @@ impl EngineKernel {
         units: f64,
         stop_attach: Option<Price>,
         target_attach: Option<Price>,
+        limit_priced: bool,
     ) -> Option<(Price, f64)> {
         let direction = self.ledger.get(position_id)?.position.direction;
-        let price = self.slippage_model.apply(entry_price, direction, true, Some(bar.volume));
+        let price = self.executed_price(entry_price, direction, true, limit_priced, bar);
         let size = match self.lot_size {
             Some(lot) if lot > 0.0 => (units / lot).floor() * lot,
             _ => units,
@@ -1685,6 +2132,12 @@ impl EngineKernel {
             return None;
         }
         let contract_value = price * self.multiplier();
+        // The order was checked whole when its first slice opened; the
+        // position and exposure caps still bind each added slice.
+        if self.check_size_limits(bar, direction, size, contract_value, false).is_err() {
+            self.risk.record_rejection();
+            return None;
+        }
         let entry_fees = match self.fee_model.breakdown(contract_value, size, direction, true) {
             Some(b) => b.total(),
             None => self.fee_model.calculate(contract_value, size, direction),
@@ -1740,7 +2193,7 @@ impl EngineKernel {
                 continue;
             }
             if let Some(event) =
-                self.close_at(idx, bar, position_id, bar.close, ExitReason::Liquidation)
+                self.close_at(idx, bar, position_id, bar.close, ExitReason::Liquidation, false)
             {
                 events.push(event);
             }

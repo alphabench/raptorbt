@@ -5,8 +5,10 @@ Unlike the legacy intents (:class:`~raptorbt.strategy.orders.MarketOrder` /
 side and time-in-force, may rest across bars (limit/stop kinds), and report
 their lifecycle through the granular ``on_order_*`` hooks.
 
-Sizing: pass exactly one of ``units`` (contract count) or ``size_frac``
-(fraction of available capital, resolved at fill time). Omit both on a
+Sizing: pass exactly one of ``quantity`` (contract count; ``units`` is its
+deprecated spelling) or ``size_frac`` (fraction of available capital,
+resolved at fill time). ``instrument`` routes the order in a multi-instrument
+run; without it the order goes to the symbol being processed. Omit both on a
 closing-side order to close the full position. ``stop_price`` /
 ``target_price`` attach protective levels to the position an opening order
 creates.
@@ -21,14 +23,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from raptorbt.errors import InvalidOrder
+
 _VALID_SIDES = ("buy", "sell")
 _VALID_TIFS = ("gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close")
 _VALID_OFFSET_KINDS = ("price", "bps", "ticks")
 
 
+def _bad(code: str, message: str, parameter: str, value=None, valid=None) -> InvalidOrder:
+    return InvalidOrder(
+        message,
+        code=code,
+        operation="order",
+        parameter=parameter,
+        value=value,
+        valid=valid,
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
 class _OrderBase:
     side: str
+    instrument: str | None = None
+    quantity: float | None = None
+    #: Deprecated spelling of ``quantity``; kept silent so existing code is quiet.
     units: float | None = None
     size_frac: float | None = None
     tif: str = "gtc"
@@ -39,16 +57,52 @@ class _OrderBase:
     tags: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # ``units`` and ``quantity`` are one field under two names; both read
+        # the same afterwards. (Both given and equal is how ``replace`` calls.)
+        if self.units is not None and self.quantity is not None:
+            if self.units != self.quantity:
+                raise _bad(
+                    "conflicting_order_args",
+                    "pass quantity or units, not both",
+                    "quantity, units",
+                    [self.quantity, self.units],
+                )
+        elif self.units is not None:
+            object.__setattr__(self, "quantity", self.units)
+        elif self.quantity is not None:
+            object.__setattr__(self, "units", self.quantity)
         if self.side not in _VALID_SIDES:
-            raise ValueError(f"side must be one of {_VALID_SIDES}, got {self.side!r}")
+            raise _bad(
+                "invalid_order_side",
+                f"side must be one of {_VALID_SIDES}, got {self.side!r}",
+                "side",
+                self.side,
+                _VALID_SIDES,
+            )
         if self.tif not in _VALID_TIFS:
-            raise ValueError(f"tif must be one of {_VALID_TIFS}, got {self.tif!r}")
+            raise _bad(
+                "invalid_time_in_force",
+                f"tif must be one of {_VALID_TIFS}, got {self.tif!r}",
+                "tif",
+                self.tif,
+                _VALID_TIFS,
+            )
         if self.tif == "gtd" and self.expire_ns is None:
-            raise ValueError("tif='gtd' requires expire_ns")
+            raise _bad("missing_order_field", "tif='gtd' requires expire_ns", "expire_ns")
         if self.tif in ("at_open", "at_close") and self.kind != "market":
-            raise ValueError("at_open/at_close apply to market orders")
+            raise _bad(
+                "incompatible_order_options",
+                "at_open/at_close apply to market orders",
+                "tif",
+                self.tif,
+            )
         if self.units is not None and self.size_frac is not None:
-            raise ValueError("pass units or size_frac, not both")
+            raise _bad(
+                "conflicting_order_args",
+                "pass units or size_frac, not both",
+                "units, size_frac",
+                [self.units, self.size_frac],
+            )
 
     @property
     def kind(self) -> str:
@@ -78,7 +132,7 @@ class Limit(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.price <= 0.0:
-            raise ValueError("limit price must be > 0")
+            raise _bad("invalid_order_value", "limit price must be > 0", "price", self.price)
 
     @property
     def kind(self) -> str:
@@ -94,7 +148,7 @@ class StopMarket(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.trigger <= 0.0:
-            raise ValueError("stop trigger must be > 0")
+            raise _bad("invalid_order_value", "stop trigger must be > 0", "trigger", self.trigger)
 
     @property
     def kind(self) -> str:
@@ -111,7 +165,12 @@ class StopLimit(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.trigger <= 0.0 or self.price <= 0.0:
-            raise ValueError("stop_limit needs trigger > 0 and price > 0")
+            raise _bad(
+                "invalid_order_value",
+                "stop_limit needs trigger > 0 and price > 0",
+                "trigger, price",
+                [self.trigger, self.price],
+            )
 
     @property
     def kind(self) -> str:
@@ -128,7 +187,7 @@ class MarketIfTouched(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.trigger <= 0.0:
-            raise ValueError("trigger must be > 0")
+            raise _bad("invalid_order_value", "trigger must be > 0", "trigger", self.trigger)
 
     @property
     def kind(self) -> str:
@@ -145,7 +204,12 @@ class LimitIfTouched(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.trigger <= 0.0 or self.price <= 0.0:
-            raise ValueError("limit_if_touched needs trigger > 0 and price > 0")
+            raise _bad(
+                "invalid_order_value",
+                "limit_if_touched needs trigger > 0 and price > 0",
+                "trigger, price",
+                [self.trigger, self.price],
+            )
 
     @property
     def kind(self) -> str:
@@ -174,9 +238,15 @@ class TrailingStopMarket(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.offset <= 0.0:
-            raise ValueError("offset must be > 0")
+            raise _bad("invalid_order_value", "offset must be > 0", "offset", self.offset)
         if self.offset_kind not in _VALID_OFFSET_KINDS:
-            raise ValueError(f"offset_kind must be one of {_VALID_OFFSET_KINDS}")
+            raise _bad(
+                "invalid_offset_kind",
+                f"offset_kind must be one of {_VALID_OFFSET_KINDS}",
+                "offset_kind",
+                self.offset_kind,
+                _VALID_OFFSET_KINDS,
+            )
 
     @property
     def kind(self) -> str:
@@ -195,11 +265,19 @@ class TrailingStopLimit(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.offset <= 0.0:
-            raise ValueError("offset must be > 0")
+            raise _bad("invalid_order_value", "offset must be > 0", "offset", self.offset)
         if self.offset_kind not in _VALID_OFFSET_KINDS:
-            raise ValueError(f"offset_kind must be one of {_VALID_OFFSET_KINDS}")
+            raise _bad(
+                "invalid_offset_kind",
+                f"offset_kind must be one of {_VALID_OFFSET_KINDS}",
+                "offset_kind",
+                self.offset_kind,
+                _VALID_OFFSET_KINDS,
+            )
         if self.limit_offset < 0.0:
-            raise ValueError("limit_offset must be >= 0")
+            raise _bad(
+                "invalid_order_value", "limit_offset must be >= 0", "limit_offset", self.limit_offset
+            )
 
     @property
     def kind(self) -> str:
@@ -235,16 +313,29 @@ class Twap(_OrderBase):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.slices < 1:
-            raise ValueError("slices must be >= 1")
+            raise _bad("invalid_order_value", "slices must be >= 1", "slices", self.slices)
         if self.units is None:
-            raise ValueError("Twap needs explicit units; size_frac cannot be sliced")
+            raise _bad(
+                "missing_order_field",
+                "Twap needs explicit units; size_frac cannot be sliced",
+                "units",
+            )
         if self.every_bars is not None:
             if self.bar_ns is None:
-                raise ValueError("every_bars needs bar_ns to convert to a duration")
+                raise _bad(
+                    "missing_order_field",
+                    "every_bars needs bar_ns to convert to a duration",
+                    "bar_ns",
+                )
             if self.every:
-                raise ValueError("pass every or every_bars, not both")
+                raise _bad(
+                    "conflicting_order_args",
+                    "pass every or every_bars, not both",
+                    "every, every_bars",
+                    [self.every, self.every_bars],
+                )
         elif self.every <= 0:
-            raise ValueError("every must be > 0 nanoseconds")
+            raise _bad("invalid_order_value", "every must be > 0 nanoseconds", "every", self.every)
 
     @property
     def kind(self) -> str:

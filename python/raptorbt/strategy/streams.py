@@ -19,6 +19,15 @@ from raptorbt._raptorbt import BarAggregator
 from raptorbt.strategy.context import CompositeBar
 
 
+def sessions_of(instruments: dict | None) -> dict:
+    """``{symbol: SessionSchedule}`` for the instruments that carry one."""
+    return {
+        symbol: spec.session
+        for symbol, spec in (instruments or {}).items()
+        if spec is not None and spec.session is not None
+    }
+
+
 def enumerate_subscriptions(subscriptions):
     """Yield ``(stream_id, (step, unit, brick_size))`` for each subscription.
 
@@ -36,10 +45,22 @@ class StreamState:
 
     ``symbols`` is the list of symbols in a portfolio run, or ``None`` for a
     single-instrument run (where registrations carry no symbol and every
-    indicator sees the one stream).
+    indicator sees the one stream). ``tz_offset_ns`` is the session's UTC
+    offset: daily and longer composite bars cut at its midnight. ``stamp`` is
+    what the timestamps of pushed *bars* mean (see ``BarAggregator``); trades
+    are instants and ignore it. ``sessions`` maps a symbol (``None`` in a
+    single-instrument run) to its ``SessionSchedule``: that symbol's daily and
+    longer bars then follow the schedule's trading dates and skip holidays.
     """
 
-    def __init__(self, strategy, symbols: list[str] | None = None):
+    def __init__(
+        self,
+        strategy,
+        symbols: list[str] | None = None,
+        tz_offset_ns: int = 0,
+        stamp: str = "open",
+        sessions: dict | None = None,
+    ):
         subscriptions = list(strategy._bar_subscriptions)
         keys: list[str | None] = list(symbols) if symbols else [None]
 
@@ -49,7 +70,10 @@ class StreamState:
             str | None, list[tuple[int, int, str, BarAggregator]]
         ] = {
             key: [
-                (stream_id, step, unit, BarAggregator(step, unit, brick_size=brick))
+                (stream_id, step, unit, BarAggregator(
+                        step, unit, tz_offset_ns=tz_offset_ns, brick_size=brick,
+                        stamp=stamp, session=(sessions or {}).get(key),
+                    ))
                 for stream_id, (step, unit, brick) in enumerate_subscriptions(
                     subscriptions
                 )
@@ -60,10 +84,7 @@ class StreamState:
         # Indicator routing, indexed once rather than scanned per bar.
         self._primary: dict[str | None, list] = {key: [] for key in keys}
         self._composite: dict[tuple[str | None, int], list] = {}
-        self._unrouted = False
         for indicator, stream_id, symbol in strategy._indicators:
-            if symbol is None:
-                self._unrouted = True
             # An unrouted registration listens on every symbol; see
             # `Strategy.register_indicator` for why that is rarely wanted.
             if (
@@ -82,30 +103,6 @@ class StreamState:
                     self._primary[key].append(indicator)
                 else:
                     self._composite.setdefault((key, stream_id), []).append(indicator)
-
-    @property
-    def has_unrouted_indicators(self) -> bool:
-        """Whether any indicator was registered without a symbol."""
-        return self._unrouted
-
-    def primary_indicators(self, symbol: str | None = None):
-        """Indicators listening on a symbol's primary stream."""
-        return self._primary.get(symbol, ())
-
-    def push_trade(
-        self, strategy, ctx, ts, price, size, symbol: str | None = None
-    ) -> None:
-        """Feed one trade print into the symbol's composite aggregators.
-
-        The trade-driven twin of :meth:`push`. Primary-stream indicators are
-        *not* updated here — in a tick run they are fed by the runner's
-        primary bar aggregator, not by every print.
-        """
-        for stream_id, step, unit, aggregator in self._aggregators[symbol]:
-            completed = aggregator.push_trade(ts, price, size)
-            self._dispatch(
-                strategy, ctx, aggregator, completed, stream_id, step, unit, symbol
-            )
 
     def _dispatch(
         self, strategy, ctx, aggregator, completed, stream_id, step, unit, symbol

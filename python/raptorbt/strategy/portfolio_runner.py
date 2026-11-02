@@ -1,5 +1,8 @@
 """Multi-instrument driver for class-based strategies.
 
+:func:`run_portfolio_strategy` runs one strategy on the shared runtime: it is
+:func:`~raptorbt.run_strategies` with a single strategy.
+
 One strategy instance trades N instruments against a single shared account.
 Bars from all instruments are merged into one deterministic schedule
 (by timestamp, then registration order); ``on_bar`` fires once per event
@@ -29,276 +32,11 @@ schedule.
 
 from __future__ import annotations
 
-import warnings
+from typing import Literal
 
-import numpy as np
-
-from raptorbt._raptorbt import (
-    BacktestConfig,
-    InstrumentConfig,
-    PortfolioResult,
-    PortfolioSession,
-)
+from raptorbt._raptorbt import BacktestConfig, InstrumentConfig, PortfolioResult
 from raptorbt.strategy.base import Strategy
-from raptorbt.strategy.context import Bar
-from raptorbt.strategy.orders import ClosePosition, MarketOrder
-from raptorbt.strategy.runner import dispatch_events
-from raptorbt.strategy.streams import StreamState
-
-
-class PortfolioContext:
-    """Read/query surface handed to strategy hooks in portfolio runs."""
-
-    def __init__(self, session: PortfolioSession, symbols: list[str], data: dict):
-        self._session = session
-        self._symbols = symbols
-        self._index_of = {s: i for i, s in enumerate(symbols)}
-        self._data = data
-        # Current event state, maintained by the runner.
-        self.symbol: str = symbols[0]
-        self.idx: int = 0  # local bar index within the current symbol
-        self._bar: Bar | None = None
-
-    # -- account ---------------------------------------------------------------
-
-    @property
-    def equity(self) -> float:
-        """Portfolio equity: the shared balance plus every open position's mark."""
-        return self._session.equity()
-
-    @property
-    def cash(self) -> float:
-        """Shared cash balance (includes margin locked against open positions)."""
-        return self._session.cash()
-
-    @property
-    def free_capital(self) -> float:
-        """Capital a new entry may draw on: cash less locked margin, portfolio-wide."""
-        return self._session.free_capital()
-
-    # -- current event -------------------------------------------------------
-
-    @property
-    def bar(self) -> Bar:
-        """The bar being processed (belongs to ``ctx.symbol``)."""
-        return self._bar
-
-    @property
-    def timestamp(self) -> int:
-        return self._bar.timestamp
-
-    # -- data access ---------------------------------------------------------
-
-    @property
-    def symbols(self) -> list[str]:
-        return list(self._symbols)
-
-    def series(self, symbol: str | None = None) -> dict[str, np.ndarray]:
-        """Full OHLCV arrays of a symbol (default: the current one)."""
-        return self._data[symbol or self.symbol]
-
-    # -- portfolio state -----------------------------------------------------
-
-    @property
-    def position(self):
-        """Earliest open position of the current symbol, or ``None``.
-
-        A property, matching the single-instrument ``StrategyContext`` — the
-        same ``if ctx.position is None`` works on both paths. For another
-        symbol use :meth:`position_for`.
-        """
-        return self._session.position(self._index_of[self.symbol])
-
-    def position_for(self, symbol: str | None = None):
-        """Earliest open position of a symbol, or ``None``."""
-        return self._session.position(self._index_of[symbol or self.symbol])
-
-    def positions(self, symbol: str | None = None):
-        """All open positions of a symbol, in opening order."""
-        return self._session.positions(self._index_of[symbol or self.symbol])
-
-    def set_underlying_price(
-        self, price: float | None, symbol: str | None = None
-    ) -> None:
-        """Price a symbol's options settle against at expiry.
-
-        Routes to the current symbol by default, so a strategy tracking an
-        index alongside its options can set it from ``on_bar``.
-        """
-        self._session.set_underlying_price(self._instrument_index(symbol), price)
-
-    @property
-    def net_position(self) -> float:
-        """Signed unit total across the current symbol's open positions."""
-        return self.net_position_for(self.symbol)
-
-    def net_position_for(self, symbol: str | None = None) -> float:
-        """Signed unit total across a symbol's open positions."""
-        return sum(p.size * p.direction for p in self.positions(symbol))
-
-    @property
-    def is_net_long(self) -> bool:
-        return self.net_position > 0.0
-
-    @property
-    def is_net_short(self) -> bool:
-        return self.net_position < 0.0
-
-    @property
-    def is_flat(self) -> bool:
-        return not self.positions()
-
-    @property
-    def equity(self) -> float:
-        """Portfolio equity: shared cash plus all instruments' marks."""
-        return self._session.equity()
-
-    @property
-    def cash(self) -> float:
-        """Uncommitted shared cash."""
-        return self._session.cash()
-
-    def open_orders(self, symbol: str | None = None) -> list:
-        """Orders still working on ``symbol`` (default: the current one),
-        each with what has filled so far — see :class:`WorkingOrder`."""
-        from raptorbt.strategy.context import WorkingOrder
-
-        sym = symbol or self.symbol
-        return [
-            WorkingOrder(*row, symbol=sym)
-            for row in self._session.working_orders(self._instrument_index(sym))
-        ]
-
-    def _instrument_index(self, symbol: str | None) -> int:
-        return self._index_of[symbol or self.symbol]
-
-
-def _as_arrays(arrays: dict) -> dict[str, np.ndarray]:
-    out = {
-        "timestamps": np.ascontiguousarray(arrays["timestamps"], dtype=np.int64),
-    }
-    for key in ("open", "high", "low", "close", "volume"):
-        out[key] = np.ascontiguousarray(arrays[key], dtype=np.float64)
-    n = len(out["timestamps"])
-    for key, arr in out.items():
-        if len(arr) != n:
-            raise ValueError(f"{key} has length {len(arr)}, expected {n}")
-    return out
-
-
-def drain_intents(strategy, symbol: str, idx: int) -> dict:
-    """Fold a strategy's queued intents into `apply_current` kwargs.
-
-    Shared by the bar and tick runners so both refuse duplicate intents the
-    same way.
-    """
-    entry = False
-    exit_ = False
-    size_mult = None
-    stop_override = None
-    target_override = None
-    for intent in strategy.drain_orders():
-        if isinstance(intent, MarketOrder):
-            if entry:
-                raise ValueError(f"duplicate entry intents on {symbol} event {idx}")
-            entry = True
-            size_mult = intent.size_frac
-            stop_override = intent.stop_price
-            target_override = intent.target_price
-        elif isinstance(intent, ClosePosition):
-            if exit_:
-                raise ValueError(f"duplicate close intents on {symbol} event {idx}")
-            exit_ = True
-        else:
-            raise ValueError(f"unknown order intent: {intent!r}")
-    return {
-        "entry": entry,
-        "exit": exit_,
-        "atr": 0.0,
-        "size_mult": size_mult,
-        "stop_price": stop_override,
-        "target_price": target_override,
-    }
-
-
-def apply_commands_on(strategy, session, ctx, symbols, id_map):
-    """Build the command applier shared by the bar and tick runners.
-
-    Returns a callable ``(instrument, local_idx, ts)`` that drains the
-    strategy's queued commands and routes each to its instrument.
-    """
-
-    def apply_commands(current_instrument: int, local_idx: int, ts: int) -> None:
-        for command in strategy.drain_commands():
-            if command[0] == "submit":
-                _, client_id, order, parent, symbol = command
-                instrument = (
-                    ctx._instrument_index(symbol) if symbol else current_instrument
-                )
-                parent_engine_id = None
-                if parent:
-                    mapped = id_map.get(parent)
-                    if mapped is None:
-                        raise ValueError(f"unknown parent order {parent!r}")
-                    if mapped[0] != instrument:
-                        raise ValueError("parent order belongs to a different symbol")
-                    parent_engine_id = mapped[1]
-                engine_id = session.submit_order(
-                    instrument,
-                    side=order.side,
-                    kind=order.kind,
-                    submitted_idx=local_idx,
-                    submitted_ts=ts,
-                    client_id=client_id,
-                    units=order.units,
-                    size_frac=order.size_frac,
-                    limit_price=getattr(order, "price", None),
-                    trigger_price=getattr(order, "trigger", None),
-                    tif=order.tif,
-                    expire_ns=order.expire_ns,
-                    stop_price=order.stop_price,
-                    target_price=order.target_price,
-                    offset=getattr(order, "offset", None),
-                    offset_kind=getattr(order, "offset_kind", "price"),
-                    limit_offset=getattr(order, "limit_offset", 0.0),
-                    post_only=getattr(order, "post_only", False),
-                    reduce_only=order.reduce_only,
-                    parent_id=parent_engine_id,
-                )
-                id_map[client_id] = (instrument, engine_id)
-            elif command[0] == "cancel":
-                mapped = id_map.get(command[1])
-                if mapped is not None:
-                    session.cancel_order(mapped[0], local_idx, mapped[1])
-            elif command[0] == "cancel_all":
-                for i in range(len(symbols)):
-                    session.cancel_all_orders(i, local_idx)
-            elif command[0] == "link_oco":
-                mapped = [id_map[c] for c in command[1] if c in id_map]
-                if len(mapped) >= 2:
-                    instruments_involved = {m[0] for m in mapped}
-                    if len(instruments_involved) != 1:
-                        raise ValueError("one-cancels-other links cannot span symbols")
-                    session.link_oco(mapped[0][0], [m[1] for m in mapped])
-            elif command[0] == "close":
-                _, position_id, symbol = command
-                session.request_close(
-                    ctx._instrument_index(symbol) if symbol else current_instrument,
-                    position_id,
-                )
-            elif command[0] == "close_all_for":
-                instrument = ctx._instrument_index(command[1])
-                for snapshot in session.positions(instrument):
-                    session.request_close(instrument, snapshot.position_id)
-            elif command[0] == "modify":
-                # The id map carries the owning instrument, so a modify
-                # routes without the caller naming a symbol.
-                mapped = id_map.get(command[1])
-                if mapped is not None:
-                    session.modify_order(mapped[0], mapped[1], **command[2])
-
-    return apply_commands
-
+from raptorbt.strategy.multi_runner import run_strategies
 
 def run_portfolio_strategy(
     strategy: Strategy | type[Strategy],
@@ -310,6 +48,8 @@ def run_portfolio_strategy(
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
+    bar_stamp: Literal["open", "close"] | None = None,
+    bar_ns: int | dict[str, int] | None = None,
 ) -> PortfolioResult:
     """Run one strategy over N instruments sharing a capital pool.
 
@@ -330,91 +70,35 @@ def run_portfolio_strategy(
     portfolio equity and halts entries on every symbol. Capital allocation
     is the strategy's own: each entry is offered the full free balance, so
     size it with ``size_frac``.
+
+    ``bar_stamp`` says what each symbol's ``timestamps`` mean: ``"close"`` (a
+    bar is stamped when it ends) or ``"open"`` (when it starts; ``bar_ns`` is
+    then required: the bar width in nanoseconds, or a ``{symbol: ns}`` dict
+    covering every symbol). The engine runs on bar close time: the merged
+    schedule, fills, ``DAY`` expiry, session square-off and the strategy
+    clock use ``ctx.bar_close_ts``, while ``ctx.timestamp`` and
+    ``ctx.bar.timestamp`` stay the stamps you passed. Composite bars are
+    stamped at their window end, a close time. ``None`` keeps the pre-1.0
+    behaviour (composites built as if stamps were open stamps, event order as
+    if they were close stamps) and emits a ``DeprecationWarning``; it will be
+    required in 1.0.
+
+    This is :func:`~raptorbt.run_strategies` with one strategy, on the shared
+    runtime. ``ctx.series()`` returns read-only views cut at the bars that
+    have closed, not the full arrays, so a strategy cannot read data from its
+    own future.
     """
-    if isinstance(strategy, type):
-        strategy = strategy()
-    if not isinstance(strategy, Strategy):
-        raise ValueError(
-            f"strategy must be a Strategy instance or subclass, got {type(strategy).__name__}"
-        )
-    if not data:
-        raise ValueError("data must contain at least one symbol")
-
-    symbols = list(data.keys())
-    arrays = {symbol: _as_arrays(data[symbol]) for symbol in symbols}
-
-    session = PortfolioSession(
-        config=config, account_type=account_type, leverage=leverage
-    )
-    for symbol in symbols:
-        session.add_instrument(
-            symbol,
-            direction=(directions or {}).get(symbol, 1),
-            instrument_config=(instrument_configs or {}).get(symbol),
-            instrument=(instruments or {}).get(symbol),
-            oms_type=oms_type,
-        )
-    for i, symbol in enumerate(symbols):
-        a = arrays[symbol]
-        session.set_bars(
-            i, a["timestamps"], a["open"], a["high"], a["low"], a["close"], a["volume"]
-        )
-    session.seal()
-
-    ctx = PortfolioContext(session, symbols, arrays)
-    strategy.drain_orders()
-    strategy.drain_commands()
-    strategy._bar_subscriptions = []
-    strategy._indicators = []
-    from raptorbt.strategy.cache import Cache
-    from raptorbt.strategy.clock import Clock
-
-    strategy.clock = Clock()
-    strategy.cache = Cache()
-    strategy.on_start(ctx)
-
-    # One clock per symbol: a timer set in on_start belongs to every symbol,
-    # not to whichever one's event happens to cross the threshold first.
-    clocks = {symbol: strategy.clock.clone_schedule() for symbol in symbols}
-
-    # Subscriptions and indicators are declared in on_start, so the per-symbol
-    # aggregators and indicator routing are built once it returns.
-    streams = StreamState(strategy, symbols)
-    if streams.has_unrouted_indicators:
-        warnings.warn(
-            "register_indicator() without symbol= in a portfolio run feeds the "
-            "indicator every symbol's bars interleaved; pass symbol= to route it",
-            stacklevel=2,
-        )
-
-    # client order id -> (instrument index, engine order id).
-    id_map: dict[str, tuple[int, int]] = {}
-
-    apply_commands = apply_commands_on(strategy, session, ctx, symbols, id_map)
-
-    while True:
-        current = session.current()
-        if current is None:
-            break
-        instrument, local_idx, ts, o, h, l, c, v = current
-        ctx.symbol = symbols[instrument]
-        ctx.idx = local_idx
-        ctx._bar = Bar(ts, o, h, l, c, v)
-
-        strategy.clock = clocks[ctx.symbol]
-        for time_event in strategy.clock._advance(ts):
-            strategy.on_time_event(ctx, time_event)
-
-        # Composite bars and indicators for THIS symbol only, before on_bar
-        # sees the bar. Orders queued from on_composite_bar are drained by
-        # this bar's apply_commands and route to the completing symbol.
-        streams.push(strategy, ctx, ts, o, h, l, c, v, symbol=ctx.symbol)
-
-        strategy.on_bar(ctx)
-        apply_commands(instrument, local_idx, ts)
-
-        events = session.apply_current(**drain_intents(strategy, ctx.symbol, local_idx))
-        dispatch_events(strategy, ctx, events)
-
-    strategy.on_stop(ctx)
-    return session.finish()
+    return run_strategies(
+        [strategy],
+        data,
+        config,
+        directions=directions,
+        instruments=instruments,
+        instrument_configs=instrument_configs,
+        oms_type=oms_type,
+        account_type=account_type,
+        leverage=leverage,
+        bar_stamp=bar_stamp,
+        bar_ns=bar_ns,
+        _via="run_portfolio_strategy",
+    )[0]

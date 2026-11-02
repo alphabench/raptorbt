@@ -1,0 +1,837 @@
+//! The multi-strategy core: one tape, many isolated books.
+//!
+//! [`RuntimeCore`] owns the shared pieces of a run (the [`MarketStore`], the
+//! bar-aggregator hub, the indicator bank and the subscription index) and one
+//! [`PortfolioBook`] per strategy. It is plain Rust: a driver (the Python
+//! bindings, or a test) walks the tape with a [`MergeCursor`] and calls
+//!
+//! 1. [`RuntimeCore::advance`] once per event, which moves the visibility
+//!    watermark, pushes the event through the aggregators and feeds the
+//!    indicator bank (`begin_event`, `emit_composite`, `emit_primary`). An
+//!    event is a bar, a trade print, a quote or a depth snapshot; a print
+//!    feeds the aggregators as `BarAggregator.push_trade` would, and when it
+//!    completes a primary bar (see [`RuntimeBuilder::set_primary_bars`]) the
+//!    bank gets that bar's primary emission;
+//! 2. for each strategy in [`RuntimeCore::subscribers`] order, whatever
+//!    strategy code it runs, revealing indicator emissions as it consumes
+//!    them (see [`crate::runtime::indicators`]);
+//! 3. [`RuntimeCore::apply`] to step that strategy's book with the event.
+//!
+//! # Isolation
+//!
+//! A strategy has its own account: no cash, margin or halt is shared, unless
+//! it is put in an account group (see [`crate::runtime::groups`]), where the
+//! members of the group share one. What is shared is read-only market data and the pure functions of it
+//! (aggregated bars, indicator values, ATR series).
+//!
+//! # Per-instrument ordinals
+//!
+//! A book addresses instruments by *local* index: the position of the
+//! instrument in the strategy's own subscription list, which is kept in
+//! ascending global-id order, i.e. the order a standalone session over the
+//! same symbols would register them. The event ordinal (`local_idx`) is the
+//! cursor's per-instrument counter, which counts that instrument's events
+//! only; with a bars-only store it equals the bar's row, with ticks it counts
+//! every bar, trade, quote and book of the instrument. Neither depends on
+//! which other strategies or instruments exist, so a strategy subscribed to a
+//! subset sees the ordinals, and the tie-break order at equal timestamps
+//! (stream = instrument id), its standalone session would.
+
+use std::sync::Arc;
+
+use crate::accounts::AccountMode;
+use crate::core::error::RaptorError;
+use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, OhlcvBar};
+use crate::core::Result;
+use crate::data::events::DepthRef;
+use crate::data::BarSpec;
+use crate::instruments::InstrumentSpec;
+use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
+use crate::portfolio::ledger::PositionPolicy;
+use crate::portfolio::session::{ScheduleData, ScheduleEntry, SessionOutcome};
+use crate::runtime::aggregators::{AggKey, AggregatorHub, AggregatorHubBuilder};
+use crate::runtime::atr_cache::AtrCache;
+use crate::runtime::cursor::{EventKind, EventRef, MergeCursor};
+use crate::runtime::groups::{AccountGroup, GroupOutcome, GroupSpec};
+use crate::runtime::ids::{AggId, InstrumentId, StrategyId};
+use crate::runtime::indicators::{
+    IndKey, IndicatorBank, IndicatorRegistry, LocalStreamId, Ohlc, PrimaryOrder, Registration,
+};
+use crate::runtime::memory::HeapSize;
+use crate::runtime::router::{SubscriptionIndex, SubscriptionIndexBuilder};
+use crate::runtime::store::MarketStore;
+
+/// How the books treat one instrument.
+#[derive(Debug, Clone)]
+pub struct InstrumentParams {
+    pub direction: Direction,
+    pub spec: Option<InstrumentSpec>,
+    pub config: Option<InstrumentConfig>,
+    /// ATR period behind ATR-based stops and targets, `0` for none.
+    pub atr_period: usize,
+}
+
+impl Default for InstrumentParams {
+    fn default() -> Self {
+        Self { direction: Direction::Long, spec: None, config: None, atr_period: 0 }
+    }
+}
+
+/// A strategy's engine-side record.
+///
+/// Its instruments are `strat_insts[inst_start..inst_start + inst_len]`.
+#[derive(Debug, Clone, Copy)]
+pub struct StrategySlot {
+    inst_start: u32,
+    inst_len: u32,
+    /// Events applied to the strategy's book.
+    events: u64,
+}
+
+/// Registration phase of a [`RuntimeCore`].
+pub struct RuntimeBuilder {
+    store: Arc<MarketStore>,
+    params: Vec<InstrumentParams>,
+    config: BacktestConfig,
+    mode: AccountMode,
+    policy: PositionPolicy,
+    index: SubscriptionIndexBuilder,
+    hub: AggregatorHubBuilder,
+    registry: IndicatorRegistry,
+    slots: Vec<StrategySlot>,
+    strat_insts: Vec<InstrumentId>,
+    books: Vec<Option<PortfolioBook>>,
+    groups: Vec<AccountGroup>,
+    /// Members each group was declared with, by group.
+    declared: Vec<usize>,
+    /// Each strategy's group.
+    group_of: Vec<Option<u32>>,
+}
+
+impl RuntimeBuilder {
+    /// `params` holds one entry per instrument of `store`, by id.
+    pub fn new(
+        store: impl Into<Arc<MarketStore>>,
+        params: Vec<InstrumentParams>,
+        config: BacktestConfig,
+        mode: AccountMode,
+        policy: PositionPolicy,
+    ) -> Result<Self> {
+        let store = store.into();
+        if params.len() != store.len() {
+            return Err(RaptorError::invalid_parameter(format!(
+                "{} instrument parameter sets for {} instruments",
+                params.len(),
+                store.len()
+            )));
+        }
+        let n = store.len();
+        for (i, p) in params.iter().enumerate() {
+            let id = InstrumentId::new(i as u32);
+            if p.atr_period > 0 && (store.ticks(id).is_some() || store.depth(id).is_some()) {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "ATR-based stop/target (period {}) on {:?}, which has ticks or depth: \
+                     tick events carry no bar series to compute ATR from",
+                    p.atr_period,
+                    store.symbols().symbol(id).unwrap_or_default()
+                )));
+            }
+        }
+        Ok(Self {
+            store,
+            params,
+            config,
+            mode,
+            policy,
+            index: SubscriptionIndexBuilder::new(n),
+            hub: AggregatorHubBuilder::new(n),
+            registry: IndicatorRegistry::new(),
+            slots: Vec::new(),
+            strat_insts: Vec::new(),
+            books: Vec::new(),
+            groups: Vec::new(),
+            declared: Vec::new(),
+            group_of: Vec::new(),
+        })
+    }
+
+    /// Add an account for `members` strategies to share; returns its id.
+    ///
+    /// The account's capital and account-level limits come from `spec`; the
+    /// strategies added to it keep every other setting of the run's config.
+    /// `members` fixes each member's share of the starting cash, which its
+    /// equity curve starts from.
+    pub fn add_group(&mut self, spec: GroupSpec, members: usize) -> Result<u32> {
+        if members == 0 {
+            return Err(RaptorError::invalid_parameter("an account group needs a strategy"));
+        }
+        let gid = u32::try_from(self.groups.len())
+            .map_err(|_| RaptorError::invalid_parameter("too many account groups (u32 ids)"))?;
+        self.groups.push(AccountGroup::new(spec, &self.config));
+        self.declared.push(members);
+        Ok(gid)
+    }
+
+    pub fn group_mut(&mut self, group: u32) -> &mut AccountGroup {
+        &mut self.groups[group as usize]
+    }
+
+    pub fn store(&self) -> &MarketStore {
+        &self.store
+    }
+
+    /// Add a strategy over `instruments`: non-empty, strictly ascending ids.
+    /// The strategy's local instrument `i` is `instruments[i]`.
+    pub fn add_strategy(&mut self, instruments: &[InstrumentId]) -> Result<StrategyId> {
+        self.add_strategy_in(instruments, None)
+    }
+
+    /// [`RuntimeBuilder::add_strategy`] on the account of `group`, if given.
+    pub fn add_strategy_in(
+        &mut self,
+        instruments: &[InstrumentId],
+        group: Option<u32>,
+    ) -> Result<StrategyId> {
+        if instruments.is_empty() {
+            return Err(RaptorError::invalid_parameter("a strategy needs an instrument"));
+        }
+        if instruments.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(RaptorError::invalid_parameter(
+                "a strategy's instruments must be unique and in registration order",
+            ));
+        }
+        if let Some(bad) = instruments.iter().find(|i| i.index() >= self.store.len()) {
+            return Err(RaptorError::invalid_parameter(format!(
+                "instrument id {} is not in the store",
+                bad.raw()
+            )));
+        }
+        let too_many = || RaptorError::invalid_parameter("too many strategies (u32 ids)");
+        let sid = StrategyId::new(u32::try_from(self.slots.len()).map_err(|_| too_many())?);
+        let inst_start = u32::try_from(self.strat_insts.len()).map_err(|_| too_many())?;
+        let mut book = match group {
+            None => PortfolioBook::new(self.config.clone(), self.mode),
+            Some(g) => {
+                let Some(target) = self.groups.get_mut(g as usize) else {
+                    return Err(RaptorError::invalid_parameter("unknown account group"));
+                };
+                if target.members().len() >= self.declared[g as usize] {
+                    return Err(RaptorError::invalid_parameter(
+                        "more strategies than the account group was declared with",
+                    ));
+                }
+                let spec = *target.spec();
+                let mut book = PortfolioBook::new(spec.config(&self.config), spec.mode);
+                book.join_group(spec.initial_capital / self.declared[g as usize] as f64);
+                target.add_member(sid.index());
+                book
+            }
+        };
+        for &id in instruments {
+            let p = &self.params[id.index()];
+            let symbol = self.store.symbols().symbol(id).unwrap_or_default().to_string();
+            book.add_instrument(
+                symbol,
+                p.direction,
+                p.spec.clone(),
+                p.config.as_ref(),
+                self.policy,
+            );
+        }
+        self.index.register(sid, instruments)?;
+        self.strat_insts.extend_from_slice(instruments);
+        self.slots.push(StrategySlot { inst_start, inst_len: instruments.len() as u32, events: 0 });
+        self.books.push(Some(book));
+        self.group_of.push(group);
+        Ok(sid)
+    }
+
+    /// The strategy's local index of `instrument`.
+    pub fn local_of(&self, strategy: StrategyId, instrument: InstrumentId) -> Option<usize> {
+        local_of(&self.slots, &self.strat_insts, strategy, instrument)
+    }
+
+    /// The global instrument behind a strategy's local index.
+    pub fn instrument_of(&self, strategy: StrategyId, local: usize) -> Option<InstrumentId> {
+        instrument_of(&self.slots, &self.strat_insts, strategy, local)
+    }
+
+    /// Number of instruments the strategy trades.
+    pub fn instruments_of(&self, strategy: StrategyId) -> usize {
+        self.slots[strategy.index()].inst_len as usize
+    }
+
+    /// A strategy's book, so hooks that run before the first event
+    /// (`on_start`) can query and configure it.
+    pub fn book(&self, strategy: StrategyId) -> &PortfolioBook {
+        self.books[strategy.index()].as_ref().expect("books are live while building")
+    }
+
+    pub fn book_mut(&mut self, strategy: StrategyId) -> &mut PortfolioBook {
+        self.books[strategy.index()].as_mut().expect("books are live while building")
+    }
+
+    /// Adopt a position the account already holds; see
+    /// [`PortfolioBook::adopt_position`]. In a group the cost comes out of
+    /// the group's pool.
+    pub fn adopt_position(
+        &mut self,
+        strategy: StrategyId,
+        instrument: usize,
+        timestamp: crate::core::types::Timestamp,
+        price: f64,
+        size: f64,
+    ) -> std::result::Result<u64, String> {
+        adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
+            book.adopt_position(instrument, timestamp, price, size)
+        })
+    }
+
+    /// Subscribe `strategy` to an aggregation of one of its instruments.
+    /// Returns the shared aggregation and the strategy's local stream id.
+    pub fn register_aggregation(
+        &mut self,
+        strategy: StrategyId,
+        key: AggKey,
+    ) -> Result<(AggId, u16)> {
+        if self.local_of(strategy, key.instrument()).is_none() {
+            return Err(RaptorError::invalid_parameter(
+                "an aggregation must be on an instrument the strategy trades",
+            ));
+        }
+        let session =
+            self.params[key.instrument().index()].spec.as_ref().and_then(|s| s.session.as_ref());
+        self.hub.register_with_session(strategy, key, session)
+    }
+
+    /// Aggregate `instrument`'s trade prints into `spec` bars: the primary
+    /// bars a tick run fires `on_bar` for and feeds primary indicators with.
+    /// Daily and longer units cut at `tz_offset_ns`'s midnight.
+    pub fn set_primary_bars(
+        &mut self,
+        instrument: InstrumentId,
+        spec: BarSpec,
+        tz_offset_ns: i64,
+    ) -> Result<()> {
+        self.hub.set_primary(instrument, spec, tz_offset_ns)
+    }
+
+    /// Intern the instrument set of an indicator fed by several instruments.
+    pub fn primary_order(&mut self, instruments: &[InstrumentId]) -> Result<PrimaryOrder> {
+        self.registry.primary_order(instruments)
+    }
+
+    /// Register an indicator reader; see [`IndicatorRegistry::register`].
+    pub fn register_indicator(
+        &mut self,
+        strategy: StrategyId,
+        key: IndKey,
+        stream: Option<LocalStreamId>,
+    ) -> Result<Registration> {
+        self.registry.register(strategy, key, stream)
+    }
+
+    /// Freeze the registrations and build the core.
+    pub fn build(self) -> Result<RuntimeCore> {
+        let hub = self.hub.build()?;
+        let bank = IndicatorBank::new(&self.registry);
+        let index = self.index.build()?;
+        let mut atr_cache = AtrCache::new();
+        let mut strat_atr = Vec::with_capacity(self.strat_insts.len());
+        for &id in &self.strat_insts {
+            let period = self.params[id.index()].atr_period;
+            // `atr_at` is indexed by event ordinal, which is the bar row only
+            // for an instrument with nothing but bars (see `new`).
+            let series = self.store.bars(id).and_then(|bars| atr_cache.get(id, period, bars));
+            strat_atr.push(series);
+        }
+        let instruments = self.store.len();
+        Ok(RuntimeCore {
+            store: self.store,
+            hub,
+            bank,
+            index,
+            slots: self.slots,
+            strat_insts: self.strat_insts,
+            strat_atr,
+            books: self.books,
+            groups: self.groups,
+            group_of: self.group_of,
+            atr_cache,
+            watermark: vec![0; instruments],
+            tick_watermark: vec![0; instruments],
+            current: None,
+            current_depth: None,
+            events: 0,
+        })
+    }
+}
+
+/// Run `f` on a strategy's book, with the group's pool if it has one, and
+/// leave every member pointed at the pool afterwards.
+fn adopt<R>(
+    groups: &mut [AccountGroup],
+    group_of: &[Option<u32>],
+    books: &mut [Option<PortfolioBook>],
+    strategy: StrategyId,
+    f: impl FnOnce(&mut PortfolioBook) -> R,
+) -> R {
+    let book = books[strategy.index()].as_mut().expect("strategy book already finished");
+    let Some(g) = group_of[strategy.index()] else { return f(book) };
+    groups[g as usize].run_on(books, strategy.index(), f)
+}
+
+fn ohlc(bar: &OhlcvBar) -> Ohlc {
+    Ohlc { open: bar.open, high: bar.high, low: bar.low, close: bar.close }
+}
+
+fn empty_bar(timestamp: i64) -> KernelBar {
+    KernelBar { timestamp, open: 0.0, high: 0.0, low: 0.0, close: 0.0, volume: 0.0 }
+}
+
+fn local_of(
+    slots: &[StrategySlot],
+    insts: &[InstrumentId],
+    strategy: StrategyId,
+    instrument: InstrumentId,
+) -> Option<usize> {
+    let slot = slots.get(strategy.index())?;
+    let own = &insts[slot.inst_start as usize..(slot.inst_start + slot.inst_len) as usize];
+    own.binary_search(&instrument).ok()
+}
+
+fn instrument_of(
+    slots: &[StrategySlot],
+    insts: &[InstrumentId],
+    strategy: StrategyId,
+    local: usize,
+) -> Option<InstrumentId> {
+    let slot = slots.get(strategy.index())?;
+    (local < slot.inst_len as usize).then(|| insts[slot.inst_start as usize + local])
+}
+
+/// The payload of one event, whether it came off a cursor or was pushed.
+#[derive(Debug, Clone, Copy)]
+pub enum Pushed {
+    Bar(KernelBar),
+    Trade(crate::data::events::TradeTick),
+    Quote(crate::data::events::QuoteTick),
+    Depth(crate::data::book::DepthTick),
+}
+
+/// The event being processed.
+#[derive(Debug, Clone, Copy)]
+pub struct Current {
+    pub event: EventRef,
+    /// The bar of a bar event. For a print, its degenerate bar; for a quote
+    /// or a book, zeros at the event's time. Read `data` to tell them apart.
+    pub bar: KernelBar,
+    /// The payload (a depth snapshot is `Depth(_)`; its levels are in the
+    /// store, see [`RuntimeCore::depth_of`]).
+    pub data: ScheduleData,
+    /// The primary bar this print completed, if any.
+    pub primary: Option<OhlcvBar>,
+}
+
+/// Heap bytes by category; see [`RuntimeCore::memory_report`].
+///
+/// The categories are disjoint, so `total()` is their sum. Python objects are
+/// not counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryReport {
+    pub strategies: usize,
+    /// The columns, once.
+    pub shared_store: usize,
+    /// Distinct aggregators and their per-instrument index (not the
+    /// per-strategy subscription entries).
+    pub aggregators: usize,
+    /// Distinct indicator cells and cores (not the per-strategy reader
+    /// entries).
+    pub indicators: usize,
+    /// The instrument-to-strategy index's offsets (not its member entries).
+    pub index: usize,
+    /// ATR series, once per instrument and period.
+    pub atr: usize,
+    /// Per-strategy engine state: slot, instrument list, ATR references,
+    /// subscription-index entries, aggregator subscriptions, indicator reader
+    /// entries.
+    pub engine_per_strategy: usize,
+    /// Books: the structs, their kernels, order logs, marks and trade
+    /// records, curves excluded.
+    pub portfolio_per_strategy: usize,
+    /// Sampled equity, drawdown, returns and timestamps.
+    pub curves: usize,
+}
+
+impl MemoryReport {
+    pub fn total(&self) -> usize {
+        self.shared_store
+            + self.aggregators
+            + self.indicators
+            + self.index
+            + self.atr
+            + self.engine_per_strategy
+            + self.portfolio_per_strategy
+            + self.curves
+    }
+
+    fn per(&self, bytes: usize) -> usize {
+        bytes / self.strategies.max(1)
+    }
+
+    pub fn engine_bytes_per_strategy(&self) -> usize {
+        self.per(self.engine_per_strategy)
+    }
+
+    pub fn portfolio_bytes_per_strategy(&self) -> usize {
+        self.per(self.portfolio_per_strategy)
+    }
+
+    pub fn curve_bytes_per_strategy(&self) -> usize {
+        self.per(self.curves)
+    }
+}
+
+/// The shared data layer and every strategy's book.
+pub struct RuntimeCore {
+    store: Arc<MarketStore>,
+    hub: AggregatorHub,
+    bank: Arc<IndicatorBank>,
+    index: SubscriptionIndex,
+    slots: Vec<StrategySlot>,
+    strat_insts: Vec<InstrumentId>,
+    /// ATR series per strategy-local instrument, parallel to `strat_insts`.
+    strat_atr: Vec<Option<Arc<[f64]>>>,
+    /// `None` once a strategy's book has been finished.
+    books: Vec<Option<PortfolioBook>>,
+    groups: Vec<AccountGroup>,
+    /// Each strategy's group.
+    group_of: Vec<Option<u32>>,
+    atr_cache: AtrCache,
+    /// Bar rows visible per instrument: bar events yielded so far.
+    watermark: Vec<u64>,
+    /// Tick rows visible per instrument: one past the last row that yielded
+    /// a trade or a quote.
+    tick_watermark: Vec<u64>,
+    current: Option<Current>,
+    /// The snapshot of the current event when it is a book.
+    current_depth: Option<crate::data::book::DepthTick>,
+    events: u64,
+}
+
+impl RuntimeCore {
+    /// The market data. Clone the `Arc` and build the cursor from the clone:
+    /// `MergeCursor::new(&store)`.
+    pub fn store(&self) -> &Arc<MarketStore> {
+        &self.store
+    }
+
+    pub fn bank(&self) -> &Arc<IndicatorBank> {
+        &self.bank
+    }
+
+    pub fn hub(&self) -> &AggregatorHub {
+        &self.hub
+    }
+
+    pub fn strategies(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Events advanced so far.
+    pub fn events(&self) -> u64 {
+        self.events
+    }
+
+    /// Take the next event off the cursor and make it current.
+    ///
+    /// Moves the visibility watermark, pushes the event through the shared
+    /// aggregators and feeds the indicator bank: `begin_event`, then every
+    /// composite emission in emission order, then the primary bar. For a
+    /// print the primary bar is the one the print completes, if any; quotes
+    /// and books feed nothing. Strategy code runs after this returns.
+    /// `Ok(None)` at the end of the tape.
+    pub fn advance(&mut self, cursor: &mut MergeCursor<'_>) -> Result<Option<EventRef>> {
+        let Some(event) = cursor.next() else {
+            self.current = None;
+            return Ok(None);
+        };
+        let missing = || RaptorError::invalid_parameter("the cursor yielded an event with no row");
+        let payload = match event.kind {
+            EventKind::Bar => Pushed::Bar(cursor.bar(&event).ok_or_else(missing)?),
+            EventKind::Trade => Pushed::Trade(cursor.trade(&event).ok_or_else(missing)?),
+            EventKind::Quote => Pushed::Quote(cursor.quote(&event).ok_or_else(missing)?),
+            EventKind::Depth => Pushed::Depth(cursor.depth(&event).ok_or_else(missing)?),
+        };
+        self.ingest(event, payload)?;
+        Ok(Some(event))
+    }
+
+    /// Make a pushed event current, as [`RuntimeCore::advance`] does for the
+    /// cursor's: the same watermark, aggregator and indicator work, from a
+    /// payload the caller already holds. `event.row` is the absolute row of
+    /// the payload in the caller's ring.
+    pub fn advance_pushed(&mut self, event: EventRef, payload: Pushed) -> Result<()> {
+        self.ingest(event, payload)
+    }
+
+    fn ingest(&mut self, event: EventRef, payload: Pushed) -> Result<()> {
+        let i = event.instrument.index();
+        self.events += 1;
+        self.bank.begin_event();
+        let mut primary = None;
+        let mut depth = None;
+        let (bar, data) = match payload {
+            Pushed::Bar(bar) => {
+                self.watermark[i] = event.row + 1;
+                for (agg, composite) in self.hub.on_bar(event.instrument, &bar) {
+                    self.bank.emit_composite(*agg, ohlc(composite))?;
+                }
+                self.bank.emit_primary(
+                    event.instrument,
+                    Ohlc { open: bar.open, high: bar.high, low: bar.low, close: bar.close },
+                )?;
+                (bar, ScheduleData::Bar(bar))
+            }
+            Pushed::Trade(t) => {
+                self.tick_watermark[i] = self.tick_watermark[i].max(event.row + 1);
+                for (agg, composite) in
+                    self.hub.on_trade(event.instrument, t.timestamp, t.price, t.size)
+                {
+                    self.bank.emit_composite(*agg, ohlc(composite))?;
+                }
+                primary = self.hub.primary_trade(event.instrument, t.timestamp, t.price, t.size);
+                if let Some(bar) = &primary {
+                    self.bank.emit_primary(event.instrument, ohlc(bar))?;
+                }
+                let bar = KernelBar {
+                    timestamp: t.timestamp,
+                    open: t.price,
+                    high: t.price,
+                    low: t.price,
+                    close: t.price,
+                    volume: t.size,
+                };
+                (bar, ScheduleData::Trade(t))
+            }
+            Pushed::Quote(q) => {
+                self.tick_watermark[i] = self.tick_watermark[i].max(event.row + 1);
+                self.hub.skip(event.instrument);
+                (empty_bar(q.timestamp), ScheduleData::Quote(q))
+            }
+            Pushed::Depth(d) => {
+                self.hub.skip(event.instrument);
+                depth = Some(d);
+                (
+                    empty_bar(event.ts),
+                    // The slot is a store row; a pushed snapshot travels in `depth`.
+                    ScheduleData::Depth(DepthRef { slot: event.row as u32, timestamp: event.ts }),
+                )
+            }
+        };
+        self.current = Some(Current { event, bar, data, primary });
+        self.current_depth = depth;
+        Ok(())
+    }
+
+    /// Forget the current event, so nothing is in flight. A live driver calls
+    /// this once a push has been fully dispatched: work queued afterwards
+    /// (a time event on a refused row) is stamped on its target's last print
+    /// rather than on the event just finished.
+    pub fn clear_current(&mut self) {
+        self.current = None;
+        self.current_depth = None;
+    }
+
+    pub fn current(&self) -> Option<&Current> {
+        self.current.as_ref()
+    }
+
+    /// Strategies subscribed to `instrument`, in registration order.
+    #[inline]
+    pub fn subscribers(&self, instrument: InstrumentId) -> &[StrategyId] {
+        self.index.subscribers(instrument)
+    }
+
+    /// What `strategy` receives from the aggregators for the current event.
+    pub fn deliveries(&self, strategy: StrategyId) -> crate::runtime::aggregators::Deliveries<'_> {
+        self.hub.deliveries(strategy)
+    }
+
+    /// Bar rows of `instrument` visible so far.
+    #[inline]
+    pub fn watermark(&self, instrument: InstrumentId) -> u64 {
+        self.watermark.get(instrument.index()).copied().unwrap_or(0)
+    }
+
+    /// Tick rows of `instrument` visible so far: one past the last row that
+    /// has yielded a trade or a quote.
+    #[inline]
+    pub fn tick_watermark(&self, instrument: InstrumentId) -> u64 {
+        self.tick_watermark.get(instrument.index()).copied().unwrap_or(0)
+    }
+
+    /// The depth snapshot behind the current event, if it is a book.
+    pub fn depth_of(&self, event: &EventRef) -> Option<crate::data::book::DepthTick> {
+        (event.kind == EventKind::Depth).then_some(self.current_depth).flatten()
+    }
+
+    pub fn local_of(&self, strategy: StrategyId, instrument: InstrumentId) -> Option<usize> {
+        local_of(&self.slots, &self.strat_insts, strategy, instrument)
+    }
+
+    pub fn instrument_of(&self, strategy: StrategyId, local: usize) -> Option<InstrumentId> {
+        instrument_of(&self.slots, &self.strat_insts, strategy, local)
+    }
+
+    /// Number of instruments the strategy trades.
+    pub fn instruments_of(&self, strategy: StrategyId) -> usize {
+        self.slots[strategy.index()].inst_len as usize
+    }
+
+    /// The ATR for a bar of a strategy-local instrument; `0.0` (arms
+    /// nothing) without a series, as the legacy runner.
+    #[inline]
+    pub fn atr_at(&self, strategy: StrategyId, local: usize, idx: usize) -> f64 {
+        let slot = &self.slots[strategy.index()];
+        match &self.strat_atr[slot.inst_start as usize + local] {
+            Some(series) => series[idx],
+            None => 0.0,
+        }
+    }
+
+    /// The strategy's book, or `None` once it has been finished.
+    pub fn book(&self, strategy: StrategyId) -> Option<&PortfolioBook> {
+        self.books.get(strategy.index())?.as_ref()
+    }
+
+    pub fn book_mut(&mut self, strategy: StrategyId) -> Option<&mut PortfolioBook> {
+        self.books.get_mut(strategy.index())?.as_mut()
+    }
+
+    /// Step the strategy's book with the current event.
+    ///
+    /// Call once per event per subscribed strategy, after its hooks ran.
+    pub fn apply(&mut self, strategy: StrategyId, input: StepInput) -> Result<Vec<EngineEvent>> {
+        let Some(cur) = self.current else {
+            return Err(RaptorError::invalid_parameter("no current event to apply"));
+        };
+        let local = local_of(&self.slots, &self.strat_insts, strategy, cur.event.instrument)
+            .ok_or_else(|| {
+                RaptorError::invalid_parameter("strategy is not subscribed to the current event")
+            })?;
+        let entry = ScheduleEntry {
+            instrument: local,
+            local_idx: cur.event.local_idx as usize,
+            data: cur.data,
+        };
+        let depth = self.depth_of(&cur.event);
+        self.slots[strategy.index()].events += 1;
+        if let Some(g) = self.group_of[strategy.index()] {
+            return Ok(self.groups[g as usize].step(
+                &mut self.books,
+                strategy.index(),
+                &entry,
+                depth,
+                input,
+            ));
+        }
+        let book = self.books[strategy.index()].as_mut().expect("strategy book already finished");
+        Ok(book.apply(&entry, depth, input))
+    }
+
+    /// The account group of a strategy, if it is in one.
+    pub fn group_of(&self, strategy: StrategyId) -> Option<u32> {
+        self.group_of.get(strategy.index()).copied().flatten()
+    }
+
+    /// Halt an account by hand; see [`AccountGroup::halt`].
+    pub fn halt_group(&mut self, group: u32, reason: &str, flatten: bool) -> Result<()> {
+        let g = self
+            .groups
+            .get_mut(group as usize)
+            .ok_or_else(|| RaptorError::invalid_parameter("unknown account group"))?;
+        g.halt(&mut self.books, reason, flatten);
+        Ok(())
+    }
+
+    /// Adopt a position; see [`RuntimeBuilder::adopt_position`].
+    pub fn adopt_position(
+        &mut self,
+        strategy: StrategyId,
+        instrument: usize,
+        timestamp: crate::core::types::Timestamp,
+        price: f64,
+        size: f64,
+    ) -> std::result::Result<u64, String> {
+        if self.books.get(strategy.index()).is_none_or(|b| b.is_none()) {
+            return Err("strategy already finished".to_string());
+        }
+        adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
+            book.adopt_position(instrument, timestamp, price, size)
+        })
+    }
+
+    /// An account's result, once every strategy on it is finished.
+    pub fn finish_group(&mut self, group: u32) -> Result<GroupOutcome> {
+        let g = self
+            .groups
+            .get_mut(group as usize)
+            .ok_or_else(|| RaptorError::invalid_parameter("unknown account group"))?;
+        if g.members().iter().any(|&m| self.books[m].is_some()) {
+            return Err(RaptorError::invalid_parameter(
+                "finish every strategy on the account before the account",
+            ));
+        }
+        Ok(g.outcome())
+    }
+
+    /// Liquidate and settle the strategy's book.
+    pub fn finish(&mut self, strategy: StrategyId) -> Result<SessionOutcome> {
+        if let Some(g) = self.group_of[strategy.index()] {
+            if self.books[strategy.index()].is_none() {
+                return Err(RaptorError::invalid_parameter("strategy already finished"));
+            }
+            // The closes pay into the account's pool, not the book's copy.
+            self.groups[g as usize].close_out(&mut self.books, strategy.index());
+        }
+        self.books[strategy.index()]
+            .take()
+            .map(PortfolioBook::finish)
+            .ok_or_else(|| RaptorError::invalid_parameter("strategy already finished"))
+    }
+
+    /// Heap bytes by category (unfinished books only).
+    pub fn memory_report(&self) -> MemoryReport {
+        use std::mem::size_of;
+        let live = || self.books.iter().flatten();
+        let atr_refs = self.strat_atr.capacity() * size_of::<Option<Arc<[f64]>>>();
+        let index_entries = self.index.len() * size_of::<StrategyId>();
+        let hub_entries = self.hub.subscription_heap_bytes();
+        let link_entries = self.bank.link_heap_bytes();
+        MemoryReport {
+            strategies: self.slots.len(),
+            shared_store: self.store.heap_bytes(),
+            aggregators: self.hub.heap_bytes().saturating_sub(hub_entries),
+            indicators: self.bank.heap_bytes().saturating_sub(link_entries),
+            index: self.index.heap_bytes().saturating_sub(index_entries),
+            atr: self.atr_cache.heap_bytes(),
+            engine_per_strategy: self.slots.capacity() * size_of::<StrategySlot>()
+                + self.strat_insts.capacity() * size_of::<InstrumentId>()
+                + atr_refs
+                + index_entries
+                + hub_entries
+                + link_entries,
+            // The book structs themselves sit inline in `books`.
+            portfolio_per_strategy: live().map(|b| b.heap_bytes()).sum::<usize>()
+                + self.books.capacity() * size_of::<Option<PortfolioBook>>(),
+            curves: live().map(|b| b.curve_heap_bytes()).sum::<usize>()
+                + self.groups.iter().map(|g| g.curve_heap_bytes()).sum::<usize>(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "runner_tests.rs"]
+mod tests;

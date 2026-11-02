@@ -116,8 +116,11 @@ pub enum TimeInForce {
 
 /// Order lifecycle states.
 ///
-/// Transitions are enforced by [`Order::transition`]; anything not listed
-/// there is a logic error, caught in debug builds.
+/// Transitions are enforced by [`Order::transition`] using
+/// [`OrderStatus::can_transition_to`]; anything not listed there is a logic
+/// error and panics in every build. An order driven by venue reports
+/// ([`Order::apply_report`]) returns a typed error instead of panicking.
+/// The full diagram is in `docs/architecture/order-lifecycle.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderStatus {
     /// Created, not yet evaluated by the engine.
@@ -137,9 +140,71 @@ pub enum OrderStatus {
     Expired,
     /// Terminal: refused (e.g. opening order while a position is open).
     Rejected,
+    /// A cancel was requested and the venue has not answered. The order may
+    /// still fill (and any fill is real) until the cancel is acknowledged;
+    /// only a cancel acknowledgement makes it [`OrderStatus::Canceled`].
+    PendingCancel,
+    /// A replace (modify) was requested and the venue has not answered. The
+    /// order keeps working at its old terms until the replace is
+    /// acknowledged.
+    PendingReplace,
 }
 
 impl OrderStatus {
+    /// Whether the lifecycle allows moving from `self` to `to`.
+    pub fn can_transition_to(self, to: OrderStatus) -> bool {
+        use OrderStatus::*;
+        matches!(
+            (self, to),
+            (Submitted, Accepted)
+                | (Submitted, Rejected)
+                | (Submitted, Canceled)
+                | (Accepted, Triggered)
+                | (Accepted, Filled)
+                | (Accepted, Canceled)
+                | (Accepted, Expired)
+                | (Accepted, Rejected)
+                | (Triggered, Filled)
+                | (Triggered, Canceled)
+                | (Triggered, Expired)
+                | (Triggered, Rejected)
+                | (Accepted, PartiallyFilled)
+                | (Triggered, PartiallyFilled)
+                | (PartiallyFilled, PartiallyFilled)
+                | (PartiallyFilled, Filled)
+                | (PartiallyFilled, Canceled)
+                | (PartiallyFilled, Expired)
+                | (PartiallyFilled, Rejected)
+                // A request is not an acknowledgement: the pending states
+                // sit between a cancel/replace request and the venue's
+                // answer. A negative answer returns to the working state.
+                | (Submitted, PendingCancel)
+                | (Accepted, PendingCancel)
+                | (Triggered, PendingCancel)
+                | (PartiallyFilled, PendingCancel)
+                | (PendingReplace, PendingCancel)
+                | (Accepted, PendingReplace)
+                | (Triggered, PendingReplace)
+                | (PartiallyFilled, PendingReplace)
+                | (PendingCancel, PendingReplace)
+                | (PendingCancel, Submitted)
+                | (PendingCancel, Accepted)
+                | (PendingCancel, Triggered)
+                | (PendingCancel, PartiallyFilled)
+                | (PendingCancel, Filled)
+                | (PendingCancel, Canceled)
+                | (PendingCancel, Expired)
+                | (PendingCancel, Rejected)
+                | (PendingReplace, Accepted)
+                | (PendingReplace, Triggered)
+                | (PendingReplace, PartiallyFilled)
+                | (PendingReplace, Filled)
+                | (PendingReplace, Canceled)
+                | (PendingReplace, Expired)
+                | (PendingReplace, Rejected)
+        )
+    }
+
     /// Stable identifier for reporting.
     #[inline]
     pub fn as_str(self) -> &'static str {
@@ -152,7 +217,15 @@ impl OrderStatus {
             OrderStatus::Canceled => "canceled",
             OrderStatus::Expired => "expired",
             OrderStatus::Rejected => "rejected",
+            OrderStatus::PendingCancel => "pending_cancel",
+            OrderStatus::PendingReplace => "pending_replace",
         }
+    }
+
+    /// Whether a cancel or replace request is awaiting the venue's answer.
+    #[inline]
+    pub fn is_pending(self) -> bool {
+        matches!(self, OrderStatus::PendingCancel | OrderStatus::PendingReplace)
     }
 
     /// Whether this is an end state.
@@ -273,6 +346,10 @@ pub struct Order {
     /// `Filled`); a whole-fill engine leaves it at the full size on fill.
     #[serde(default)]
     pub filled_qty: f64,
+    /// Ledger of a venue-driven order: venue id, executions, outstanding
+    /// requests. `None` for orders the in-process matcher drives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) broker: Option<Box<super::report::BrokerState>>,
 }
 
 /// What became of one order, once the run is over.
@@ -423,6 +500,7 @@ impl Order {
             trail_watermark: None,
             trail_limit: None,
             filled_qty: 0.0,
+            broker: None,
         }
     }
 
@@ -431,42 +509,22 @@ impl Order {
     #[inline]
     pub fn limit_live(&self) -> bool {
         matches!(self.status, OrderStatus::Triggered | OrderStatus::PartiallyFilled)
+            || (self.status.is_pending() && self.filled_qty > 0.0)
     }
 
     /// Move to a new status, checking the transition is legal.
     ///
-    /// Returns `false` (and leaves the order untouched) on an illegal
-    /// transition; callers treat that as a bug, not a user error.
-    #[must_use]
+    /// An illegal transition means the engine's own bookkeeping is wrong (no
+    /// user input can ask for one), so it panics in every build, naming the
+    /// order and both states, rather than leaving the order in a state the
+    /// order log would misreport. Always returns `true`; the return value is
+    /// kept so call sites that branch on it still read naturally.
     pub fn transition(&mut self, to: OrderStatus) -> bool {
-        use OrderStatus::*;
-        let ok = matches!(
-            (self.status, to),
-            (Submitted, Accepted)
-                | (Submitted, Rejected)
-                | (Submitted, Canceled)
-                | (Accepted, Triggered)
-                | (Accepted, Filled)
-                | (Accepted, Canceled)
-                | (Accepted, Expired)
-                | (Accepted, Rejected)
-                | (Triggered, Filled)
-                | (Triggered, Canceled)
-                | (Triggered, Expired)
-                | (Triggered, Rejected)
-                | (Accepted, PartiallyFilled)
-                | (Triggered, PartiallyFilled)
-                | (PartiallyFilled, PartiallyFilled)
-                | (PartiallyFilled, Filled)
-                | (PartiallyFilled, Canceled)
-                | (PartiallyFilled, Expired)
-                | (PartiallyFilled, Rejected)
-        );
-        if ok {
-            self.status = to;
+        if !self.status.can_transition_to(to) {
+            panic!("illegal order transition: order {} {:?} -> {:?}", self.id, self.status, to);
         }
-        debug_assert!(ok, "illegal order transition {:?} -> {to:?}", self.status);
-        ok
+        self.status = to;
+        true
     }
 
     /// The price a resting order would currently fill or trigger at.
@@ -539,13 +597,86 @@ mod tests {
         assert!(o.transition(OrderStatus::Filled));
     }
 
-    #[cfg(not(debug_assertions))]
     #[test]
-    fn illegal_transition_is_refused() {
-        let mut o = order(OrderKind::Market);
-        assert!(o.transition(OrderStatus::Accepted));
-        assert!(o.transition(OrderStatus::Filled));
-        assert!(!o.transition(OrderStatus::Accepted));
-        assert_eq!(o.status, OrderStatus::Filled);
+    fn transition_table_accepts_legal_and_refuses_illegal() {
+        use OrderStatus::*;
+        let all = [
+            Submitted,
+            Accepted,
+            Triggered,
+            PartiallyFilled,
+            Filled,
+            Canceled,
+            Expired,
+            Rejected,
+            PendingCancel,
+            PendingReplace,
+        ];
+        let legal = [
+            (Submitted, Accepted),
+            (Submitted, Rejected),
+            (Submitted, Canceled),
+            (Accepted, Triggered),
+            (Accepted, Filled),
+            (Accepted, Canceled),
+            (Accepted, Expired),
+            (Accepted, Rejected),
+            (Accepted, PartiallyFilled),
+            (Triggered, Filled),
+            (Triggered, Canceled),
+            (Triggered, Expired),
+            (Triggered, Rejected),
+            (Triggered, PartiallyFilled),
+            (PartiallyFilled, PartiallyFilled),
+            (PartiallyFilled, Filled),
+            (PartiallyFilled, Canceled),
+            (PartiallyFilled, Expired),
+            (PartiallyFilled, Rejected),
+            (Submitted, PendingCancel),
+            (Accepted, PendingCancel),
+            (Triggered, PendingCancel),
+            (PartiallyFilled, PendingCancel),
+            (PendingReplace, PendingCancel),
+            (Accepted, PendingReplace),
+            (Triggered, PendingReplace),
+            (PartiallyFilled, PendingReplace),
+            (PendingCancel, PendingReplace),
+            (PendingCancel, Submitted),
+            (PendingCancel, Accepted),
+            (PendingCancel, Triggered),
+            (PendingCancel, PartiallyFilled),
+            (PendingCancel, Filled),
+            (PendingCancel, Canceled),
+            (PendingCancel, Expired),
+            (PendingCancel, Rejected),
+            (PendingReplace, Accepted),
+            (PendingReplace, Triggered),
+            (PendingReplace, PartiallyFilled),
+            (PendingReplace, Filled),
+            (PendingReplace, Canceled),
+            (PendingReplace, Expired),
+            (PendingReplace, Rejected),
+        ];
+        for from in all {
+            for to in all {
+                let expected = legal.contains(&(from, to));
+                assert_eq!(from.can_transition_to(to), expected, "{from:?} -> {to:?}");
+                let mut o = order(OrderKind::Market);
+                o.status = from;
+                if expected {
+                    assert!(o.transition(to));
+                    assert_eq!(o.status, to);
+                } else {
+                    let r =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| o.transition(to)));
+                    assert!(r.is_err(), "{from:?} -> {to:?} should panic");
+                    assert_eq!(o.status, from);
+                }
+            }
+        }
+        for t in [Filled, Canceled, Expired, Rejected] {
+            assert!(t.is_terminal());
+            assert!(all.iter().all(|&to| !t.can_transition_to(to)));
+        }
     }
 }

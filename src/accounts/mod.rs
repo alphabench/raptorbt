@@ -10,7 +10,11 @@
 //! short cash-flow), and emits a margin call when equity falls below the
 //! maintenance requirement.
 
-use std::collections::HashMap;
+pub mod margin_model;
+
+pub use margin_model::{LineView, MarginClass, MarginModel};
+
+use std::collections::BTreeMap;
 
 /// How the account funds positions.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -29,7 +33,7 @@ pub enum AccountMode {
 #[derive(Debug, Default)]
 pub struct MarginBook {
     /// Initial margin locked per open position id.
-    locked: HashMap<u64, f64>,
+    locked: BTreeMap<u64, f64>,
     /// Latched once a margin call fires; blocks further entries.
     halted: bool,
 }
@@ -145,6 +149,13 @@ impl SharedAccount {
             self.halted = true;
             self.halted_at = Some(idx);
         }
+    }
+
+    /// Overwrite the cash and locked margin. An account group does this to
+    /// each member's copy before the member is stepped.
+    pub fn set_pool(&mut self, balance: f64, locked: f64) {
+        self.balance = balance;
+        self.locked = locked;
     }
 
     /// Apply a stepped kernel's cash and locked-margin movement.

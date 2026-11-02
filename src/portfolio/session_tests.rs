@@ -27,8 +27,8 @@ fn session_two_instruments() -> EventSession {
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     // Interleaved timestamps: AAA at 0,10,20..., BBB offset by 5.
-    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
-    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
+    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0])).unwrap();
     session.seal();
     session
 }
@@ -94,8 +94,8 @@ fn session_two_instruments_gated(
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
-    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
+    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0])).unwrap();
     session.seal();
     session
 }
@@ -207,8 +207,8 @@ fn drawdown_halt_blocks_entries_on_all_instruments() {
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
-    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0])).unwrap();
     session.seal();
 
     // AAA goes all-in, then collapses.
@@ -238,8 +238,8 @@ fn drawdown_halt_reports_its_own_reason_not_margin_call() {
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
-    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
@@ -265,7 +265,7 @@ fn drawdown_halt_records_halted_at_on_the_account() {
         BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0]));
+    session.set_bars(a, bars(0, &[100.0, 50.0, 40.0, 40.0])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
@@ -288,7 +288,7 @@ fn a_latched_drawdown_halt_suppresses_a_later_margin_call() {
         BacktestConfig { fees: 0.0, max_drawdown_pct: Some(15.0), ..BacktestConfig::default() };
     let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
+    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
@@ -315,8 +315,8 @@ fn session_two_instruments_margin(leverage: f64, short_second: bool) -> EventSes
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let second_dir = if short_second { Direction::Short } else { Direction::Long };
     let b = session.add_instrument("BBB".into(), second_dir, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0]));
-    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0]));
+    session.set_bars(a, bars(0, &[100.0, 101.0, 102.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 51.0, 52.0])).unwrap();
     session.seal();
     session
 }
@@ -333,7 +333,7 @@ fn cash_mode_arithmetic_unchanged() {
     }
     // Exact equality, not approximate: these feed the golden metrics.
     assert_eq!(session.cash(), session.free_capital());
-    let curve = session.equity_curve.clone();
+    let curve = session.book.equity_curve().to_vec();
     assert_eq!(curve.len(), 6);
     // Marked at full position value throughout, as the cash model does.
     assert_eq!(curve[0], 100_000.0);
@@ -445,8 +445,8 @@ fn portfolio_margin_call_halts_all_kernels() {
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
     // AAA collapses after entry; BBB is untouched and never enters.
-    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
-    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0]));
+    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
@@ -493,8 +493,8 @@ fn finish_reports_rejected_entries_and_halt() {
     let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0]));
-    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0]));
+    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0, 30.0])).unwrap();
+    session.set_bars(b, bars(5, &[50.0, 50.0, 50.0, 50.0])).unwrap();
     session.seal();
 
     // AAA enters, then collapses into a call; both then keep signaling.
@@ -532,7 +532,7 @@ fn finish_reports_margin_halt() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::with_account(config, AccountMode::Margin { leverage: 50.0 });
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0]));
+    session.set_bars(a, bars(0, &[100.0, 40.0, 30.0])).unwrap();
     session.seal();
     session.apply_current(StepInput { entry: true, ..StepInput::default() });
     while session.current().is_some() {
@@ -587,7 +587,7 @@ fn seal_keeps_trade_and_quote_events() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 102.0, 0.0, 0.0)]));
+    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 102.0, 0.0, 0.0)])).unwrap();
     session.seal();
 
     let mut kinds = Vec::new();
@@ -612,7 +612,7 @@ fn trade_precedes_the_quote_of_the_same_feed_row() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0)]));
+    session.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0)])).unwrap();
     session.seal();
 
     let first = session.current().expect("an event");
@@ -630,7 +630,7 @@ fn quotes_do_not_sample_the_equity_curve() {
     let with_quotes = {
         let mut s = EventSession::new(config.clone());
         let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-        s.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 101.0, 100.0, 102.0)]));
+        s.set_ticks(a, tick_data(&[(10, 100.0, 99.0, 101.0), (20, 101.0, 100.0, 102.0)])).unwrap();
         s.seal();
         while s.current().is_some() {
             s.apply_current(StepInput::default());
@@ -640,7 +640,7 @@ fn quotes_do_not_sample_the_equity_curve() {
     let without_quotes = {
         let mut s = EventSession::new(config);
         let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-        s.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 101.0, 0.0, 0.0)]));
+        s.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 101.0, 0.0, 0.0)])).unwrap();
         s.seal();
         while s.current().is_some() {
             s.apply_current(StepInput::default());
@@ -660,7 +660,7 @@ fn tick_entries_lend_and_drain_the_shared_account() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 110.0, 0.0, 0.0)]));
+    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (20, 110.0, 0.0, 0.0)])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, size_mult: Some(0.5), ..StepInput::default() });
@@ -682,8 +682,8 @@ fn max_positions_gates_tick_entries_portfolio_wide() {
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     let b = session.add_instrument("BBB".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (30, 101.0, 0.0, 0.0)]));
-    session.set_ticks(b, tick_data(&[(20, 50.0, 0.0, 0.0), (40, 51.0, 0.0, 0.0)]));
+    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (30, 101.0, 0.0, 0.0)])).unwrap();
+    session.set_ticks(b, tick_data(&[(20, 50.0, 0.0, 0.0), (40, 51.0, 0.0, 0.0)])).unwrap();
     session.seal();
 
     session.apply_current(StepInput { entry: true, size_mult: Some(0.25), ..StepInput::default() });
@@ -713,8 +713,8 @@ fn depth_events_merge_and_reach_the_kernel_book() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0)]));
-    session.set_depth(a, vec![depth_snapshot(10, (99.0, 500.0), (101.0, 400.0))]);
+    session.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0)])).unwrap();
+    session.set_depth(a, vec![depth_snapshot(10, (99.0, 500.0), (101.0, 400.0))]).unwrap();
     session.seal();
 
     // The book precedes the print that follows it in time.
@@ -734,14 +734,15 @@ fn depth_events_do_not_sample_the_equity_curve() {
     let curve_with_depth = {
         let mut s = EventSession::new(config.clone());
         let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)]));
+        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)])).unwrap();
         s.set_depth(
             a,
             vec![
                 depth_snapshot(10, (99.0, 500.0), (101.0, 400.0)),
                 depth_snapshot(30, (100.0, 500.0), (102.0, 400.0)),
             ],
-        );
+        )
+        .unwrap();
         s.seal();
         while s.current().is_some() {
             s.apply_current(StepInput::default());
@@ -751,7 +752,7 @@ fn depth_events_do_not_sample_the_equity_curve() {
     let curve_without = {
         let mut s = EventSession::new(config);
         let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)]));
+        s.set_ticks(a, tick_data(&[(20, 100.0, 0.0, 0.0), (40, 101.0, 0.0, 0.0)])).unwrap();
         s.seal();
         while s.current().is_some() {
             s.apply_current(StepInput::default());
@@ -766,9 +767,9 @@ fn depth_events_do_not_fill_resting_orders() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_ticks(a, tick_data(&[(30, 100.0, 0.0, 0.0)]));
+    session.set_ticks(a, tick_data(&[(30, 100.0, 0.0, 0.0)])).unwrap();
     // A book straddling the limit is intent, not a trade.
-    session.set_depth(a, vec![depth_snapshot(10, (89.0, 500.0), (91.0, 400.0))]);
+    session.set_depth(a, vec![depth_snapshot(10, (89.0, 500.0), (91.0, 400.0))]).unwrap();
     session.seal();
 
     session.kernel_mut(0).submit_order(
@@ -798,7 +799,7 @@ fn push_tick_matches_batch_replay() {
     let batch = {
         let mut s = EventSession::new(config.clone());
         let a = s.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-        s.set_ticks(a, tick_data(&rows));
+        s.set_ticks(a, tick_data(&rows)).unwrap();
         s.seal();
         let mut first = true;
         while s.current().is_some() {
@@ -820,7 +821,7 @@ fn push_tick_matches_batch_replay() {
         let mut first = true;
         for (ts, ltp, bid, ask) in rows {
             // tick_data() stamps buy/sell deltas of 1.0/0.0 per row.
-            s.push_tick(a, ts, ltp, bid, ask, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            s.push_tick(a, ts, ltp, bid, ask, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
             while s.current().is_some() {
                 let input = if first {
                     first = false;
@@ -847,10 +848,10 @@ fn pushes_append_behind_warmup_bars() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 101.0]));
+    session.set_bars(a, bars(0, &[100.0, 101.0])).unwrap();
 
     // No explicit seal: the first push seals implicitly.
-    session.push_tick(a, 30, 102.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    session.push_tick(a, 30, 102.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap();
 
     let mut seen = Vec::new();
     while let Some(entry) = session.current() {
@@ -874,24 +875,29 @@ fn remaining_counts_unapplied_events() {
     assert_eq!(session.remaining(), 0);
 
     // One row carrying both a print and a book appends two events.
-    assert_eq!(session.push_tick(a, 10, 100.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 2);
+    assert_eq!(
+        session.push_tick(a, 10, 100.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap(),
+        2
+    );
     assert_eq!(session.remaining(), 2);
     session.apply_current(StepInput::default());
     assert_eq!(session.remaining(), 1);
     session.apply_current(StepInput::default());
     assert_eq!(session.remaining(), 0);
 
-    session.push_bar(
-        a,
-        KernelBar {
-            timestamp: 20,
-            open: 100.0,
-            high: 101.0,
-            low: 99.0,
-            close: 100.5,
-            volume: 10.0,
-        },
-    );
+    session
+        .push_bar(
+            a,
+            KernelBar {
+                timestamp: 20,
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.5,
+                volume: 10.0,
+            },
+        )
+        .unwrap();
     assert_eq!(session.remaining(), 1);
 }
 
@@ -907,7 +913,7 @@ fn adoption_after_an_applied_event_is_refused() {
     let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
     let mut session = EventSession::new(config);
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
-    session.set_bars(a, bars(0, &[100.0, 99.0, 98.0]));
+    session.set_bars(a, bars(0, &[100.0, 99.0, 98.0])).unwrap();
     session.seal();
     session.apply_current(StepInput::default());
 
@@ -931,7 +937,10 @@ fn adoption_survives_a_quote_only_event() {
     let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
     session.seal();
     // ltp = 0.0 means "no trade print", so this appends only the quote.
-    assert_eq!(session.push_tick(a, 1_000, 0.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 1);
+    assert_eq!(
+        session.push_tick(a, 1_000, 0.0, 99.0, 101.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).unwrap(),
+        1
+    );
     session.apply_current(StepInput::default());
 
     assert!(
@@ -978,7 +987,7 @@ fn option_session(
             PositionPolicy::Net,
         );
         // Offset each leg's timestamps so the schedule interleaves legs in order.
-        session.set_bars(idx, bars(i as i64, premiums));
+        session.set_bars(idx, bars(i as i64, premiums)).unwrap();
     }
     session.seal();
     session
@@ -1102,4 +1111,40 @@ fn a_hedged_pair_is_not_margin_called_on_a_move_two_naked_deposits_would_be() {
     }
     assert_eq!(calls, 0, "a hedged pair must be maintained at its group figure");
     assert!(!session.is_halted());
+}
+
+#[test]
+fn decreasing_timestamps_are_refused_at_attach() {
+    let mut session = EventSession::new(BacktestConfig::default());
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let mut unsorted = bars(0, &[100.0, 101.0, 102.0, 103.0]);
+    unsorted[2].timestamp = 5; // 0, 10, 5, 30
+    let err = session.set_bars(a, unsorted).unwrap_err().to_string();
+    assert!(
+        err.contains("AAA bars") && err.contains("index 2") && err.contains("5 after 10"),
+        "{err}"
+    );
+    assert!(session
+        .set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (5, 100.0, 0.0, 0.0)]))
+        .is_err());
+    // Equal neighbours are fine.
+    session.set_ticks(a, tick_data(&[(10, 100.0, 0.0, 0.0), (10, 101.0, 0.0, 0.0)])).unwrap();
+}
+
+#[test]
+fn live_pushes_refuse_a_decreasing_timestamp() {
+    let mut session = EventSession::new(BacktestConfig::default());
+    let a = session.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    session.set_bars(a, bars(0, &[100.0, 101.0])).unwrap(); // last bar at 10
+    let tick = |s: &mut EventSession, ts| {
+        s.push_tick(a, ts, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    };
+    assert!(tick(&mut session, 9).is_err(), "older than the attached history");
+    assert_eq!(tick(&mut session, 10).unwrap(), 1, "equal timestamp is allowed");
+    assert_eq!(tick(&mut session, 20).unwrap(), 1);
+    let err = tick(&mut session, 15).unwrap_err().to_string();
+    assert!(err.contains("AAA live feed") && err.contains("15 after 20"), "{err}");
+    let bar = KernelBar { timestamp: 19, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 };
+    assert!(session.push_bar(a, bar).is_err());
+    assert_eq!(session.remaining(), 4, "refused pushes append nothing");
 }

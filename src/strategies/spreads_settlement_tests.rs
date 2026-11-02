@@ -104,7 +104,7 @@ fn a_calendar_survives_its_near_leg_expiry() {
 
 /// What the far leg does after the near one dies has to reach the result.
 ///
-/// This is the sharper statement of the defect. The old engine returned the
+/// This is the sharper statement of the defect. Before the fix, the result was the
 /// same number whatever the far leg did, because it had already closed --
 /// so the error was not a bias anyone could correct for, it was a result
 /// uncorrelated with the trade. Two runs differing only in the far leg's

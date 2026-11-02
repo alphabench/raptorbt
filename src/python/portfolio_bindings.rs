@@ -33,7 +33,7 @@ fn to_pyarray2<'py>(
     flat: Vec<f64>,
     rows: usize,
     cols: usize,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     Array2::from_shape_vec((rows, cols), flat)
         .map(|a| a.into_pyarray(py))
         .map_err(|e| PyValueError::new_err(format!("shape error: {e}")))
@@ -71,7 +71,7 @@ pub struct PyRiskModel {
 #[pymethods]
 impl PyRiskModel {
     /// Covariance of per-period returns as an `n_assets x n_assets` array.
-    fn cov<'py>(&self, py: Python<'py>) -> PyResult<&'py PyArray2<f64>> {
+    fn cov<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
         to_pyarray2(py, self.inner.cov.clone(), self.inner.n_assets, self.inner.n_assets)
     }
 
@@ -236,11 +236,11 @@ pub struct PyOptimizationResult {
 
 #[pymethods]
 impl PyOptimizationResult {
-    fn weights<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn weights<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.inner.weights.clone())
     }
 
-    fn trades<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn trades<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.inner.trades.clone())
     }
 
@@ -317,15 +317,15 @@ impl PyRiskContributions {
         self.total_vol_annualized
     }
 
-    fn marginal<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn marginal<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.marginal.clone())
     }
 
-    fn contribution<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn contribution<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.contribution.clone())
     }
 
-    fn pct_contribution<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn pct_contribution<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.pct_contribution.clone())
     }
 }
@@ -335,7 +335,7 @@ impl PyRiskContributions {
 /// Eagerly copies arrays under the GIL at construction so the item is `Send`
 /// and the batch loop can release the GIL (same pattern as
 /// `PyBatchSpreadItem`).
-#[pyclass(name = "OptimizeItem")]
+#[pyclass(name = "OptimizeItem", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyOptimizeItem {
     item_id: String,
@@ -416,20 +416,19 @@ pub fn batch_optimize_portfolios(
     let base = config.to_rust();
     let inner_model = model.inner.clone();
 
-    let results: Vec<(String, Result<OptimizationResult, PortfolioMathError>)> =
-        py.allow_threads(|| {
-            items
-                .into_par_iter()
-                .map(|item| {
-                    let mut cfg = base.clone();
-                    if let Some(pv) = item.portfolio_value {
-                        cfg.portfolio_value = pv;
-                    }
-                    let r = optimize_long_only(&inner_model, &item.alpha, &item.w_current, &cfg);
-                    (item.item_id, r)
-                })
-                .collect()
-        });
+    let results: Vec<(String, Result<OptimizationResult, PortfolioMathError>)> = py.detach(|| {
+        items
+            .into_par_iter()
+            .map(|item| {
+                let mut cfg = base.clone();
+                if let Some(pv) = item.portfolio_value {
+                    cfg.portfolio_value = pv;
+                }
+                let r = optimize_long_only(&inner_model, &item.alpha, &item.w_current, &cfg);
+                (item.item_id, r)
+            })
+            .collect()
+    });
 
     results
         .into_iter()
@@ -465,7 +464,7 @@ pub fn winsorize_panel<'py>(
     py: Python<'py>,
     values: PyReadonlyArray2<f64>,
     pct: f64,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let (flat, rows, cols) = numpy_to_vec2_f64(values);
     let out = factor_panel::winsorize_panel(&flat, rows, cols, pct).map_err(to_py_err)?;
     to_pyarray2(py, out, rows, cols)
@@ -477,7 +476,7 @@ pub fn zscore_panel<'py>(
     py: Python<'py>,
     values: PyReadonlyArray2<f64>,
     min_names: usize,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let (flat, rows, cols) = numpy_to_vec2_f64(values);
     let out = factor_panel::zscore_panel(&flat, rows, cols, min_names).map_err(to_py_err)?;
     to_pyarray2(py, out, rows, cols)
@@ -489,7 +488,7 @@ pub fn rank_panel<'py>(
     py: Python<'py>,
     values: PyReadonlyArray2<f64>,
     min_names: usize,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let (flat, rows, cols) = numpy_to_vec2_f64(values);
     let out = factor_panel::rank_panel(&flat, rows, cols, min_names).map_err(to_py_err)?;
     to_pyarray2(py, out, rows, cols)
@@ -502,7 +501,7 @@ pub fn momentum_panel<'py>(
     prices: PyReadonlyArray2<f64>,
     lookback: usize,
     skip: usize,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let (flat, rows, cols) = numpy_to_vec2_f64(prices);
     let out = factor_panel::momentum_panel(&flat, rows, cols, lookback, skip).map_err(to_py_err)?;
     to_pyarray2(py, out, rows, cols)
@@ -514,7 +513,7 @@ pub fn composite_scores<'py>(
     py: Python<'py>,
     factors: Vec<PyReadonlyArray2<f64>>,
     weights: PyReadonlyArray1<f64>,
-) -> PyResult<&'py PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     if factors.is_empty() {
         return Err(PyValueError::new_err("no factor panels supplied"));
     }
@@ -593,7 +592,7 @@ impl PyRankIc {
         self.mean_names
     }
 
-    fn daily_ic<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn daily_ic<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.daily_ic.clone())
     }
 }
@@ -648,23 +647,23 @@ pub struct PyRebalanceSimResult {
 
 #[pymethods]
 impl PyRebalanceSimResult {
-    fn equity_curve<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn equity_curve<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.equity_curve.clone())
     }
 
-    fn turnover<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn turnover<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.turnover.clone())
     }
 
-    fn cost_regulatory<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn cost_regulatory<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.cost_regulatory.clone())
     }
 
-    fn cost_brokerage<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn cost_brokerage<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.cost_brokerage.clone())
     }
 
-    fn cost_dp<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn cost_dp<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         PyArray1::from_vec(py, self.cost_dp.clone())
     }
 
@@ -761,24 +760,23 @@ pub fn simulate_rebalance_policy(
 
 /// Export a segment's cost schedule, including the DP sell charge.
 ///
-/// The single numeric source of truth for cost parity tests between this
-/// crate and the backend's `costs.py` -- the two must never drift.
+/// The single numeric source of truth for cost parity tests.
 #[pyfunction]
 pub fn indian_cost_schedule(segment: &str) -> PyResult<HashMap<String, f64>> {
     let seg = parse_segment(segment)?;
-    let s = seg.schedule();
+    let s = seg.rates();
     let mut out = HashMap::new();
     // Two keys since 0.9.0: flat is the per-order cap (zero on delivery,
-    // where Zerodha charges nothing), rate is the percentage alternative
-    // (zero where only the flat applies). The old single
-    // `brokerage_per_order` key is gone on purpose -- a consumer still
-    // reading it must fail loudly rather than treat the cap as the charge.
-    out.insert("brokerage_flat".into(), s.brokerage_flat);
+    // where nothing is charged), rate is the percentage alternative (zero
+    // where only the flat applies). The old single `brokerage_per_order` key
+    // is gone on purpose -- a consumer still reading it must fail loudly
+    // rather than treat the cap as the charge.
+    out.insert("brokerage_flat".into(), s.brokerage_cap.unwrap_or(s.brokerage_flat));
     out.insert("brokerage_rate".into(), s.brokerage_rate);
-    out.insert("stt_rate".into(), s.stt_rate);
-    out.insert("exchange_txn_rate".into(), s.exchange_txn_rate);
-    out.insert("sebi_turnover_rate".into(), s.sebi_turnover_rate);
-    out.insert("stamp_duty_rate".into(), s.stamp_duty_rate);
+    out.insert("stt_rate".into(), s.tax_buy_rate.max(s.tax_sell_rate));
+    out.insert("exchange_txn_rate".into(), s.exchange_rate);
+    out.insert("sebi_turnover_rate".into(), s.regulatory_rate);
+    out.insert("stamp_duty_rate".into(), s.stamp_buy_rate);
     out.insert("gst_rate".into(), s.gst_rate);
     out.insert("dp_sell_charge_per_isin_per_day".into(), DP_SELL_CHARGE_PER_ISIN_PER_DAY);
     Ok(out)

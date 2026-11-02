@@ -343,14 +343,43 @@ impl PositionLedger {
         self.open.iter().map(|p| price * p.position.size * self.contract_multiplier).sum()
     }
 
-    /// Total market value of open positions at the given price.
+    /// Total marked value of open positions in a cash account.
     ///
-    /// `price * size` for every direction — the fully-funded model the
-    /// engine has always used (shorts included; the golden suite pins it).
-    /// Direction-aware marking arrives with the margin account layer, which
-    /// owns short cash-flow properly.
+    /// A long is worth `price * size`. A short has no asset to value: the
+    /// entry notional stays posted as collateral, so it is worth that
+    /// collateral plus the gain since entry (see [`marked_value`]).
     pub fn position_value(&self, price: Price) -> f64 {
-        self.open.iter().map(|p| price * p.position.size * self.contract_multiplier).sum()
+        self.open
+            .iter()
+            .map(|p| {
+                marked_value(
+                    p.position.direction,
+                    p.position.entry_price,
+                    price,
+                    p.position.size,
+                    self.contract_multiplier,
+                )
+            })
+            .sum()
+    }
+}
+
+/// What `size` units opened at `entry` are worth in a cash account at `price`.
+///
+/// Long: `price * size`. Short: the entry collateral plus `(entry - price) *
+/// size`, so the account gains when the price falls. Closing credits this
+/// value at the exit price, which keeps final equity equal to initial capital
+/// plus realised PnL.
+pub fn marked_value(
+    direction: Direction,
+    entry: Price,
+    price: Price,
+    size: f64,
+    contract_multiplier: f64,
+) -> f64 {
+    match direction {
+        Direction::Long => price * size * contract_multiplier,
+        Direction::Short => (entry + (entry - price)) * size * contract_multiplier,
     }
 }
 

@@ -1925,7 +1925,7 @@ fn a_future_one_lot_of_margin_cannot_cover_is_refused_for_margin() {
 #[test]
 fn the_leverage_rate_path_is_bit_identical_to_the_pre_model_arithmetic() {
     // 0.12.0 rewrote sizing as `per_contract + contract_value × fee` and
-    // moved the rate path by one ULP; a downstream parity test caught it.
+    // moved the rate path by one ULP; a parity test caught it.
     // The rate path must evaluate `contract_value × (rate + fee)` and
     // `contract_value × size × rate` exactly as 0.11 did.
     let config = BacktestConfig { fees: 0.0013, ..BacktestConfig::default() };
@@ -1952,4 +1952,160 @@ fn the_leverage_rate_path_is_bit_identical_to_the_pre_model_arithmetic() {
         (price * expected_size * rate).to_bits(),
         "locked margin must be contract_value × size × rate, in that order"
     );
+}
+
+fn tick_grid_kernel(direction: Direction, slippage: SlippageModel) -> EngineKernel {
+    use crate::instruments::{InstrumentKind, InstrumentSpec};
+
+    let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+    let fee_model = config.fee_model();
+    let spec =
+        InstrumentSpec { price_increment: 0.05, ..InstrumentSpec::new("EQ", InstrumentKind::Cash) };
+    EngineKernel::new(
+        config,
+        fee_model,
+        slippage,
+        FillPrice::Close,
+        "EQ".to_string(),
+        direction,
+        None,
+    )
+    .with_instrument(spec)
+}
+
+fn on_grid(price: Price) -> bool {
+    let ticks = price / 0.05;
+    (ticks - ticks.round()).abs() < 1e-9
+}
+
+#[test]
+fn slipped_fills_land_on_the_tick_grid_against_the_trader() {
+    for direction in [Direction::Long, Direction::Short] {
+        let mut kernel = tick_grid_kernel(direction, SlippageModel::Percentage(0.001));
+        enter(&mut kernel, 0, 100.03);
+        let entry = kernel.position_snapshot().unwrap().entry_price;
+        assert!(on_grid(entry), "{direction:?} entry {entry} off grid");
+        match direction {
+            // buy: slipped 100.13003 -> rounds up to 100.15
+            Direction::Long => assert!((entry - 100.15).abs() < 1e-9, "{entry}"),
+            // sell: slipped 99.92997 -> rounds down to 99.90
+            Direction::Short => assert!((entry - 99.90).abs() < 1e-9, "{entry}"),
+        }
+
+        let events =
+            kernel.step(1, &bar(1, 110.03), StepInput { exit: true, ..StepInput::default() });
+        let exit = match events.as_slice() {
+            [EngineEvent::Exited { trade, .. }] => trade.exit_price,
+            other => panic!("expected exit, got {other:?}"),
+        };
+        assert!(on_grid(exit), "{direction:?} exit {exit} off grid");
+        match direction {
+            // sell: slipped 109.91997 -> down to 109.90
+            Direction::Long => assert!((exit - 109.90).abs() < 1e-9, "{exit}"),
+            // cover (buy): slipped 110.14003 -> up to 110.15
+            Direction::Short => assert!((exit - 110.15).abs() < 1e-9, "{exit}"),
+        }
+    }
+}
+
+#[test]
+fn on_grid_prices_without_slippage_do_not_move() {
+    let mut kernel = tick_grid_kernel(Direction::Long, SlippageModel::None);
+    enter(&mut kernel, 0, 100.05);
+    assert_eq!(kernel.position_snapshot().unwrap().entry_price, 100.05);
+}
+
+#[test]
+fn off_grid_limit_fills_never_cross_the_limit() {
+    // Buy limit 99.03 fills no higher than 99.03 (snaps down to 99.00).
+    let mut kernel = tick_grid_kernel(Direction::Long, SlippageModel::Percentage(0.01));
+    kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 99.03 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "b".to_string(),
+        None,
+        None,
+    );
+    kernel.step_trade(1, &trade(1, 99.0, 10.0), StepInput::default());
+    let entry = kernel.position_snapshot().expect("filled").entry_price;
+    assert!(entry <= 99.03 && on_grid(entry), "buy limit filled at {entry}");
+
+    // Sell limit 101.02 fills no lower than 101.02 (snaps up to 101.05).
+    let mut kernel = tick_grid_kernel(Direction::Short, SlippageModel::Percentage(0.01));
+    kernel.submit_order(
+        OrderSide::Sell,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 101.02 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "s".to_string(),
+        None,
+        None,
+    );
+    kernel.step_trade(1, &trade(1, 101.1, 10.0), StepInput::default());
+    let entry = kernel.position_snapshot().expect("filled").entry_price;
+    assert!(entry >= 101.02 && on_grid(entry), "sell limit filled at {entry}");
+}
+
+fn indian_kernel(segment: &str, lot: Option<f64>) -> EngineKernel {
+    let config = BacktestConfig {
+        fee_segment: Some(segment.to_string()),
+        initial_capital: 100_000.0,
+        ..BacktestConfig::default()
+    };
+    let fee_model = config.fee_model();
+    let inst = InstrumentConfig { lot_size: lot, ..InstrumentConfig::default() };
+    EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "EQ".to_string(),
+        Direction::Long,
+        Some(&inst),
+    )
+}
+
+#[test]
+fn full_capital_entry_under_itemised_fees_never_overdraws_cash() {
+    // Sweep prices so the size lands on varied fractional/lot boundaries.
+    for segment in ["NSE-DELIVERY", "NSE-INTRADAY", "NFO"] {
+        for lot in [None, Some(1.0), Some(25.0)] {
+            for k in 0..200 {
+                let price = 37.0 + 3.71 * k as f64;
+                let mut kernel = indian_kernel(segment, lot);
+                let before = kernel.cash();
+                let events = kernel.step(
+                    0,
+                    &bar(0, price),
+                    StepInput { entry: true, ..StepInput::default() },
+                );
+                let Some(EngineEvent::Entered { size, .. }) = events.first() else {
+                    continue; // too small for one lot: rejected, nothing debited
+                };
+                let snapshot = kernel.position_snapshot().unwrap();
+                let charged = before - kernel.cash() - snapshot.entry_price * size;
+                let expected = kernel.fee_model.calculate_side(
+                    snapshot.entry_price,
+                    *size,
+                    Direction::Long,
+                    true,
+                );
+                assert!(
+                    kernel.cash() >= 0.0,
+                    "{segment} lot {lot:?} price {price}: cash {} after entry",
+                    kernel.cash()
+                );
+                assert!(
+                    (charged - expected).abs() < 1e-9 * before,
+                    "{segment} price {price}: charged {charged} vs fee {expected}"
+                );
+            }
+        }
+    }
 }

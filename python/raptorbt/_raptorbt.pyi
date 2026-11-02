@@ -5,7 +5,7 @@ backtest runners. Indicator and tick helpers are declared with their array
 signatures at the bottom.
 """
 
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -43,6 +43,10 @@ class BacktestConfig:
     periods_per_year: float | None
     risk_free_rate: float
     session_minutes: float | None
+    # Set together with `fee_segment` to price the run on your own rates
+    # instead of the built-in exchange presets; `fee_segment` then names the
+    # row ("NFO-OPT") and a segment the schedule has no row for is refused.
+    fee_schedule: FeeSchedule | None
     fee_segment: str | None
     max_positions: int | None
     max_drawdown_pct: float | None
@@ -58,6 +62,16 @@ class BacktestConfig:
     bar_path_adaptive: bool
     legacy_annualization: bool
     squareoff_time_minutes: int | None
+    # Optional risk limits; None (the default) leaves each off. A non-positive
+    # value counts as off. A breach refuses the order or entry with the
+    # reject reason shown.
+    max_order_qty: float | None  # units above this: "order_size"
+    max_order_notional: float | None  # units * price * multiplier above this: "order_size"
+    max_position_qty: float | None  # net position per instrument after a fill: "max_position"
+    max_gross_exposure: float | None  # notional across instruments: "max_exposure"
+    max_daily_loss: float | None  # money; "daily_loss" for the rest of the day
+    max_daily_loss_pct: float | None  # percent of the day's starting equity
+    flatten_on_daily_loss: bool  # also close open positions on a breach
 
     def __init__(
         self,
@@ -85,6 +99,14 @@ class BacktestConfig:
         liquidate_on_margin_call: bool = ...,
         squareoff_time: str | None = ...,
         fill_timing: str | None = ...,
+        max_order_qty: float | None = ...,
+        max_order_notional: float | None = ...,
+        max_position_qty: float | None = ...,
+        max_gross_exposure: float | None = ...,
+        max_daily_loss: float | None = ...,
+        max_daily_loss_pct: float | None = ...,
+        flatten_on_daily_loss: bool = ...,
+        fee_schedule: FeeSchedule | None = ...,
     ) -> None: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...
@@ -292,6 +314,10 @@ class Order:
 
 class BacktestResult:
     metrics: BacktestMetrics
+    # True when the drawdown limit tripped or the strategy was halted
+    # (ctx.halt); halted_at is the bar count when it latched.
+    halted: bool
+    halted_at: int | None
 
     # These three return numpy arrays, not lists: `+` concatenates a list and
     # adds elementwise on an array, so the declared type decides what the
@@ -319,6 +345,26 @@ class PortfolioResult:
     # (``run_portfolio_strategy``), which interleaves N instrument streams.
     halted_at: int | None
     metrics: BacktestMetrics
+
+class AccountResult:
+    """An account group's final state; see ``AccountSpec``."""
+
+    name: str
+    initial_capital: float
+    #: Cash at the end, positions closed: initial capital plus the members'
+    #: trade P&L (which is net of fees).
+    balance: float
+    halted: bool
+    #: Events applied to any member before the account first halted.
+    halted_at: int | None
+    #: Indices, in the call's strategy list, of the strategies on the account,
+    #: in the order they step.
+    strategies: list[int]
+    def equity_curve(self) -> _F64: ...
+    def drawdown_curve(self) -> _F64: ...
+    #: Initial margin locked at each equity sample.
+    def locked_margin(self) -> _F64: ...
+    def timestamps(self) -> _I64: ...
 
 class BatchSpreadItem:
     strategy_id: str
@@ -705,6 +751,151 @@ def realized_vol_rolling(
 def oi_position_pct(oi: _F64, oi_day_high: float, oi_day_low: float) -> _F64: ...
 def tick_velocity(timestamps_ns: _I64, window_seconds: float = ...) -> _F64: ...
 
+# --- Trading sessions --------------------------------------------------------
+
+class SessionSchedule:
+    """When an instrument can trade: weekday windows, holidays, square-off.
+
+    Minutes are local minutes from midnight; dates are ``yyyymmdd`` ints. A
+    window is half-open (``open <= t < close``). No holiday calendar ships:
+    pass the exchange's dates in ``holidays``.
+    """
+
+    tz_offset_ns: int
+    squareoff_minute: int | None
+    holidays: list[int]
+    #: Keyed ``"mon"``..``"sun"``; days that do not trade are absent.
+    windows: dict[str, list[tuple[int, int]]]
+    def __init__(
+        self,
+        windows: dict[str | int, list[tuple[int, int]]],
+        tz_offset_ns: int = ...,
+        holidays: list[int] | None = ...,
+        squareoff_minute: int | None = ...,
+    ) -> None: ...
+    @staticmethod
+    def nse_equity(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def nse_fo(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def bse_equity(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    def with_holidays(self, dates: list[int]) -> SessionSchedule: ...
+    def with_squareoff_minute(self, squareoff_minute: int | None) -> SessionSchedule: ...
+    def is_open(self, ts_ns: int) -> bool: ...
+    def session_date(self, ts_ns: int) -> int | None: ...
+    def session_close_ns(self, date: int) -> int | None: ...
+    def next_open_ns(self, ts_ns: int) -> int | None: ...
+
+# --- Fees as data and margin models ------------------------------------------
+
+#: Keys of a priced fill: brokerage, stt (the transaction tax, whatever the
+#: row calls it), exchange_txn, sebi_fee, stamp_duty, gst, ipft, dp_charge,
+#: total, and exact_total (set by the rounded modes, else None).
+_Charge = dict[str, float | None]
+
+class RateCard:
+    @staticmethod
+    def from_json(text: str) -> RateCard: ...
+    @staticmethod
+    def from_dict(doc: dict[str, Any]) -> RateCard: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def effective_from(self) -> str: ...
+    @property
+    def effective_ns(self) -> int: ...
+    @property
+    def source(self) -> str: ...
+    def fee_schedule(self) -> FeeSchedule: ...
+    def backdated_fills(self, fill_ts: list[int]) -> int: ...
+    def to_json(self) -> str: ...
+    def to_dict(self) -> dict[str, Any]: ...
+
+class FeeSchedule:
+    @staticmethod
+    def exchange_presets() -> FeeSchedule: ...
+    @staticmethod
+    def from_cards(cards: list[RateCard]) -> FeeSchedule: ...
+    @staticmethod
+    def from_json(text: str) -> FeeSchedule: ...
+    @staticmethod
+    def from_dict(doc: dict[str, Any]) -> FeeSchedule: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def source(self) -> str: ...
+    def rows(self) -> list[dict[str, Any]]: ...
+    def row(
+        self,
+        venue: str,
+        segment: str,
+        underlying: str | None = ...,
+        at: int | None = ...,
+        settlement: bool = ...,
+    ) -> dict[str, Any]: ...
+    def charge(
+        self,
+        venue: str,
+        segment: str,
+        side: str,
+        price: float,
+        quantity: float,
+        multiplier: float = ...,
+        underlying: str | None = ...,
+        at: int | None = ...,
+        order_turnover: float = ...,
+        day_fee_owed: bool = ...,
+    ) -> _Charge: ...
+    def to_json(self, effective_from: str = ...) -> str: ...
+    def __len__(self) -> int: ...
+
+class MarginModel:
+    @staticmethod
+    def no_margin() -> MarginModel: ...
+    @staticmethod
+    def cash_only() -> MarginModel: ...
+    @staticmethod
+    def leverage(factors: dict[str, float]) -> MarginModel: ...
+    @staticmethod
+    def percent_of_notional(pct: float) -> MarginModel: ...
+    @staticmethod
+    def option_simple(seller_pct: float) -> MarginModel: ...
+    @staticmethod
+    def table(per_unit: dict[str, float], default: MarginModel | None = ...) -> MarginModel: ...
+    @staticmethod
+    def by_type(models: dict[str, MarginModel]) -> MarginModel: ...
+    @staticmethod
+    def by_product(intraday: MarginModel, carry: MarginModel) -> MarginModel: ...
+    @staticmethod
+    def defined_risk() -> MarginModel: ...
+    @staticmethod
+    def spread_credit(seller_pct: float, spread_pct: float) -> MarginModel: ...
+    @staticmethod
+    def from_spec(leverage: float = ...) -> MarginModel: ...
+    @property
+    def name(self) -> str: ...
+    def required(self, spec: InstrumentSpec, quantity: float, price: float) -> float: ...
+    def required_split(
+        self, spec: InstrumentSpec, quantity: float, price: float, intraday_quantity: float
+    ) -> float: ...
+    def required_legs(
+        self, legs: list[tuple[InstrumentSpec, float, float]], now: int | None = ...
+    ) -> float: ...
+    def group_shares(
+        self, legs: list[tuple[InstrumentSpec, float, float]], now: int = ...
+    ) -> list[float]: ...
+    def groups_options(self) -> bool: ...
+    def params(self) -> dict[str, Any]: ...
+    def describe(self) -> str: ...
+
+def defined_risk(legs: list[tuple[InstrumentSpec, float, float]]) -> float: ...
+
 # --- Instrument market definitions ------------------------------------------
 
 class InstrumentSpec:
@@ -727,6 +918,12 @@ class InstrumentSpec:
     right: str | None
     underlying: str | None
     tradable: bool
+    #: Metadata only: nothing is converted between currencies.
+    venue: str | None
+    currency: str | None
+    #: With a schedule the kernel enforces the session; without one the
+    #: instrument trades at any timestamp, as before.
+    session: SessionSchedule | None
     @staticmethod
     def equity(
         symbol: str,
@@ -737,6 +934,9 @@ class InstrumentSpec:
         margin_maint: float = ...,
         maker_fee: float = ...,
         taker_fee: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def futures_contract(
@@ -751,6 +951,9 @@ class InstrumentSpec:
         margin_maint: float = ...,
         maker_fee: float = ...,
         taker_fee: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def perpetual(
@@ -764,6 +967,9 @@ class InstrumentSpec:
         margin_maint: float = ...,
         maker_fee: float = ...,
         taker_fee: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def option(
@@ -783,6 +989,9 @@ class InstrumentSpec:
         taker_fee: float = ...,
         span_pct: float = ...,
         exposure_pct: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def currency_pair(
@@ -794,9 +1003,18 @@ class InstrumentSpec:
         margin_maint: float = ...,
         maker_fee: float = ...,
         taker_fee: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
-    def index(symbol: str, price_increment: float = ...) -> InstrumentSpec: ...
+    def index(
+        symbol: str,
+        price_increment: float = ...,
+        venue: str | None = ...,
+        currency: str | None = ...,
+        session: SessionSchedule | None = ...,
+    ) -> InstrumentSpec: ...
 
 # --- Streaming indicators ----------------------------------------------------
 
@@ -804,6 +1022,11 @@ class Indicator:
     kind: str
     value: Any | None
     initialized: bool
+    #: True once a shared runtime (``run_strategies``) owns the indicator.
+    #: ``update_bar`` and ``reset`` then raise ``RuntimeError``.
+    linked: bool
+    #: Number of ``update_bar`` calls made on this indicator.
+    update_count: int
     @staticmethod
     def sma(period: int) -> Indicator: ...
     @staticmethod
@@ -838,12 +1061,17 @@ _BarArrays = tuple[_I64, _F64, _F64, _F64, _F64, _F64]
 class BarAggregator:
     step: int
     unit: str
+    stamp: str
     def __init__(
         self,
         step: int,
         unit: str,
         tz_offset_ns: int = ...,
         brick_size: float = ...,
+        stamp: Literal["open", "close"] = ...,
+        #: Daily and longer bars cut at the schedule's own midnight and skip
+        #: holidays and weekends; other units are unaffected.
+        session: SessionSchedule | None = ...,
     ) -> None: ...
     def push_bar(
         self,
@@ -876,6 +1104,7 @@ def aggregate_bars(
     unit: str,
     tz_offset_ns: int = ...,
     brick_size: float = ...,
+    stamp: Literal["open", "close"] = ...,
 ) -> _BarArrays: ...
 def bars_from_ticks(
     timestamps: _I64,
@@ -887,6 +1116,292 @@ def bars_from_ticks(
     tz_offset_ns: int = ...,
     brick_size: float = ...,
 ) -> _BarArrays: ...
+
+# --- Multi-strategy runtime --------------------------------------------------
+#
+# Internal to ``raptorbt.run_strategies`` and ``raptorbt.LiveNode``: ``Runtime``
+# owns the shared market data, one isolated portfolio book per strategy and the
+# per-event loop. A runtime over ``MarketData.live`` takes pushed events.
+# ``RuntimeContext`` is the context handed to a strategy's hooks;
+# ``StrategyView`` is a strategy's book with the method surface of
+# ``PortfolioSession``, which the command path drives.
+
+class RuntimeContext:
+    symbol: str
+    idx: int
+    bar: Any | None
+    timestamp: int
+    bar_close_ts: int | None
+    equity: float
+    cash: float
+    free_capital: float
+    symbols: list[str]
+    position: PositionSnapshot | None
+    net_position: float
+    is_net_long: bool
+    is_net_short: bool
+    is_flat: bool
+    #: The print being handled, only inside ``on_trade_tick``.
+    tick: Any | None
+    #: The quote being handled, only inside ``on_quote``.
+    quote: Any | None
+    #: The last book seen for the current symbol; persists outside its hook.
+    book: Any | None
+    best_bid: float | None
+    best_ask: float | None
+    last_price: float | None
+    def series(self, symbol: str | None = ...) -> dict[str, _F64 | _I64]: ...
+    def keep_history(self, rows: int, symbol: str | None = ...) -> None: ...
+    def position_for(self, symbol: str | None = ...) -> PositionSnapshot | None: ...
+    def positions(self, symbol: str | None = ...) -> list[PositionSnapshot]: ...
+    def set_underlying_price(
+        self, price: float | None, symbol: str | None = ...
+    ) -> None: ...
+    def net_position_for(self, symbol: str | None = ...) -> float: ...
+    def open_orders(self, symbol: str | None = ...) -> list[Any]: ...
+    def halt(self, reason: str = ..., flatten: bool = ...) -> None: ...
+    def is_halted(self) -> bool: ...
+    def _instrument_index(self, symbol: str | None = ...) -> int: ...
+    #: ``(locked_margin, realized_pnl, unrealized_pnl, gross_exposure,
+    #: net_exposure)``; backs ``ctx.portfolio``.
+    def _portfolio_totals(self) -> tuple[float, float, float, float, float]: ...
+
+class CommandQueue:
+    """A strategy's queued commands and intents; orders are converted to
+    plain data when submitted."""
+
+    def __init__(self) -> None: ...
+    def enter(
+        self,
+        size_frac: float | None = ...,
+        stop_price: float | None = ...,
+        target_price: float | None = ...,
+    ) -> None: ...
+    def close_intent(self) -> None: ...
+    def submit(
+        self,
+        order: Any,
+        client_id: str,
+        parent: str | None = ...,
+        symbol: str | None = ...,
+        twap: bool = ...,
+    ) -> None: ...
+    def cancel(self, client_id: str) -> None: ...
+    def cancel_all(self) -> None: ...
+    def link_oco(self, client_ids: list[str]) -> None: ...
+    def close(self, position_id: int, symbol: str | None = ...) -> None: ...
+    def close_all_for(self, symbol: str) -> None: ...
+    def modify(
+        self,
+        client_id: str,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
+        trigger_price: float | None = ...,
+    ) -> None: ...
+    def has_commands(self) -> bool: ...
+    def has_intents(self) -> bool: ...
+    def drain_commands(self) -> list[tuple[Any, ...]]: ...
+    def drain_intents(self) -> list[tuple[Any, ...]]: ...
+    def restore_intents(self, intents: list[tuple[Any, ...]]) -> None: ...
+
+class KernelDriver:
+    """``run_strategy_backtest``'s per-bar work after ``on_bar``: route the
+    strategy's queued commands, fold its intents, step the session and send
+    the engine events to the hooks."""
+
+    def __init__(
+        self,
+        session: KernelSession,
+        strategy: Any,
+        ctx: Any,
+        hooks: int,
+        atr: Any | None = ...,
+    ) -> None: ...
+    def step(
+        self,
+        idx: int,
+        ts: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None: ...
+
+class StrategyView:
+    def submit_order(
+        self,
+        instrument: int,
+        side: str,
+        kind: str,
+        submitted_idx: int,
+        submitted_ts: int,
+        client_id: str,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
+        trigger_price: float | None = ...,
+        tif: str = ...,
+        expire_ns: int | None = ...,
+        stop_price: float | None = ...,
+        target_price: float | None = ...,
+        offset: float | None = ...,
+        offset_kind: str = ...,
+        limit_offset: float = ...,
+        post_only: bool = ...,
+        reduce_only: bool = ...,
+        parent_id: int | None = ...,
+    ) -> int: ...
+    def submit_twap(
+        self,
+        instrument: int,
+        units: float,
+        side: str,
+        slices: int,
+        interval_ns: int,
+        submitted_idx: int,
+        submitted_ts: int,
+        client_id: str,
+        reduce_only: bool = ...,
+    ) -> int: ...
+    def cancel_twap(self, instrument: int, algo_id: int, idx: int) -> bool: ...
+    def cancel_order(self, instrument: int, idx: int, order_id: int) -> bool: ...
+    def modify_order(
+        self,
+        instrument: int,
+        order_id: int,
+        units: float | None = ...,
+        size_frac: float | None = ...,
+        limit_price: float | None = ...,
+        trigger_price: float | None = ...,
+    ) -> bool: ...
+    def cancel_all_orders(self, instrument: int, idx: int) -> list[int]: ...
+    def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
+    def request_close(self, instrument: int, position_id: int) -> None: ...
+    def set_underlying_price(
+        self, instrument: int, price: float | None = ...
+    ) -> None: ...
+    def positions(self, instrument: int) -> list[PositionSnapshot]: ...
+    def position(self, instrument: int) -> PositionSnapshot | None: ...
+    def working_orders(
+        self, instrument: int
+    ) -> list[tuple[int, str, str, str, str, float, float]]: ...
+    def equity(self) -> float: ...
+    def is_halted(self) -> bool: ...
+    def halt(self, reason: str = ..., flatten: bool = ...) -> None: ...
+    def cash(self) -> float: ...
+    def free_capital(self) -> float: ...
+
+class MarketData:
+    """The columns of a run, built once and shared by every ``Runtime`` over it."""
+
+    def __init__(
+        self,
+        symbols: list[str],
+        arrays: list[dict[str, _F64 | _I64] | None],
+        offsets: list[int],
+        ticks: list[dict[str, Any] | None] | None = ...,
+        depth: list[dict[str, Any] | None] | None = ...,
+    ) -> None: ...
+    @staticmethod
+    def live(symbols: list[str], offsets: list[int], history: int) -> MarketData:
+        """The shell of a live node: no data, rings of ``history`` rows per symbol."""
+        ...
+
+class Runtime:
+    def __init__(
+        self,
+        market: MarketData,
+        directions: list[int],
+        instrument_configs: list[InstrumentConfig | None],
+        instruments: list[InstrumentSpec | None],
+        config: BacktestConfig | None,
+        oms_type: str,
+        account_type: str,
+        leverage: float,
+        tz_offset_ns: int,
+        stamp: str,
+        share: bool,
+        keep_curves: bool,
+        bar_cls: Any,
+        composite_cls: Any,
+        working_order_cls: Any,
+        dispatch: Any,
+        trade_cls: Any,
+        quote_cls: Any,
+        book_cls: Any,
+    ) -> None: ...
+    def set_primary_bars(self, step: int, unit: str) -> None: ...
+    def add_account(
+        self,
+        initial_capital: float,
+        account_type: str,
+        leverage: float,
+        members: int,
+        max_drawdown_pct: float | None = ...,
+        max_daily_loss: float | None = ...,
+        max_daily_loss_pct: float | None = ...,
+        max_gross_exposure: float | None = ...,
+        max_positions: int | None = ...,
+    ) -> int: ...
+    def add_strategy(
+        self, symbols: list[str], account: int | None = ...
+    ) -> tuple[int, RuntimeContext, StrategyView]: ...
+    def halt_account(self, account: int, reason: str, flatten: bool) -> None: ...
+    def finish_account(self, account: int, name: str) -> AccountResult: ...
+    def register_streams(
+        self,
+        sid: int,
+        strategy: Any,
+        ctx: RuntimeContext,
+        commands: Any | None,
+        clocks: list[Any],
+        hooks: int,
+        subscriptions: list[tuple[int, str, float]],
+        indicators: list[tuple[Any, int | None, str | None]],
+    ) -> bool: ...
+    def finalize(self) -> None: ...
+    def run(self) -> None: ...
+    def set_curve_window(self, window: int | None) -> None: ...
+    def adopt_position(
+        self, sid: int, local: int, timestamp_ns: int, price: float, quantity: float
+    ) -> int: ...
+    def push_tick(
+        self,
+        instrument: int,
+        timestamp: int,
+        ltp: float,
+        bid: float = ...,
+        ask: float = ...,
+        buy_qty_delta: float = ...,
+        sell_qty_delta: float = ...,
+        ltq: float = ...,
+        bid_qty: float = ...,
+        ask_qty: float = ...,
+        oi: float = ...,
+    ) -> int: ...
+    def push_bar(
+        self,
+        instrument: int,
+        timestamp: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None: ...
+    def push_depth(
+        self,
+        instrument: int,
+        timestamp: int,
+        bids: list[tuple[float, float]],
+        asks: list[tuple[float, float]],
+    ) -> None: ...
+    def advance_time(self, timestamp: int) -> None: ...
+    def finish(self, sid: int) -> PortfolioResult: ...
+    def close(self) -> None: ...
+    def memory_report(self) -> dict[str, int]: ...
 
 class PortfolioSession:
     def __init__(
@@ -1006,6 +1521,19 @@ class PortfolioSession:
         target_price: float | None = ...,
     ) -> list[EngineEvent]: ...
     def submit_order(self, instrument: int, *args: Any, **kwargs: Any) -> int: ...
+    def submit_twap(
+        self,
+        instrument: int,
+        units: float,
+        side: str,
+        slices: int,
+        interval_ns: int,
+        submitted_idx: int,
+        submitted_ts: int,
+        client_id: str,
+        reduce_only: bool = ...,
+    ) -> int: ...
+    def cancel_twap(self, instrument: int, algo_id: int, idx: int) -> bool: ...
     def cancel_order(self, instrument: int, idx: int, order_id: int) -> bool: ...
     def cancel_all_orders(self, instrument: int, idx: int) -> list[int]: ...
     def modify_order(
@@ -1043,11 +1571,16 @@ class PortfolioSession:
     def cash(self) -> float: ...
     def free_capital(self) -> float: ...
     def is_halted(self) -> bool: ...
+    def halt(self, reason: str = ..., flatten: bool = ...) -> None: ...
     def finish(self) -> PortfolioResult: ...
 
 # --- Per-bar strategy session (class-based strategy contract) ---------------
 
 class EngineEvent:
+    # Besides the order and position kinds: "risk_rejected" (a risk limit
+    # refused an order or entry; reject_reason says which) and "risk_halted"
+    # (the daily loss limit was reached, or the strategy was halted;
+    # reject_reason holds the reason).
     kind: str
     idx: int
     price: float | None
@@ -1145,6 +1678,8 @@ class KernelSession:
     def positions(self) -> list[PositionSnapshot]: ...
     def request_close(self, position_id: int) -> None: ...
     def free_capital(self) -> float: ...
+    def halt(self, reason: str = ..., flatten: bool = ...) -> None: ...
+    def is_halted(self) -> bool: ...
     def set_stop_price(
         self, price: float | None, position_id: int | None = ...
     ) -> None: ...
@@ -1162,3 +1697,299 @@ def resolve_atr_period(
     instrument_config: InstrumentConfig | None = ...,
 ) -> int | None: ...
 
+
+class Greeks:
+    price: float
+    delta: float
+    gamma: float
+    vega: float
+    theta: float
+    rho: float
+    def as_dict(self) -> dict[str, float]: ...
+
+def pricing_price(
+    model: str,
+    is_call: bool,
+    underlying: float,
+    strike: float,
+    tau: float,
+    vol: float,
+    rate: float = ...,
+    dividend_yield: float = ...,
+) -> float: ...
+def pricing_greeks(
+    model: str,
+    is_call: bool,
+    underlying: float,
+    strike: float,
+    tau: float,
+    vol: float,
+    rate: float = ...,
+    dividend_yield: float = ...,
+) -> Greeks: ...
+def pricing_implied_vol(
+    model: str,
+    price: float,
+    is_call: bool,
+    underlying: float,
+    strike: float,
+    tau: float,
+    rate: float = ...,
+    dividend_yield: float = ...,
+    lo: float = ...,
+    hi: float = ...,
+    tol: float = ...,
+    max_iter: int = ...,
+) -> tuple[float, int]: ...
+def pricing_price_array(
+    model: str,
+    is_call: _Bool,
+    underlying: _F64,
+    strike: _F64,
+    tau: _F64,
+    vol: _F64,
+    rate: _F64,
+    dividend_yield: _F64,
+) -> _F64: ...
+def pricing_greeks_array(
+    model: str,
+    is_call: _Bool,
+    underlying: _F64,
+    strike: _F64,
+    tau: _F64,
+    vol: _F64,
+    rate: _F64,
+    dividend_yield: _F64,
+) -> tuple[_F64, _F64, _F64, _F64, _F64, _F64]: ...
+def pricing_implied_vol_array(
+    model: str,
+    price: _F64,
+    is_call: _Bool,
+    underlying: _F64,
+    strike: _F64,
+    tau: _F64,
+    rate: _F64,
+    dividend_yield: _F64,
+    lo: float = ...,
+    hi: float = ...,
+    tol: float = ...,
+    max_iter: int = ...,
+) -> tuple[_F64, npt.NDArray[np.uint8]]: ...
+def pricing_status_name(code: int) -> str: ...
+def pricing_year_fraction(now_ns: int, expiry_ns: int) -> float: ...
+def pricing_forward(
+    spot: float, tau: float, rate: float = ..., dividend_yield: float = ...
+) -> float: ...
+
+class OptionChain:
+    def __init__(self, specs: Sequence[InstrumentSpec]) -> None: ...
+    def __len__(self) -> int: ...
+    def underlyings(self) -> list[str]: ...
+    def expiries(self, underlying: str, now_ns: int) -> list[int]: ...
+    def strikes(
+        self, underlying: str, expiry_ns: int, now_ns: int, right: str | None = ...
+    ) -> list[float]: ...
+    def contract(
+        self, underlying: str, expiry_ns: int, strike: float, right: str, now_ns: int
+    ) -> InstrumentSpec | None: ...
+    def contracts(
+        self, underlying: str, expiry_ns: int, now_ns: int, right: str | None = ...
+    ) -> list[InstrumentSpec]: ...
+    def pick_expiry(
+        self,
+        underlying: str,
+        now_ns: int,
+        which: str = ...,
+        n: int = ...,
+        min_days: int = ...,
+        date_ns: int | None = ...,
+        utc_offset_ns: int = ...,
+    ) -> int | None: ...
+    def atm_strike(
+        self, underlying: str, expiry_ns: int, now_ns: int, reference: float
+    ) -> float | None: ...
+    def atm_strike_forward(
+        self,
+        underlying: str,
+        expiry_ns: int,
+        now_ns: int,
+        spot: float,
+        rate: float = ...,
+        dividend_yield: float = ...,
+    ) -> float | None: ...
+    def strike_at_offset(
+        self, underlying: str, expiry_ns: int, now_ns: int, reference: float, offset: int
+    ) -> float | None: ...
+    def by_delta(
+        self,
+        underlying: str,
+        expiry_ns: int,
+        now_ns: int,
+        right: str,
+        target: float,
+        underlying_price: float,
+        vol: float,
+        rate: float = ...,
+        dividend_yield: float = ...,
+        model: str = ...,
+    ) -> InstrumentSpec | None: ...
+    def closest_by(
+        self,
+        underlying: str,
+        expiry_ns: int,
+        now_ns: int,
+        right: str,
+        target: float,
+        measure: Any,
+    ) -> InstrumentSpec | None: ...
+
+# --- research statistics and the full report ----------------------------------------------------
+
+def deflated_sharpe(
+    sharpes: Sequence[float],
+    best: float,
+    *,
+    samples: int,
+    skew: float = ...,
+    kurtosis: float = ...,
+    periods_per_year: float = ...,
+    luck: Literal["trials", "samples"] = ...,
+) -> dict[str, Any]: ...
+def stationary_bootstrap(
+    returns: Sequence[float],
+    *,
+    draws: int = ...,
+    block: float | None = ...,
+    seed: int,
+    periods_per_year: float = ...,
+) -> dict[str, Any]: ...
+def without_best(returns: Sequence[float], top: int) -> float: ...
+def walk_forward_windows(
+    days: Sequence[Any], *, train: int, test: int, step: int | None = ...
+) -> list[dict[str, Any]]: ...
+def design_grid(space: dict[str, Sequence[Any]]) -> list[dict[str, Any]]: ...
+def design_random(
+    space: dict[str, Sequence[Any] | tuple[float, float]], n: int, *, seed: int
+) -> list[dict[str, Any]]: ...
+def full_report(
+    equity_ts: Sequence[int],
+    equity: Sequence[float],
+    trades: Any = ...,
+    orders: Any = ...,
+    fees: Any = ...,
+    periods_per_year: float | None = ...,
+    risk_free: float = ...,
+    session_minutes: float = ...,
+    tz_offset_ns: int = ...,
+    *,
+    slippage: float = ...,
+    multipliers: dict[str, float] | None = ...,
+    exposure: Sequence[tuple[int, float, float]] | None = ...,
+    exposure_time: tuple[int, int] | None = ...,
+    benchmark: Sequence[tuple[int, float]] | None = ...,
+    period: tuple[Any, Any] | None = ...,
+    attribution: bool = ...,
+    rule_metrics: Any = ...,
+    unrealised: dict[str, float] | None = ...,
+) -> dict[str, Any]: ...
+
+# --- resampling ---------------------------------------------------------------------------------
+
+class ResampledBar:
+    @property
+    def stream(self) -> str | None: ...
+    @property
+    def ts(self) -> int: ...
+    @property
+    def open(self) -> float: ...
+    @property
+    def high(self) -> float: ...
+    @property
+    def low(self) -> float: ...
+    @property
+    def close(self) -> float: ...
+    @property
+    def volume(self) -> float: ...
+    @property
+    def period(self) -> int: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def closed_by(self) -> Literal["clock", "print", "carry", "session", "flush"]: ...
+    @property
+    def n_source(self) -> int: ...
+    @property
+    def complete(self) -> bool: ...
+    def as_tuple(self) -> tuple[int, float, float, float, float, float]: ...
+
+class Resampler:
+    def __init__(
+        self,
+        width_ns: int,
+        *,
+        source_ns: int = ...,
+        anchor_ns: int = ...,
+        tz_offset_ns: int = ...,
+        closed: Literal["left", "right"] = ...,
+        gaps: Literal["skip", "carry"] = ...,
+        close_on: Literal["clock", "next_print"] = ...,
+        min_source: int = ...,
+        session_anchored: bool = ...,
+        stream: str | None = ...,
+    ) -> None: ...
+    @property
+    def width_ns(self) -> int: ...
+    @property
+    def source_ns(self) -> int: ...
+    @property
+    def closed(self) -> str: ...
+    @property
+    def gaps(self) -> str: ...
+    @property
+    def close_on(self) -> str: ...
+    def push_trade(self, ts: int, price: float, qty: float) -> list[ResampledBar]: ...
+    def push_bar(
+        self,
+        ts: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float = ...,
+        period: int = ...,
+    ) -> list[ResampledBar]: ...
+    def on_clock(self, ts: int) -> list[ResampledBar]: ...
+    def on_session(self, open: bool, ts: int) -> list[ResampledBar]: ...
+    def next_close(self) -> int | None: ...
+    def flush(self) -> list[ResampledBar]: ...
+
+def resample_bars(
+    timestamps: _I64,
+    open: _F64,
+    high: _F64,
+    low: _F64,
+    close: _F64,
+    volume: _F64,
+    width_ns: int,
+    *,
+    source_ns: int = ...,
+    anchor_ns: int = ...,
+    tz_offset_ns: int = ...,
+    closed: Literal["left", "right"] = ...,
+    gaps: Literal["skip", "carry"] = ...,
+    min_source: int = ...,
+    flush: bool = ...,
+) -> dict[str, np.ndarray]: ...
+def resample_trades(
+    timestamps: _I64,
+    price: _F64,
+    qty: _F64,
+    width_ns: int,
+    *,
+    anchor_ns: int = ...,
+    tz_offset_ns: int = ...,
+    closed: Literal["left", "right"] = ...,
+    gaps: Literal["skip", "carry"] = ...,
+    min_source: int = ...,
+    flush: bool = ...,
+) -> dict[str, np.ndarray]: ...

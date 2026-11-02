@@ -81,6 +81,7 @@ RaptorBT is open source (MIT) and developed by the [Alphabench](https://alphaben
 - [Stop-Loss & Take-Profit](#stop-loss--take-profit)
 - [Monte Carlo Portfolio Simulation](#monte-carlo-portfolio-simulation)
 - [API Reference](#api-reference)
+- [Errors](#errors)
 - [Building from Source](#building-from-source)
 
 ---
@@ -266,8 +267,9 @@ class SmaCross(raptorbt.Strategy):
         elif crossed_dn and ctx.position is not None:
             self.close_position()
 
-    def on_position_closed(self, ctx, event):
-        self.log.info("closed: pnl=%.2f", event.trade.pnl)
+    def on_position_event(self, ctx, event):
+        if event.kind == "exited":
+            self.log.info("closed: pnl=%.2f", event.trade.pnl)
 
 
 result = raptorbt.run_strategy_backtest(
@@ -277,8 +279,8 @@ result = raptorbt.run_strategy_backtest(
 print(result.metrics.total_return_pct, len(result.trades()))
 ```
 
-Hooks: `on_start`, `on_bar`, `on_stop`, `on_order_filled`,
-`on_order_rejected`, `on_position_opened`, `on_position_closed`. Inside
+Hooks: `on_start`, `on_bar`, `on_stop`, `on_fill`, `on_order_rejected`,
+`on_position_event` (see [The Strategy API](#the-strategy-api)). Inside
 `on_bar`, `ctx` provides the current `bar`, `position` snapshot, `equity`,
 `cash`, `history(n)`, and `set_stop_price()` / `set_target_price()` for
 programmatic exits. Decision logic must only read array values at `ctx.idx`
@@ -293,6 +295,277 @@ step directly.
 Note: one Python hook call per bar makes the class path slower than the
 array path — fine for typical bar counts, but prefer arrays for large
 parameter sweeps.
+
+### The Strategy API
+
+The same event loop runs under `run_strategies`, `run_portfolio_strategy`,
+`run_tick_strategy`, `TickStrategyStream` / `LiveNode` and, where it applies
+(one instrument, no ticks), `run_strategy_backtest`. A strategy declares what
+it wants, then reads it through `ctx`. The examples below run as written
+against `bars` (`{symbol: {"timestamps", "open", "high", "low", "close",
+"volume"}}`), and `ticks` / `depth` for the tick ones.
+
+**Subscriptions and data.** Declare in `on_init` or `on_start`; read anywhere.
+`ctx.data` only ever shows what has closed by the current event.
+
+```python raptorbt-example
+import raptorbt
+from raptorbt import Strategy, run_strategies
+
+
+class MultiTimeframe(Strategy):
+    def on_start(self, ctx):
+        self.fast, self.slow = ctx.symbols[0], ctx.symbols[1]
+        self.subscribe(self.fast)                                  # primary bars
+        self.subscribe(self.fast, timeframe="5m", history=50)      # 5-minute bars
+        self.subscribe(self.slow, timeframe="15m", history=20)
+
+    def on_bar(self, ctx, event):
+        if event.timeframe is not None:       # a completed 5m / 15m bar
+            return
+        five = ctx.data.history(self.fast, "5m", count=10)    # read-only arrays
+        quarter = ctx.data.latest(self.slow, "15m")            # last closed bar or None
+        if len(five) == 10 and quarter is not None and five.close[-1] > quarter.close:
+            if ctx.data.position(self.fast) is None:
+                self.enter(size_frac=0.1)
+
+
+results = run_strategies([MultiTimeframe()], bars, config=config, bar_stamp="close")
+```
+
+`timeframe` is `None` (the primary bars), one of `"1m" "3m" "5m" "10m" "15m"
+"30m" "1h" "2h" "4h" "1d" "1w"`, or a `Timeframe` / `(step, unit)` tuple for
+tick, volume, value and renko bars: `Timeframe.ticks(100)`,
+`Timeframe.volume(5000)`, `Timeframe.value(1_000_000)`, `Timeframe.renko(2.5)`.
+`history=n` is the lookback you will read: it sizes a composite timeframe's
+buffer (1000 bars by default) and the rows a live node keeps. An unknown
+timeframe or data type raises an error that lists what is supported:
+
+```text
+Invalid timeframe subscription.
+
+Operation:
+    strategy
+
+Requested:
+    timeframe = '1minute'
+
+Supported:
+    '1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d', '1w'
+
+Related skill:
+    raptorbt-timeframes
+```
+
+**Indicators.** `ctx.indicators.<name>(instrument=, timeframe=None, ...)`
+returns a handle with `.ready` and `.value` (and `.values`, a named tuple,
+for multi-output ones). They are the runtime's own streaming indicators, so
+identical ones are computed once however many strategies ask. Available:
+`sma ema wma rsi atr roc stddev bollinger donchian macd`; the input is
+the close (`field="close"`; ATR and Donchian read the whole bar).
+
+```python raptorbt-example
+from raptorbt import Strategy, run_strategies
+
+
+class Trend(Strategy):
+    def on_start(self, ctx):
+        s = ctx.symbols[0]
+        self.ema = ctx.indicators.ema(instrument=s, timeframe="5m", period=3)
+        self.rsi = ctx.indicators.rsi(instrument=s, period=4)
+        self.bands = ctx.indicators.bollinger(instrument=s, period=5, k=2.0)
+        self.macd = ctx.indicators.macd(instrument=s, fast=3, slow=6, signal=2)
+
+    def on_bar(self, ctx, event):
+        if not (self.rsi.ready and self.bands.ready and self.macd.ready):
+            return
+        lower = self.bands.values.lower               # (middle, upper, lower)
+        if event.timeframe is None and self.rsi.value < 30 and event.close < lower:
+            self.enter(size_frac=0.1)
+
+
+run_strategies([Trend()], bars, config=config, bar_stamp="close")
+```
+
+Your own indicator goes through `ctx.indicators.custom(obj, instrument=,
+timeframe=)`. The contract: `obj.update(bar)` is called once per closed bar
+(a `Bar` for primary bars, a `CompositeBar` for a timeframe) before your hooks
+see that bar, and `obj.ready` and `obj.value` are readable. It belongs to the
+strategy and is never shared.
+
+```python raptorbt-example
+from raptorbt import Strategy, run_strategies
+
+
+class Range:
+    """High-low range of the last n closes."""
+
+    def __init__(self, n):
+        self.n, self.closes = n, []
+
+    def update(self, bar):
+        self.closes.append(bar.close)
+
+    @property
+    def ready(self):
+        return len(self.closes) >= self.n
+
+    @property
+    def value(self):
+        window = self.closes[-self.n:]
+        return max(window) - min(window) if self.ready else None
+
+
+class UsesCustom(Strategy):
+    def on_start(self, ctx):
+        self.range = ctx.indicators.custom(Range(5), instrument=ctx.symbols[0])
+
+    def on_bar(self, ctx, event):
+        if ctx.symbol == ctx.symbols[0] and self.range.ready and self.range.value > 3.0:
+            self.log.info("wide range %.2f", self.range.value)
+
+
+run_strategies([UsesCustom()], bars, config=config, bar_stamp="close")
+```
+
+**Hooks and orders.** Typed orders take `instrument=` (where to route the
+order in a multi-instrument run) and `quantity=` (contracts; `size_frac=`
+still sizes by capital). Validation is unchanged.
+
+```python raptorbt-example
+from raptorbt import Strategy, run_strategies
+from raptorbt.strategy import orders
+
+
+class Hooks(Strategy):
+    def on_start(self, ctx):
+        self.clock.set_timer("heartbeat", 600 * 10**9, start_ns=0)
+        self.events = []
+
+    def on_timer(self, ctx, event):                 # was on_time_event
+        self.events.append(("timer", event.name))
+
+    def on_bar(self, ctx, event):
+        if ctx.idx == 3 and ctx.is_flat:
+            self.submit_bracket(
+                orders.Market(side="buy", instrument=ctx.symbol, quantity=5),
+                stop_trigger=event.close * 0.95,
+                target_price=event.close * 1.10,
+            )
+
+    def on_fill(self, ctx, event):                  # was on_order_filled
+        self.events.append(("fill", ctx.symbol, event.kind))
+
+    def on_position_event(self, ctx, event):        # was on_position_opened/_closed
+        self.events.append(("position", ctx.symbol, event.kind))
+
+
+strategy = Hooks()
+run_strategies([strategy], bars, config=config, bar_stamp="close")
+assert any(e[0] == "fill" for e in strategy.events)
+```
+
+The hooks, in the order a run calls them: `on_init`, `on_start`, then per event
+`on_timer`, `on_trade` / `on_quote` / `on_book` / `on_bar`, `on_market_data`,
+`on_fill`, `on_position_event`, `on_order_event`, and finally `on_stop`.
+
+- `on_init(ctx)` runs once per run, just before `on_start` and before any
+  position is adopted. Declare subscriptions and indicators there; read
+  positions and equity in `on_start`.
+- `on_bar(self, ctx)` sees primary bars only, as before. Define
+  `on_bar(self, ctx, event)` to also receive every completed composite bar
+  (`event.timeframe` is `None` for a primary bar, `"5m"` etc. for a composite
+  one). The signature is inspected when the strategy starts: a hook with a
+  second required parameter is the event form; a defaulted or missing one is
+  the legacy form.
+- `on_market_data(ctx, event)` sees every bar, composite bar, trade, quote and
+  book, after the specific hook for that event.
+- `on_book` is `on_order_book`; the old name stays as an alias.
+- `on_risk_event(ctx, event)` receives `risk_rejected` and `risk_halted` events from the risk limits and `ctx.halt`; it has no old name.
+
+Defining a new name and its old alias on the same class raises `TypeError`
+(they would run on the same event twice); defining only the old name emits one
+`DeprecationWarning` per class and keeps working.
+
+**Ticks.** Once a strategy calls `subscribe`, it receives trades, quotes and
+books only for the instruments and types it subscribed to, and the runtime
+does not build the ones nobody asked for. A strategy that never subscribes
+receives everything, exactly as before. `ctx.data.quote()` / `.book()` return
+the latest one for a subscribed instrument.
+
+```python raptorbt-example
+from raptorbt import Strategy, run_strategies
+
+
+class Spread(Strategy):
+    def on_start(self, ctx):
+        s = ctx.symbols[0]
+        self.subscribe(s, data_type="quote")
+        self.subscribe(s, data_type="book")
+        self.wide = 0
+
+    def on_quote(self, ctx, quote):
+        assert ctx.data.quote(quote.symbol) is quote
+        if quote.spread > 1.0:
+            self.wide += 1
+
+    def on_book(self, ctx, book):
+        assert ctx.data.book(book.symbol) is book
+
+
+run_strategies([Spread()], ticks=ticks, depth=depth, config=config)
+```
+
+**Portfolio view.** `ctx.portfolio` is this strategy's own book: `positions`
+(`{symbol: (position, ...)}`), `cash`, `equity`, `available_capital`,
+`halted`, `locked_margin`, `realized_pnl`, `unrealized_pnl`, `gross_exposure` and
+`net_exposure` (notional at each instrument's last mark, contract multiplier
+included). Account-level views are not part of it. The totals need the shared
+runtime; `run_strategy_backtest` has `positions`, `cash`, `equity` and
+`available_capital` only.
+
+```python raptorbt-example
+from raptorbt import Strategy, run_strategies
+
+
+class Exposure(Strategy):
+    def on_start(self, ctx):
+        self.peak = 0.0
+
+    def on_bar(self, ctx, event):
+        book = ctx.portfolio
+        if ctx.idx == 2:
+            self.enter(size_frac=0.25)
+        self.peak = max(self.peak, book.gross_exposure)
+        assert book.net_exposure <= book.gross_exposure + 1e-9
+
+
+strategy = Exposure()
+run_strategies([strategy], bars, config=config, bar_stamp="close")
+assert strategy.peak > 0.0
+```
+
+**Migrating.** Every old name keeps working with identical results.
+
+| Old | New |
+| --- | --- |
+| `subscribe_bars(5, "m")` + `on_composite_bar(ctx, bar)` | `subscribe(symbol, timeframe="5m")` + `on_bar(ctx, event)` |
+| `register_indicator(Indicator.sma(20), stream_id=, symbol=)` | `ctx.indicators.sma(instrument=, timeframe=, period=20)` |
+| `ctx.series(symbol)` (full arrays so far) | `ctx.data.history(symbol, timeframe, count=n)` / `ctx.data.latest(...)` |
+| `ctx.position_for(symbol)` | `ctx.data.position(symbol)` |
+| `ctx.equity`, `ctx.cash`, `ctx.free_capital` | `ctx.portfolio.equity`, `.cash`, `.available_capital` |
+| `on_time_event` | `on_timer` |
+| `on_trade_tick` | `on_trade` |
+| `on_order_book` | `on_book` |
+| `on_composite_bar` | `on_bar(self, ctx, event)` |
+| `on_order_filled` | `on_fill` |
+| `on_position_opened`, `on_position_closed` | `on_position_event` (`event.kind` is `"entered"` / `"exited"`) |
+| `Market(units=5)` | `Market(quantity=5)` |
+| `submit_order(order, symbol="X")` | `Market(..., instrument="X")` |
+
+`on_order_accepted`, `on_order_rejected`, `on_order_triggered`,
+`on_order_canceled`, `on_order_expired`, `on_order_event`, `on_margin_call` and
+the algo hooks are unchanged.
 
 ### Instrument Definitions
 
@@ -352,6 +625,74 @@ and expiry are re-priced as one position group once they are open together
 exposure plus its width — so a hedged book keeps the capital a real account
 would. A new sold leg still sizes on its naked deposit; the group benefit
 lands after the leg is on.
+
+### Trading sessions
+
+**In plain words: tell an instrument when its market is open, and the engine
+stops trading it at other times.** Attach a `SessionSchedule` to an
+`InstrumentSpec`; an instrument with no schedule trades at any timestamp, as
+always.
+
+```python
+import raptorbt
+from raptorbt import InstrumentSpec, SessionSchedule
+
+# Mon-Fri 09:15-15:30 IST. The exchange holiday list is yours to supply:
+# the library ships no calendar.
+nse = SessionSchedule.nse_equity(holidays=[20260126, 20260303])
+
+reliance = InstrumentSpec.equity(
+    "RELIANCE", price_increment=0.05, venue="NSE", currency="INR", session=nse,
+)
+
+result = raptorbt.run_strategy_backtest(
+    MyStrategy, ts, o, h, l, c, v, instrument=reliance, bar_stamp="close",
+)
+```
+
+With a schedule the engine, in every runner (`run_strategy_backtest`,
+`run_portfolio_strategy`, `run_tick_strategy`, `TickStrategyStream`,
+`run_strategies` and `LiveNode`):
+
+- **rejects orders while closed.** A typed order, or an `enter()`, placed
+  outside a window or on a holiday is refused with reason `"market_closed"`
+  and arrives at `on_order_rejected`;
+- **skips after-hours data for matching.** A resting limit or stop is not
+  filled by a bar or print outside the session. It stays working and matches
+  in the next session;
+- **squares off.** On the first event at or after the square-off minute each
+  trading day, open positions (long or short) close with exit reason
+  `Squareoff`, and working entry orders are cancelled (reduce-only orders
+  stay). Entries are then refused with `"squareoff"` for the rest of that
+  trading day, so the position cannot re-open and carry overnight;
+- **expires DAY orders at the close**, not at local midnight;
+- **cuts daily bars on trading dates.** `subscribe_bars(1, "d")` cuts at the
+  schedule's own midnight, and a holiday or weekend produces no bar.
+
+Clock conventions: a window is `open <= t < close`, and a bar is stamped at
+its close, so the bar closing exactly at 15:30 is still inside a session that
+ends at 15:30 while an order placed at 15:30 is not. Raw daily input bars must
+therefore be stamped inside the session (for example at the close), not at
+midnight.
+
+The presets (`nse_equity()`, `nse_fo()`, `bse_equity()`) use square-off at
+15:20, a typical broker cut-off for intraday positions rather than an
+exchange rule; pass `squareoff_minute=` to change it or `None` to turn it off.
+Build your own for any market, including one with a lunch break:
+
+```python
+tokyo = SessionSchedule(
+    {day: [(9 * 60, 11 * 60 + 30), (12 * 60 + 30, 15 * 60)]
+     for day in ("mon", "tue", "wed", "thu", "fri")},
+    tz_offset_ns=9 * 3600 * 10**9,
+    holidays=[20260112],
+)
+tokyo.is_open(ts_ns); tokyo.session_date(ts_ns)
+tokyo.session_close_ns(20260115); tokyo.next_open_ns(ts_ns)
+```
+
+`currency` and `venue` are labels only: nothing is converted between
+currencies.
 
 ### Choosing a side
 
@@ -424,15 +765,15 @@ class Breakout(raptorbt.Strategy):
   with book depth). Netting policy only — under hedging every order opens,
   so protect positions with per-position `stop_price`/`target_price`
   attachments instead.
-- **Sizing**: `units=` (explicit contracts; refused if it exceeds available
-  capital) or `size_frac=` (fraction of capital, resolved at fill time);
+- **Sizing**: `quantity=` (explicit contracts, also spelled `units=`; refused
+  if it exceeds available capital) or `size_frac=` (fraction of capital, resolved at fill time);
   omit both on a closing-side order to close the full position.
 - **Semantics**: market orders fill on the submission bar at the configured
   fill-price model — the same contract as `enter()`. Resting orders begin
   matching on the _next_ bar (an order cannot rest into a bar that had
   already closed), with gap-throughs filling at the open.
 - **Lifecycle hooks**: `on_order_accepted`, `on_order_triggered`,
-  `on_order_filled`, `on_order_canceled`, `on_order_expired`,
+  `on_fill`, `on_order_canceled`, `on_order_expired`,
   `on_order_rejected`, plus catch-all `on_order_event`. Events carry
   `client_order_id` (deterministic `"{order_id_tag}-{seq}"`).
 - **Management**: `self.cancel_order(client_id)`,
@@ -453,6 +794,10 @@ coarser bars — time (`"ms"`/`"s"`/`"m"`/`"h"`/`"d"`/`"w"`), `"tick"`,
 `"volume"`, and `"value"` units. Time bars use left-open epoch-aligned
 windows and are stamped with the window-_end_ timestamp, so a bar labeled
 `t` contains only data strictly before `t` — no look-ahead by construction.
+`BarAggregator.push_bar` and `aggregate_bars` take `stamp="open"` (default)
+or `"close"` to say what the timestamps of the _input_ bars mean; with
+`"close"`, windows are right-closed, so a 5-minute bar stamped `09:20` joins
+the window it ends rather than the next. Trades are instants and ignore it.
 Beyond time, tick, volume and value windows, two families sample on
 something other than the clock:
 
@@ -522,6 +867,37 @@ Calendar `"month"`/`"year"` units aggregate on civil UTC dates. Passing
 windows to that timezone's civil dates — an NSE day bar covers one IST
 trading date (a 23:30 IST print stays on its trading date instead of
 rolling into the next UTC day).
+
+#### What a bar's timestamp means: `bar_stamp`
+
+A bar can be stamped when it starts (open) or when it ends (close), and the
+engine has to know which, because fills, `DAY` order expiry, the strategy
+clock and composite-bar windows all depend on it. `run_strategy_backtest`,
+`run_portfolio_strategy` and `TickStrategyStream` (its warmup bars and
+`push_bar`) take two keyword arguments:
+
+```python
+raptorbt.run_strategy_backtest(strategy, ts_open, o, h, l, c, v,
+                               bar_stamp="open", bar_ns=60_000_000_000)
+raptorbt.run_portfolio_strategy(strategy, data, bar_stamp="close")
+# bar_ns may be a dict, {symbol: ns}, when symbols use different bar widths.
+```
+
+- `bar_stamp="close"`: the stamp is the bar's end; no width needed.
+- `bar_stamp="open"`: needs `bar_ns`, the bar width in nanoseconds (a
+  positive whole number; a missing or non-positive width raises
+  `ValueError`, as does a `bar_ns` dict that omits a symbol).
+- Either way the engine runs on **bar close time**. `ctx.bar_close_ts` is that
+  time, and `ctx.datetime`, fills, order expiry and the clock use it.
+  `ctx.timestamp` and `ctx.bar.timestamp` stay the stamp you passed in, so
+  code that indexes your own arrays keeps working. Composite bars
+  (`on_composite_bar`) are stamped at their window end, a close time.
+- Left unset (`None`), a `DeprecationWarning` is raised and today's behaviour
+  is kept exactly: composite bars are built as if the stamps were open
+  stamps, and events are ordered as if they were close stamps. These two
+  assumptions contradict each other, which is why `bar_stamp` will be
+  required in 1.0. `run_tick_strategy` has no bar input (its tick-built bars
+  are close-stamped) and takes neither argument.
 
 ### Streaming Indicators, Clock, and Cache
 
@@ -623,8 +999,10 @@ result.result.equity_curve()  # portfolio curve, sampled per merged event
 result.per_instrument         # per-symbol trades / pnl / rejections
 ```
 
-`ctx` in portfolio runs is a `PortfolioContext`: `ctx.bar` / `ctx.symbol` /
-`ctx.idx` (local to the symbol), `ctx.series(symbol)` for full arrays,
+`run_portfolio_strategy` runs on the shared runtime: it is `run_strategies`
+with one strategy. `ctx` in portfolio runs offers `ctx.bar` / `ctx.symbol` /
+`ctx.idx` (local to the symbol), `ctx.series(symbol)` for the bars that have
+closed so far (read-only views, never the future),
 `ctx.position` / `ctx.is_flat` (properties for the current symbol, same as the
 single-instrument context), `ctx.position_for(symbol)` /
 `ctx.positions(symbol)`, and portfolio-level
@@ -652,6 +1030,162 @@ including on symbols that never traded. Results carry `halted` and
 (the session interleaves N streams), not the bar index the array runners
 report. `result.rejected_entries` is the sum across instruments, whereas the
 array portfolio runner reports its single shared risk gate's counter.
+
+### Running many strategies
+
+`run_strategies` runs a list of strategies over one shared copy of the market
+data. Each strategy keeps its own account, so there is no shared cash,
+margin or halt, and each one gets exactly the result its own
+`run_portfolio_strategy` call would give.
+
+```python
+results = raptorbt.run_strategies(
+    [fast_strategy, (slow_strategy, ["INFY", "TCS"]), MeanReversion],
+    data,                      # symbol -> OHLCV arrays, as for one strategy
+    config,
+    bar_stamp="close",
+)
+results[1].result.trades()     # results come back in input order
+```
+
+Each item is a strategy instance, a `Strategy` subclass (instantiated without
+arguments) or a `(strategy, symbols)` pair; without symbols a strategy trades
+every symbol in `data`. The other arguments (`directions`, `instruments`,
+`instrument_configs`, `oms_type`, `account_type`, `leverage`, `bar_stamp`,
+`bar_ns`) apply to every strategy.
+
+For tick strategies pass `ticks=` (and optionally `depth=` and
+`primary_bars=(step, unit)`) in the formats `run_tick_strategy` takes, instead
+of or next to `data`: `run_strategies([s], ticks=ticks, depth=depth,
+primary_bars=(1, "m"))[0]` equals `run_tick_strategy(s, ticks, depth=depth,
+primary_bars=(1, "m"))`, hook for hook. A symbol may have bars, ticks or both;
+a symbol with both sees them on one tape in time order. ATR-based stops are
+refused on a symbol with ticks, as in `run_tick_strategy`.
+
+**The contract.** For a strategy `s` over `syms`,
+`run_strategies([(s, syms)], data, **kw)[0]` equals
+`run_portfolio_strategy(s, {k: data[k] for k in data if k in syms}, **kw)`:
+trades, orders, curves, metrics, `halted` / `halted_at`, `per_instrument` and
+the sequence and values of everything the strategy observes in its hooks.
+It still holds when other strategies run in the same call, in any order.
+
+- `share=True` (the default) aggregates each distinct bar stream once and
+  links an indicator registered with `register_indicator` to one shared state
+  per distinct definition. An indicator is linked only if it was never
+  updated by hand and is registered exactly once; after the run
+  `indicator.linked` says which happened. A linked indicator is updated by the
+  runtime, so calling `update_bar` or `reset` on it raises `RuntimeError`.
+  `share=False` gives every strategy private aggregators and indicators and
+  the same results, only slower.
+- `batch_size=N` runs the strategies in consecutive batches of N, in input
+  order, and `None` (the default) uses batches of 250. The market data is
+  built once and shared by every batch; each batch builds its own
+  aggregators, indicator states and books, runs the tape, and is finished and
+  freed before the next batch starts. Batching changes neither results nor
+  semantics: the sharing described above happens among the strategies of a
+  batch, the data is shared across all batches, and accounts are isolated
+  either way. It exists for cache locality: an event visits every strategy
+  subscribed to it, and once their combined state (about 11 KB per
+  5-instrument strategy) outgrows the CPU caches the cost per strategy-event
+  climbs with the number of strategies. 250 is the size at which that cost
+  was lowest and flat in the `benches/runtime/density.py` sweeps (K = 3000,
+  5 instruments per strategy); it is a fixed count. A batch's `on_start`
+  hooks run when the batch starts. `batch_size` below 1 raises `ValueError`;
+  with `share=False` every strategy is its own batch.
+- `keep_curves=False` returns no equity, drawdown or returns curves (the
+  final equity is kept as a one-element curve); trades, orders and metrics are
+  unchanged. Curves are still sampled during the run, because the metrics are
+  computed from them.
+- `memory_report=True` returns `(results, report)`: heap bytes held by the
+  Rust runtime by category (`shared_store`, `aggregators`, `indicators`,
+  `index`, `atr`, `engine_per_strategy`, `portfolio_per_strategy`,
+  `curves`) and the per-strategy figures. `shared_store` is counted once;
+  the other categories are those of the largest live batch (the peak), plus
+  `batches` and `batch_size`. Python objects are not counted.
+
+**`ctx.series()` shows only what has happened.** It returns read-only views
+cut at the latest bar of that symbol the run has reached (for a symbol with
+ticks and no bars, the latest print or quote), so a strategy cannot read data
+from its own future; in `on_start` the arrays are empty. This holds for
+`run_portfolio_strategy`, `run_tick_strategy` and `TickStrategyStream` too,
+because they run on the same runtime. Only `run_strategy_backtest` still hands
+out the full arrays.
+
+### Account groups
+
+By default every strategy in `run_strategies` or `LiveNode` has its own
+account. To make several strategies trade one account (one user's cash,
+margin and risk limits), name it with `AccountSpec` and put the strategies on
+it:
+
+```python
+from raptorbt import AccountSpec, run_strategies
+
+results, accounts = run_strategies(
+    [
+        (Momentum(), ["NSE:TCS"], {"account": "user42"}),
+        {"strategy": MeanReversion(), "symbols": ["NSE:INFY"], "account": "user42"},
+        Breakout(),                      # no account: its own, as before
+    ],
+    data,
+    accounts={
+        "user42": AccountSpec(
+            initial_capital=500_000,
+            account_type="margin", leverage=3.0,
+            max_drawdown_pct=15, max_daily_loss_pct=3,
+            max_gross_exposure=1_500_000, max_positions=4,
+        ),
+    },
+)
+accounts["user42"].balance, accounts["user42"].halted_at
+```
+
+- **One pool.** Cash and locked margin belong to the account. An entry by one
+  strategy uses cash the others then do not have, and every strategy's locked
+  margin counts against every strategy's free capital. A strategy on an
+  account ignores the call's `initial_capital`, `account_type` and `leverage`
+  for cash: the `AccountSpec` supplies them.
+- **Order decides who gets scarce cash.** Within one event, the strategies on
+  an account step in the order they are listed. The first one takes the cash;
+  list them in the order you want them served. Accounts do not touch each
+  other, so their relative order, and where an isolated strategy sits in the
+  list, change nothing.
+- **Account-level checks run on the whole account.** Equity, the maintenance
+  requirement, the drawdown halt, `max_positions`, `max_gross_exposure` and
+  the daily loss are computed over every strategy on it, after each strategy's
+  step. The call's own account-level `BacktestConfig` fields are for isolated
+  strategies; on an account the `AccountSpec`'s apply. Every other setting
+  (order and position size limits, stops, instrument configs,
+  `flatten_on_daily_loss`, `liquidate_on_margin_call`) is the config's.
+- **Halts fan out.** A margin call, the drawdown halt, a daily-loss flatten
+  and `LiveNode.halt_account(name, flatten=False)` halt every strategy on the
+  account; their `halted_at` is the account's applied-event ordinal. A
+  strategy that calls `ctx.halt()` halts only itself.
+- **Per-strategy results.** Each strategy's `PortfolioResult` keeps its own
+  trades, orders, positions and P&L. Its equity curve is *attributed*: it
+  starts at an equal share of the account's capital and moves only by the
+  strategy's own entries, exits and fees (`ctx.equity` reads the same figure;
+  `ctx.cash` and `ctx.free_capital` are the account's). The account's own
+  curve is in the `AccountResult` (`balance`, `equity_curve()`,
+  `drawdown_curve()`, `locked_margin()`, `timestamps()`, `halted`,
+  `halted_at`, `strategies`). The final balance is the initial capital plus
+  the members' trade P&L, which is net of fees.
+- **Return shape.** With `accounts=` the call returns `(results,
+  account_results)` (`(results, report, account_results)` with
+  `memory_report=True`); without it, nothing changes. `LiveNode.finish()`
+  follows the same rule.
+- **A group of one is an isolated strategy.** Its result, orders, curves,
+  metrics and `halted` / `halted_at` are bit-identical to running it alone
+  with the same capital and settings.
+- **Batching.** An account is never split across batches: all its strategies
+  run together, in the batch of its first, and that batch grows to hold them
+  (an account holds at most 500 strategies). Batching changes no result.
+- **Errors.** An unknown account name raises `unknown_account`; a bad
+  `AccountSpec` raises `invalid_account_spec`.
+
+Cost: 2,000 strategies in 400 accounts of five run about 17% slower than the
+same 2,000 isolated (`benches/runtime/density.py --k 2000 --accounts 400`),
+because each step also walks the account's other strategies.
 
 ### Transaction Costs
 
@@ -745,8 +1279,18 @@ means different things in bar and tick sessions — "every 1 bar" would
 silently become "every 1 print" on a tick feed. Use `every_bars=N,
 bar_ns=...` if you prefer to think in bars.
 
-A schedule is not an order: cancelling it (`cancel_twap`) stops the
-remaining slices but does not unwind the ones that already traded, and
+`Twap` works in every strategy runner: `run_strategy_backtest`,
+`run_portfolio_strategy`, `run_tick_strategy`, `TickStrategyStream` and
+`run_strategies`. Slices release on trade steps, so a tick feed needs prints,
+not just quotes. A netting account refuses a slice that adds to a position
+the schedule already opened, so use `oms_type="hedging"` for a schedule that
+builds one.
+
+A schedule is not an order, but you cancel it like one: pass the id that
+`submit_order` returned to `cancel_order`. That stops the remaining slices
+and cancels any that are working, but does not unwind the ones that already
+traded. Cancelling a schedule that has finished does nothing.
+
 `on_algo_completed` means fully _released_, not fully filled. Only explicit
 `units` can be sliced — `size_frac` resolves against equity at fill time,
 so each slice would size against a different account.
@@ -780,6 +1324,67 @@ a committed golden-fixture suite enforces this):
   a stop and target are both touched inside one bar, infer the traversal
   from candle geometry (up-candle: open→low→high→close) instead of the
   conservative stop-first default.
+
+### Risk limits
+
+Every limit is optional and off by default. With none set a run is
+bit-identical to one without them. A breached limit refuses the order or entry
+(it never shrinks it), and the refusal reaches `on_order_rejected` with a
+stable `reject_reason`; an `on_risk_event(ctx, event)` hook (a no-op unless you
+override it) also receives each breach as a `risk_rejected` event, and the two
+stop-trading moments (the daily-loss limit, a halt) as `risk_halted`.
+
+```python
+config = BacktestConfig(
+    max_order_qty=500,            # units in one order           -> "order_size"
+    max_order_notional=250_000,   # units x price x multiplier   -> "order_size"
+    max_position_qty=1_000,       # net units per instrument     -> "max_position"
+    max_gross_exposure=1_000_000, # notional across instruments  -> "max_exposure"
+    max_daily_loss=5_000,         # money, or max_daily_loss_pct=2.0
+    flatten_on_daily_loss=True,   # also close positions on a breach
+)
+```
+
+- **Boundaries.** A figure equal to the limit passes; only strictly above is
+  refused. A zero or negative limit means "no limit", never "reject everything".
+- **Order size.** Judged on the resolved quantity, so a `size_frac` entry is
+  checked after it has been turned into units. An explicit-units order is
+  checked whole before its first slice fills.
+- **Position size.** The signed net position of the instrument after the fill.
+  A fill that reduces an oversized position is never blocked.
+- **Gross exposure.** Notional of every open position (units x latest price x
+  contract multiplier) across the strategy's instruments, plus the new entry.
+- **Daily loss.** The day's profit and loss is equity now minus equity at the
+  end of the previous day (the starting capital on the first), realised plus
+  unrealised. When it falls to the limit (`max_daily_loss` in money, or
+  `max_daily_loss_pct` of the day's starting equity; the tighter applies) new
+  entries are refused as `daily_loss` for the rest of that day, and the limit
+  starts afresh the next day. By default open positions are left alone; with
+  `flatten_on_daily_loss=True` they are closed at that bar's close (exit reason
+  `Liquidation`). A day is the instrument's session
+  date when its `InstrumentSpec` has a `SessionSchedule` (in the schedule's
+  timezone; a weekend or holiday has none, so the day does not roll over it),
+  and otherwise the local calendar date from `session_tz_offset_ns`. A
+  multi-instrument strategy takes its day from the schedule of the instrument
+  whose event is being applied. A daily block is not a halt: it does not
+  set `halted`.
+- **Halting a strategy.** `ctx.halt(reason="manual", flatten=False)` stops that
+  strategy for good: new entries are refused as `killed`, working orders are
+  cancelled and, with `flatten=True`, open positions are closed at each
+  symbol's last price. `LiveNode.halt(strategy_index, flatten=False)` does the
+  same from outside the strategy. `is_halted` reads True at once; the cancels
+  and closes happen when that strategy's next event is applied. The result
+  reports `halted` and `halted_at`, as for the drawdown halt.
+
+| Limit | `run_single_backtest` | `run_portfolio_backtest` | `run_strategy_backtest` | `run_portfolio_strategy`, `run_tick_strategy`, `run_strategies`, `TickStrategyStream`, `LiveNode` |
+| --- | --- | --- | --- | --- |
+| order size, position size | yes | yes | yes | yes |
+| gross exposure | yes (one instrument) | yes | yes (one instrument) | yes |
+| daily loss and flatten | yes | yes | yes | yes |
+| `ctx.halt`, `LiveNode.halt` | n/a (no strategy) | n/a | `ctx.halt` | `ctx.halt`; `LiveNode.halt` |
+
+The spread, pairs, basket, options and multi-strategy array runners do not
+apply these limits.
 
 ## Strategy Types
 
@@ -1069,6 +1674,8 @@ class Scalper(raptorbt.Strategy):
         # Only fires when primary_bars is set. A view, not a venue.
         ...
 
+# Runs on the shared runtime, like run_strategies with one strategy.
+# ctx.series(symbol) shows only the ticks that have arrived.
 result = raptorbt.run_tick_strategy(
     Scalper,
     ticks={"NIFTY24600PE": dict(timestamps=ts, ltp=ltp, bid=bid, ask=ask)},
@@ -1099,6 +1706,9 @@ Three semantics to know:
 broker socket, a replayer, anything where the next event has not happened yet
 — use `TickStrategyStream`. You construct it once, then push events as they
 arrive; every strategy hook a push triggers fires before that push returns.
+A stream is a one-strategy `LiveNode`, so `ctx.series(symbol)` shows the
+latest rows held (10,000 per symbol and kind by default) up to what has
+arrived, not the whole feed.
 
 ```python
 stream = raptorbt.TickStrategyStream(
@@ -1133,6 +1743,62 @@ the first live push. Those bars **execute** — they match orders and mark
 equity — unlike bars aggregated from prints via `primary_bars`, which remain a
 view. Hand the stream a strategy that stays passive on history if that is not
 what you want.
+
+#### Live Node: Many Strategies on One Feed
+
+`LiveNode` is `TickStrategyStream` for a list of strategies. It is one
+long-running process that takes the feed once: every strategy that trades the
+pushed symbol sees it, in the order you gave the strategies, and each sees
+what its own `TickStrategyStream` would show it. Accounts are isolated.
+
+```python
+node = raptorbt.LiveNode(
+    [Scalper(), Breakout(), (Hedger(), ["RELIANCE", "INFY"])],
+    ["RELIANCE", "INFY", "SBIN"],
+    config=raptorbt.BacktestConfig(initial_capital=100_000.0, fees=0.001),
+    warmup_bars={"RELIANCE": dict(timestamps=ts, open=o, high=h,
+                                  low=l, close=c, volume=v)},
+    bar_stamp="close",
+    primary_bars=(1, "m"),
+    initial_positions={1: {"RELIANCE": {"quantity": 100, "avg_price": 90.0}}},
+    history=10_000,
+)
+
+node.push_tick("RELIANCE", timestamp_ns, price, bid, ask)   # -> events appended
+node.push_bar("INFY", timestamp_ns, o, h, l, c, v)
+node.push_depth("INFY", timestamp_ns, [(bid, size)], [(ask, size)])
+node.advance_time(timestamp_ns)     # timers due by now fire, with no data
+
+node.positions(0, "RELIANCE")       # strategy 0's open positions
+node.equity(1), node.is_halted(2)
+
+results = node.finish()             # one PortfolioResult per strategy
+```
+
+- **Same results as one stream, or one batch run.** The frozen stream
+  scenarios run through a one-strategy node and match bit for bit, and the same
+  ticks pushed into a node give what `run_strategies(ticks=...)` gives, hook
+  by hook.
+- **Seeds are per strategy.** `initial_positions` is keyed by the strategy's
+  index in the list, or by the strategy object, and maps symbol to
+  `{"quantity", "avg_price"}`.
+- **Time without data.** `advance_time(ts)` moves every strategy's clocks (one
+  per symbol it trades) to `ts` and fires what is due. Orders a timer submits
+  match from the next print.
+- **Memory does not grow with the feed.** The node keeps the last `history`
+  rows (default 10,000) of each symbol's bars, tick rows and depth snapshots in
+  fixed rings, so `ctx.series(symbol)` shows those rows, up to the latest
+  pushed. A strategy that needs a longer look-back calls
+  `ctx.keep_history(rows)`; rows it keeps are never overwritten, and a push
+  that would have to overwrite one raises `RuntimeError` and changes nothing.
+  Each strategy's equity, drawdown and returns curves still grow by about 32
+  bytes per distinct timestamp; pass `curve_samples=N` to keep only the latest
+  N to 2N samples (the curves and metrics from `finish()` then cover that
+  window; trades and orders stay complete).
+- **Errors.** A timestamp older than the symbol's last raises `ValueError`
+  and changes nothing. After `finish()`, every call raises `RuntimeError`.
+- **Cost.** `node.memory_report()` returns the heap held by the Rust side,
+  including the fixed `live_rings`.
 
 #### Position Adoption — Starting on Shares You Already Own
 
@@ -1892,6 +2558,36 @@ Three properties hold for every measured trade:
 `None` means the trade came from a path that does not track intra-trade extremes
 — a synthesized spread, basket or pairs leg. Read it as "not measured", never as
 a zero excursion.
+
+---
+
+## Errors
+
+Errors raised on purpose are `raptorbt.errors.RaptorBTError`. Each says what failed, which parameter was wrong, what would have been accepted, and which documentation domain applies. The same facts are attributes (`code`, `operation`, `parameter`, `value`, `valid`, `skill`) and `to_dict()` returns them as plain data, so a program or an AI agent can act on them.
+
+```python
+try:
+    raptorbt.KernelSession(symbol="X", account_type="spot")
+except raptorbt.InvalidParameter as e:
+    print(e)
+    # account_type must be 'cash' or 'margin', got "spot"
+    #
+    # Requested:
+    #     account_type = 'spot'
+    #
+    # Supported:
+    #     'cash', 'margin'
+    #
+    # Related skill:
+    #     raptorbt-execution
+    e.code, e.valid   # ('invalid_account_type', ['cash', 'margin'])
+```
+
+Every class also subclasses the builtin it replaces (`InvalidParameter`, `InvalidData`, `InvalidOrder`, `InvalidSubscription` and `UnsupportedOperation` are `ValueError`; `StateError` is `RuntimeError`; `SessionFinished` is both; `UnknownSymbol` is `KeyError` and `ValueError`), and the first line of the message is unchanged, so existing `except ValueError` handlers keep working.
+
+Codes: `conflicting_order_args`, `decreasing_timestamps`, `depth_without_ticks`, `duplicate_strategy`, `duplicate_symbols`, `empty_data`, `empty_strategies`, `incompatible_order_options`, `insufficient_data`, `invalid_account_type`, `invalid_allocation`, `invalid_array`, `invalid_bar_ns`, `invalid_bar_spec`, `invalid_bar_stamp`, `invalid_bar_step`, `invalid_batch_size`, `invalid_config`, `invalid_curve_samples`, `invalid_data`, `invalid_direction`, `invalid_fill_timing`, `invalid_history`, `invalid_initial_positions`, `invalid_input_type`, `invalid_leverage`, `invalid_offset_kind`, `invalid_oms_type`, `invalid_option_type`, `invalid_order_intent`, `invalid_order_kind`, `invalid_order_link`, `invalid_order_reference`, `invalid_order_side`, `invalid_order_value`, `invalid_parameter`, `invalid_primary_bars`, `invalid_size_type`, `invalid_squareoff_time`, `invalid_strategy`, `invalid_strategy_entry`, `invalid_strike_selection`, `invalid_time_in_force`, `length_mismatch`, `missing_bar_ns`, `missing_field`, `missing_order_field`, `no_symbols`, `node_finished`, `primary_bars_without_ticks`, `run_finished`, `runtime_busy`, `runtime_not_ready`, `session_finished`, `unknown_symbol`, `unsupported_short_ticks`, `untradable_instrument`.
+
+[docs/errors.md](docs/errors.md) lists each code with its meaning, alternatives and domain.
 
 ---
 

@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # clippy builds pyo3, so this job carries the same interpreter ceiling
-      # as `test` -- pinned for the same reason.
+      # clippy builds pyo3, so this job needs an interpreter pyo3 supports --
+      # pinned for the same reason as `test`.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -47,11 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # pyo3 0.20.3 supports Python 3.12 at the newest, and its build script
-      # aborts against anything later. Runner images have moved their default
-      # interpreter past that, so the version is pinned here rather than left
-      # to the image -- an unpinned runner upgrade breaks the build, not a
-      # change in this repo.
+      # pyo3's build script aborts against an interpreter newer than the
+      # release supports. Runner images move their default interpreter on
+      # their own schedule, so the version is pinned here rather than left to
+      # the image -- an unpinned runner upgrade breaks the build, not a change
+      # in this repo.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -77,7 +77,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
 
@@ -99,3 +99,14 @@ jobs:
           pip install pytest numpy
           python -c "import raptorbt; print('version:', raptorbt.__version__)"
           pytest tests/python -v
+
+      # The skills ship in the wheel and must stay true to the package they
+      # document. Run from outside the checkout so the installed wheel is what
+      # is checked. Non-strict now (drafts allowed); `--strict` becomes the
+      # gate when every skill is written.
+      - name: Check skills against the installed wheel
+        shell: bash
+        run: |
+          pytest tests/skill_validation -v
+          cd "$RUNNER_TEMP"
+          python -m raptorbt.skills check

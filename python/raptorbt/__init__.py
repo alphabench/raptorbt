@@ -28,6 +28,7 @@ from raptorbt._raptorbt import (
     BacktestMetrics,
     Trade,
     PortfolioResult,
+    AccountResult,
     InstrumentSummary,
     # Backtest functions
     run_single_backtest,
@@ -91,12 +92,24 @@ from raptorbt._raptorbt import (
     rolling_max,
     # Instrument market definitions
     InstrumentSpec,
+    SessionSchedule,
+    # Option chain (pricing lives in raptorbt.pricing)
+    OptionChain,
+    # Fees as data and margin models
+    FeeSchedule,
+    RateCard,
+    MarginModel,
     # Streaming indicators
     Indicator,
     # Bar aggregation
     BarAggregator,
     aggregate_bars,
     bars_from_ticks,
+    # Resampling: ticks to bars, bars to coarser bars
+    Resampler,
+    ResampledBar,
+    resample_bars,
+    resample_trades,
     # Per-bar strategy session (class-based strategy contract)
     KernelSession,
     PortfolioSession,
@@ -105,17 +118,33 @@ from raptorbt._raptorbt import (
     resolve_atr_period,
 )
 from raptorbt.strategy import (
+    AccountSpec,
     Bar,
-    PortfolioContext,
     run_portfolio_strategy,
+    run_strategies,
     run_tick_strategy,
     TickStrategyStream,
+    LiveNode,
     ClosePosition,
     MarketOrder,
     Strategy,
     StrategyConfig,
     StrategyContext,
     run_strategy_backtest,
+)
+from raptorbt import errors
+from raptorbt import report, research, sampling
+from raptorbt.report import full_report
+from raptorbt.errors import (
+    RaptorBTError,
+    InvalidParameter,
+    InvalidData,
+    InvalidOrder,
+    InvalidSubscription,
+    UnsupportedOperation,
+    StateError,
+    SessionFinished,
+    UnknownSymbol,
 )
 
 try:  # Python 3.8+
@@ -133,6 +162,21 @@ from raptorbt.version_check import check_for_update as _check_for_update
 _check_for_update(__version__)
 
 __all__ = [
+    # Research statistics and the full report
+    "research",
+    "report",
+    "full_report",
+    # Structured errors
+    "errors",
+    "RaptorBTError",
+    "InvalidParameter",
+    "InvalidData",
+    "InvalidOrder",
+    "InvalidSubscription",
+    "UnsupportedOperation",
+    "StateError",
+    "SessionFinished",
+    "UnknownSymbol",
     # Session lengths
     "SESSION_NSE",
     "SESSION_MCX",
@@ -146,6 +190,7 @@ __all__ = [
     "TargetConfig",
     # Result classes
     "PortfolioResult",
+    "AccountResult",
     "InstrumentSummary",
     "BacktestResult",
     "BacktestMetrics",
@@ -211,10 +256,20 @@ __all__ = [
     "rolling_max",
     # Per-bar strategy session (class-based strategy contract)
     "InstrumentSpec",
+    "OptionChain",
+    "SessionSchedule",
+    "FeeSchedule",
+    "RateCard",
+    "MarginModel",
     "Indicator",
     "BarAggregator",
     "aggregate_bars",
     "bars_from_ticks",
+    "Resampler",
+    "ResampledBar",
+    "resample_bars",
+    "resample_trades",
+    "sampling",
     "KernelSession",
     "PortfolioSession",
     "EngineEvent",
@@ -227,10 +282,20 @@ __all__ = [
     "Strategy",
     "StrategyConfig",
     "StrategyContext",
-    "PortfolioContext",
+    "AccountSpec",
     "run_portfolio_strategy",
+    "run_strategies",
     "run_tick_strategy",
     "TickStrategyStream",
+    "LiveNode",
     "run_strategy_backtest",
 ]
 
+
+
+def __getattr__(name):
+    if name == "PortfolioContext":
+        from raptorbt import strategy
+
+        return strategy.__getattr__(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

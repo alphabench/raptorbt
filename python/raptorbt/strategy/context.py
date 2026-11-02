@@ -18,6 +18,11 @@ class Bar(NamedTuple):
     close: float
     volume: float
 
+    @property
+    def timeframe(self) -> None:
+        """``None``: a primary bar. Composite bars carry their timeframe."""
+        return None
+
 
 class StrategyContext:
     """Read/act surface a strategy sees inside its hooks.
@@ -37,9 +42,14 @@ class StrategyContext:
         low: np.ndarray,
         close: np.ndarray,
         volume: np.ndarray,
+        close_timestamps: np.ndarray | None = None,
     ) -> None:
         self._session = session
+        #: The caller's own bar stamps, exactly as passed in.
         self.timestamps = timestamps
+        #: Bar close times, the engine's clock. Equal to ``timestamps`` unless
+        #: the run declared ``bar_stamp="open"``.
+        self.close_timestamps = timestamps if close_timestamps is None else close_timestamps
         self.open = open_
         self.high = high
         self.low = low
@@ -65,17 +75,31 @@ class StrategyContext:
 
     @property
     def timestamp(self) -> int:
-        """Epoch timestamp of the current bar (engine time units)."""
+        """The current bar's timestamp as the caller stamped it.
+
+        Open or close, whichever the input used: it indexes the caller's own
+        arrays and is never shifted. For the engine's clock use
+        :attr:`bar_close_ts`.
+        """
         return int(self.timestamps[self.idx])
 
     @property
+    def bar_close_ts(self) -> int:
+        """Epoch ns at which the current bar closed: the time the engine
+        acts on it. Fills, order expiry, square-off, the strategy clock and
+        :attr:`datetime` all use it. Equals :attr:`timestamp` for
+        ``bar_stamp="close"`` (and for the legacy unset case)."""
+        return int(self.close_timestamps[self.idx])
+
+    @property
     def datetime(self) -> _dt.datetime:
-        """Current bar timestamp as a naive UTC datetime.
+        """Current bar's close time (:attr:`bar_close_ts`) as a naive UTC
+        datetime.
 
         Assumes nanosecond epoch timestamps, the convention used by the
         array-based runners.
         """
-        return _dt.datetime.utcfromtimestamp(self.timestamps[self.idx] / 1e9)
+        return _dt.datetime.utcfromtimestamp(self.close_timestamps[self.idx] / 1e9)
 
     def history(self, n: int) -> np.ndarray:
         """Trailing window of up to ``n`` closes ending at the current bar."""
@@ -141,6 +165,18 @@ class StrategyContext:
         """Uninvested cash."""
         return self._session.cash()
 
+    # -- risk ----------------------------------------------------------------
+
+    def halt(self, reason: str = "manual", flatten: bool = False) -> None:
+        """Stop this strategy trading.
+
+        New entries are refused with ``killed``, working orders are cancelled,
+        and with ``flatten=True`` open positions are closed at the last bar's
+        close. It takes effect when the next bar is stepped, and the result
+        reports ``halted`` and ``halted_at``. A halt cannot be undone.
+        """
+        self._session.halt(reason, flatten)
+
     # -- position management -----------------------------------------------
 
     def set_stop_price(self, price: float | None) -> None:
@@ -164,7 +200,8 @@ class CompositeBar(NamedTuple):
     """A completed higher-timeframe bar built from the primary stream.
 
     ``timestamp`` is the window-end for time aggregations — the bar contains
-    only data strictly before it, never the bar that completed it.
+    only data strictly before it, never the bar that completed it. It is a
+    close time, whichever way the input bars were stamped.
     ``stream_id`` is the handle returned by ``Strategy.subscribe_bars``.
     ``symbol`` names the instrument the bar was built from in portfolio
     runs, and is ``None`` in single-instrument ones.
@@ -180,6 +217,11 @@ class CompositeBar(NamedTuple):
     close: float
     volume: float
     symbol: str | None = None
+
+    @property
+    def timeframe(self) -> str:
+        """The bar's timeframe as a label: ``"5m"``, ``"1h"``, ``"100tick"``."""
+        return f"{self.step}{self.unit}"
 
 
 class TradeTick(NamedTuple):
@@ -225,9 +267,9 @@ class QuoteTick(NamedTuple):
 
 
 class WorkingOrder(NamedTuple):
-    """One order still working, as :meth:`PortfolioContext.open_orders`
-    reports it. ``filled_qty`` is what has filled so far (partial fills);
-    ``units`` is ``nan`` for a capital-fraction or close-all order."""
+    """One order still working, as ``ctx.open_orders()`` of a
+    portfolio or tick run reports it. ``filled_qty`` is what has filled so far
+    (partial fills); ``units`` is ``nan`` for a capital-fraction or close-all order."""
 
     order_id: int
     client_id: str

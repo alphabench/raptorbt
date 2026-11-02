@@ -97,9 +97,10 @@ class Clock:
                 continue
             if ts >= next_fire:
                 due.append(TimeEvent(name, next_fire, ts))
-                # Skip past every missed point so a data gap fires once.
-                while state[0] <= ts:
-                    state[0] += interval
+                # Skip past every missed point so a data gap fires once:
+                # jump straight to the first point after ts (stepping one
+                # interval at a time from an early start took ~1e8 steps).
+                state[0] += ((ts - state[0]) // interval + 1) * interval
                 if stop_ns is not None and state[0] > stop_ns:
                     del self._timers[name]
 

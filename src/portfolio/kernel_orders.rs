@@ -12,7 +12,7 @@ use crate::execution::orders::{
 use crate::execution::queue::QueueVerdict;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
-use crate::portfolio::risk::RiskGate;
+use crate::portfolio::risk::{RejectReason, RiskGate};
 
 impl EngineKernel {
     /// Register an execution schedule that releases slices over time.
@@ -173,6 +173,22 @@ impl EngineKernel {
         order.parent_id = parent_id;
         let id = self.orders.submit(order);
 
+        // A closed market takes no orders. The refusal is an ordinary
+        // rejection, so it is counted and reaches the strategy as an event.
+        if self.closed_at(submitted_ts) {
+            if let Some(order) = self.orders.get_mut(id) {
+                let _ = order.transition(OrderStatus::Rejected);
+            }
+            self.risk.record_rejection();
+            self.pending_events.push(EngineEvent::OrderRejected {
+                idx: submitted_idx,
+                order_id: id,
+                client_id,
+                reason: RejectReason::MarketClosed.as_str(),
+            });
+            return id;
+        }
+
         // Resting kinds start working immediately (held children stay
         // Submitted until their parent fills); plain market kinds are
         // acknowledged when their fill is processed in the step.
@@ -301,6 +317,18 @@ impl EngineKernel {
         outcome: MatchOutcome,
         events: &mut Vec<EngineEvent>,
     ) {
+        // `match_bar` computed every outcome for the bar before any was
+        // applied, so an earlier one can have finished an order whose own
+        // outcome is still queued (a bracket leg canceled by its sibling's
+        // fill). Such an outcome describes a market the order has already
+        // left: drop it. Expire, Cancel and Reject outcomes are the
+        // matcher's report of a terminal state it already set, so they are
+        // not stale.
+        if let MatchOutcome::Trigger { order_id } | MatchOutcome::Fill { order_id, .. } = outcome {
+            if self.orders.get(order_id).is_none_or(|o| o.status.is_terminal()) {
+                return;
+            }
+        }
         let (id, matched_price) = match outcome {
             MatchOutcome::Trigger { order_id } => {
                 let client_id =
@@ -342,9 +370,16 @@ impl EngineKernel {
         // Stochastic fills: a marketable resting limit may be passed over
         // (queue position, exhausted liquidity); it stays working. Stop and
         // market fills may instead slip one tick against the trader.
+        // Triggered stop-limit, if-touched-limit and trailing-stop-limit
+        // orders rest as limits too; `MarketToLimit` fills at the open as a
+        // market order and is not one.
         let is_limit_fill = matches!(kind, OrderKind::Limit { .. })
-            || (matches!(kind, OrderKind::StopLimit { .. })
-                && matches!(status, OrderStatus::Triggered | OrderStatus::PartiallyFilled));
+            || (matches!(
+                kind,
+                OrderKind::StopLimit { .. }
+                    | OrderKind::LimitIfTouched { .. }
+                    | OrderKind::TrailingStopLimit { .. }
+            ) && matches!(status, OrderStatus::Triggered | OrderStatus::PartiallyFilled));
         let mut queue_granted = false;
         if is_limit_fill {
             // The queue model reads the tape; it consumes no randomness, so
@@ -434,9 +469,10 @@ impl EngineKernel {
         // never consulted here, so one run can hold long and short legs and
         // a leg can flip side across rebalances once it goes flat.
         //
-        // `reduce_only` short-circuits to the closing branch so a protective
-        // leg left working after a stop already exited can never reverse
-        // into a fresh position.
+        // A `reduce_only` order closes only when it opposes the open
+        // position; otherwise it is refused, so a protective leg left
+        // working after a stop already exited can never reverse into a
+        // fresh position, and one on the position's own side never closes it.
         let order_direction = match side {
             OrderSide::Buy => Direction::Long,
             OrderSide::Sell => Direction::Short,
@@ -452,7 +488,10 @@ impl EngineKernel {
         let (opens, open_direction) = if hedging {
             (true, order_direction)
         } else if reduce_only {
-            (false, order_direction)
+            // Only an order opposing the open position reduces it. Any other
+            // reduce-only order, including one with no position to reduce,
+            // takes the `opens` path below and is refused.
+            (!matches!(held, Some(dir) if dir != order_direction), order_direction)
         } else {
             match held {
                 // Opposing an open position is a close.
@@ -466,9 +505,9 @@ impl EngineKernel {
 
         if opens {
             if reduce_only {
-                // A reduce-only order must never increase exposure. Under
-                // netting `reduce_only` already routed to the closing branch,
-                // so this only fires for hedging, where every order opens.
+                // A reduce-only order must never increase exposure: it is
+                // refused when it does not oppose the open position (under
+                // netting), and always under hedging, where every order opens.
                 reject(
                     &mut self.orders,
                     &mut self.risk,
@@ -477,6 +516,18 @@ impl EngineKernel {
                     id,
                     &client_id,
                     "reduce_only",
+                );
+                return;
+            }
+            if self.session_state.entries_blocked {
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    RejectReason::Squareoff.as_str(),
                 );
                 return;
             }
@@ -521,6 +572,7 @@ impl EngineKernel {
                     slice,
                     stop_attach,
                     target_attach,
+                    is_limit_fill,
                 ) {
                     Some((price, size)) => {
                         let entered =
@@ -599,6 +651,20 @@ impl EngineKernel {
                     return;
                 }
             };
+            if let QtySpec::Units(whole) = qty {
+                if let Err(reason) = self.check_whole_order(open_direction, whole, raw_price) {
+                    reject(
+                        &mut self.orders,
+                        &mut self.risk,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        reason.as_str(),
+                    );
+                    return;
+                }
+            }
             match self.open_at(
                 idx,
                 bar,
@@ -612,6 +678,7 @@ impl EngineKernel {
                 self.last_atr,
                 stop_attach,
                 target_attach,
+                is_limit_fill,
             ) {
                 Some(EngineEvent::Entered { price, size, direction, .. }) => {
                     // Remember which order opened it, so a later slice of the
@@ -651,12 +718,17 @@ impl EngineKernel {
             }
         } else {
             let Some(first) = self.ledger.first() else {
-                // Nothing to close. A reduce-only order was routed here on
-                // purpose and keeps reporting `reduce_only` (it must never
-                // open, which is exactly what happened); any other order
-                // wanted to open and was refused. Both are counted.
-                let reason = if reduce_only { "reduce_only" } else { "no_position" };
-                reject(&mut self.orders, &mut self.risk, events, idx, id, &client_id, reason);
+                // Nothing to close. Closing is only chosen when a position is
+                // held, so this is a defensive refusal, counted like any other.
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "no_position",
+                );
                 return;
             };
             let position_id = first.id;
@@ -683,7 +755,15 @@ impl EngineKernel {
                 self.cancel_remainder(idx, id, events);
                 return;
             }
-            match self.reduce_at(idx, bar, position_id, slice, raw_price, ExitReason::Order) {
+            match self.reduce_at(
+                idx,
+                bar,
+                position_id,
+                slice,
+                raw_price,
+                ExitReason::Order,
+                is_limit_fill,
+            ) {
                 Some(EngineEvent::Exited { trade, .. }) => {
                     // The order is done once it has what it asked for, or
                     // once nothing is left to close; the surplus of an
@@ -749,6 +829,38 @@ impl EngineKernel {
             self.after_fill(idx, id, events);
         } else if ioc_remainder {
             self.cancel_remainder(idx, id, events);
+        } else {
+            self.shrink_oco_siblings(id, requested);
+        }
+    }
+
+    /// One-cancels-other on a partial slice: the legs are alternative ways
+    /// out of the same quantity, so once `id` has filled part of
+    /// `requested`, no sibling may still offer more than what is left, or a
+    /// later fill of the sibling would trade quantity that is already gone.
+    /// Each working sibling with an explicit unit size is cut to what it has
+    /// filled plus the quantity remaining on `id`; it is never raised. A
+    /// sibling sized by capital fraction or whole position resolves at its
+    /// own fill and is left alone. The full fill of any leg still cancels
+    /// the rest (`after_fill`).
+    fn shrink_oco_siblings(&mut self, id: u64, requested: f64) {
+        let Some((group, filled)) =
+            self.orders.get(id).and_then(|o| Some((o.oco_group?, o.filled_qty)))
+        else {
+            return;
+        };
+        let remaining = (requested - filled).max(0.0);
+        for sibling in self.orders.all_mut() {
+            if sibling.oco_group != Some(group) || sibling.id == id || sibling.status.is_terminal()
+            {
+                continue;
+            }
+            if let QtySpec::Units(q) = sibling.qty {
+                let cap = sibling.filled_qty + remaining;
+                if q > cap {
+                    sibling.qty = QtySpec::Units(cap);
+                }
+            }
         }
     }
 

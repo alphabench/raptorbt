@@ -7,8 +7,10 @@
 
 pub mod matching;
 pub mod order;
+pub mod report;
 
 pub use matching::{MatchOutcome, OrderEngine};
 pub use order::{
     Order, OrderKind, OrderRecord, OrderSide, OrderStatus, QtySpec, TimeInForce, TrailOffset,
 };
+pub use report::{ExecutionReport, OrderEventError, ReportOutcome};

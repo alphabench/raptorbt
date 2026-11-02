@@ -29,7 +29,6 @@ use crate::execution::{FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
-use crate::portfolio::risk::RiskGate;
 use crate::signals::processor::SignalProcessor;
 
 /// How capital is divided among instruments when an entry opens.
@@ -147,8 +146,8 @@ impl PortfolioBacktest {
             })
             .collect();
 
-        let mut risk =
-            RiskGate::new(self.config.base.max_positions, self.config.base.max_drawdown_pct);
+        let mut risk = self.config.base.risk_gate();
+        let timestamps = &instruments[0].0.timestamps;
 
         let mut cash = self.config.base.initial_capital;
         let mut equity_curve = vec![cash; n_bars];
@@ -162,6 +161,10 @@ impl PortfolioBacktest {
         let mut halted_at: Option<usize> = None;
 
         for i in 0..n_bars {
+            if risk.daily_active() {
+                risk.roll_day(self.config.base.day_of(timestamps[i]));
+            }
+
             // Exits first, across all instruments, so capital freed this bar is
             // available to entries on the same bar.
             for (idx, kernel) in kernels.iter_mut().enumerate() {
@@ -194,25 +197,46 @@ impl PortfolioBacktest {
             let open_now = kernels.iter().filter(|k| k.is_in_position()).count();
             let mut open_count = open_now;
 
-            for (idx, kernel) in kernels.iter_mut().enumerate() {
-                if kernel.is_in_position() || !cleaned[idx].0[i] {
+            for idx in 0..n_instruments {
+                // Gross notional the other instruments hold, for
+                // `max_gross_exposure`; only computed when that cap is set.
+                let external_exposure = kernels[idx].tracks_exposure().then(|| {
+                    kernels
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != idx)
+                        .map(|(j, k)| k.gross_notional(instruments[j].0.close[i]))
+                        .sum::<f64>()
+                });
+                let kernel = &mut kernels[idx];
+                // Under NextBarOpen the previous bar's signal fills in this
+                // bar's step, so a flat kernel with a waiting entry must be
+                // stepped even though this bar has no signal of its own.
+                let pending = kernel.has_pending_entry();
+                if kernel.is_in_position() || !(cleaned[idx].0[i] || pending) {
                     continue;
                 }
 
                 if risk.check_entry(open_count).is_err() {
                     risk.record_rejection();
                     rejected[idx] += 1;
+                    if pending {
+                        kernel.clear_pending_entry();
+                    }
                     continue;
                 }
 
                 let budget = self.entry_budget(cash, open_count, n_instruments);
                 if budget <= 0.0 {
+                    if pending {
+                        kernel.clear_pending_entry();
+                    }
                     continue;
                 }
 
                 let bar = bar_at(&instruments[idx].0, i);
                 let input = StepInput {
-                    entry: true,
+                    entry: cleaned[idx].0[i],
                     exit: false,
                     atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
                     size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
@@ -222,12 +246,33 @@ impl PortfolioBacktest {
                 // Lend the kernel its slice of the pool; it spends what it needs
                 // and hands back the remainder.
                 kernel.set_cash(budget);
+                kernel.set_external_exposure(external_exposure);
                 let events = kernel.step(i, &bar, input);
+                kernel.set_external_exposure(None);
                 let spent = budget - kernel.cash();
                 kernel.set_cash(0.0);
                 cash -= spent;
 
-                if events.iter().any(|e| matches!(e, EngineEvent::Entered { .. })) {
+                // A fill-bar stop can close the position in the same step that
+                // opened it: that trade is booked like any other, and the
+                // slot it briefly held is not taken.
+                for event in events {
+                    match event {
+                        EngineEvent::Exited { trade, .. } => {
+                            per_instrument_trades[idx] += 1;
+                            per_instrument_pnl[idx] += trade.pnl;
+                            trades.push(*trade);
+                        }
+                        // Size, position and exposure limits live in the
+                        // kernel; count their refusals here with the rest.
+                        EngineEvent::EntryRejected { reason, .. } if reason.is_risk_limit() => {
+                            risk.record_rejection();
+                            rejected[idx] += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if kernel.is_in_position() {
                     open_count += 1;
                 }
             }
@@ -238,7 +283,33 @@ impl PortfolioBacktest {
                 .enumerate()
                 .map(|(idx, k)| k.position_value(instruments[idx].0.close[i]))
                 .sum();
-            let equity = cash + position_value;
+            let mut equity = cash + position_value;
+
+            // The day's loss limit. Reaching it refuses entries for the rest
+            // of the day (the gate's `check_entry` above) and, when asked,
+            // closes everything at this bar's close.
+            if risk.daily_active()
+                && risk.on_day_equity(Some(self.config.base.day_of(timestamps[i])), equity)
+                && risk.flatten_on_daily_loss()
+            {
+                for (idx, kernel) in kernels.iter_mut().enumerate() {
+                    if !kernel.is_in_position() {
+                        continue;
+                    }
+                    let bar = bar_at(&instruments[idx].0, i);
+                    kernel.set_cash(0.0);
+                    for event in kernel.halt_cleanup(i, Some(&bar), false, true) {
+                        if let EngineEvent::Exited { trade, .. } = event {
+                            per_instrument_trades[idx] += 1;
+                            per_instrument_pnl[idx] += trade.pnl;
+                            trades.push(*trade);
+                        }
+                    }
+                    cash += kernel.cash();
+                    kernel.set_cash(0.0);
+                }
+                equity = cash;
+            }
             equity_curve[i] = equity;
 
             if equity > peak_equity {

@@ -478,7 +478,7 @@ def test_stream_refuses_leveraged_adoption():
 
 
 def test_stream_seeds_a_long_short_book():
-    """The production scenario that could not deploy at all before.
+    """A scenario that could not run at all before.
 
     A strategy with any short leg is given `account_type="margin"` (at
     leverage 1.0, so the book stays fully funded), because a short only

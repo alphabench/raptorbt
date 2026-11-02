@@ -4,6 +4,8 @@ use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::errors::Fail;
+
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, TickData};
 use crate::data::{BookLevel, BookSide, DepthTick};
 use crate::execution::orders::{OrderSide, OrderStatus, QtySpec};
@@ -17,7 +19,8 @@ use super::bindings::{
 use super::instrument_bindings::PyInstrumentSpec;
 use super::numpy_bridge::{numpy_to_vec_f64, numpy_to_vec_i64};
 use super::strategy_bindings::{
-    parse_account_mode, parse_qty_spec, submit_order_on, PyEngineEvent, PyPositionSnapshot,
+    parse_account_mode, parse_qty_spec, submit_order_on, submit_twap_on, PyEngineEvent,
+    PyPositionSnapshot,
 };
 
 /// Visible levels of one side of a depth snapshot.
@@ -25,6 +28,110 @@ fn book_levels(book: &DepthTick, side: BookSide) -> &[BookLevel] {
     match side {
         BookSide::Bid => &book.bids[..book.bid_len as usize],
         BookSide::Ask => &book.asks[..book.ask_len as usize],
+    }
+}
+
+/// Validate the per-instrument arguments of `add_instrument`: direction,
+/// position policy from `oms_type`, and a tradable instrument spec.
+pub(crate) fn parse_instrument_args(
+    direction: i32,
+    instrument: Option<&PyInstrumentSpec>,
+    oms_type: &str,
+) -> PyResult<(Direction, PositionPolicy, Option<crate::instruments::InstrumentSpec>)> {
+    let direction = Direction::from_int(direction).ok_or_else(|| {
+        Fail::new("invalid_direction", "direction must be 1 or -1")
+            .param("direction")
+            .value(direction)
+    })?;
+    let policy = match oms_type {
+        "netting" => PositionPolicy::Net,
+        "hedging" => PositionPolicy::Independent,
+        other => {
+            return Err(Fail::new(
+                "invalid_oms_type",
+                format!("oms_type must be 'netting' or 'hedging', got {other:?}"),
+            )
+            .param("oms_type")
+            .value(other)
+            .into())
+        }
+    };
+    let spec = match instrument {
+        Some(py_spec) => {
+            let spec = crate::instruments::InstrumentSpec::from(py_spec);
+            if !spec.kind.tradable() {
+                return Err(Fail::new(
+                    "untradable_instrument",
+                    format!("instrument {:?} is not tradable", spec.symbol),
+                )
+                .param("instrument")
+                .value(spec.symbol.to_string())
+                .into());
+            }
+            Some(spec)
+        }
+        None => None,
+    };
+    Ok((direction, policy, spec))
+}
+
+/// One working order: `(order_id, client_id, side, kind, status, filled_qty,
+/// units)`.
+pub(crate) type WorkingOrderRow = (u64, String, String, String, String, f64, f64);
+
+/// Working orders of a kernel as rows; see `PortfolioSession.working_orders`.
+pub(crate) fn working_order_rows(
+    kernel: &crate::portfolio::kernel::EngineKernel,
+) -> Vec<WorkingOrderRow> {
+    kernel
+        .open_orders()
+        .into_iter()
+        .map(|o| {
+            let side = match o.side {
+                OrderSide::Buy => "buy",
+                OrderSide::Sell => "sell",
+            };
+            let kind = format!("{:?}", o.kind)
+                .split(' ')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('{')
+                .to_lowercase();
+            let status = match o.status {
+                OrderStatus::Triggered => "triggered",
+                OrderStatus::PartiallyFilled => "partially_filled",
+                OrderStatus::PendingCancel => "pending_cancel",
+                OrderStatus::PendingReplace => "pending_replace",
+                _ => "accepted",
+            };
+            let units = match o.qty {
+                QtySpec::Units(u) => u,
+                _ => f64::NAN,
+            };
+            (o.id, o.client_id.clone(), side.into(), kind, status.into(), o.filled_qty, units)
+        })
+        .collect()
+}
+
+/// A finished book as the Python result object.
+pub(crate) fn convert_outcome(
+    outcome: crate::portfolio::session::SessionOutcome,
+) -> PyPortfolioResult {
+    PyPortfolioResult {
+        result: convert_result(outcome.result),
+        per_instrument: outcome
+            .instruments
+            .into_iter()
+            .map(|o| PyInstrumentSummary {
+                symbol: o.symbol,
+                trades: o.trades,
+                pnl: o.pnl,
+                rejected_entries: o.rejected_entries,
+            })
+            .collect(),
+        rejected_entries: outcome.rejected_entries,
+        halted: outcome.halted,
+        halted_at: outcome.halted_at,
     }
 }
 
@@ -43,15 +150,15 @@ pub struct PyPortfolioSession {
 
 impl PyPortfolioSession {
     fn session_ref(&self) -> PyResult<&EventSession> {
-        self.session
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("session is finished; create a new one"))
+        self.session.as_ref().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })
     }
 
     fn session_mut(&mut self) -> PyResult<&mut EventSession> {
-        self.session
-            .as_mut()
-            .ok_or_else(|| PyValueError::new_err("session is finished; create a new one"))
+        self.session.as_mut().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })
     }
 }
 
@@ -75,30 +182,7 @@ impl PyPortfolioSession {
         instrument: Option<&PyInstrumentSpec>,
         oms_type: &str,
     ) -> PyResult<usize> {
-        let direction = Direction::from_int(direction)
-            .ok_or_else(|| PyValueError::new_err("direction must be 1 or -1"))?;
-        let policy = match oms_type {
-            "netting" => PositionPolicy::Net,
-            "hedging" => PositionPolicy::Independent,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "oms_type must be 'netting' or 'hedging', got {other:?}"
-                )))
-            }
-        };
-        let spec = match instrument {
-            Some(py_spec) => {
-                let spec = crate::instruments::InstrumentSpec::from(py_spec);
-                if !spec.kind.tradable() {
-                    return Err(PyValueError::new_err(format!(
-                        "instrument {:?} is not tradable",
-                        spec.symbol
-                    )));
-                }
-                Some(spec)
-            }
-            None => None,
-        };
+        let (direction, policy, spec) = parse_instrument_args(direction, instrument, oms_type)?;
         let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
         Ok(self.session_mut()?.add_instrument(
             symbol.to_string(),
@@ -129,7 +213,7 @@ impl PyPortfolioSession {
         let v = numpy_to_vec_f64(volume);
         let n = ts.len();
         if [o.len(), h.len(), l.len(), c.len(), v.len()].iter().any(|&len| len != n) {
-            return Err(PyValueError::new_err("all bar arrays must share one length"));
+            return Err(Fail::new("length_mismatch", "all bar arrays must share one length").into());
         }
         let bars: Vec<KernelBar> = (0..n)
             .map(|i| KernelBar {
@@ -141,7 +225,7 @@ impl PyPortfolioSession {
                 volume: v[i],
             })
             .collect();
-        self.session_mut()?.set_bars(instrument, bars);
+        self.session_mut()?.set_bars(instrument, bars)?;
         Ok(())
     }
 
@@ -174,7 +258,11 @@ impl PyPortfolioSession {
                 Some(a) => {
                     let v = numpy_to_vec_f64(a);
                     if v.len() != n {
-                        return Err(PyValueError::new_err("all tick arrays must share one length"));
+                        return Err(Fail::new(
+                            "length_mismatch",
+                            "all tick arrays must share one length",
+                        )
+                        .into());
                     }
                     Ok(v)
                 }
@@ -182,7 +270,9 @@ impl PyPortfolioSession {
             }
         };
         if ltp.len() != n {
-            return Err(PyValueError::new_err("all tick arrays must share one length"));
+            return Err(
+                Fail::new("length_mismatch", "all tick arrays must share one length").into()
+            );
         }
         let ticks = TickData {
             timestamps: ts,
@@ -196,7 +286,7 @@ impl PyPortfolioSession {
             bid_qty: optional(bid_qty)?,
             ask_qty: optional(ask_qty)?,
         };
-        self.session_mut()?.set_ticks(instrument, ticks);
+        self.session_mut()?.set_ticks(instrument, ticks)?;
         Ok(())
     }
 
@@ -223,7 +313,11 @@ impl PyPortfolioSession {
         let asz = ask_sizes.as_array();
         for arr in [&bp, &bs, &ap, &asz] {
             if arr.shape()[0] != n {
-                return Err(PyValueError::new_err("depth arrays must have one row per timestamp"));
+                return Err(Fail::new(
+                    "length_mismatch",
+                    "depth arrays must have one row per timestamp",
+                )
+                .into());
             }
         }
         if bp.shape()[1] != bs.shape()[1] || ap.shape()[1] != asz.shape()[1] {
@@ -244,7 +338,7 @@ impl PyPortfolioSession {
                 DepthTick::from_levels(ts[row], &bids, &asks)
             })
             .collect();
-        self.session_mut()?.set_depth(instrument, snapshots);
+        self.session_mut()?.set_depth(instrument, snapshots)?;
         Ok(())
     }
 
@@ -305,7 +399,7 @@ impl PyPortfolioSession {
             bid_qty,
             ask_qty,
             oi,
-        ))
+        )?)
     }
 
     /// Append one live bar to the schedule tail (seals first, idempotent).
@@ -321,7 +415,7 @@ impl PyPortfolioSession {
         volume: f64,
     ) -> PyResult<()> {
         self.session_mut()?
-            .push_bar(instrument, KernelBar { timestamp, open, high, low, close, volume });
+            .push_bar(instrument, KernelBar { timestamp, open, high, low, close, volume })?;
         Ok(())
     }
 
@@ -343,7 +437,7 @@ impl PyPortfolioSession {
                 .collect()
         };
         let snapshot = DepthTick::from_levels(timestamp, &to_levels(&bids), &to_levels(&asks));
-        self.session_mut()?.push_depth(instrument, snapshot);
+        self.session_mut()?.push_depth(instrument, snapshot)?;
         Ok(())
     }
 
@@ -531,6 +625,42 @@ impl PyPortfolioSession {
         )
     }
 
+    /// Register a TWAP schedule on an instrument; returns its id.
+    #[pyo3(signature = (instrument, units, side, slices, interval_ns, submitted_idx, submitted_ts, client_id, reduce_only=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn submit_twap(
+        &mut self,
+        instrument: usize,
+        units: f64,
+        side: &str,
+        slices: u32,
+        interval_ns: i64,
+        submitted_idx: usize,
+        submitted_ts: i64,
+        client_id: &str,
+        reduce_only: bool,
+    ) -> PyResult<u64> {
+        let session = self.session_mut()?;
+        // On the target's own clock, as for `submit_order`.
+        let submitted_idx = session.submission_idx(instrument, submitted_idx);
+        submit_twap_on(
+            session.kernel_mut(instrument),
+            units,
+            side,
+            slices,
+            interval_ns,
+            submitted_idx,
+            submitted_ts,
+            client_id,
+            reduce_only,
+        )
+    }
+
+    /// Stop a schedule and cancel the slices it has working.
+    fn cancel_twap(&mut self, instrument: usize, algo_id: u64, idx: usize) -> PyResult<bool> {
+        Ok(self.session_mut()?.kernel_mut(instrument).cancel_algo(algo_id, idx))
+    }
+
     fn cancel_order(&mut self, instrument: usize, idx: usize, order_id: u64) -> PyResult<bool> {
         Ok(self.session_mut()?.kernel_mut(instrument).cancel_order(idx, order_id))
     }
@@ -615,39 +745,8 @@ impl PyPortfolioSession {
     /// `(order_id, client_id, side, kind, status, filled_qty, units)` —
     /// `units` is `nan` for a capital-fraction or close-all order. Status is
     /// `accepted`, `triggered` or `partially_filled`.
-    #[allow(clippy::type_complexity)]
-    fn working_orders(
-        &self,
-        instrument: usize,
-    ) -> PyResult<Vec<(u64, String, String, String, String, f64, f64)>> {
-        Ok(self
-            .session_ref()?
-            .kernel(instrument)
-            .open_orders()
-            .into_iter()
-            .map(|o| {
-                let side = match o.side {
-                    OrderSide::Buy => "buy",
-                    OrderSide::Sell => "sell",
-                };
-                let kind = format!("{:?}", o.kind)
-                    .split(' ')
-                    .next()
-                    .unwrap_or("")
-                    .trim_end_matches('{')
-                    .to_lowercase();
-                let status = match o.status {
-                    OrderStatus::Triggered => "triggered",
-                    OrderStatus::PartiallyFilled => "partially_filled",
-                    _ => "accepted",
-                };
-                let units = match o.qty {
-                    QtySpec::Units(u) => u,
-                    _ => f64::NAN,
-                };
-                (o.id, o.client_id.clone(), side.into(), kind, status.into(), o.filled_qty, units)
-            })
-            .collect())
+    fn working_orders(&self, instrument: usize) -> PyResult<Vec<WorkingOrderRow>> {
+        Ok(working_order_rows(self.session_ref()?.kernel(instrument)))
     }
 
     /// Earliest open position of one instrument, or None.
@@ -682,28 +781,18 @@ impl PyPortfolioSession {
         Ok(self.session_ref()?.is_halted())
     }
 
+    /// Halt the session; see `RuntimeContext.halt`.
+    #[pyo3(signature = (reason="manual", flatten=false))]
+    fn halt(&mut self, reason: &str, flatten: bool) -> PyResult<()> {
+        self.session_mut()?.halt(reason, flatten);
+        Ok(())
+    }
+
     /// Force-close all instruments and compute portfolio metrics.
     fn finish(&mut self) -> PyResult<PyPortfolioResult> {
-        let session = self
-            .session
-            .take()
-            .ok_or_else(|| PyValueError::new_err("session is already finished"))?;
-        let outcome = session.finish();
-        Ok(PyPortfolioResult {
-            result: convert_result(outcome.result),
-            per_instrument: outcome
-                .instruments
-                .into_iter()
-                .map(|o| PyInstrumentSummary {
-                    symbol: o.symbol,
-                    trades: o.trades,
-                    pnl: o.pnl,
-                    rejected_entries: o.rejected_entries,
-                })
-                .collect(),
-            rejected_entries: outcome.rejected_entries,
-            halted: outcome.halted,
-            halted_at: outcome.halted_at,
-        })
+        let session = self.session.take().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is already finished"))
+        })?;
+        Ok(convert_outcome(session.finish()))
     }
 }

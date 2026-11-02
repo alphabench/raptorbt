@@ -9,6 +9,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::errors::Fail;
+
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, StopConfig, TargetConfig};
 use crate::execution::orders::{OrderKind, OrderSide, QtySpec, TimeInForce, TrailOffset};
 use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
@@ -28,7 +30,11 @@ pub(crate) fn parse_qty_spec(
     size_frac: Option<f64>,
 ) -> PyResult<Option<QtySpec>> {
     match (units, size_frac) {
-        (Some(_), Some(_)) => Err(PyValueError::new_err("pass units or size_frac, not both")),
+        (Some(_), Some(_)) => {
+            Err(Fail::new("conflicting_order_args", "pass units or size_frac, not both")
+                .param("units, size_frac")
+                .into())
+        }
         (Some(u), None) => Ok(Some(QtySpec::Units(u))),
         (None, Some(f)) => Ok(Some(QtySpec::CapitalFrac(f))),
         (None, None) => Ok(None),
@@ -45,20 +51,27 @@ pub(crate) fn parse_account_mode(
         "cash" => Ok(crate::accounts::AccountMode::Cash),
         "margin" => {
             if leverage <= 0.0 {
-                return Err(PyValueError::new_err("leverage must be > 0"));
+                return Err(Fail::new("invalid_leverage", "leverage must be > 0")
+                    .param("leverage")
+                    .value(leverage)
+                    .into());
             }
             Ok(crate::accounts::AccountMode::Margin { leverage })
         }
-        other => Err(PyValueError::new_err(format!(
-            "account_type must be 'cash' or 'margin', got {other:?}"
-        ))),
+        other => Err(Fail::new(
+            "invalid_account_type",
+            format!("account_type must be 'cash' or 'margin', got {other:?}"),
+        )
+        .param("account_type")
+        .value(other)
+        .into()),
     }
 }
 
 /// One observable outcome of a session step.
 ///
-/// `kind` is `"entered"`, `"exited"`, `"entry_rejected"`, or one of the
-/// order-lifecycle kinds (`"order_accepted"`, `"order_triggered"`,
+/// `kind` is `"entered"`, `"exited"`, `"entry_rejected"`, `"risk_rejected"`,
+/// `"risk_halted"`, or one of the order-lifecycle kinds (`"order_accepted"`, `"order_triggered"`,
 /// `"order_filled"`, `"order_canceled"`, `"order_expired"`,
 /// `"order_rejected"`); the optional fields are populated according to the
 /// kind.
@@ -81,7 +94,8 @@ pub struct PyEngineEvent {
     /// Completed trade, for `exited` events.
     #[pyo3(get)]
     pub trade: Option<PyTrade>,
-    /// Refusal reason, for `entry_rejected`/`order_rejected` events.
+    /// Refusal reason, for `entry_rejected`/`order_rejected`/`risk_rejected`
+    /// events; the halt reason for `risk_halted`.
     #[pyo3(get)]
     pub reject_reason: Option<String>,
     /// Engine order id, for `order_*` events.
@@ -202,6 +216,17 @@ impl From<EngineEvent> for PyEngineEvent {
                 client_order_id: Some(client_id),
                 ..empty
             },
+            EngineEvent::RiskRejected { idx, reason, order_id, client_id } => Self {
+                kind: "risk_rejected".to_string(),
+                idx,
+                reject_reason: Some(reason.to_string()),
+                order_id,
+                client_order_id: order_id.map(|_| client_id),
+                ..empty
+            },
+            EngineEvent::RiskHalted { idx, reason } => {
+                Self { kind: "risk_halted".to_string(), idx, reject_reason: Some(reason), ..empty }
+            }
             EngineEvent::MarginCall { idx, equity, required } => Self {
                 kind: "margin_call".to_string(),
                 idx,
@@ -278,9 +303,13 @@ impl PyKernelSession {
             1 => Direction::Long,
             -1 => Direction::Short,
             other => {
-                return Err(PyValueError::new_err(format!(
-                    "direction must be 1 (long) or -1 (short), got {other}"
-                )))
+                return Err(Fail::new(
+                    "invalid_direction",
+                    format!("direction must be 1 (long) or -1 (short), got {other}"),
+                )
+                .param("direction")
+                .value(other)
+                .into())
             }
         };
 
@@ -291,9 +320,13 @@ impl PyKernelSession {
             "netting" => crate::portfolio::ledger::PositionPolicy::Net,
             "hedging" => crate::portfolio::ledger::PositionPolicy::Independent,
             other => {
-                return Err(PyValueError::new_err(format!(
-                    "oms_type must be 'netting' or 'hedging', got {other:?}"
-                )))
+                return Err(Fail::new(
+                    "invalid_oms_type",
+                    format!("oms_type must be 'netting' or 'hedging', got {other:?}"),
+                )
+                .param("oms_type")
+                .value(other)
+                .into())
             }
         };
         let account = parse_account_mode(account_type, leverage)?;
@@ -303,10 +336,13 @@ impl PyKernelSession {
         if let Some(spec) = instrument {
             let spec = crate::instruments::InstrumentSpec::from(spec);
             if !spec.kind.tradable() {
-                return Err(PyValueError::new_err(format!(
-                    "instrument {:?} is not tradable (kind={:?})",
-                    spec.symbol, spec.kind
-                )));
+                return Err(Fail::new(
+                    "untradable_instrument",
+                    format!("instrument {:?} is not tradable (kind={:?})", spec.symbol, spec.kind),
+                )
+                .param("instrument")
+                .value(spec.symbol.to_string())
+                .into());
             }
             runner = runner.with_instrument(spec);
         }
@@ -342,10 +378,9 @@ impl PyKernelSession {
         stop_price: Option<f64>,
         target_price: Option<f64>,
     ) -> PyResult<Vec<PyEngineEvent>> {
-        let runner = self
-            .runner
-            .as_mut()
-            .ok_or_else(|| PyValueError::new_err("session is finished; create a new one"))?;
+        let runner = self.runner.as_mut().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })?;
 
         let bar = KernelBar { timestamp, open, high, low, close, volume };
         let input = StepInput {
@@ -462,29 +497,17 @@ impl PyKernelSession {
         client_id: &str,
         reduce_only: bool,
     ) -> PyResult<u64> {
-        let side = match side {
-            "buy" => OrderSide::Buy,
-            "sell" => OrderSide::Sell,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "side must be 'buy' or 'sell', got {other:?}"
-                )))
-            }
-        };
-        self.runner_mut()?
-            .kernel_mut()
-            .submit_algo(
-                side,
-                QtySpec::Units(units),
-                OrderKind::Market,
-                TimeInForce::Gtc,
-                client_id.to_string(),
-                crate::execution::algos::ExecAlgorithm::Twap { slices, interval_ns },
-                reduce_only,
-                submitted_ts,
-                submitted_idx,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        submit_twap_on(
+            self.runner_mut()?.kernel_mut(),
+            units,
+            side,
+            slices,
+            interval_ns,
+            submitted_idx,
+            submitted_ts,
+            client_id,
+            reduce_only,
+        )
     }
 
     /// Stop a schedule and cancel the slices it has working.
@@ -520,7 +543,13 @@ impl PyKernelSession {
         match position_id {
             Some(id) => {
                 if !kernel.set_stop_price_for(id, price) {
-                    return Err(PyValueError::new_err(format!("unknown position id {id}")));
+                    return Err(Fail::new(
+                        "invalid_order_reference",
+                        format!("unknown position id {id}"),
+                    )
+                    .param("position_id")
+                    .value(id as i64)
+                    .into());
                 }
             }
             None => kernel.set_stop_price(price),
@@ -535,7 +564,13 @@ impl PyKernelSession {
         match position_id {
             Some(id) => {
                 if !kernel.set_target_price_for(id, price) {
-                    return Err(PyValueError::new_err(format!("unknown position id {id}")));
+                    return Err(Fail::new(
+                        "invalid_order_reference",
+                        format!("unknown position id {id}"),
+                    )
+                    .param("position_id")
+                    .value(id as i64)
+                    .into());
                 }
             }
             None => kernel.set_target_price(price),
@@ -565,6 +600,23 @@ impl PyKernelSession {
         Ok(self.runner_ref()?.kernel().free_capital())
     }
 
+    /// Halt the session: new entries are refused as `killed`; working orders
+    /// are cancelled and, with `flatten=True`, the position is closed at the
+    /// last bar's close when the next bar is stepped.
+    #[pyo3(signature = (reason="manual", flatten=false))]
+    fn halt(&mut self, reason: &str, flatten: bool) -> PyResult<()> {
+        self.runner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("session is already finished"))?
+            .halt(reason, flatten);
+        Ok(())
+    }
+
+    /// Whether the drawdown limit or a halt has latched.
+    fn is_halted(&self) -> PyResult<bool> {
+        Ok(self.runner_ref()?.is_halted())
+    }
+
     /// Mark-to-market equity after the most recent step.
     fn equity(&self) -> PyResult<f64> {
         Ok(self.runner_ref()?.equity())
@@ -592,7 +644,7 @@ impl PyKernelSession {
         let runner = self
             .runner
             .take()
-            .ok_or_else(|| PyValueError::new_err("session is already finished"))?;
+            .ok_or_else(|| Fail::new("session_finished", "session is already finished"))?;
         Ok(convert_result(runner.finish()))
     }
 }
@@ -612,16 +664,16 @@ pub(crate) fn convert_snapshot(
 }
 
 impl PyKernelSession {
-    fn runner_ref(&self) -> PyResult<&SingleRunner> {
-        self.runner
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("session is finished; create a new one"))
+    pub(crate) fn runner_ref(&self) -> PyResult<&SingleRunner> {
+        self.runner.as_ref().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })
     }
 
-    fn runner_mut(&mut self) -> PyResult<&mut SingleRunner> {
-        self.runner
-            .as_mut()
-            .ok_or_else(|| PyValueError::new_err("session is finished; create a new one"))
+    pub(crate) fn runner_mut(&mut self) -> PyResult<&mut SingleRunner> {
+        self.runner.as_mut().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })
     }
 }
 
@@ -639,17 +691,66 @@ pub fn resolve_atr_period(
 ) -> Option<usize> {
     let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
     let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
+    atr_period(&rust_config, inst.as_ref())
+}
 
+/// The ATR period behind a run's stop/target levels; see [`resolve_atr_period`].
+pub(crate) fn atr_period(
+    config: &BacktestConfig,
+    instrument_config: Option<&InstrumentConfig>,
+) -> Option<usize> {
     let effective_stop =
-        inst.as_ref().and_then(|ic| ic.stop.as_ref()).copied().unwrap_or(rust_config.stop);
+        instrument_config.and_then(|ic| ic.stop.as_ref()).copied().unwrap_or(config.stop);
     let effective_target =
-        inst.as_ref().and_then(|ic| ic.target.as_ref()).copied().unwrap_or(rust_config.target);
+        instrument_config.and_then(|ic| ic.target.as_ref()).copied().unwrap_or(config.target);
 
     match (effective_stop, effective_target) {
         (StopConfig::Atr { period, .. }, _) => Some(period),
         (_, TargetConfig::Atr { period, .. }) => Some(period),
         _ => None,
     }
+}
+
+/// Register a TWAP schedule on a kernel — shared by the single-instrument
+/// session, the portfolio session and the runtime's strategy view.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_twap_on(
+    kernel: &mut crate::portfolio::kernel::EngineKernel,
+    units: f64,
+    side: &str,
+    slices: u32,
+    interval_ns: i64,
+    submitted_idx: usize,
+    submitted_ts: i64,
+    client_id: &str,
+    reduce_only: bool,
+) -> PyResult<u64> {
+    let side = match side {
+        "buy" => OrderSide::Buy,
+        "sell" => OrderSide::Sell,
+        other => {
+            return Err(Fail::new(
+                "invalid_order_side",
+                format!("side must be 'buy' or 'sell', got {other:?}"),
+            )
+            .param("side")
+            .value(other)
+            .into())
+        }
+    };
+    kernel
+        .submit_algo(
+            side,
+            QtySpec::Units(units),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            client_id.to_string(),
+            crate::execution::algos::ExecAlgorithm::Twap { slices, interval_ns },
+            reduce_only,
+            submitted_ts,
+            submitted_idx,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// Parse Python order arguments and submit onto a kernel — shared by the
@@ -680,29 +781,60 @@ pub(crate) fn submit_order_on(
     let side = match side {
         "buy" => OrderSide::Buy,
         "sell" => OrderSide::Sell,
-        other => return Err(PyValueError::new_err(format!("unknown side {other:?}"))),
+        other => {
+            return Err(Fail::new("invalid_order_side", format!("unknown side {other:?}"))
+                .param("side")
+                .value(other)
+                .into())
+        }
     };
     let qty = match (units, size_frac) {
         (Some(_), Some(_)) => {
-            return Err(PyValueError::new_err("pass units or size_frac, not both"))
+            return Err(Fail::new("conflicting_order_args", "pass units or size_frac, not both")
+                .param("units, size_frac")
+                .into())
         }
-        (Some(u), None) if u <= 0.0 => return Err(PyValueError::new_err("units must be > 0")),
+        (Some(u), None) if u <= 0.0 => {
+            return Err(Fail::new("invalid_order_value", "units must be > 0")
+                .param("units")
+                .value(u)
+                .into())
+        }
         (Some(u), None) => QtySpec::Units(u),
         (None, Some(f)) if f <= 0.0 || f > 1.0 => {
-            return Err(PyValueError::new_err("size_frac must be in (0, 1]"))
+            return Err(Fail::new("invalid_order_value", "size_frac must be in (0, 1]")
+                .param("size_frac")
+                .value(f)
+                .into())
         }
         (None, Some(f)) => QtySpec::CapitalFrac(f),
         (None, None) => QtySpec::FullPosition,
     };
-    let need_limit =
-        || limit_price.ok_or_else(|| PyValueError::new_err(format!("{kind} needs limit_price")));
+    let need_limit = || {
+        limit_price.ok_or_else(|| {
+            PyErr::from(
+                Fail::new("missing_order_field", format!("{kind} needs limit_price"))
+                    .param("limit_price"),
+            )
+        })
+    };
     let need_trigger = || {
-        trigger_price.ok_or_else(|| PyValueError::new_err(format!("{kind} needs trigger_price")))
+        trigger_price.ok_or_else(|| {
+            PyErr::from(
+                Fail::new("missing_order_field", format!("{kind} needs trigger_price"))
+                    .param("trigger_price"),
+            )
+        })
     };
     let trail_offset = |kernel: &crate::portfolio::kernel::EngineKernel| -> PyResult<TrailOffset> {
-        let raw = offset.ok_or_else(|| PyValueError::new_err(format!("{kind} needs offset")))?;
+        let raw = offset.ok_or_else(|| {
+            Fail::new("missing_order_field", format!("{kind} needs offset")).param("offset")
+        })?;
         if raw <= 0.0 {
-            return Err(PyValueError::new_err("offset must be > 0"));
+            return Err(Fail::new("invalid_order_value", "offset must be > 0")
+                .param("offset")
+                .value(raw)
+                .into());
         }
         match offset_kind {
             "price" => Ok(TrailOffset::Price(raw)),
@@ -710,15 +842,23 @@ pub(crate) fn submit_order_on(
             "ticks" => {
                 let tick = kernel.price_increment();
                 if tick <= 0.0 {
-                    return Err(PyValueError::new_err(
+                    return Err(Fail::new(
+                        "incompatible_order_options",
                         "offset_kind='ticks' needs an instrument with price_increment",
-                    ));
+                    )
+                    .param("offset_kind")
+                    .value("ticks")
+                    .into());
                 }
                 Ok(TrailOffset::Price(raw * tick))
             }
-            other => Err(PyValueError::new_err(format!(
-                "offset_kind must be 'price', 'bps', or 'ticks', got {other:?}"
-            ))),
+            other => Err(Fail::new(
+                "invalid_offset_kind",
+                format!("offset_kind must be 'price', 'bps', or 'ticks', got {other:?}"),
+            )
+            .param("offset_kind")
+            .value(other)
+            .into()),
         }
     };
 
@@ -739,28 +879,46 @@ pub(crate) fn submit_order_on(
         "trailing_stop_limit" => {
             OrderKind::TrailingStopLimit { offset: trail_offset(kernel_ref)?, limit_offset }
         }
-        other => return Err(PyValueError::new_err(format!("unknown order kind {other:?}"))),
+        other => {
+            return Err(Fail::new("invalid_order_kind", format!("unknown order kind {other:?}"))
+                .param("kind")
+                .value(other)
+                .into())
+        }
     };
     let tif = match tif {
         "gtc" => TimeInForce::Gtc,
         "day" => TimeInForce::Day,
         "gtd" => TimeInForce::Gtd {
-            expire_ns: expire_ns
-                .ok_or_else(|| PyValueError::new_err("gtd orders need expire_ns"))?,
+            expire_ns: expire_ns.ok_or_else(|| {
+                Fail::new("missing_order_field", "gtd orders need expire_ns").param("expire_ns")
+            })?,
         },
         "ioc" => TimeInForce::Ioc,
         "fok" => TimeInForce::Fok,
         "at_open" => TimeInForce::AtOpen,
         "at_close" => TimeInForce::AtClose,
-        other => return Err(PyValueError::new_err(format!("unknown tif {other:?}"))),
+        other => {
+            return Err(Fail::new("invalid_time_in_force", format!("unknown tif {other:?}"))
+                .param("tif")
+                .value(other)
+                .into())
+        }
     };
     if matches!(tif, TimeInForce::AtOpen | TimeInForce::AtClose)
         && !matches!(kind_parsed, OrderKind::Market)
     {
-        return Err(PyValueError::new_err("at_open/at_close apply to market orders"));
+        return Err(Fail::new(
+            "incompatible_order_options",
+            "at_open/at_close apply to market orders",
+        )
+        .param("tif")
+        .into());
     }
     if post_only && !matches!(kind_parsed, OrderKind::Limit { .. }) {
-        return Err(PyValueError::new_err("post_only applies to limit orders"));
+        return Err(Fail::new("incompatible_order_options", "post_only applies to limit orders")
+            .param("post_only")
+            .into());
     }
 
     Ok(kernel.submit_order_full(

@@ -6,8 +6,9 @@ feed whose end is not known in advance. Push a tick, and every hook it
 triggers fires before ``push_tick`` returns, so the caller reads positions
 and queued state synchronously.
 
-Semantics are identical to :func:`raptorbt.run_tick_strategy` — both drive
-the same dispatch loop — with two additions. Pushed or warmup *bars* execute
+Semantics are identical to :func:`raptorbt.run_tick_strategy` — both run on
+the same Rust runtime; a stream is a one-strategy :class:`~raptorbt.LiveNode`
+— with two additions. Pushed or warmup *bars* execute
 (they match orders and mark equity), exactly as in the bar runner; bars
 aggregated from prints via ``primary_bars`` remain a view only. And a print
 the session refuses (``ltp == 0`` and no two-sided book — an index that has
@@ -29,22 +30,11 @@ Typical shape::
 
 from __future__ import annotations
 
-import numpy as np
+from typing import Literal
 
-from raptorbt._raptorbt import (
-    BacktestConfig,
-    InstrumentConfig,
-    PortfolioResult,
-    PortfolioSession,
-)
+from raptorbt._raptorbt import BacktestConfig, InstrumentConfig, PortfolioResult
 from raptorbt.strategy.base import Strategy
-from raptorbt.strategy.portfolio_runner import apply_commands_on
-from raptorbt.strategy.tick_runner import (
-    TickContext,
-    advance_clock,
-    drive_tick_events,
-    setup_tick_strategy,
-)
+from raptorbt.strategy.live_node import LiveNode
 
 
 class TickStrategyStream:
@@ -67,8 +57,20 @@ class TickStrategyStream:
     because a strategy holding a short must run under a margin account for
     that short to transact at all, and such a book still needs seeding.
 
+    ``bar_stamp`` / ``bar_ns`` say what the timestamps of warmup and pushed
+    *bars* mean, as in :func:`raptorbt.run_portfolio_strategy`: ``"close"``,
+    or ``"open"`` with ``bar_ns`` (the bar width in ns, or a ``{symbol: ns}``
+    dict covering every symbol). Ticks are instants and ignore both. Leaving
+    ``bar_stamp`` unset while supplying bars keeps the pre-1.0 behaviour and
+    emits a ``DeprecationWarning``.
+
     Everything else — account type, leverage, risk limits, OMS type —
     behaves as in :func:`raptorbt.run_tick_strategy`.
+
+    The stream wraps a one-strategy :class:`~raptorbt.LiveNode`, so
+    ``ctx.series()`` returns read-only views of the rows still held (the last
+    10,000 per symbol and kind, see ``LiveNode(history=...)``), cut at what
+    has arrived. It no longer exposes the full arrays.
     """
 
     def __init__(
@@ -85,84 +87,26 @@ class TickStrategyStream:
         account_type: str = "cash",
         leverage: float = 1.0,
         initial_positions: dict[str, dict] | None = None,
+        bar_stamp: Literal["open", "close"] | None = None,
+        bar_ns: int | dict[str, int] | None = None,
     ):
-        if isinstance(strategy, type):
-            strategy = strategy()
-        if not isinstance(strategy, Strategy):
-            raise ValueError(
-                f"strategy must be a Strategy instance or subclass, got {type(strategy).__name__}"
-            )
-        if not symbols:
-            raise ValueError("symbols must name at least one instrument")
-
-        self._strategy = strategy
-        self._symbols = list(symbols)
-        self._index_of = {s: i for i, s in enumerate(self._symbols)}
-        self._finished = False
-
-        session = PortfolioSession(
-            config=config, account_type=account_type, leverage=leverage
+        self._node = LiveNode(
+            [strategy],
+            symbols,
+            config,
+            primary_bars=primary_bars,
+            warmup_bars=warmup_bars,
+            directions=directions,
+            instruments=instruments,
+            instrument_configs=instrument_configs,
+            oms_type=oms_type,
+            account_type=account_type,
+            leverage=leverage,
+            initial_positions={0: initial_positions} if initial_positions else None,
+            bar_stamp=bar_stamp,
+            bar_ns=bar_ns,
+            _via="TickStrategyStream",
         )
-        for symbol in self._symbols:
-            session.add_instrument(
-                symbol,
-                direction=(directions or {}).get(symbol, 1),
-                instrument_config=(instrument_configs or {}).get(symbol),
-                instrument=(instruments or {}).get(symbol),
-                oms_type=oms_type,
-            )
-        arrays: dict[str, dict[str, np.ndarray]] = {}
-        for symbol, bars in (warmup_bars or {}).items():
-            i = self._index_of[symbol]
-            a = {
-                "timestamps": np.ascontiguousarray(bars["timestamps"], dtype=np.int64),
-            }
-            for key in ("open", "high", "low", "close", "volume"):
-                a[key] = np.ascontiguousarray(bars[key], dtype=np.float64)
-            session.set_bars(
-                i,
-                a["timestamps"],
-                a["open"],
-                a["high"],
-                a["low"],
-                a["close"],
-                a["volume"],
-            )
-            arrays[symbol] = a
-        session.seal()
-
-        for symbol, seed in (initial_positions or {}).items():
-            if symbol not in self._index_of:
-                raise ValueError(f"initial_positions names unknown symbol {symbol!r}")
-            quantity = float(seed.get("quantity") or 0)
-            avg_price = float(seed.get("avg_price") or 0)
-            if quantity <= 0 or avg_price <= 0:
-                raise ValueError(
-                    f"initial_positions[{symbol!r}] needs positive quantity "
-                    f"and avg_price (got {quantity} @ {avg_price})"
-                )
-            session.adopt_position(
-                self._index_of[symbol],
-                int(seed.get("timestamp_ns") or 0),
-                avg_price,
-                quantity,
-            )
-
-        self._session = session
-        self.ctx = TickContext(session, self._symbols, arrays)
-        self._clocks, self._streams, self._primary = setup_tick_strategy(
-            strategy, self.ctx, self._symbols, primary_bars
-        )
-        self._id_map: dict[str, tuple[int, int]] = {}
-        self._apply_commands = apply_commands_on(
-            strategy, session, self.ctx, self._symbols, self._id_map
-        )
-        # Intents (enter / close_position) a timer queued for a symbol
-        # between its prints, waiting for that symbol's next print.
-        self._held_intents: dict[str, list] = {}
-        # Prime indicators and strategy state from the warmup history now,
-        # so the stream is warm before the first live event.
-        self._drain()
 
     # -- feeding -------------------------------------------------------------
 
@@ -193,25 +137,9 @@ class TickStrategyStream:
         routed to their instrument at once and match from its next print;
         intents they queue are held for this symbol's next print.
         """
-        self._check_open()
-        appended = self._session.push_tick(
-            self._index_of[symbol],
-            timestamp,
-            ltp,
-            bid,
-            ask,
-            buy_qty_delta,
-            sell_qty_delta,
-            ltq=ltq,
-            bid_qty=bid_qty,
-            ask_qty=ask_qty,
-            oi=oi,
+        return self._node.push_tick(
+            symbol, timestamp, ltp, bid, ask, buy_qty_delta, sell_qty_delta, ltq, bid_qty, ask_qty, oi
         )
-        if appended:
-            self._drain()
-        else:
-            self._mark_time(symbol, timestamp)
-        return appended
 
     def push_bar(
         self,
@@ -223,12 +151,11 @@ class TickStrategyStream:
         close: float,
         volume: float,
     ) -> None:
-        """Feed one closed bar. It executes: orders match, equity marks."""
-        self._check_open()
-        self._session.push_bar(
-            self._index_of[symbol], timestamp, open, high, low, close, volume
-        )
-        self._drain()
+        """Feed one closed bar. It executes: orders match, equity marks.
+
+        ``timestamp`` is stamped as the stream's ``bar_stamp`` declares.
+        """
+        self._node.push_bar(symbol, timestamp, open, high, low, close, volume)
 
     def push_depth(
         self,
@@ -238,71 +165,32 @@ class TickStrategyStream:
         asks: list[tuple[float, float]],
     ) -> None:
         """Feed one depth snapshot: ``(price, size)`` lists, best first."""
-        self._check_open()
-        self._session.push_depth(self._index_of[symbol], timestamp, bids, asks)
-        self._drain()
+        self._node.push_depth(symbol, timestamp, bids, asks)
 
     # -- state ---------------------------------------------------------------
 
     @property
+    def ctx(self):
+        """The context handed to the strategy's hooks."""
+        return self._node.ctx(0)
+
+    @property
     def strategy(self) -> Strategy:
-        return self._strategy
+        return self._node.strategies[0]
 
     @property
     def equity(self) -> float:
-        return self._session.equity()
+        return self._node.equity(0)
 
     @property
     def is_halted(self) -> bool:
         """Whether a margin call or drawdown kill-switch has latched."""
-        return self._session.is_halted()
+        return self._node.is_halted(0)
 
     def positions(self, symbol: str):
-        return self._session.positions(self._index_of[symbol])
+        return self._node.positions(0, symbol)
 
     def finish(self) -> PortfolioResult:
         """Close out and compute metrics; the stream is unusable after."""
-        self._check_open()
-        self._finished = True
-        self._strategy.on_stop(self.ctx)
-        return self._session.finish()
-
-    # -- internals -----------------------------------------------------------
-
-    def _check_open(self) -> None:
-        if self._finished:
-            raise RuntimeError("stream is finished; create a new one")
-
-    def _drain(self) -> None:
-        drive_tick_events(
-            self._strategy,
-            self.ctx,
-            self._session,
-            self._symbols,
-            self._clocks,
-            self._streams,
-            self._primary,
-            self._apply_commands,
-            before_trade=self._release_held_intents,
-        )
-
-    def _mark_time(self, symbol: str, timestamp: int) -> None:
-        """A refused print still proves the market reached its instant.
-
-        Fire what is due on this symbol's clock now. Commands (submit_order,
-        cancel, close by id) are routed at once; with no event in flight the
-        session stamps them on the target's last print, so they match from
-        its next one. Intents have no symbol of their own and ride a print,
-        so they are held for this symbol's next trade event rather than
-        left on the queue for whichever symbol prints first.
-        """
-        advance_clock(self._strategy, self.ctx, self._clocks, symbol, timestamp)
-        self._apply_commands(self._index_of[symbol], 0, timestamp)
-        queued = self._strategy.drain_orders()
-        if queued:
-            self._held_intents.setdefault(symbol, []).extend(queued)
-
-    def _release_held_intents(self, symbol: str) -> None:
-        held = self._held_intents.pop(symbol, None)
-        if held:
-            self._strategy._pending_orders[:0] = held
+        (result,) = self._node.finish()
+        return result

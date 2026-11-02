@@ -10,7 +10,7 @@ margin-called at a level only two naked deposits would have breached.
 
 import numpy as np
 
-from raptorbt import BacktestConfig, InstrumentSpec, Strategy, run_portfolio_strategy
+from raptorbt import BacktestConfig, InstrumentSpec, Strategy
 
 CE, PE = "BANKNIFTY57000CE", "BANKNIFTY57000PE"
 STRIKE, LOT = 57_000.0, 30.0
@@ -69,9 +69,9 @@ class _SellBothOnce(Strategy):
         self.margin_calls += 1
 
 
-def _run(capital, ce_premiums, pe_premiums):
+def _run(portfolio_runner, capital, ce_premiums, pe_premiums):
     strategy = _SellBothOnce()
-    result = run_portfolio_strategy(
+    result = portfolio_runner(
         strategy,
         {CE: _bars(ce_premiums, start_ts=0), PE: _bars(pe_premiums, start_ts=5)},
         config=BacktestConfig(initial_capital=capital, fees=0.0),
@@ -83,9 +83,9 @@ def _run(capital, ce_premiums, pe_premiums):
     return result, strategy
 
 
-def test_a_sold_straddle_frees_the_group_benefit_once_both_legs_are_on():
+def test_a_sold_straddle_frees_the_group_benefit_once_both_legs_are_on(portfolio_runner):
     result, strategy = _run(
-        420_000.0, [1_006.15, 1_006.15, 1_006.15], [551.05, 551.05, 551.05]
+        portfolio_runner, 420_000.0, [1_006.15, 1_006.15, 1_006.15], [551.05, 551.05, 551.05]
     )
     assert len(result.result.trades()) == 2
     # Group: span once + exposure on both − premium collected.
@@ -96,20 +96,20 @@ def test_a_sold_straddle_frees_the_group_benefit_once_both_legs_are_on():
     assert strategy.free_after_pair > 420_000.0 - 2 * NAKED_PER_LOT + 100_000.0
 
 
-def test_a_hedged_pair_survives_a_move_two_naked_deposits_would_not():
+def test_a_hedged_pair_survives_a_move_two_naked_deposits_would_not(portfolio_runner):
     # The call runs against the seller by 3,993.85 × 30 = 1,19,815: equity
     # 2,90,185 is under two naked deposits but over the group figure.
     result, strategy = _run(
-        410_000.0, [1_006.15, 5_000.0, 5_000.0], [551.05, 551.05, 551.05]
+        portfolio_runner, 410_000.0, [1_006.15, 5_000.0, 5_000.0], [551.05, 551.05, 551.05]
     )
     assert len(result.result.trades()) == 2
     assert strategy.margin_calls == 0
     assert not result.halted
 
 
-def test_the_second_sold_leg_must_still_be_carriable_on_its_own():
+def test_the_second_sold_leg_must_still_be_carriable_on_its_own(portfolio_runner):
     """Sizing a new sold leg uses its naked deposit; the group benefit
     arrives after it is on. ₹4 lakh carries one deposit (2,00,925), and the
     1,99,075 left cannot carry a second."""
-    result, _ = _run(400_000.0, [1_006.15, 1_006.15], [551.05, 551.05])
+    result, _ = _run(portfolio_runner, 400_000.0, [1_006.15, 1_006.15], [551.05, 551.05])
     assert len(result.result.trades()) == 1

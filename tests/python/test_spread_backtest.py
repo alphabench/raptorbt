@@ -176,7 +176,7 @@ def test_target_profit_still_closes_a_real_winner():
 # days and the overnight price jumps were booked as profit or loss the trader
 # could never have experienced.
 #
-# The backend passed `session_aware=True` for months. It reached a `hasattr`
+# A caller passed `session_aware=True`. It reached a `hasattr`
 # guard for a `set_session_config` method that existed only in the type stub,
 # never in the engine, so the call was silently dropped. These tests exist so
 # that cannot recur: the setting is real, it is reachable from Python, and bad
@@ -283,7 +283,7 @@ def test_squareoff_time_parses_to_minutes_from_midnight():
 
 
 def test_batch_spread_backtest_honours_squareoff():
-    """The batch path is what production calls, so it gets its own pin.
+    """The batch path is what batch users call, so it gets its own pin.
 
     ``batch_spread_backtest`` builds each item's config by cloning the shared
     base config. That is why squareoff reaches it -- but "why" is an argument,
@@ -498,7 +498,7 @@ def test_a_calendar_spread_survives_its_near_leg_expiry():
 def test_the_far_leg_still_moves_a_calendars_result():
     """What the far leg does after the near one dies has to reach the P&L.
 
-    The old engine returned the same number whatever the far leg did,
+    Before the fix, the result was the same number whatever the far leg did,
     because it had already closed -- an answer uncorrelated with the
     trade rather than merely optimistic. A 40-point difference in where
     the far leg settles is 3000 on a 75 lot.

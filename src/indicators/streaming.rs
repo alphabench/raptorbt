@@ -23,41 +23,63 @@ pub trait StreamingIndicator: std::fmt::Debug + Send {
 }
 
 /// Rolling window shared by the windowed cores.
+///
+/// NaN policy: the running sum covers finite values only and `bad` counts the
+/// non-finite values currently in the window. A window holding any non-finite
+/// value has a NaN mean; once it leaves the window the mean recovers. O(1) per
+/// push.
 #[derive(Debug, Clone)]
 struct Window {
     period: usize,
     values: VecDeque<f64>,
     sum: f64,
+    bad: usize,
 }
 
 impl Window {
     fn new(period: usize) -> Self {
-        Self { period, values: VecDeque::with_capacity(period + 1), sum: 0.0 }
+        Self { period, values: VecDeque::with_capacity(period + 1), sum: 0.0, bad: 0 }
     }
 
     /// Push a value; returns `true` once the window is full.
     fn push(&mut self, value: f64) -> bool {
         self.values.push_back(value);
-        self.sum += value;
+        if value.is_finite() {
+            self.sum += value;
+        } else {
+            self.bad += 1;
+        }
         if self.values.len() > self.period {
             if let Some(old) = self.values.pop_front() {
-                self.sum -= old;
+                if old.is_finite() {
+                    self.sum -= old;
+                } else {
+                    self.bad -= 1;
+                }
             }
         }
         self.values.len() == self.period
     }
 
+    /// Window mean; NaN while any non-finite value is inside the window.
     fn mean(&self) -> f64 {
+        if self.bad > 0 {
+            return f64::NAN;
+        }
         self.sum / self.period as f64
     }
 
     fn reset(&mut self) {
         self.values.clear();
         self.sum = 0.0;
+        self.bad = 0;
     }
 }
 
 /// Simple moving average.
+///
+/// A window containing a NaN (or infinity) yields NaN; the average recovers
+/// once that value leaves the window. Matches the batch `sma`.
 #[derive(Debug)]
 pub struct StreamingSma {
     window: Window,
@@ -507,6 +529,25 @@ impl StreamingMacd {
 mod tests {
     use super::*;
     use crate::indicators::{momentum, trend, volatility};
+
+    #[test]
+    fn sma_recovers_after_nan_leaves_the_window() {
+        let x = [1.0, 2.0, 3.0, f64::NAN, 5.0, 6.0, 7.0, 8.0];
+        let batch = trend::sma(&x, 3).unwrap();
+        let mut s = StreamingSma::new(3);
+        for (i, &v) in x.iter().enumerate() {
+            let got = s.update(v);
+            match got {
+                Some(g) if !g.is_nan() => assert_eq!(g, batch[i], "idx {i}"),
+                Some(_) => assert!(batch[i].is_nan(), "idx {i}"),
+                None => assert!(batch[i].is_nan(), "idx {i}"),
+            }
+        }
+        assert_eq!(batch[6], 6.0);
+        assert_eq!(batch[7], 7.0);
+        assert!(batch[3].is_nan() && batch[4].is_nan() && batch[5].is_nan());
+        assert_eq!(s.value(), Some(7.0));
+    }
 
     fn series(n: usize) -> Vec<f64> {
         // Deterministic pseudo-random walk.

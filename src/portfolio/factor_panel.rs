@@ -7,9 +7,8 @@
 //! error: absence is representable (NaN), a broken input is not.
 //!
 //! Factor *lists* and composite *weights* are caller-supplied data. This
-//! module hardcodes no factor and no weighting -- the platform's factor
-//! configuration (and each factor's measured IC provenance) lives in the
-//! backend, not in Rust.
+//! module hardcodes no factor and no weighting -- the caller supplies
+//! the factor lists and weights.
 
 use super::errors::PortfolioMathError;
 
@@ -236,7 +235,7 @@ pub fn composite_scores(
 /// mean of those daily ICs with a Newey-West-free t-statistic
 /// `mean / (stdev / sqrt(n))` over the dates that scored.
 ///
-/// This is the falsifiability tool: a factor earns a place in the platform only
+/// This is the falsifiability tool: a factor earns a place only
 /// by clearing a t-bar measured here, and the number it returns is the number
 /// that must be persisted as that factor's provenance.
 ///

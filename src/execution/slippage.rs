@@ -106,49 +106,6 @@ impl SlippageModel {
     }
 }
 
-/// Market impact model for large orders.
-#[derive(Debug, Clone)]
-pub struct MarketImpact {
-    /// Temporary impact coefficient.
-    pub temporary_impact: f64,
-    /// Permanent impact coefficient.
-    pub permanent_impact: f64,
-    /// Average daily volume for normalization.
-    pub avg_daily_volume: f64,
-}
-
-impl MarketImpact {
-    /// Create a new market impact model.
-    pub fn new(temporary: f64, permanent: f64, adv: f64) -> Self {
-        Self { temporary_impact: temporary, permanent_impact: permanent, avg_daily_volume: adv }
-    }
-
-    /// Calculate market impact for an order.
-    ///
-    /// Uses simplified square-root model: impact = sigma * sqrt(Q / ADV)
-    ///
-    /// # Arguments
-    /// * `order_size` - Number of shares/contracts
-    /// * `price` - Current price
-    /// * `volatility` - Price volatility (sigma)
-    ///
-    /// # Returns
-    /// Total market impact in price terms
-    pub fn calculate(&self, order_size: f64, price: Price, volatility: f64) -> f64 {
-        if self.avg_daily_volume <= 0.0 {
-            return 0.0;
-        }
-
-        let participation_rate = order_size / self.avg_daily_volume;
-        let sqrt_participation = participation_rate.sqrt();
-
-        let temporary = self.temporary_impact * volatility * price * sqrt_participation;
-        let permanent = self.permanent_impact * volatility * price * participation_rate;
-
-        temporary + permanent
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

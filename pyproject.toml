@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "raptorbt"
-version = "0.13.4"
+version = "2.0.0.dev0"
 description = "High-performance Rust backtesting engine with Python bindings. Bar-level and tick-level simulation with sub-millisecond execution and a minimal footprint."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Typing :: Typed",
@@ -48,3 +49,16 @@ Documentation = "https://www.alphabench.in/raptorbt"
 features = ["pyo3/extension-module"]
 python-source = "python"
 module-name = "raptorbt._raptorbt"
+# The skill files live in skills/ and are reached from the package through the
+# symlink python/raptorbt/skills/_data. maturin does not follow that link by
+# itself, so the wheel lists the files through it (they land at
+# raptorbt/skills/_data) and the sdist carries the real directory.
+include = [
+    { path = "python/raptorbt/skills/_data/**/*", format = "wheel" },
+    { path = "skills/**/*", format = "sdist" },
+]
+
+[tool.pytest.ini_options]
+# Most tests predate bar_stamp and call the strategy runners without it;
+# tests of the contract itself pass it explicitly or use pytest.warns.
+filterwarnings = ["ignore:.*bar_stamp not given:DeprecationWarning"]

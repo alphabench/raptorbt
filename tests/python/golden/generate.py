@@ -2,7 +2,7 @@
 
 Run from the repo root AFTER building the extension::
 
-    .venv/bin/python raptorbt/tests/python/golden/generate.py
+    .venv/bin/python tests/python/golden/generate.py
 
 Fixtures pin bit-exact results (float hex) for a corpus of runs across the
 array and class paths. ``test_golden.py`` replays the corpus and asserts

@@ -75,6 +75,23 @@ impl RaptorError {
 
 impl From<RaptorError> for pyo3::PyErr {
     fn from(err: RaptorError) -> pyo3::PyErr {
-        pyo3::exceptions::PyValueError::new_err(err.to_string())
+        use crate::python::errors::Fail;
+        let code = match &err {
+            RaptorError::LengthMismatch { .. } => "length_mismatch",
+            RaptorError::InvalidParameter { .. } => "invalid_parameter",
+            RaptorError::InsufficientData { .. } => "insufficient_data",
+            RaptorError::InvalidConfig { .. } => "invalid_config",
+            RaptorError::EmptyData { .. } => "empty_data",
+            RaptorError::DivisionByZero { .. }
+            | RaptorError::IndexOutOfBounds { .. }
+            | RaptorError::PythonError { .. } => "invalid_data",
+        };
+        let fail = Fail::new(code, err.to_string());
+        match err {
+            RaptorError::LengthMismatch { actual, .. } => fail.value(actual),
+            RaptorError::InsufficientData { available, .. } => fail.value(available),
+            _ => fail,
+        }
+        .into()
     }
 }

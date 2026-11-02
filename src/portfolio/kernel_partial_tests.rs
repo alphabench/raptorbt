@@ -272,3 +272,43 @@ fn an_order_in_flight_cannot_fill_before_its_latency_elapses() {
     );
     assert!(kernel.is_in_position());
 }
+
+#[test]
+fn a_partly_filled_oco_leg_shrinks_its_sibling_to_what_is_left() {
+    let mut kernel = partial_kernel();
+    let entry = submit(&mut kernel, OrderSide::Buy, QtySpec::Units(100.0), TimeInForce::Gtc, "in");
+    kernel.step_trade(1, &print(1, 100.0, 100.0), StepInput::default());
+    assert_eq!(kernel.order(entry).unwrap().status, OrderStatus::Filled);
+    let target = kernel.submit_order(
+        OrderSide::Sell,
+        QtySpec::Units(100.0),
+        OrderKind::Limit { price: 110.0 },
+        TimeInForce::Gtc,
+        1,
+        1,
+        "tp".into(),
+        None,
+        None,
+    );
+    let stop = kernel.submit_order(
+        OrderSide::Sell,
+        QtySpec::Units(100.0),
+        OrderKind::StopMarket { trigger: 90.0 },
+        TimeInForce::Gtc,
+        1,
+        1,
+        "sl".into(),
+        None,
+        None,
+    );
+    kernel.link_oco(&[target, stop]);
+    kernel.step_trade(2, &print(2, 110.0, 40.0), StepInput::default());
+    assert_eq!(kernel.order(target).unwrap().status, OrderStatus::PartiallyFilled);
+    // 60 are left to sell: the stop may not offer more.
+    assert_eq!(kernel.order(stop).unwrap().qty, QtySpec::Units(60.0));
+    assert_eq!(kernel.order(stop).unwrap().status, OrderStatus::Accepted);
+    // Completing the target cancels the stop as before.
+    kernel.step_trade(3, &print(3, 110.0, 60.0), StepInput::default());
+    assert_eq!(kernel.order(target).unwrap().status, OrderStatus::Filled);
+    assert_eq!(kernel.order(stop).unwrap().status, OrderStatus::Canceled);
+}

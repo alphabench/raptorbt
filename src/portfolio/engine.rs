@@ -1156,7 +1156,7 @@ mod tests {
 
     /// Time in the market cannot exceed the time the backtest ran. Summing the
     /// holding periods of *concurrent* positions against one equity curve
-    /// reported 123.5% on a real run.
+    /// reported 123.5%.
     #[test]
     fn ulcer_describes_the_same_curve_as_max_drawdown() {
         // The invariant that must survive refactoring. `calculate_metrics` folds

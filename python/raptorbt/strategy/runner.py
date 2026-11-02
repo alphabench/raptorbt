@@ -2,70 +2,33 @@
 
 from __future__ import annotations
 
+import os
+from typing import Literal
+
 import numpy as np
 
+from raptorbt.errors import InvalidData, InvalidOrder, InvalidParameter
 from raptorbt._raptorbt import (
     InstrumentSpec,
     BacktestConfig,
     BacktestResult,
     InstrumentConfig,
+    KernelDriver,
     KernelSession,
-    atr as _atr,
-    resolve_atr_period,
 )
+from raptorbt.strategy import api
+from raptorbt.strategy._commands import (
+    KernelTarget,
+    CommandPath,
+    atr_at,
+    atr_series,
+    session_tz_offset_ns,
+    dispatch_events,
+)
+from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import StrategyContext
-from raptorbt.strategy.orders import ClosePosition, MarketOrder, Twap
 from raptorbt.strategy.streams import StreamState
-
-
-def dispatch_events(strategy: Strategy, ctx, events) -> None:
-    """Route engine events into strategy hooks.
-
-    Shared by the single-instrument and portfolio runners. The `entered`/
-    `exited` events double as fill notifications for the legacy intent
-    path; an order-driven fill already fired ``on_order_filled`` for its
-    own ``order_filled`` event, so the immediately following position event
-    must not fire it again.
-    """
-    symbol = getattr(ctx, "symbol", None)
-    order_fill_preceded = False
-    for event in events:
-        strategy.cache._observe(event, symbol)
-        if event.kind == "entered":
-            if not order_fill_preceded:
-                strategy.on_order_filled(ctx, event)
-            strategy.on_position_opened(ctx, event)
-            order_fill_preceded = False
-        elif event.kind == "exited":
-            if not order_fill_preceded:
-                strategy.on_order_filled(ctx, event)
-            strategy.on_position_closed(ctx, event)
-            order_fill_preceded = False
-        elif event.kind == "entry_rejected":
-            strategy.on_order_rejected(ctx, event)
-        elif event.kind == "algo_started":
-            strategy.on_algo_started(ctx, event)
-            strategy.on_order_event(ctx, event)
-        elif event.kind == "algo_completed":
-            strategy.on_algo_completed(ctx, event)
-            strategy.on_order_event(ctx, event)
-        elif event.kind == "margin_call":
-            strategy.on_margin_call(ctx, event)
-            strategy.on_order_event(ctx, event)
-        elif event.kind.startswith("order_"):
-            handler = {
-                "order_accepted": strategy.on_order_accepted,
-                "order_triggered": strategy.on_order_triggered,
-                "order_filled": strategy.on_order_filled,
-                "order_canceled": strategy.on_order_canceled,
-                "order_expired": strategy.on_order_expired,
-                "order_rejected": strategy.on_order_rejected,
-            }.get(event.kind)
-            if handler is not None:
-                handler(ctx, event)
-            strategy.on_order_event(ctx, event)
-            order_fill_preceded = event.kind == "order_filled"
 
 
 def run_strategy_backtest(
@@ -84,6 +47,8 @@ def run_strategy_backtest(
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
+    bar_stamp: Literal["open", "close"] | None = None,
+    bar_ns: int | dict[str, int] | None = None,
 ) -> BacktestResult:
     """Run a class-based strategy over OHLCV arrays.
 
@@ -103,17 +68,37 @@ def run_strategy_backtest(
     events are dispatched to the ``on_order_*`` / ``on_position_*`` hooks
     before the next bar.
 
+    ``bar_stamp`` says what ``timestamps`` mean: ``"close"`` (a bar is stamped
+    when it ends) or ``"open"`` (when it starts; ``bar_ns`` is then required,
+    the bar width in nanoseconds, or a ``{symbol: ns}`` dict). The engine
+    runs on bar close time: fills, ``DAY`` expiry, session square-off, the
+    strategy clock and ``ctx.datetime`` use ``ctx.bar_close_ts``, while
+    ``ctx.timestamp`` and ``ctx.bar.timestamp`` stay the stamps you passed.
+    Composite bars (``subscribe_bars``) are stamped at their window end, a
+    close time. ``None`` keeps the pre-1.0 behaviour (composites built as if
+    stamps were open stamps, event order as if they were close stamps) and
+    emits a ``DeprecationWarning``; it will be required in 1.0.
+
     Raises:
-        ValueError: on inconsistent array lengths, on conflicting same-bar
+        ValueError: on an invalid ``bar_stamp``, on ``bar_stamp="open"``
+            without a positive ``bar_ns``, on inconsistent array lengths, on decreasing
+            timestamps (equal timestamps are allowed), on conflicting same-bar
             intents (enter and close while in position), or on duplicate
             same-bar intents.
     """
     if isinstance(strategy, type):
         strategy = strategy()
     if not isinstance(strategy, Strategy):
-        raise ValueError(
-            f"strategy must be a Strategy instance or subclass, got {type(strategy).__name__}"
+        raise InvalidParameter(
+            f"strategy must be a Strategy instance or subclass, got {type(strategy).__name__}",
+            code="invalid_strategy",
+            operation="run_strategy_backtest",
+            parameter="strategy",
+            value=type(strategy).__name__,
+            valid=["Strategy instance", "Strategy subclass"],
         )
+
+    stamps = BarStamps.resolve(bar_stamp, bar_ns, [symbol], "run_strategy_backtest")
 
     timestamps = np.ascontiguousarray(timestamps, dtype=np.int64)
     open_ = np.ascontiguousarray(open, dtype=np.float64)
@@ -131,11 +116,36 @@ def run_strategy_backtest(
         ("volume", volume),
     ):
         if len(arr) != n:
-            raise ValueError(
-                f"{name} has length {len(arr)}, expected {n} (same as timestamps)"
+            raise InvalidData(
+                f"{name} has length {len(arr)}, expected {n} (same as timestamps)",
+                code="length_mismatch",
+                operation="run_strategy_backtest",
+                parameter=name,
+                value=len(arr),
+                valid=[n],
             )
     if n == 0:
-        raise ValueError("cannot backtest zero bars")
+        raise InvalidData(
+            "cannot backtest zero bars",
+            code="empty_data",
+            operation="run_strategy_backtest",
+            parameter="timestamps",
+            value=0,
+        )
+    decreasing = np.flatnonzero(timestamps[1:] < timestamps[:-1])
+    if decreasing.size:
+        i = int(decreasing[0]) + 1
+        raise InvalidData(
+            f"{symbol} bars: timestamps must not decrease, but index {i} is "
+            f"{int(timestamps[i])} after {int(timestamps[i - 1])}",
+            code="decreasing_timestamps",
+            operation="run_strategy_backtest",
+            parameter="timestamps",
+            value=int(timestamps[i]),
+        )
+
+    # Everything the engine does in time runs on bar close time.
+    visible = stamps.visible(symbol, timestamps)
 
     session = KernelSession(
         symbol=symbol,
@@ -149,18 +159,12 @@ def run_strategy_backtest(
     )
 
     # Same ATR series the array-based engine would compute for ATR-based
-    # stop/target configs; period resolution happens in the engine crate.
-    atr_period = resolve_atr_period(config, instrument_config)
-    atr_values = None
-    if atr_period:
-        try:
-            atr_values = _atr(high, low, close, atr_period)
-        except ValueError:
-            # Mirror the array engine: unusable ATR degrades to "no stop"
-            # (an ATR of 0.0 sets no stop/target) rather than failing the run.
-            atr_values = None
+    # stop/target configs.
+    atr_values = atr_series(config, instrument_config, high, low, close)
 
-    ctx = StrategyContext(session, timestamps, open_, high, low, close, volume)
+    ctx = StrategyContext(
+        session, timestamps, open_, high, low, close, volume, close_timestamps=visible
+    )
 
     strategy.drain_orders()  # discard intents queued before the run
     strategy.drain_commands()
@@ -171,91 +175,39 @@ def run_strategy_backtest(
 
     strategy.clock = Clock()
     strategy.cache = Cache()
+    api.begin(strategy, ctx, [symbol], symbol)
     strategy.on_start(ctx)
+    mask = api.finish(strategy)
 
     # Multi-timeframe: one streaming aggregator per subscription declared in
     # on_start. Completed composite bars dispatch before the primary on_bar
     # of the bar that completed them (they closed strictly earlier).
-    streams = StreamState(strategy)
+    streams = StreamState(
+        strategy,
+        tz_offset_ns=session_tz_offset_ns(config),
+        stamp=stamps.aggregator_stamp,
+        sessions={None: instrument.session} if instrument is not None else None,
+    )
 
-    # client order id -> engine order id, for cancel/modify routing.
-    id_map: dict[str, int] = {}
-
-    def apply_commands(i: int) -> None:
-        for command in strategy.drain_commands():
-            if command[0] == "submit":
-                _, client_id, order, parent, _symbol = command
-                if isinstance(order, Twap):
-                    # A schedule, not an order: it releases its own slices.
-                    session.submit_twap(
-                        order.units,
-                        order.side,
-                        order.slices,
-                        order.interval_ns,
-                        i,
-                        int(timestamps[i]),
-                        client_id,
-                        order.reduce_only,
-                    )
-                    continue
-                parent_engine_id = id_map.get(parent) if parent else None
-                if parent and parent_engine_id is None:
-                    raise ValueError(f"unknown parent order {parent!r}")
-                engine_id = session.submit_order(
-                    side=order.side,
-                    kind=order.kind,
-                    submitted_idx=i,
-                    submitted_ts=int(timestamps[i]),
-                    client_id=client_id,
-                    units=order.units,
-                    size_frac=order.size_frac,
-                    limit_price=getattr(order, "price", None),
-                    trigger_price=getattr(order, "trigger", None),
-                    tif=order.tif,
-                    expire_ns=order.expire_ns,
-                    stop_price=order.stop_price,
-                    target_price=order.target_price,
-                    offset=getattr(order, "offset", None),
-                    offset_kind=getattr(order, "offset_kind", "price"),
-                    limit_offset=getattr(order, "limit_offset", 0.0),
-                    post_only=getattr(order, "post_only", False),
-                    reduce_only=order.reduce_only,
-                    parent_id=parent_engine_id,
-                )
-                id_map[client_id] = engine_id
-            elif command[0] == "link_oco":
-                engine_ids = [id_map[c] for c in command[1] if c in id_map]
-                if len(engine_ids) >= 2:
-                    session.link_oco(engine_ids)
-            elif command[0] == "cancel":
-                engine_id = id_map.get(command[1])
-                if engine_id is not None:
-                    session.cancel_order(i, engine_id)
-            elif command[0] == "cancel_all":
-                session.cancel_all_orders(i)
-            elif command[0] == "close":
-                session.request_close(command[1])
-            elif command[0] == "close_all_for":
-                # Single-instrument run: symbol routing degenerates to the
-                # legacy whole-position close.
-                for snapshot in session.positions():
-                    session.request_close(snapshot.position_id)
-            elif command[0] == "modify":
-                engine_id = id_map.get(command[1])
-                if engine_id is not None:
-                    session.modify_order(engine_id, **command[2])
+    # The Python command path stays reachable while the native one settles.
+    if os.environ.get("RAPTORBT_PY_COMMANDS") == "1":
+        commands = CommandPath(strategy, KernelTarget(session))
+        driver = None
+    else:
+        commands = None
+        driver = KernelDriver(session, strategy, ctx, mask, atr_values)
 
     for i in range(n):
         ctx.idx = i
 
         # Clock first: scheduled times precede the bar revealing them.
-        for time_event in strategy.clock._advance(int(timestamps[i])):
+        for time_event in strategy.clock._advance(int(visible[i])):
             strategy.on_time_event(ctx, time_event)
 
         streams.push(
             strategy,
             ctx,
-            int(timestamps[i]),
+            int(visible[i]),
             float(open_[i]),
             float(high[i]),
             float(low[i]),
@@ -264,51 +216,42 @@ def run_strategy_backtest(
         )
 
         strategy.on_bar(ctx)
-        apply_commands(i)
+        if driver is not None:
+            driver.step(
+                i,
+                int(visible[i]),
+                float(open_[i]),
+                float(high[i]),
+                float(low[i]),
+                float(close[i]),
+                float(volume[i]),
+            )
+            continue
+        commands(0, i, int(visible[i]))
 
-        entry = False
-        exit_ = False
-        size_mult: float | None = None
-        stop_override: float | None = None
-        target_override: float | None = None
-
-        for intent in strategy.drain_orders():
-            if isinstance(intent, MarketOrder):
-                if entry:
-                    raise ValueError(f"duplicate entry intents queued on bar {i}")
-                entry = True
-                size_mult = intent.size_frac
-                stop_override = intent.stop_price
-                target_override = intent.target_price
-            elif isinstance(intent, ClosePosition):
-                if exit_:
-                    raise ValueError(f"duplicate close intents queued on bar {i}")
-                exit_ = True
-            else:
-                raise ValueError(f"unknown order intent on bar {i}: {intent!r}")
+        intents = commands.fold(i, atr=atr_at(atr_values, i))
 
         # An enter+close pair while in position would exit and immediately
         # re-enter on the same bar; refuse rather than guess the intent.
-        if entry and exit_ and session.is_in_position():
-            raise ValueError(
+        if intents["entry"] and intents["exit"] and session.is_in_position():
+            raise InvalidOrder(
                 f"bar {i}: enter() and close_position() queued on the same bar "
-                "while in position; emit one intent per bar"
+                "while in position; emit one intent per bar",
+                code="invalid_order_intent",
+                operation="run_strategy_backtest",
+                parameter="intents",
+                value=i,
             )
 
         events = session.step(
             i,
-            int(timestamps[i]),
+            int(visible[i]),
             float(open_[i]),
             float(high[i]),
             float(low[i]),
             float(close[i]),
             float(volume[i]),
-            entry=entry,
-            exit=exit_,
-            atr=float(atr_values[i]) if atr_values is not None else 0.0,
-            size_mult=size_mult,
-            stop_price=stop_override,
-            target_price=target_override,
+            **intents,
         )
 
         dispatch_events(strategy, ctx, events)

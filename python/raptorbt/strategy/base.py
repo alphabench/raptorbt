@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 
+from raptorbt._raptorbt import CommandQueue
+from raptorbt.errors import InvalidOrder, InvalidSubscription
+from raptorbt.strategy import api
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
 from raptorbt.strategy.config import StrategyConfig
 from raptorbt.strategy.context import StrategyContext
-from raptorbt.strategy.orders import ClosePosition, Market, MarketOrder
-from raptorbt.strategy.orders.types import _OrderBase
+from raptorbt.strategy.orders import Market
+from raptorbt.strategy.orders.types import Twap, _OrderBase
 
 
 class Strategy:
@@ -22,14 +25,19 @@ class Strategy:
     ``on_order_*`` / ``on_position_*`` hooks.
     """
 
+    #: The run's API state (subscriptions, views); set by the runner.
+    _api = None
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        api.check_class(cls)
+
     def __init__(self, config: StrategyConfig | None = None) -> None:
         self.config = config if config is not None else StrategyConfig()
-        self._pending_orders: list[MarketOrder | ClosePosition] = []
-        # Typed-order commands, drained by the runner each bar:
-        # ("submit", client_id, order, parent) / ("cancel", client_id) /
-        # ("cancel_all",) / ("modify", client_id, kwargs) / ("close", pid) /
-        # ("link_oco", ids).
-        self._pending_commands: list[tuple] = []
+        # Orders, cancels, closes and entry intents queued by the hooks; the
+        # runner takes them out each event. Orders are converted to plain
+        # data as they are submitted.
+        self._queue = CommandQueue()
         self._order_seq = 0
         # (step, unit) bar subscriptions declared in on_start.
         self._bar_subscriptions: list[tuple[int, str]] = []
@@ -41,6 +49,15 @@ class Strategy:
         self._indicators: list[tuple[object, int | None]] = []
 
     # -- lifecycle hooks ----------------------------------------------------
+    #
+    # The canonical names. Hooks marked "deprecated" further down receive the
+    # same events under their old names; define one or the other, never both.
+
+    def on_init(self, ctx: StrategyContext) -> None:
+        """Called once per run, before :meth:`on_start` and before any
+        position is adopted. Declare subscriptions and indicators here; the
+        account is not yet seeded, so read positions and equity in
+        :meth:`on_start`."""
 
     def on_start(self, ctx: StrategyContext) -> None:
         """Called once before the first bar.
@@ -50,17 +67,66 @@ class Strategy:
         """
 
     def on_bar(self, ctx: StrategyContext) -> None:
-        """Called once per bar, in ascending time order."""
+        """Called once per bar, in ascending time order.
+
+        Defined as ``on_bar(self, ctx)`` it sees primary bars only. Defined as
+        ``on_bar(self, ctx, event)`` it receives the bar as ``event`` and also
+        every completed composite bar (``event.timeframe`` is ``None`` for a
+        primary bar and a label such as ``"5m"`` for a composite one), which
+        replaces :meth:`on_composite_bar`.
+        """
+
+    def on_market_data(self, ctx: StrategyContext, event) -> None:
+        """Every bar, composite bar, trade, quote and book the strategy
+        receives, after the hook specific to that event."""
+
+    def on_trade(self, ctx: StrategyContext, tick) -> None:
+        """A trade printed. Only fires in tick runs. Replaces
+        :meth:`on_trade_tick`; see there for the book it sees."""
+
+    def on_book(self, ctx: StrategyContext, book) -> None:
+        """The order book changed. Only fires in tick runs with depth data.
+        Replaces :meth:`on_order_book`."""
+
+    def on_timer(self, ctx: StrategyContext, event) -> None:
+        """Called for each due clock alert/timer, *before* the bar's data
+        handlers. Replaces :meth:`on_time_event`."""
+
+    def on_fill(self, ctx: StrategyContext, event) -> None:
+        """Called when an entry or exit fill occurs. Replaces
+        :meth:`on_order_filled`."""
+
+    def on_position_event(self, ctx: StrategyContext, event) -> None:
+        """Called after a position opens (``event.kind == "entered"``) or
+        closes (``"exited"``; ``event.trade`` is the round trip). Replaces
+        :meth:`on_position_opened` and :meth:`on_position_closed`."""
+
+    def on_risk_event(self, ctx: StrategyContext, event) -> None:
+        """Called when a risk limit refuses an order or stops trading.
+
+        ``event.kind`` is ``"risk_rejected"`` (an order or entry was refused;
+        ``event.reject_reason`` is ``order_size``, ``max_position``,
+        ``max_exposure``, ``daily_loss`` or ``killed``) or ``"risk_halted"``
+        (the day's loss limit was reached, ``reject_reason`` is
+        ``"daily_loss"``; or the strategy was halted, ``reject_reason`` is
+        the halt reason). A refused order also reaches ``on_order_rejected``.
+        """
 
     def on_stop(self, ctx: StrategyContext) -> None:
         """Called once after the last bar, before finalization."""
 
+    # -- deprecated names ---------------------------------------------------
+
     def on_time_event(self, ctx: StrategyContext, event) -> None:
-        """Called for each due clock alert/timer, *before* the bar's data
+        """Deprecated: use :meth:`on_timer`.
+
+        Called for each due clock alert/timer, *before* the bar's data
         handlers — the scheduled time precedes the bar that revealed it."""
 
     def on_trade_tick(self, ctx: StrategyContext, tick) -> None:
-        """A trade printed. Only fires in tick runs.
+        """Deprecated: use :meth:`on_trade`.
+
+        A trade printed. Only fires in tick runs.
 
         ``ctx.best_bid`` / ``ctx.best_ask`` hold the last book observed
         *before* this print — the quote from the same feed row arrives in
@@ -77,7 +143,9 @@ class Strategy:
         """
 
     def on_order_book(self, ctx: StrategyContext, book) -> None:
-        """The order book changed. Only fires in tick runs with depth data.
+        """Deprecated: use :meth:`on_book`.
+
+        The order book changed. Only fires in tick runs with depth data.
 
         Like quotes, books do not fill orders — displayed size is intent,
         not a trade. An order submitted here rests and matches on the next
@@ -85,7 +153,9 @@ class Strategy:
         """
 
     def on_composite_bar(self, ctx: StrategyContext, bar) -> None:
-        """Called when a subscribed higher-timeframe bar completes.
+        """Deprecated: use ``on_bar(self, ctx, event)``.
+
+        Called when a subscribed higher-timeframe bar completes.
 
         ``bar`` is a :class:`~raptorbt.strategy.context.CompositeBar`;
         dispatched *before* ``on_bar`` of the primary bar that completed it,
@@ -95,7 +165,9 @@ class Strategy:
     # -- order/position event hooks -----------------------------------------
 
     def on_order_filled(self, ctx: StrategyContext, event) -> None:
-        """Called when an entry or exit fill occurs."""
+        """Deprecated: use :meth:`on_fill`.
+
+        Called when an entry or exit fill occurs."""
 
     def on_order_rejected(self, ctx: StrategyContext, event) -> None:
         """Called when an entry intent or order is refused."""
@@ -131,10 +203,14 @@ class Strategy:
         requirement; new entries halt for the rest of the run."""
 
     def on_position_opened(self, ctx: StrategyContext, event) -> None:
-        """Called after a position opens."""
+        """Deprecated: use :meth:`on_position_event`.
+
+        Called after a position opens."""
 
     def on_position_closed(self, ctx: StrategyContext, event) -> None:
-        """Called after a position closes; ``event.trade`` is the round trip."""
+        """Deprecated: use :meth:`on_position_event`.
+
+        Called after a position closes; ``event.trade`` is the round trip."""
 
     # -- order API -----------------------------------------------------------
 
@@ -158,16 +234,16 @@ class Strategy:
         and cannot be mis-spelled.
         """
         if side is None:
-            self._pending_orders.append(
-                MarketOrder(
-                    size_frac=size_frac,
-                    stop_price=stop_price,
-                    target_price=target_price,
-                )
-            )
+            self._queue.enter(size_frac, stop_price, target_price)
             return
         if side not in ("buy", "sell"):
-            raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+            raise InvalidOrder(
+                f"side must be 'buy' or 'sell', got {side!r}",
+                code="invalid_order_side",
+                operation="enter",
+                parameter="side",
+                value=side,
+            )
         # A sided entry rides the typed-order path, where the side survives
         # to the kernel. `size_frac` must be explicit: omitting both sizing
         # kwargs means "close the whole position", which an opening order
@@ -226,11 +302,11 @@ class Strategy:
         bar's symbol).
         """
         if position_id is None and symbol is None:
-            self._pending_orders.append(ClosePosition())
+            self._queue.close_intent()
         elif position_id is None:
-            self._pending_commands.append(("close_all_for", symbol))
+            self._queue.close_all_for(symbol)
         else:
-            self._pending_commands.append(("close", position_id, symbol))
+            self._queue.close(position_id, symbol)
 
     def submit_order(
         self,
@@ -246,20 +322,32 @@ class Strategy:
         order on every subsequent event and in :meth:`cancel_order` /
         :meth:`modify_order`. ``parent`` (another order's client id) holds
         this order until the parent fills; it dies if the parent does.
-        ``symbol`` routes the order in multi-instrument runs; single-
-        instrument runs ignore it, and the portfolio runner defaults it to
-        the symbol whose bar is being processed.
+        The order's ``instrument`` routes it in multi-instrument runs;
+        single-instrument runs ignore it, and the portfolio runner defaults
+        it to the symbol whose bar is being processed. ``symbol`` is the
+        deprecated spelling of the same thing (it does not warn).
         """
         if not isinstance(order, _OrderBase):
             raise TypeError(
                 "submit_order takes a typed order (orders.Market/Limit/StopMarket/"
                 f"StopLimit/...), got {type(order).__name__}"
             )
+        if order.instrument is not None:
+            if symbol is not None and symbol != order.instrument:
+                raise InvalidOrder(
+                    f"submit_order: symbol={symbol!r} contradicts the order's "
+                    f"instrument={order.instrument!r}",
+                    code="conflicting_order_args",
+                    operation="submit_order",
+                    parameter="symbol, instrument",
+                    value=[symbol, order.instrument],
+                )
+            symbol = order.instrument
         if client_id is None:
             tag = getattr(self.config, "order_id_tag", None) or "O"
             client_id = f"{tag}-{self._order_seq}"
         self._order_seq += 1
-        self._pending_commands.append(("submit", client_id, order, parent, symbol))
+        self._queue.submit(order, client_id, parent, symbol, isinstance(order, Twap))
         return client_id
 
     def register_indicator(
@@ -327,15 +415,54 @@ class Strategy:
         that completed a bar arrives as ``bar.symbol`` (and ``ctx.symbol``).
         """
         if step < 1:
-            raise ValueError("step must be >= 1")
+            raise InvalidSubscription(
+                "step must be >= 1",
+                code="invalid_bar_step",
+                operation="subscribe_bars",
+                parameter="step",
+                value=step,
+            )
         self._bar_subscriptions.append((step, unit, brick_size))
         return len(self._bar_subscriptions) - 1
+
+    def subscribe(
+        self,
+        instrument: str,
+        *,
+        data_type: str = "bar",
+        timeframe=None,
+        history: int | None = None,
+    ):
+        """Declare interest in an instrument's data. Call from ``on_init`` or
+        ``on_start``.
+
+        ``data_type`` is ``"bar"``, ``"trade"``, ``"quote"`` or ``"book"``.
+        ``timeframe`` (bars only) is ``None`` for the primary bars, one of
+        ``"1m" "3m" "5m" "10m" "15m" "30m" "1h" "2h" "4h" "1d" "1w"``, or a
+        :class:`~raptorbt.strategy.Timeframe` / ``(step, unit)`` tuple for tick,
+        volume, value and renko bars. ``history`` is the lookback the
+        strategy will read: it sizes the rows a live node keeps and the
+        buffer of a composite timeframe.
+
+        Once a strategy calls ``subscribe`` it receives trades, quotes and
+        books only for what it subscribed to; a strategy that never calls it
+        receives everything, as before. Returns the stream handle (the
+        ``stream_id`` of its composite bars) for a ``timeframe``, else
+        ``None``.
+        """
+        return api.subscribe(self, instrument, data_type, timeframe, history)
 
     def link_oco(self, *client_ids: str) -> None:
         """Queue a one-cancels-other link between submitted orders."""
         if len(client_ids) < 2:
-            raise ValueError("link_oco needs at least two client ids")
-        self._pending_commands.append(("link_oco", list(client_ids)))
+            raise InvalidOrder(
+                "link_oco needs at least two client ids",
+                code="invalid_order_link",
+                operation="link_oco",
+                parameter="client_ids",
+                value=list(client_ids),
+            )
+        self._queue.link_oco(list(client_ids))
 
     def submit_bracket(
         self,
@@ -361,29 +488,42 @@ class Strategy:
         exit_side = "sell" if entry.side == "buy" else "buy"
         entry_id = self.submit_order(entry)
         stop_order = (
-            StopMarket(side=exit_side, trigger=stop_trigger, reduce_only=True)
+            StopMarket(
+                side=exit_side,
+                trigger=stop_trigger,
+                reduce_only=True,
+                instrument=entry.instrument,
+            )
             if stop_limit_price is None
             else StopLimit(
                 side=exit_side,
                 trigger=stop_trigger,
                 price=stop_limit_price,
                 reduce_only=True,
+                instrument=entry.instrument,
             )
         )
         stop_id = self.submit_order(stop_order, parent=entry_id)
         target_id = self.submit_order(
-            Limit(side=exit_side, price=target_price, reduce_only=True), parent=entry_id
+            Limit(
+                side=exit_side,
+                price=target_price,
+                reduce_only=True,
+                instrument=entry.instrument,
+            ),
+            parent=entry_id,
         )
         self.link_oco(stop_id, target_id)
         return entry_id, stop_id, target_id
 
     def cancel_order(self, client_id: str) -> None:
-        """Queue cancellation of a working order by client id."""
-        self._pending_commands.append(("cancel", client_id))
+        """Queue cancellation of a working order, or of a ``Twap`` schedule's
+        unreleased slices, by client id. A finished one is left alone."""
+        self._queue.cancel(client_id)
 
     def cancel_all_orders(self) -> None:
         """Queue cancellation of every working order."""
-        self._pending_commands.append(("cancel_all",))
+        self._queue.cancel_all()
 
     def modify_order(
         self,
@@ -394,30 +534,16 @@ class Strategy:
         trigger_price: float | None = None,
     ) -> None:
         """Queue a price/quantity replacement of a working order."""
-        self._pending_commands.append(
-            (
-                "modify",
-                client_id,
-                {
-                    "units": units,
-                    "size_frac": size_frac,
-                    "limit_price": limit_price,
-                    "trigger_price": trigger_price,
-                },
-            )
-        )
+        self._queue.modify(client_id, units, size_frac, limit_price, trigger_price)
 
-    def drain_orders(self) -> list[MarketOrder | ClosePosition]:
-        """Return and clear pending intents. Called by the runner."""
-        pending = self._pending_orders
-        self._pending_orders = []
-        return pending
+    def drain_orders(self) -> list[tuple]:
+        """Return and clear pending intents, as ``("enter", size_frac, stop,
+        target)`` / ``("close",)`` tuples. Called by the runner."""
+        return self._queue.drain_intents()
 
     def drain_commands(self) -> list[tuple]:
         """Return and clear pending typed-order commands. Called by the runner."""
-        pending = self._pending_commands
-        self._pending_commands = []
-        return pending
+        return self._queue.drain_commands()
 
     # -- logging -------------------------------------------------------------
 
@@ -425,3 +551,6 @@ class Strategy:
     def log(self) -> logging.Logger:
         """Logger namespaced to the concrete strategy class."""
         return logging.getLogger(f"raptorbt.strategy.{type(self).__name__}")
+
+
+api._install_base(Strategy)

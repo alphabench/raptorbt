@@ -4,6 +4,8 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::errors::Fail;
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -51,7 +53,14 @@ type PyInstrumentArrays<'py> = (
 /// doubled long.
 fn parse_direction(direction: i32) -> PyResult<Direction> {
     Direction::from_int(direction).ok_or_else(|| {
-        PyValueError::new_err(format!("direction must be 1 (long) or -1 (short), got {direction}"))
+        PyErr::from(
+            Fail::new(
+                "invalid_direction",
+                format!("direction must be 1 (long) or -1 (short), got {direction}"),
+            )
+            .param("direction")
+            .value(direction),
+        )
     })
 }
 
@@ -102,7 +111,7 @@ pub struct PyBacktestConfig {
     ///
     /// When set, the engine charges the real regulatory schedule instead of
     /// the flat `fees` fraction, and reports the breakdown per trade.
-    #[pyo3(get, set)]
+    #[pyo3(get)]
     pub fee_segment: Option<String>,
     /// Maximum concurrent open positions. `None` is unlimited.
     #[pyo3(get, set)]
@@ -149,6 +158,31 @@ pub struct PyBacktestConfig {
     /// conflicts; false keeps the legacy stop-first assumption.
     #[pyo3(get, set)]
     pub bar_path_adaptive: bool,
+    /// Reject an order or entry larger than this many units (`order_size`).
+    #[pyo3(get, set)]
+    pub max_order_qty: Option<f64>,
+    /// Reject an order or entry worth more than this (`order_size`).
+    #[pyo3(get, set)]
+    pub max_order_notional: Option<f64>,
+    /// Per-instrument cap on the net position after a fill (`max_position`).
+    #[pyo3(get, set)]
+    pub max_position_qty: Option<f64>,
+    /// Cap on gross notional exposure across instruments (`max_exposure`).
+    #[pyo3(get, set)]
+    pub max_gross_exposure: Option<f64>,
+    /// Daily loss limit in money; entries are refused for the rest of the day.
+    #[pyo3(get, set)]
+    pub max_daily_loss: Option<f64>,
+    /// Daily loss limit as a percent of the day's starting equity.
+    #[pyo3(get, set)]
+    pub max_daily_loss_pct: Option<f64>,
+    /// Close open positions when the daily loss limit is reached.
+    #[pyo3(get, set)]
+    pub flatten_on_daily_loss: bool,
+    /// Rates resolved from `fee_schedule` and `fee_segment` (kept in step by
+    /// both setters), or `None` for the built-in presets.
+    fee_rates: Option<crate::execution::costs::FeeRates>,
+    fee_schedule: Option<super::costs_bindings::PyFeeSchedule>,
     stop_config: StopConfig,
     target_config: TargetConfig,
     /// Execution-timing policy, parsed at construction; `None` derives it
@@ -186,6 +220,14 @@ impl PyBacktestConfig {
         liquidate_on_margin_call=false,
         squareoff_time=None,
         fill_timing=None,
+        max_order_qty=None,
+        max_order_notional=None,
+        max_position_qty=None,
+        max_gross_exposure=None,
+        max_daily_loss=None,
+        max_daily_loss_pct=None,
+        flatten_on_daily_loss=false,
+        fee_schedule=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -213,9 +255,18 @@ impl PyBacktestConfig {
         liquidate_on_margin_call: bool,
         squareoff_time: Option<String>,
         fill_timing: Option<String>,
+        max_order_qty: Option<f64>,
+        max_order_notional: Option<f64>,
+        max_position_qty: Option<f64>,
+        max_gross_exposure: Option<f64>,
+        max_daily_loss: Option<f64>,
+        max_daily_loss_pct: Option<f64>,
+        flatten_on_daily_loss: bool,
+        fee_schedule: Option<super::costs_bindings::PyFeeSchedule>,
     ) -> PyResult<Self> {
         let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
         let fill_timing = parse_fill_timing(fill_timing.as_deref())?;
+        let fee_rates = Self::resolve_fee_rates(fee_schedule.as_ref(), fee_segment.as_deref())?;
         Ok(Self {
             initial_capital,
             fees,
@@ -239,11 +290,44 @@ impl PyBacktestConfig {
             fill_prob_slippage,
             fill_seed,
             bar_path_adaptive,
+            max_order_qty,
+            max_order_notional,
+            max_position_qty,
+            max_gross_exposure,
+            max_daily_loss,
+            max_daily_loss_pct,
+            flatten_on_daily_loss,
+            fee_rates,
+            fee_schedule,
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
             squareoff_time_minutes,
             fill_timing,
         })
+    }
+
+    /// The fee schedule that prices `fee_segment`, or `None` for the built-in
+    /// exchange presets.
+    #[getter]
+    fn fee_schedule(&self) -> Option<super::costs_bindings::PyFeeSchedule> {
+        self.fee_schedule.clone()
+    }
+
+    #[setter]
+    fn set_fee_schedule(
+        &mut self,
+        schedule: Option<super::costs_bindings::PyFeeSchedule>,
+    ) -> PyResult<()> {
+        self.fee_rates = Self::resolve_fee_rates(schedule.as_ref(), self.fee_segment.as_deref())?;
+        self.fee_schedule = schedule;
+        Ok(())
+    }
+
+    #[setter]
+    fn set_fee_segment(&mut self, segment: Option<String>) -> PyResult<()> {
+        self.fee_rates = Self::resolve_fee_rates(self.fee_schedule.as_ref(), segment.as_deref())?;
+        self.fee_segment = segment;
+        Ok(())
     }
 
     /// Set fixed percentage stop-loss.
@@ -302,21 +386,25 @@ fn parse_fill_timing(value: Option<&str>) -> PyResult<Option<crate::core::types:
         "same_bar_close" => Ok(Some(FillTiming::SameBarClose)),
         "next_bar_open" => Ok(Some(FillTiming::NextBarOpen)),
         "same_bar_open_lookahead" => Ok(Some(FillTiming::SameBarOpenLookahead)),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid fill_timing {raw:?}; expected \"same_bar_close\", \
-             \"next_bar_open\", or \"same_bar_open_lookahead\" (the \
-             pre-0.11 look-ahead, for reproducing old results only)"
-        ))),
+        _ => Err(Fail::new(
+            "invalid_fill_timing",
+            format!(
+                "invalid fill_timing {raw:?}; expected \"same_bar_close\", \
+                 \"next_bar_open\", or \"same_bar_open_lookahead\" (the \
+                 pre-0.11 look-ahead, for reproducing old results only)"
+            ),
+        )
+        .param("fill_timing")
+        .value(raw)
+        .into()),
     }
 }
 
 /// Parse a "HH:MM" local squareoff time into minutes from midnight.
 ///
 /// Refuses anything it cannot read rather than guessing. A silently ignored
-/// squareoff is the exact defect this argument exists to fix: the backend
-/// passed `session_aware=True` to an engine with no such setting for months,
-/// the call was swallowed by a `hasattr` guard, and every intraday backtest
-/// held positions overnight while reporting profit no user could have earned.
+/// squareoff would let an intraday backtest hold positions overnight and report
+/// profit no user could have earned.
 /// Refusing loudly is the whole point -- do not add a fallback here.
 fn parse_squareoff_time(value: Option<&str>) -> PyResult<Option<u32>> {
     let Some(raw) = value else {
@@ -325,10 +413,18 @@ fn parse_squareoff_time(value: Option<&str>) -> PyResult<Option<u32>> {
     let text = raw.trim();
 
     let invalid = || {
-        PyValueError::new_err(format!(
-            "invalid squareoff_time {raw:?}; expected 24-hour \"HH:MM\" local \
-             time, e.g. \"15:25\" for NSE. Pass None to disable squareoff."
-        ))
+        PyErr::from(
+            Fail::new(
+                "invalid_squareoff_time",
+                format!(
+                    "invalid squareoff_time {raw:?}; expected 24-hour \"HH:MM\" local \
+                     time, e.g. \"15:25\" for NSE. Pass None to disable squareoff."
+                ),
+            )
+            .param("squareoff_time")
+            .value(raw)
+            .valid(["HH:MM (24-hour, e.g. 15:25)", "None"]),
+        )
     };
 
     let (h, m) = text.split_once(':').ok_or_else(invalid)?;
@@ -342,6 +438,29 @@ fn parse_squareoff_time(value: Option<&str>) -> PyResult<Option<u32>> {
     }
 
     Ok(Some(hours * 60 + minutes))
+}
+
+impl PyBacktestConfig {
+    /// The rates a schedule gives `fee_segment`. A schedule with no
+    /// `fee_segment` has nothing to price and is refused, as is a name the
+    /// schedule has no row for: a schedule never silently charges the flat
+    /// `fees` rate or nothing.
+    fn resolve_fee_rates(
+        schedule: Option<&super::costs_bindings::PyFeeSchedule>,
+        fee_segment: Option<&str>,
+    ) -> PyResult<Option<crate::execution::costs::FeeRates>> {
+        match (schedule, fee_segment) {
+            (None, _) => Ok(None),
+            (Some(s), Some(seg)) => super::costs_bindings::resolve_rates(&s.inner, seg).map(Some),
+            (Some(_), None) => Err(Fail::new(
+                "invalid_fee_schedule",
+                "fee_schedule needs fee_segment to say which row prices the run, e.g. \"NFO-OPT\"",
+            )
+            .op("BacktestConfig")
+            .param("fee_segment")
+            .into()),
+        }
+    }
 }
 
 impl From<&PyBacktestConfig> for BacktestConfig {
@@ -360,6 +479,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             session_minutes: py_config.session_minutes,
             squareoff_time_minutes: py_config.squareoff_time_minutes,
             fee_segment: py_config.fee_segment.clone(),
+            fee_rates: py_config.fee_rates,
             max_positions: py_config.max_positions,
             max_drawdown_pct: py_config.max_drawdown_pct,
             legacy_annualization: py_config.legacy_annualization,
@@ -373,12 +493,19 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             fill_prob_slippage: py_config.fill_prob_slippage,
             fill_seed: py_config.fill_seed,
             bar_path_adaptive: py_config.bar_path_adaptive,
+            max_order_qty: py_config.max_order_qty,
+            max_order_notional: py_config.max_order_notional,
+            max_position_qty: py_config.max_position_qty,
+            max_gross_exposure: py_config.max_gross_exposure,
+            max_daily_loss: py_config.max_daily_loss,
+            max_daily_loss_pct: py_config.max_daily_loss_pct,
+            flatten_on_daily_loss: py_config.flatten_on_daily_loss,
         }
     }
 }
 
 /// Python-exposed per-instrument configuration.
-#[pyclass(name = "InstrumentConfig")]
+#[pyclass(name = "InstrumentConfig", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyInstrumentConfig {
     #[pyo3(get, set)]
@@ -890,7 +1017,7 @@ impl PyBacktestMetrics {
     }
 
     /// Convert to dictionary of all metrics.
-    fn to_dict(&self, py: Python) -> PyResult<PyObject> {
+    fn to_dict(&self, py: Python) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("Start Value", self.start_value)?;
         dict.set_item("End Value", self.end_value)?;
@@ -945,22 +1072,29 @@ pub struct PyBacktestResult {
     trades: Vec<PyTrade>,
     returns: Vec<f64>,
     orders: Vec<PyOrder>,
+    /// Whether a latching halt (drawdown limit or `ctx.halt`) stopped new
+    /// entries during the run.
+    #[pyo3(get)]
+    halted: bool,
+    /// Bars stepped when the halt latched.
+    #[pyo3(get)]
+    halted_at: Option<usize>,
 }
 
 #[pymethods]
 impl PyBacktestResult {
     /// Get equity curve as numpy array.
-    fn equity_curve<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn equity_curve<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         vec_to_numpy_f64(py, self.equity_curve.clone())
     }
 
     /// Get drawdown curve as numpy array.
-    fn drawdown_curve<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn drawdown_curve<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         vec_to_numpy_f64(py, self.drawdown_curve.clone())
     }
 
     /// Get returns as numpy array.
-    fn returns<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn returns<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         vec_to_numpy_f64(py, self.returns.clone())
     }
 
@@ -1030,6 +1164,7 @@ pub fn run_single_backtest<'py>(
     };
 
     let dir = parse_direction(direction)?;
+    crate::data::ensure_time_sorted(&format!("{symbol} bars"), ohlcv.timestamps.iter().copied())?;
 
     let signals = CompiledSignals {
         symbol: symbol.to_string(),
@@ -1073,6 +1208,10 @@ pub fn run_basket_backtest<'py>(
                 close: Cow::Borrowed(numpy_as_slice_f64(c)),
                 volume: Cow::Borrowed(numpy_as_slice_f64(v)),
             };
+            crate::data::ensure_time_sorted(
+                &format!("{sym} bars"),
+                ohlcv.timestamps.iter().copied(),
+            )?;
             let signals = CompiledSignals {
                 symbol: sym.clone(),
                 entries: entries.as_slice().expect("contiguous").to_vec(),
@@ -1200,9 +1339,13 @@ pub fn run_portfolio_backtest<'py>(
     };
 
     if instruments.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
+        return Err(Fail::new(
+            "empty_data",
             "run_portfolio_backtest requires at least one instrument",
-        ));
+        )
+        .op("run_portfolio_backtest")
+        .param("instruments")
+        .into());
     }
 
     let rust_instruments: Vec<(OhlcvData, CompiledSignals)> = instruments
@@ -1219,6 +1362,10 @@ pub fn run_portfolio_backtest<'py>(
                 close: Cow::Borrowed(numpy_as_slice_f64(c)),
                 volume: Cow::Borrowed(numpy_as_slice_f64(v)),
             };
+            crate::data::ensure_time_sorted(
+                &format!("{sym} bars"),
+                ohlcv.timestamps.iter().copied(),
+            )?;
             let signals = CompiledSignals {
                 symbol: sym.clone(),
                 entries: entries.as_slice().expect("contiguous").to_vec(),
@@ -1235,19 +1382,31 @@ pub fn run_portfolio_backtest<'py>(
     if let Some((idx, _)) =
         rust_instruments.iter().enumerate().find(|(_, (o, _))| o.len() != n_bars)
     {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "all instruments must have the same number of bars; instrument {idx} has {}, expected {n_bars}",
-            rust_instruments[idx].0.len()
-        )));
+        return Err(Fail::new(
+            "length_mismatch",
+            format!(
+                "all instruments must have the same number of bars; instrument {idx} has {}, expected {n_bars}",
+                rust_instruments[idx].0.len()
+            ),
+        )
+        .op("run_portfolio_backtest")
+        .param("instruments")
+        .value(rust_instruments[idx].0.len())
+        .into());
     }
 
     let allocation = match allocation {
         "full" => CapitalAllocation::Full,
         "equal_weight" => CapitalAllocation::EqualWeight,
         other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown allocation '{other}'; expected 'equal_weight' or 'full'"
-            )))
+            return Err(Fail::new(
+                "invalid_allocation",
+                format!("unknown allocation '{other}'; expected 'equal_weight' or 'full'"),
+            )
+            .op("run_portfolio_backtest")
+            .param("allocation")
+            .value(other)
+            .into())
         }
     };
 
@@ -1319,16 +1478,24 @@ pub fn run_options_backtest<'py>(
         volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
     };
 
+    crate::data::ensure_time_sorted(&format!("{symbol} bars"), ohlcv.timestamps.iter().copied())?;
+
     let opt_prices = numpy_to_vec_f64(option_prices);
     let opt_opens = option_open_prices.map(numpy_to_vec_f64);
     if let Some(ref opens) = opt_opens {
         if opens.len() != opt_prices.len() {
-            return Err(PyValueError::new_err(format!(
-                "option_open_prices has {} entries but option_prices has {}; \
-                 the two series must cover the same bars",
-                opens.len(),
-                opt_prices.len(),
-            )));
+            return Err(Fail::new(
+                "length_mismatch",
+                format!(
+                    "option_open_prices has {} entries but option_prices has {}; \
+                     the two series must cover the same bars",
+                    opens.len(),
+                    opt_prices.len(),
+                ),
+            )
+            .param("option_open_prices")
+            .value(opens.len())
+            .into());
         }
     }
 
@@ -1352,9 +1519,13 @@ pub fn run_options_backtest<'py>(
         "call" | "ce" | "c" => OptionType::Call,
         "put" | "pe" | "p" => OptionType::Put,
         other => {
-            return Err(PyValueError::new_err(format!(
-                "unknown option_type {other:?}; expected call/ce/c or put/pe/p"
-            )))
+            return Err(Fail::new(
+                "invalid_option_type",
+                format!("unknown option_type {other:?}; expected call/ce/c or put/pe/p"),
+            )
+            .param("option_type")
+            .value(other)
+            .into())
         }
     };
 
@@ -1365,9 +1536,15 @@ pub fn run_options_backtest<'py>(
         "itm1" => StrikeSelection::Itm(1),
         "itm2" => StrikeSelection::Itm(2),
         other => {
-            return Err(PyValueError::new_err(format!(
-                "unknown strike_selection {other:?}; expected atm, otm1, otm2, itm1 or itm2"
-            )))
+            return Err(Fail::new(
+                "invalid_strike_selection",
+                format!(
+                    "unknown strike_selection {other:?}; expected atm, otm1, otm2, itm1 or itm2"
+                ),
+            )
+            .param("strike_selection")
+            .value(other)
+            .into())
         }
     };
 
@@ -1377,9 +1554,15 @@ pub fn run_options_backtest<'py>(
         "notional" => SizeType::Notional(size_value),
         "risk" => SizeType::RiskPercent(size_value),
         other => {
-            return Err(PyValueError::new_err(format!(
-                "unknown size_type {other:?}; expected percent, contracts, notional or risk"
-            )))
+            return Err(Fail::new(
+                "invalid_size_type",
+                format!(
+                    "unknown size_type {other:?}; expected percent, contracts, notional or risk"
+                ),
+            )
+            .param("size_type")
+            .value(other)
+            .into())
         }
     };
 
@@ -1463,6 +1646,15 @@ pub fn run_pairs_backtest<'py>(
         ..Default::default()
     };
 
+    crate::data::ensure_time_sorted(
+        &format!("{symbol} leg 1 bars"),
+        leg1_ohlcv.timestamps.iter().copied(),
+    )?;
+    crate::data::ensure_time_sorted(
+        &format!("{symbol} leg 2 bars"),
+        leg2_ohlcv.timestamps.iter().copied(),
+    )?;
+
     let backtest = PairsBacktest::new(pairs_config);
     let result = backtest.run(&leg1_ohlcv, &leg2_ohlcv, &signals);
 
@@ -1491,6 +1683,10 @@ pub fn run_spread_backtest<'py>(
     legs_open_premiums: Option<Vec<PyReadonlyArray1<f64>>>,
 ) -> PyResult<PyBacktestResult> {
     let ts = numpy_to_vec_i64(timestamps);
+    crate::data::ensure_time_sorted(
+        &format!("{spread_type} spread underlying bars"),
+        ts.iter().copied(),
+    )?;
     let underlying = numpy_to_vec_f64(underlying_close);
     let premiums: Vec<Vec<f64>> = legs_premiums.into_iter().map(numpy_to_vec_f64).collect();
     let open_premiums: Option<Vec<Vec<f64>>> =
@@ -1499,10 +1695,13 @@ pub fn run_spread_backtest<'py>(
         let shape_matches = opens.len() == premiums.len()
             && opens.iter().zip(premiums.iter()).all(|(o, p)| o.len() == p.len());
         if !shape_matches {
-            return Err(PyValueError::new_err(
+            return Err(Fail::new(
+                "length_mismatch",
                 "legs_open_premiums must mirror legs_premiums exactly -- same \
                  number of legs, same number of bars per leg",
-            ));
+            )
+            .param("legs_open_premiums")
+            .into());
         }
     }
     let entry_signals = numpy_to_vec_bool(entries);
@@ -1580,7 +1779,7 @@ pub fn run_spread_backtest<'py>(
 }
 
 /// A single spread backtest item for batch execution.
-#[pyclass(name = "BatchSpreadItem")]
+#[pyclass(name = "BatchSpreadItem", from_py_object)]
 #[derive(Clone)]
 pub struct PyBatchSpreadItem {
     #[pyo3(get, set)]
@@ -1651,6 +1850,7 @@ pub fn batch_spread_backtest(
 
     // Convert shared data while holding GIL
     let ts = numpy_to_vec_i64(timestamps);
+    crate::data::ensure_time_sorted("batch spread underlying bars", ts.iter().copied())?;
     let underlying = numpy_to_vec_f64(underlying_close);
     let base_config = config.map(BacktestConfig::from).unwrap_or_default();
 
@@ -1725,7 +1925,7 @@ pub fn batch_spread_backtest(
         .collect::<PyResult<_>>()?;
 
     // Release GIL and run all backtests in parallel via Rayon
-    let results: Vec<(String, crate::core::types::BacktestResult)> = py.allow_threads(|| {
+    let results: Vec<(String, crate::core::types::BacktestResult)> = py.detach(|| {
         prepared
             .into_par_iter()
             .map(|item| {
@@ -1752,7 +1952,7 @@ pub fn batch_spread_backtest(
 /// Eagerly copies its arrays under the GIL at construction, so the item holds
 /// no GIL-bound types and the batch loop can release the GIL (same pattern as
 /// [`PyBatchSpreadItem`]).
-#[pyclass(name = "BatchSingleItem")]
+#[pyclass(name = "BatchSingleItem", from_py_object)]
 #[derive(Clone)]
 pub struct PyBatchSingleItem {
     /// Caller's label for this run; returned alongside its result.
@@ -1840,6 +2040,10 @@ pub fn batch_single_backtest(
         close: Cow::Borrowed(numpy_as_slice_f64(&close)),
         volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
     };
+    crate::data::ensure_time_sorted(
+        "batch single shared price series",
+        ohlcv.timestamps.iter().copied(),
+    )?;
     let n = ohlcv.len();
     let base_config = config.map(BacktestConfig::from).unwrap_or_default();
 
@@ -1903,7 +2107,7 @@ pub fn batch_single_backtest(
         })
         .collect::<PyResult<_>>()?;
 
-    let results: Vec<(String, crate::core::types::BacktestResult)> = py.allow_threads(|| {
+    let results: Vec<(String, crate::core::types::BacktestResult)> = py.detach(|| {
         prepared
             .into_par_iter()
             .map(|item| {
@@ -1947,6 +2151,8 @@ pub fn run_multi_backtest<'py>(
         close: Cow::Borrowed(numpy_as_slice_f64(&close)),
         volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
     };
+
+    crate::data::ensure_time_sorted("multi-strategy bars", ohlcv.timestamps.iter().copied())?;
 
     let rust_strategies: Vec<CompiledSignals> = strategies
         .into_iter()
@@ -2045,12 +2251,18 @@ pub fn run_tick_backtest<'py>(
     // entry and target above -- it is long-only. Refuse a short rather than
     // silently running long logic against a negative quantity.
     if quantity < 0 {
-        return Err(PyValueError::new_err(format!(
-            "tick backtests are long-only: quantity must be >= 0, got {quantity}"
-        )));
+        return Err(Fail::new(
+            "unsupported_short_ticks",
+            format!("tick backtests are long-only: quantity must be >= 0, got {quantity}"),
+        )
+        .op("run_tick_backtest")
+        .param("quantity")
+        .value(quantity)
+        .into());
     }
 
     let timestamps = numpy_to_vec_i64(timestamps);
+    crate::data::ensure_time_sorted(&format!("{symbol} ticks"), timestamps.iter().copied())?;
     let n_ticks = timestamps.len();
     let tick_data = crate::core::types::TickData {
         timestamps,
@@ -2136,7 +2348,7 @@ pub fn compute_tick_entry_signals<'py>(
     return_1m_min_abs: f64,
     return_direction: i8,
     cooldown_ticks: usize,
-) -> PyResult<&'py PyArray1<bool>> {
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
     let result = crate::signals::tick_signals::tick_momentum_entry(
         &numpy_to_vec_f64(spread_pct),
         &numpy_to_vec_f64(bsi_delta),
@@ -2162,7 +2374,7 @@ pub fn compute_tick_exit_signals<'py>(
     py: Python<'py>,
     timestamps_ns: PyReadonlyArray1<i64>,
     eod_exit_time_ns: i64,
-) -> PyResult<&'py PyArray1<bool>> {
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
     let result = crate::signals::tick_signals::tick_momentum_exit(
         &numpy_to_vec_i64(timestamps_ns),
         eod_exit_time_ns,
@@ -2181,7 +2393,7 @@ pub fn tick_spread_pct<'py>(
     py: Python<'py>,
     bid: PyReadonlyArray1<f64>,
     ask: PyReadonlyArray1<f64>,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::spread_pct(
@@ -2200,7 +2412,7 @@ pub fn buy_sell_imbalance_delta<'py>(
     py: Python<'py>,
     buy_qty_cumulative: PyReadonlyArray1<f64>,
     sell_qty_cumulative: PyReadonlyArray1<f64>,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::buy_sell_imbalance_delta(
@@ -2221,7 +2433,7 @@ pub fn return_window<'py>(
     timestamps_ns: PyReadonlyArray1<i64>,
     ltp: PyReadonlyArray1<f64>,
     window_seconds: f64,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::return_window(
@@ -2241,7 +2453,7 @@ pub fn realized_vol_rolling<'py>(
     timestamps_ns: PyReadonlyArray1<i64>,
     ltp: PyReadonlyArray1<f64>,
     window_seconds: f64,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::realized_vol_rolling(
@@ -2260,7 +2472,7 @@ pub fn oi_position_pct<'py>(
     oi: PyReadonlyArray1<f64>,
     oi_day_high: f64,
     oi_day_low: f64,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::oi_position_pct(
@@ -2278,7 +2490,7 @@ pub fn tick_velocity<'py>(
     py: Python<'py>,
     timestamps_ns: PyReadonlyArray1<i64>,
     window_seconds: f64,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     Ok(vec_to_numpy_f64(
         py,
         crate::indicators::tick_features::tick_velocity(
@@ -2298,7 +2510,7 @@ pub fn sma<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::trend::sma(&vec, period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2311,7 +2523,7 @@ pub fn ema<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::trend::ema(&vec, period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2324,7 +2536,7 @@ pub fn rsi<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::momentum::rsi(&vec, period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2340,7 +2552,7 @@ pub fn macd<'py>(
     fast_period: usize,
     slow_period: usize,
     signal_period: usize,
-) -> PyResult<(&'py PyArray1<f64>, &'py PyArray1<f64>, &'py PyArray1<f64>)> {
+) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::momentum::macd(&vec, fast_period, slow_period, signal_period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2361,7 +2573,7 @@ pub fn stochastic<'py>(
     close: PyReadonlyArray1<f64>,
     k_period: usize,
     d_period: usize,
-) -> PyResult<(&'py PyArray1<f64>, &'py PyArray1<f64>)> {
+) -> PyResult<(F64Array<'py>, F64Array<'py>)> {
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
@@ -2378,7 +2590,7 @@ pub fn atr<'py>(
     low: PyReadonlyArray1<f64>,
     close: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
@@ -2395,7 +2607,7 @@ pub fn bollinger_bands<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
     std_dev: f64,
-) -> PyResult<(&'py PyArray1<f64>, &'py PyArray1<f64>, &'py PyArray1<f64>)> {
+) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::volatility::bollinger_bands(&vec, period, std_dev)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2414,7 +2626,7 @@ pub fn adx<'py>(
     low: PyReadonlyArray1<f64>,
     close: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
@@ -2431,7 +2643,7 @@ pub fn vwap<'py>(
     low: PyReadonlyArray1<f64>,
     close: PyReadonlyArray1<f64>,
     volume: PyReadonlyArray1<f64>,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
@@ -2451,7 +2663,7 @@ pub fn supertrend<'py>(
     close: PyReadonlyArray1<f64>,
     period: usize,
     multiplier: f64,
-) -> PyResult<(&'py PyArray1<f64>, &'py PyArray1<i8>)> {
+) -> PyResult<(F64Array<'py>, Bound<'py, PyArray1<i8>>)> {
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
@@ -2468,7 +2680,7 @@ pub fn rolling_min<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::rolling::rolling_min(&vec, period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2481,7 +2693,7 @@ pub fn rolling_max<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<f64>,
     period: usize,
-) -> PyResult<&'py PyArray1<f64>> {
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::rolling::rolling_max(&vec, period)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
@@ -2523,7 +2735,7 @@ pub fn simulate_portfolio_mc(
     n_simulations: usize,
     horizon_days: usize,
     seed: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use crate::portfolio::monte_carlo::{simulate_portfolio_forward, MonteCarloConfig};
 
     // Convert numpy arrays to Rust vecs
@@ -2542,26 +2754,42 @@ pub fn simulate_portfolio_mc(
     // matrix where a per-asset list of series was expected.
     let n_assets = rust_returns.len();
     if n_assets == 0 {
-        return Err(PyValueError::new_err("returns must contain at least one asset series"));
+        return Err(Fail::new("empty_data", "returns must contain at least one asset series")
+            .op("simulate_portfolio_mc")
+            .param("returns")
+            .into());
     }
     if rust_weights.len() != n_assets {
-        return Err(PyValueError::new_err(format!(
-            "weights has {} entries but returns has {n_assets} asset series; \
-             returns is a list of per-asset series, not an (n_obs, n_assets) matrix",
-            rust_weights.len()
-        )));
+        return Err(Fail::new(
+            "length_mismatch",
+            format!(
+                "weights has {} entries but returns has {n_assets} asset series; \
+                 returns is a list of per-asset series, not an (n_obs, n_assets) matrix",
+                rust_weights.len()
+            ),
+        )
+        .op("simulate_portfolio_mc")
+        .param("weights")
+        .value(rust_weights.len())
+        .into());
     }
     if rust_corr.len() != n_assets || rust_corr.iter().any(|row| row.len() != n_assets) {
-        return Err(PyValueError::new_err(format!(
-            "correlation_matrix must be {n_assets}x{n_assets} to match the {n_assets} asset series"
-        )));
+        return Err(Fail::new(
+            "length_mismatch",
+            format!(
+                "correlation_matrix must be {n_assets}x{n_assets} to match the {n_assets} asset series"
+            ),
+        )
+        .op("simulate_portfolio_mc")
+        .param("correlation_matrix")
+        .into());
     }
 
     let config = MonteCarloConfig { n_simulations, horizon_days, seed };
 
     // Run simulation (releases GIL for Rayon parallelism)
     let result = py
-        .allow_threads(|| {
+        .detach(|| {
             simulate_portfolio_forward(
                 &rust_returns,
                 &rust_weights,
@@ -2578,9 +2806,8 @@ pub fn simulate_portfolio_mc(
     // percentile_paths: list of (percentile, list[float])
     let paths_list = pyo3::types::PyList::empty(py);
     for (pct, path) in &result.percentile_paths {
-        let path_list = pyo3::types::PyList::new(py, path);
-        let tuple = pyo3::types::PyTuple::new(py, &[pct.to_object(py), path_list.to_object(py)]);
-        paths_list.append(tuple)?;
+        let path_list = pyo3::types::PyList::new(py, path)?;
+        paths_list.append((*pct, path_list))?;
     }
     dict.set_item("percentile_paths", paths_list)?;
 
@@ -2710,5 +2937,7 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         trades,
         orders,
         returns: result.returns,
+        halted: result.halted,
+        halted_at: result.halted_at,
     }
 }

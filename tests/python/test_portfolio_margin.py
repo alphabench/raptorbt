@@ -9,7 +9,7 @@ direction-aware, and a margin call halts every instrument at once.
 import numpy as np
 import pytest
 
-from raptorbt import BacktestConfig, Strategy, run_portfolio_strategy
+from raptorbt import BacktestConfig, Strategy
 
 
 def _bars(closes, start_ts=0, step=1):
@@ -48,17 +48,17 @@ class _EnterOnce(Strategy):
 
 
 class TestPortfolioMargin:
-    def test_margin_scales_sizing(self):
+    def test_margin_scales_sizing(self, portfolio_runner):
         data = {
             "AAA": _bars([100.0, 101.0, 102.0]),
             "BBB": _bars([50.0, 51.0, 52.0], start_ts=5_000_000_000),
         }
 
         cash_strategy = _EnterOnce()
-        run_portfolio_strategy(cash_strategy, data, config=_zero_fee_config())
+        portfolio_runner(cash_strategy, data, config=_zero_fee_config())
 
         margin_strategy = _EnterOnce()
-        run_portfolio_strategy(
+        portfolio_runner(
             margin_strategy,
             data,
             config=_zero_fee_config(),
@@ -72,7 +72,7 @@ class TestPortfolioMargin:
             5.0 * cash_strategy.sizes["AAA"], rel=1e-9
         )
 
-    def test_shared_account_funds_both_symbols(self):
+    def test_shared_account_funds_both_symbols(self, portfolio_runner):
         """Locks reserve capital without debiting it, so the balance stays
         whole and the second symbol still sizes off portfolio free capital."""
 
@@ -92,7 +92,7 @@ class TestPortfolioMargin:
             "BBB": _bars([50.0, 51.0, 52.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             strategy,
             data,
             config=_zero_fee_config(),
@@ -106,7 +106,7 @@ class TestPortfolioMargin:
         assert summary["AAA"].trades == 1
         assert summary["BBB"].trades == 1
 
-    def test_margin_marks_short_correctly(self):
+    def test_margin_marks_short_correctly(self, portfolio_runner):
         """A winning short must raise portfolio equity.
 
         Cash-mode marking adds the short's *position value*, which falls as
@@ -123,7 +123,7 @@ class TestPortfolioMargin:
             "AAA": _bars([100.0, 100.0, 100.0]),
             "BBB": _bars([50.0, 45.0, 40.0], start_ts=5_000_000_000),
         }
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             S(),
             data,
             config=_zero_fee_config(),
@@ -137,7 +137,7 @@ class TestPortfolioMargin:
         curve = result.result.equity_curve()
         assert curve[-1] > curve[0], "portfolio equity must reflect the gain"
 
-    def test_margin_call_halts_all_symbols(self):
+    def test_margin_call_halts_all_symbols(self, portfolio_runner):
         """One shared account: a call on one symbol blocks entries on the
         symbol that never traded."""
 
@@ -166,7 +166,7 @@ class TestPortfolioMargin:
             "BBB": _bars([50.0, 50.0, 50.0, 50.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             strategy,
             data,
             config=_zero_fee_config(),
@@ -183,7 +183,7 @@ class TestPortfolioMargin:
             for symbol, reason in strategy.rejects
         )
 
-    def test_reports_rejected_entries(self):
+    def test_reports_rejected_entries(self, portfolio_runner):
         """Regression: the portfolio total was hardcoded to 0."""
 
         class S(Strategy):
@@ -197,7 +197,7 @@ class TestPortfolioMargin:
             "AAA": _bars([100.0, 40.0, 30.0, 30.0]),
             "BBB": _bars([50.0, 50.0, 50.0, 50.0], start_ts=5_000_000_000),
         }
-        result = run_portfolio_strategy(
+        result = portfolio_runner(
             S(),
             data,
             config=_zero_fee_config(),
@@ -210,7 +210,7 @@ class TestPortfolioMargin:
             s.rejected_entries for s in result.per_instrument
         )
 
-    def test_cash_portfolio_unchanged(self):
+    def test_cash_portfolio_unchanged(self, portfolio_runner):
         """Default (cash) runs must be bit-identical to the single-pool
         implementation the shared account replaced."""
 
@@ -223,10 +223,10 @@ class TestPortfolioMargin:
             "AAA": _bars([100.0, 101.0, 102.0, 103.0]),
             "BBB": _bars([50.0, 50.5, 51.0, 51.5], start_ts=5_000_000_000),
         }
-        explicit = run_portfolio_strategy(
+        explicit = portfolio_runner(
             S(), data, config=_zero_fee_config(), account_type="cash"
         )
-        default = run_portfolio_strategy(S(), data, config=_zero_fee_config())
+        default = portfolio_runner(S(), data, config=_zero_fee_config())
 
         assert np.array_equal(
             np.asarray(default.result.equity_curve()),
@@ -238,14 +238,14 @@ class TestPortfolioMargin:
         assert default.halted is False
         assert default.halted_at is None
 
-    def test_rejects_invalid_account_type(self):
+    def test_rejects_invalid_account_type(self, portfolio_runner):
         data = {"AAA": _bars([100.0, 101.0])}
         with pytest.raises(ValueError, match="account_type must be"):
-            run_portfolio_strategy(
+            portfolio_runner(
                 _EnterOnce(), data, config=_zero_fee_config(), account_type="futures"
             )
         with pytest.raises(ValueError, match="leverage must be > 0"):
-            run_portfolio_strategy(
+            portfolio_runner(
                 _EnterOnce(),
                 data,
                 config=_zero_fee_config(),

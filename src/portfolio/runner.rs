@@ -17,6 +17,79 @@ use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::{compute_backtest_metrics_with_config, PortfolioEngine};
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 
+/// What became of every order one kernel handled.
+///
+/// A map because one order is mutated across several events (accepted, then
+/// triggered, then filled in slices); the kernel's book supplies submission
+/// order when the records are read out.
+#[derive(Debug, Default)]
+pub(crate) struct OrderLog {
+    events: HashMap<u64, OrderRecord>,
+}
+
+impl OrderLog {
+    /// Fold a fill or rejection event onto the order's record.
+    ///
+    /// Fills and rejections carry what the book cannot: the price and size of
+    /// each slice, and the reason an order was refused. Everything else about
+    /// the order is read from the book in [`OrderLog::records`]. Other events
+    /// are ignored.
+    ///
+    /// The record is seeded from the book here rather than at submission, so
+    /// an order is only materialised once something happened to it; the
+    /// remaining orders are picked up wholesale by `records`.
+    pub(crate) fn observe(&mut self, kernel: &EngineKernel, event: &EngineEvent) {
+        let (order_id, fill, reason) = match event {
+            EngineEvent::OrderFilled { idx, order_id, price, size, .. } => {
+                (*order_id, Some((*idx, *price, *size)), None)
+            }
+            EngineEvent::OrderRejected { order_id, reason, .. } => (*order_id, None, Some(reason)),
+            _ => return,
+        };
+        let Some(order) = kernel.order_book().iter().find(|o| o.id == order_id) else { return };
+        let mut seed = OrderRecord::from_order(order, kernel.symbol());
+        if fill.is_some() {
+            // Zero the seed ONCE, as it is created: `record_fill` folds each
+            // slice in, and the book's own `filled_qty` already holds the
+            // total. Resetting on every slice instead would keep only the
+            // last fill, which is exactly the partial-fill case this record
+            // exists to describe.
+            seed.filled_qty = 0.0;
+            seed.avg_fill_price = None;
+        }
+        let record = self.events.entry(order_id).or_insert(seed);
+        if let Some((idx, price, size)) = fill {
+            record.record_fill(idx, price, size);
+        }
+        if let Some(reason) = reason {
+            record.reject_reason = Some(reason.to_string());
+        }
+    }
+
+    /// Every order the kernel handled, in submission order.
+    ///
+    /// Reconciled against the book, not assembled from events alone: an order
+    /// that rested and expired emits no fill and no rejection, and omitting
+    /// it would report "nothing happened" for exactly the case a user is
+    /// asking about. Fill and reject detail is layered on where it exists.
+    pub(crate) fn records(&self, kernel: &EngineKernel) -> Vec<OrderRecord> {
+        kernel
+            .order_book()
+            .iter()
+            .map(|order| match self.events.get(&order.id) {
+                Some(seen) => {
+                    let mut record = seen.clone();
+                    // The book holds the final status; the event map holds
+                    // what happened along the way.
+                    record.status = order.status.as_str();
+                    record
+                }
+                None => OrderRecord::from_order(order, kernel.symbol()),
+            })
+            .collect()
+    }
+}
+
 /// Drives one instrument bar-by-bar and accumulates result curves.
 ///
 /// Call [`SingleRunner::step`] once per bar in ascending index order, then
@@ -31,13 +104,16 @@ pub struct SingleRunner {
     returns: Vec<f64>,
     timestamps: Vec<i64>,
     trades: Vec<Trade>,
-    /// What became of every order, keyed by id. A map because one order is
-    /// mutated across several events (accepted, then triggered, then filled
-    /// in slices); the book supplies submission order at `finish`.
-    order_events: HashMap<u64, OrderRecord>,
+    order_log: OrderLog,
     streaming: StreamingMetrics,
     peak_equity: f64,
     last_bar: Option<(usize, KernelBar)>,
+    /// A halt asked for between steps: its cleanup runs at the top of the
+    /// next one. The reason, and whether to flatten.
+    pending_halt: Option<(String, bool)>,
+    /// Bars stepped when the strategy was halted or the drawdown limit
+    /// tripped.
+    halted_at: Option<usize>,
 }
 
 impl SingleRunner {
@@ -73,10 +149,12 @@ impl SingleRunner {
             returns: Vec::new(),
             timestamps: Vec::new(),
             trades: Vec::new(),
-            order_events: HashMap::new(),
+            order_log: OrderLog::default(),
             streaming: StreamingMetrics::new(),
             peak_equity: initial_capital,
             last_bar: None,
+            pending_halt: None,
+            halted_at: None,
         }
     }
 
@@ -126,29 +204,22 @@ impl SingleRunner {
     /// The returned events are the same ones the kernel produced; completed
     /// trades have already been recorded internally.
     pub fn step(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Vec<EngineEvent> {
-        let events = self.kernel.step(idx, bar, input);
+        let mut events = self.apply_pending_halt(idx);
+        events.extend(self.kernel.step(idx, bar, input));
+        self.record(&events);
 
-        for event in &events {
-            match event {
-                EngineEvent::Exited { trade, .. } => {
-                    self.streaming.update(trade.return_pct / 100.0);
-                    self.trades.push((**trade).clone());
-                }
-                // Fills and rejections carry what the book cannot: the price
-                // and size of each slice, and the reason an order was
-                // refused. Everything else about the order is read from the
-                // book at `finish`.
-                EngineEvent::OrderFilled { idx, order_id, price, size, .. } => {
-                    self.order_fill(*order_id, *idx, *price, *size);
-                }
-                EngineEvent::OrderRejected { order_id, reason, .. } => {
-                    self.order_reject(*order_id, reason);
-                }
-                _ => {}
+        let mut equity = self.kernel.equity(bar.close);
+        // The day's loss limit, judged on the bar's mark: reaching it refuses
+        // new entries for the rest of the day, and may close what is open.
+        if self.kernel.observe_day(bar.timestamp, equity) {
+            events.push(EngineEvent::RiskHalted { idx, reason: "daily_loss".to_string() });
+            if self.kernel.flatten_on_daily_loss() {
+                let closed = self.kernel.halt_cleanup(idx, Some(bar), false, true);
+                self.record(&closed);
+                events.extend(closed);
+                equity = self.kernel.equity(bar.close);
             }
         }
-
-        let equity = self.kernel.equity(bar.close);
         let prev_equity = self.equity_curve.last().copied();
         self.equity_curve.push(equity);
 
@@ -159,7 +230,11 @@ impl SingleRunner {
 
         // Feed the kill-switch after this bar is marked to market, so the
         // halt takes effect from the next bar's entry check onward.
+        let was_halted = self.kernel.risk_halted();
         self.kernel.observe_equity(equity, self.peak_equity);
+        if !was_halted && self.kernel.risk_halted() {
+            self.halted_at = Some(self.equity_curve.len() - 1);
+        }
 
         let ret = match prev_equity {
             Some(prev) if prev != 0.0 => (equity - prev) / prev,
@@ -172,69 +247,58 @@ impl SingleRunner {
         events
     }
 
-    /// Force-close any open position and compute final metrics.
-    /// Fold one fill slice onto the order's record.
-    ///
-    /// The record is seeded from the book here rather than at submission, so
-    /// an order is only materialised once something happened to it; the
-    /// remaining orders are picked up wholesale at `finish`.
-    fn order_fill(&mut self, order_id: u64, idx: usize, price: f64, size: f64) {
-        let seed = self
-            .kernel
-            .order_book()
-            .iter()
-            .find(|o| o.id == order_id)
-            .map(|o| OrderRecord::from_order(o, self.kernel.symbol()));
-        if let Some(mut seed) = seed {
-            // Zero the seed ONCE, as it is created: `record_fill` folds each
-            // slice in, and the book's own `filled_qty` already holds the
-            // total. Resetting on every slice instead would keep only the
-            // last fill, which is exactly the partial-fill case this record
-            // exists to describe.
-            seed.filled_qty = 0.0;
-            seed.avg_fill_price = None;
-            let record = self.order_events.entry(order_id).or_insert(seed);
-            record.record_fill(idx, price, size);
+    /// Halt this strategy: new entries are refused as `killed` from now on.
+    /// Working orders are cancelled, and open positions closed when
+    /// `flatten`, at the start of the next step (at the last bar's close).
+    /// Only the first halt's reason is kept; a later `flatten` still counts.
+    pub fn halt(&mut self, reason: &str, flatten: bool) {
+        self.kernel.kill();
+        if self.halted_at.is_none() {
+            self.halted_at = Some(self.equity_curve.len());
+        }
+        match &mut self.pending_halt {
+            Some((_, f)) => *f |= flatten,
+            None => self.pending_halt = Some((reason.to_string(), flatten)),
         }
     }
 
-    /// Record why an order was refused. The reason lives only in the event.
-    fn order_reject(&mut self, order_id: u64, reason: &str) {
-        let seed = self
-            .kernel
-            .order_book()
-            .iter()
-            .find(|o| o.id == order_id)
-            .map(|o| OrderRecord::from_order(o, self.kernel.symbol()));
-        if let Some(seed) = seed {
-            let record = self.order_events.entry(order_id).or_insert(seed);
-            record.reject_reason = Some(reason.to_string());
-        }
+    fn apply_pending_halt(&mut self, idx: usize) -> Vec<EngineEvent> {
+        let Some((reason, flatten)) = self.pending_halt.take() else {
+            return Vec::new();
+        };
+        let bar = self.last_bar.map(|(_, bar)| bar);
+        let mut events = self.kernel.halt_cleanup(idx, bar.as_ref(), true, flatten);
+        self.record(&events);
+        events.push(EngineEvent::RiskHalted { idx, reason });
+        events
     }
 
-    /// Every order the run placed, in submission order.
-    ///
-    /// Reconciled against the book, not assembled from events alone: an order
-    /// that rested and expired emits no fill and no rejection, and omitting
-    /// it would report "nothing happened" for exactly the case a user is
-    /// asking about. Fill and reject detail is layered on where it exists.
-    fn order_log(&self) -> Vec<OrderRecord> {
-        self.kernel
-            .order_book()
-            .iter()
-            .map(|order| match self.order_events.get(&order.id) {
-                Some(seen) => {
-                    let mut record = seen.clone();
-                    // The book holds the final status; the event map holds
-                    // what happened along the way.
-                    record.status = order.status.as_str();
-                    record
+    /// Whether a halt (explicit, or the drawdown limit) has latched.
+    pub fn is_halted(&self) -> bool {
+        self.kernel.risk_halted()
+    }
+
+    /// Fold completed trades and order outcomes into the run's records.
+    fn record(&mut self, events: &[EngineEvent]) {
+        for event in events {
+            match event {
+                EngineEvent::Exited { trade, .. } => {
+                    self.streaming.update(trade.return_pct / 100.0);
+                    self.trades.push((**trade).clone());
                 }
-                None => OrderRecord::from_order(order, self.kernel.symbol()),
-            })
-            .collect()
+                // Fills and rejections carry what the book cannot: the price
+                // and size of each slice, and the reason an order was
+                // refused. Everything else about the order is read from the
+                // book at `finish`.
+                EngineEvent::OrderFilled { .. } | EngineEvent::OrderRejected { .. } => {
+                    self.order_log.observe(&self.kernel, event);
+                }
+                _ => {}
+            }
+        }
     }
 
+    /// Force-close any open position and compute final metrics.
     pub fn finish(mut self) -> BacktestResult {
         if self.kernel.is_in_position() {
             if let Some((idx, bar)) = self.last_bar {
@@ -246,7 +310,9 @@ impl SingleRunner {
         }
 
         // Built before the result takes ownership of the parts.
-        let order_log = self.order_log();
+        let halted = self.kernel.risk_halted();
+        let halted_at = self.halted_at.filter(|_| halted);
+        let order_log = self.order_log.records(&self.kernel);
 
         let metrics = compute_backtest_metrics_with_config(
             &self.equity_curve,
@@ -265,6 +331,7 @@ impl SingleRunner {
             self.returns,
         )
         .with_orders(order_log)
+        .with_halt(halted, halted_at)
     }
 
     /// Mark-to-market equity after the most recent step, or initial capital

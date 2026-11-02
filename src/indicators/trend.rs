@@ -5,6 +5,10 @@ use crate::core::Result;
 
 /// Simple Moving Average.
 ///
+/// NaN policy: a window containing a NaN (or infinity) yields NaN, and the
+/// average recovers once that value leaves the window. The running sum covers
+/// finite values only, so each step stays O(1).
+///
 /// # Arguments
 /// * `data` - Price data
 /// * `period` - Lookback period
@@ -26,14 +30,31 @@ pub fn sma(data: &[f64], period: usize) -> Result<Vec<f64>> {
         return Ok(result);
     }
 
-    // Calculate first SMA
-    let mut sum: f64 = data[..period].iter().sum();
-    result[period - 1] = sum / period as f64;
+    // Running sum over finite values; `bad` counts non-finite values in the window.
+    let mut sum = 0.0;
+    let mut bad = 0usize;
+    for &x in &data[..period] {
+        if x.is_finite() {
+            sum += x;
+        } else {
+            bad += 1;
+        }
+    }
+    result[period - 1] = if bad > 0 { f64::NAN } else { sum / period as f64 };
 
-    // Sliding window for remaining values
     for i in period..n {
-        sum = sum - data[i - period] + data[i];
-        result[i] = sum / period as f64;
+        let (old, new) = (data[i - period], data[i]);
+        if old.is_finite() {
+            sum -= old;
+        } else {
+            bad -= 1;
+        }
+        if new.is_finite() {
+            sum += new;
+        } else {
+            bad += 1;
+        }
+        result[i] = if bad > 0 { f64::NAN } else { sum / period as f64 };
     }
 
     Ok(result)

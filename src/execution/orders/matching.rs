@@ -8,6 +8,7 @@
 //! itself, on the submission bar (same-bar timing) or the bar after
 //! (next-bar-open), mirroring the signal-entry path.
 
+use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::{Direction, OhlcvBar, Price, Timestamp};
 use crate::execution::fill::FillModel;
 use crate::execution::orders::order::{Order, OrderKind, OrderStatus, TimeInForce};
@@ -63,6 +64,9 @@ pub struct OrderEngine {
     /// Entry latency on the tick path: an order is invisible to prints
     /// before `submitted_ts + latency`. `0` (default) = same print.
     order_latency_ns: i64,
+    /// The instrument's trading calendar, when it has one: resting orders
+    /// are not matched outside it and DAY orders lapse at its close.
+    session: Option<SessionSchedule>,
 }
 
 impl OrderEngine {
@@ -82,6 +86,11 @@ impl OrderEngine {
     /// An engine whose DAY orders expire on a trading date offset from UTC.
     pub fn with_tz_offset(tz_offset_ns: i64) -> Self {
         Self { tz_offset_ns, ..Self::default() }
+    }
+
+    /// Attach (or clear) the instrument's trading calendar.
+    pub fn set_session(&mut self, session: Option<SessionSchedule>) {
+        self.session = session;
     }
 
     /// Set the tick-path order-entry latency (see `order_latency_ns`).
@@ -137,6 +146,11 @@ impl OrderEngine {
     /// Every order ever submitted, in submission order.
     pub fn all(&self) -> &[Order] {
         &self.orders
+    }
+
+    /// Every order, mutably, in submission order.
+    pub fn all_mut(&mut self) -> &mut [Order] {
+        &mut self.orders
     }
 
     /// Cancel a working order. Returns `false` for unknown or finished ids.
@@ -284,6 +298,15 @@ impl OrderEngine {
         let mut actions = Vec::new();
         let tz = self.tz_offset_ns;
         let latency = self.order_latency_ns;
+        // The instant the data covers, for session tests. A bar is stamped at
+        // its close, so its last instant is one nanosecond earlier: the bar
+        // closing exactly at the session close is still inside the session.
+        let session_ts = match mode {
+            MatchMode::Bar => bar.timestamp.saturating_sub(1),
+            MatchMode::Trade => bar.timestamp,
+        };
+        let session = self.session.as_ref();
+        let in_session = session.is_none_or(|s| s.is_open(session_ts));
 
         // Parent states for one-triggers-other gating, resolved up front so
         // the mutable iteration below stays borrow-clean. Held children of a
@@ -318,9 +341,17 @@ impl OrderEngine {
                 }
             }
 
-            if expired(order, bar.timestamp, tz) {
+            let lapsed = session_day_expiry(order, session_ts, session)
+                .unwrap_or_else(|| expired(order, bar.timestamp, tz));
+            if lapsed {
                 let _ = order.transition(OrderStatus::Expired);
                 expiries.push(MatchOutcome::Expire { order_id: order.id });
+                continue;
+            }
+
+            // Outside the session nothing trades: the order stays as it is,
+            // un-matched and un-triggered (an IOC does not burn its bar).
+            if !in_session {
                 continue;
             }
 
@@ -465,6 +496,23 @@ impl OrderEngine {
         expiries.extend(actions);
         expiries
     }
+}
+
+/// Whether a DAY order has lapsed at the close of its session, or `None`
+/// when the order is not a DAY order or the instrument has no calendar (the
+/// caller then falls back to the local-date rule in [`expired`]).
+///
+/// `session_ts` is the instant the data covers (see `match_events`).
+fn session_day_expiry(
+    order: &Order,
+    session_ts: Timestamp,
+    session: Option<&SessionSchedule>,
+) -> Option<bool> {
+    if order.tif != TimeInForce::Day {
+        return None;
+    }
+    let close = session?.day_order_expiry_ns(order.submitted_ts)?;
+    Some(session_ts >= close)
 }
 
 /// Whether an order's time-in-force has lapsed at the bar timestamp.

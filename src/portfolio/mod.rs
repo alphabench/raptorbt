@@ -1,12 +1,14 @@
 //! Portfolio simulation engine for RaptorBT.
 
 pub mod allocation;
+pub mod book;
 pub mod covariance;
 pub mod engine;
 pub mod errors;
 pub mod factor_panel;
 pub mod kernel;
 mod kernel_orders;
+mod kernel_session;
 pub mod ledger;
 pub mod monte_carlo;
 pub mod optimize;
@@ -19,6 +21,7 @@ pub mod runner;
 pub mod session;
 
 pub use allocation::{AllocationStrategy, CapitalAllocator};
+pub use book::PortfolioBook;
 pub use covariance::{chol_strict, ledoit_wolf, RiskModel};
 pub use engine::PortfolioEngine;
 pub use errors::PortfolioMathError;

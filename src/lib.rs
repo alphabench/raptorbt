@@ -1,6 +1,3 @@
-// Suppress warning from PyO3 macro expansion (fixed in newer PyO3 versions)
-#![allow(non_local_definitions)]
-
 //! RaptorBT - High-performance Rust backtesting engine.
 //!
 //! This crate provides a complete backtesting solution with:
@@ -18,16 +15,19 @@ pub mod data;
 pub mod execution;
 pub mod indicators;
 pub mod instruments;
+pub mod math;
 pub mod metrics;
 pub mod portfolio;
+pub mod pricing;
 pub mod python;
+pub mod research;
+pub mod runtime;
 pub mod signals;
-pub mod stops;
 pub mod strategies;
 
 /// Python module entry point
 #[pymodule]
-fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Session lengths in minutes, for BacktestConfig(session_minutes=...).
     // Intraday annualization scales with session length, so using the NSE
     // default on MCX data understates Sharpe by ~1.5x.
@@ -51,6 +51,7 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<python::bindings::PyTrade>()?;
     m.add_class::<python::bindings::PyOrder>()?;
     m.add_class::<python::bindings::PyPortfolioResult>()?;
+    m.add_class::<python::account_bindings::PyAccountResult>()?;
     m.add_class::<python::bindings::PyInstrumentSummary>()?;
 
     // Register backtest functions
@@ -65,6 +66,11 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
 
     // Register instrument market definitions
     m.add_class::<python::instrument_bindings::PyInstrumentSpec>()?;
+    m.add_class::<python::schedule_bindings::PySessionSchedule>()?;
+    m.add_class::<python::costs_bindings::PyRateCard>()?;
+    m.add_class::<python::costs_bindings::PyFeeSchedule>()?;
+    m.add_class::<python::margin_bindings::PyMarginModel>()?;
+    m.add_function(wrap_pyfunction!(python::margin_bindings::defined_risk_py, m)?)?;
 
     // Register streaming indicators
     m.add_class::<python::indicator_bindings::PyIndicator>()?;
@@ -77,6 +83,12 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     // Register the per-bar strategy session (class-based strategy contract)
     m.add_class::<python::strategy_bindings::PyKernelSession>()?;
     m.add_class::<python::session_bindings::PyPortfolioSession>()?;
+    m.add_class::<python::runtime_bindings::PyMarketData>()?;
+    m.add_class::<python::runtime_bindings::PyRuntime>()?;
+    m.add_class::<python::runtime_bindings::PyRuntimeContext>()?;
+    m.add_class::<python::runtime_bindings::PyStrategyView>()?;
+    m.add_class::<python::runtime_bindings::PyCommandQueue>()?;
+    m.add_class::<python::runtime_bindings::PyKernelDriver>()?;
     m.add_class::<python::strategy_bindings::PyEngineEvent>()?;
     m.add_class::<python::strategy_bindings::PyPositionSnapshot>()?;
     m.add_function(wrap_pyfunction!(python::strategy_bindings::resolve_atr_period, m)?)?;
@@ -86,6 +98,11 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::batch_spread_backtest, m)?)?;
     m.add_class::<python::bindings::PyBatchSingleItem>()?;
     m.add_function(wrap_pyfunction!(python::bindings::batch_single_backtest, m)?)?;
+
+    // Register the research numerics and the full report
+    python::research_bindings::register(m)?;
+    python::report_bindings::register(m)?;
+    python::resample_bindings::register(m)?;
 
     // Register Monte Carlo simulation
     m.add_function(wrap_pyfunction!(python::bindings::simulate_portfolio_mc, m)?)?;
@@ -137,6 +154,9 @@ fn _raptorbt(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::supertrend, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::rolling_min, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::rolling_max, m)?)?;
+
+    // Register option pricing, Greeks, implied volatility and the option chain
+    python::pricing_bindings::register(m)?;
 
     Ok(())
 }

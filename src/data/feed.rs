@@ -10,7 +10,30 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::core::error::RaptorError;
+use crate::core::Result;
 use crate::data::events::MarketEvent;
+
+/// Refuse a series whose timestamps ever decrease.
+///
+/// Equal neighbours are allowed. `label` names the series in the error, which
+/// also carries the index of the first offending element and the pair of
+/// timestamps. One pass, no allocation.
+pub fn ensure_time_sorted(label: &str, timestamps: impl IntoIterator<Item = i64>) -> Result<()> {
+    let mut prev: Option<i64> = None;
+    for (index, ts) in timestamps.into_iter().enumerate() {
+        if let Some(p) = prev {
+            if ts < p {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "{label}: timestamps must not decrease, but index {index} is {ts} \
+                     after {p}"
+                )));
+            }
+        }
+        prev = Some(ts);
+    }
+    Ok(())
+}
 
 /// Heap entry; reversed ordering turns `BinaryHeap` into a min-heap.
 struct Entry {
@@ -58,8 +81,10 @@ impl EventFeed {
 
     /// Register one time-sorted stream; returns its slot index.
     ///
-    /// Debug builds assert monotone timestamps; release builds trust the
-    /// caller (streams come from sorted arrays).
+    /// The merge assumes each stream is sorted. Debug builds assert it; release
+    /// builds trust the caller, so validate untrusted input first with
+    /// [`ensure_time_sorted`] (the event session does this when data is
+    /// attached).
     pub fn add_stream(&mut self, events: Vec<MarketEvent>) -> usize {
         debug_assert!(
             events.windows(2).all(|w| w[0].timestamp() <= w[1].timestamp()),

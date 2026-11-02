@@ -5,6 +5,9 @@
 
 use rayon::prelude::*;
 
+/// Simulations per RNG stream. Fixed so results do not depend on thread count.
+const MC_CHUNK_SIZE: usize = 64;
+
 /// Configuration for Monte Carlo simulation.
 #[derive(Debug, Clone)]
 pub struct MonteCarloConfig {
@@ -195,8 +198,10 @@ pub fn simulate_portfolio_forward(
 
     // Prepare a base RNG and create per-chunk seeds via jumping
     let mut base_rng = Xoshiro256::new(config.seed);
-    let n_chunks = rayon::current_num_threads().max(1);
-    let chunk_size = config.n_simulations.div_ceil(n_chunks);
+    // The chunk size is a constant, never derived from the machine, so every
+    // simulation draws from the same RNG stream for any Rayon thread count.
+    let chunk_size = MC_CHUNK_SIZE;
+    let n_chunks = config.n_simulations.div_ceil(chunk_size).max(1);
 
     let chunk_rngs: Vec<Xoshiro256> = (0..n_chunks)
         .map(|_| {

@@ -269,7 +269,7 @@ class TestRebalanceSim:
 
 class TestCostScheduleExport:
     def test_equity_delivery_schedule_fields(self):
-        """Pins the Zerodha-published rates (zerodha.com/charges, 2026-08-20).
+        """Pins the published exchange and regulator rates (checked 2026-08-20).
 
         Delivery brokerage is ZERO -- the pre-0.9.0 flat Rs 20 charged money
         no broker collects. The old `brokerage_per_order` key must stay gone
@@ -511,10 +511,9 @@ class TestStubDeclaresNothingFictional:
     was unguarded until 0.7.2.
 
     ``BacktestConfig.set_session_config`` was declared in ``_raptorbt.pyi``
-    and never existed in the engine. The backend called it behind
-    ``hasattr(raptor_config, "set_session_config")``, the guard was always
-    False, and the else-branch logged at DEBUG -- so every intraday backtest
-    silently ran with no squareoff, holding option positions overnight and
+    and never existed in the engine. A caller guarded the call with
+    ``hasattr(raptor_config, "set_session_config")``; the guard was always
+    False, so every intraday backtest silently ran with no squareoff, holding option positions overnight and
     reporting profit no user could have earned. A type checker reading the
     stub agreed with the call the whole time.
 

@@ -341,8 +341,8 @@ class TestARefusedPrintStillTellsTheTime:
         stream.push_tick("AAA", 1, 100.0)
         stream.push_tick("AAA", 5, 0.0, 0.0, 0.0)
         assert not stream.positions("AAA"), "nothing to fill against yet"
-        working = stream._session.working_orders(0)
-        assert len(working) == 1 and working[0][3] == "market", (
+        working = stream.ctx.open_orders("AAA")
+        assert len(working) == 1 and working[0].kind == "market", (
             "the order is already resting, placed when the alert was due"
         )
         stream.push_tick("AAA", 9, 104.0)

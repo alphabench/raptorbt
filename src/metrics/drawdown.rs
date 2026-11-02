@@ -72,8 +72,10 @@ impl DrawdownTracker {
             self.drawdown_start_value = value;
             self.drawdown_start_idx = self.count - 1;
         } else {
-            // In drawdown
-            self.current_drawdown = (self.peak - value) / self.peak;
+            // In drawdown. A peak at or below zero (a curve that starts ruined) has no
+            // fraction to take; dividing by it gave NaN or infinity.
+            self.current_drawdown =
+                if self.peak > 0.0 { (self.peak - value) / self.peak } else { 0.0 };
             self.current_duration += 1;
 
             if self.current_drawdown > self.max_drawdown {
@@ -335,7 +337,7 @@ mod tests {
 
     #[test]
     fn calmar_does_not_annualize_a_short_window() {
-        // Measured 2026-08-30 on a real 5.27-day options backtest: total return
+        // Example from a 5.27-day options backtest: total return
         // 15.4971%, max drawdown 18.6952%. The portfolio engine used to annualize
         // this into a CAGR before dividing, reporting Calmar = 115_906.80 -- an
         // artifact of the window length, not a property of the strategy. The
@@ -354,7 +356,7 @@ mod tests {
         // Not a drawdown test, but the same rule, and this module is where the
         // "undefined is not zero" convention is pinned.
         //
-        // Measured 2026-08-30: a two-leg straddle closed two winning trades and
+        // A two-leg straddle closed two winning trades and
         // no losing ones, and the stored row read avg_losing_duration = 0.00
         // and avg_loss_pct = 0.00 -- figures describing trades that do not
         // exist. BacktestMetrics now carries Option for all four, so an empty
@@ -452,5 +454,19 @@ mod tests {
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].0, 1, "start is pinned to the plateau, not the decline");
         assert_eq!(periods[0].1, 4);
+    }
+
+    #[test]
+    fn a_curve_that_starts_ruined_has_no_nan_drawdown() {
+        let mut t = DrawdownTracker::new();
+        for v in [0.0, -5.0, -1.0] {
+            t.update(v);
+        }
+        assert_eq!(t.max_drawdown(), 0.0);
+        assert!(t.current_drawdown_pct().is_finite());
+        assert_eq!(t.max_duration(), 3);
+        t.update(100.0);
+        t.update(50.0);
+        assert_eq!(t.max_drawdown(), 0.5);
     }
 }

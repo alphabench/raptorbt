@@ -99,6 +99,53 @@ impl MarketEvent {
     }
 }
 
+/// The trade print one tick row carries, or `None` without a last-traded
+/// price (zero marks missing data).
+///
+/// `size` is the exchange's last traded quantity when the feed carried one
+/// (`ltq > 0`), else the flow-delta proxy (every existing bar's volume
+/// depends on it). The signed split rides alongside.
+#[inline]
+pub fn trade_from_row(
+    timestamp: Timestamp,
+    ltp: Price,
+    buy_qty_delta: f64,
+    sell_qty_delta: f64,
+    ltq: f64,
+    oi: f64,
+) -> Option<TradeTick> {
+    if ltp > 0.0 {
+        let size = if ltq > 0.0 { ltq } else { buy_qty_delta.abs() + sell_qty_delta.abs() };
+        let signed_size = buy_qty_delta.abs() - sell_qty_delta.abs();
+        Some(TradeTick { timestamp, price: ltp, size, signed_size, oi })
+    } else {
+        None
+    }
+}
+
+/// The quote one tick row carries, or `None` unless both sides of the book
+/// are present.
+#[inline]
+pub fn quote_from_row(
+    timestamp: Timestamp,
+    bid: Price,
+    ask: Price,
+    bid_qty: f64,
+    ask_qty: f64,
+) -> Option<QuoteTick> {
+    if bid > 0.0 && ask > 0.0 {
+        Some(QuoteTick {
+            timestamp,
+            bid,
+            ask,
+            bid_size: TickData::displayed(bid_qty),
+            ask_size: TickData::displayed(ask_qty),
+        })
+    } else {
+        None
+    }
+}
+
 /// Split raw tick arrays into trade and quote event streams.
 ///
 /// Every tick with a last-traded price becomes a [`TradeTick`] (size = buy
@@ -114,37 +161,28 @@ pub fn tick_data_to_events(
     let mut events = Vec::with_capacity(ticks.len() * 2);
     for i in 0..ticks.len() {
         let ts = ticks.timestamps[i];
-        let ltp = ticks.ltp[i];
-        if ltp > 0.0 {
-            // `size` is the exchange's last traded quantity when the feed
-            // carried one, else the flow-delta proxy (every existing bar's
-            // volume depends on it). The signed split rides alongside.
-            let size = ticks.print_size(i);
-            let signed_size = ticks.buy_qty_delta[i].abs() - ticks.sell_qty_delta[i].abs();
+        let ltq = ticks.ltq.get(i).copied().unwrap_or(0.0);
+        if let Some(trade) = trade_from_row(
+            ts,
+            ticks.ltp[i],
+            ticks.buy_qty_delta[i],
+            ticks.sell_qty_delta[i],
+            ltq,
+            ticks.oi[i],
+        ) {
             events.push(MarketEvent {
                 instrument,
                 stream: trade_stream,
-                payload: EventPayload::Trade(TradeTick {
-                    timestamp: ts,
-                    price: ltp,
-                    size,
-                    signed_size,
-                    oi: ticks.oi[i],
-                }),
+                payload: EventPayload::Trade(trade),
             });
         }
-        let (bid, ask) = (ticks.bid[i], ticks.ask[i]);
-        if bid > 0.0 && ask > 0.0 {
+        if let Some(quote) =
+            quote_from_row(ts, ticks.bid[i], ticks.ask[i], ticks.bid_qty[i], ticks.ask_qty[i])
+        {
             events.push(MarketEvent {
                 instrument,
                 stream: quote_stream,
-                payload: EventPayload::Quote(QuoteTick {
-                    timestamp: ts,
-                    bid,
-                    ask,
-                    bid_size: TickData::displayed(ticks.bid_qty[i]),
-                    ask_size: TickData::displayed(ticks.ask_qty[i]),
-                }),
+                payload: EventPayload::Quote(quote),
             });
         }
     }

@@ -8,6 +8,12 @@
 //! arrives (plus [`BarBuilder::flush`] at end of data). The emitted bar is
 //! stamped with the window's end timestamp, so a bar labeled `t` contains
 //! only data strictly before `t` — no look-ahead by construction.
+//!
+//! Input *bars* are bucketed by their own timestamp, so the builder needs to
+//! know what that timestamp means: callers pass the bar's
+//! [`BarStamp`](crate::data::BarStamp) through
+//! [`BarStamp::bucket_ts`](crate::data::BarStamp::bucket_ts) first. A
+//! close-stamped bar on a window boundary then lands in the window it ends.
 
 use crate::core::types::{OhlcvBar, Price, Timestamp};
 use crate::data::bar_spec::{AggregationUnit, BarSpec, BuilderParams, SpecError};
@@ -61,11 +67,11 @@ impl SourceRecord {
 /// In-progress accumulation.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Partial {
-    open: Price,
-    high: Price,
-    low: Price,
-    close: Price,
-    volume: f64,
+    pub(crate) open: Price,
+    pub(crate) high: Price,
+    pub(crate) low: Price,
+    pub(crate) close: Price,
+    pub(crate) volume: f64,
 }
 
 impl Partial {
@@ -122,7 +128,7 @@ pub trait BarBuilder: std::fmt::Debug {
 pub fn builder_for(
     spec: BarSpec,
     align_offset_ns: i64,
-) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
+) -> Result<Box<dyn BarBuilder + Send + Sync>, SpecError> {
     builder_for_with(spec, align_offset_ns, BuilderParams::default())
 }
 
@@ -131,7 +137,7 @@ pub fn builder_for_with(
     spec: BarSpec,
     align_offset_ns: i64,
     params: BuilderParams,
-) -> Result<Box<dyn BarBuilder + Send>, SpecError> {
+) -> Result<Box<dyn BarBuilder + Send + Sync>, SpecError> {
     if let Some(unit_ns) = spec.unit.fixed_ns() {
         return Ok(Box::new(TimeBarBuilder::new(unit_ns * spec.step as i64, align_offset_ns)));
     }
@@ -159,7 +165,7 @@ pub fn builder_for_with(
         | AggregationUnit::ValueRuns => {
             let threshold = spec.step as f64;
             crate::data::flow_bars::FlowBarBuilder::for_unit(spec.unit, threshold)
-                .map(|b| Box::new(b) as Box<dyn BarBuilder + Send>)
+                .map(|b| Box::new(b) as Box<dyn BarBuilder + Send + Sync>)
                 .ok_or(SpecError::Unimplemented("signed-flow unit"))
         }
     }
@@ -170,17 +176,30 @@ pub fn builder_for_with(
 pub const IST_OFFSET_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
 
 /// Fixed-width time windows, aligned to the epoch shifted by an offset.
+///
+/// Through [`BarBuilder`] a window is `[start, end)` and every source record is
+/// accepted. The standalone resampler (`aggregate_resample`: [`ResampleOptions`],
+/// `absorb`, `on_clock`) is this same builder with a choice of boundary edge, empty-interval
+/// policy, clock closing and refused late input.
 #[derive(Debug)]
 pub struct TimeBarBuilder {
-    width_ns: i64,
-    align_offset_ns: i64,
-    window: Option<i64>,
-    partial: Option<Partial>,
+    pub(crate) width_ns: i64,
+    pub(crate) align_offset_ns: i64,
+    pub(crate) window: Option<i64>,
+    pub(crate) partial: Option<Partial>,
+    /// State of the resampler API; untouched by [`BarBuilder::push`].
+    pub(crate) resample: crate::data::aggregate_resample::ResampleState,
 }
 
 impl TimeBarBuilder {
     pub fn new(width_ns: i64, align_offset_ns: i64) -> Self {
-        Self { width_ns, align_offset_ns, window: None, partial: None }
+        Self {
+            width_ns,
+            align_offset_ns,
+            window: None,
+            partial: None,
+            resample: crate::data::aggregate_resample::ResampleState::new(width_ns),
+        }
     }
 
     #[inline]

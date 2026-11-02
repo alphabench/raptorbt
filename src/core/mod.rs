@@ -2,10 +2,10 @@
 
 pub mod error;
 pub mod session;
-pub mod timeseries;
+pub mod session_schedule;
 pub mod types;
 
 pub use error::{RaptorError, Result};
 pub use session::{SessionConfig, SessionTracker};
-pub use timeseries::TimeSeries;
+pub use session_schedule::SessionSchedule;
 pub use types::*;

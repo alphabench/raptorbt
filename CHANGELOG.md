@@ -710,12 +710,11 @@ the README always said it did.**
 
 - **`calmar_ratio` is no longer annualized.** `PortfolioEngine` computed it as
   **CAGR / max drawdown**, compounding the run's return up to a full year from
-  elapsed wall-clock time with no minimum-window floor. Measured on a real
+  elapsed wall-clock time with no minimum-window floor. Measured on a
   5.27-day options backtest: a 15.4971% return against an 18.6952% drawdown
   compounded to a CAGR of 2.17e4 and reported **Calmar = 115,906.80**. The
   same inputs now give **0.83**. The shorter the run the worse it got -- one
   day of the same strategy reported ~3.7e23 -- and a value large enough to
-  overflow `NUMERIC(10,4)` had previously been observed downstream.
 
   Because the ratio carries no time term, a caller comparing two strategies is
   now comparing the strategies rather than their window lengths.
@@ -767,7 +766,7 @@ before anyone saw it.**
   for the whole run.
 
   The span now comes from the trade's own `entry_time` / `exit_time`, which
-  every production path already populates from the same clock. Bar runs are
+  every code path already populates from the same clock. Bar runs are
   unaffected — there one event is one bar, so the old indexing happened to
   agree — and both existing duration tests pass unchanged.
 
@@ -801,7 +800,7 @@ same figures in seconds, taken from the timestamps it already had.**
 - `exposure_pct` could exceed 100%. Concurrent positions each contribute
   their own holding period, and the sum was divided by a single equity
   curve, so a netting book with overlapping trades reported more time in
-  the market than the backtest ran -- 123.5% observed on a real run. Time
+  the market than the backtest ran -- 123.5%. Time
   in the market is now capped at the time available.
 
 ### Notes for callers
@@ -887,8 +886,8 @@ very wrong (47 bps of phantom fees on a Rs 10,000 position).**
 ### Deliberate approximations (stated, not hidden)
 
 - BSE equity / BFO derivatives share the NSE-family schedules; their
-  published exchange-transaction rates differ by under 0.2 bps and execution
-  truth for the platform is Zerodha on NSE/NFO.
+  published exchange-transaction rates differ by under 0.2 bps and the
+  reference broker model is Zerodha on NSE/NFO.
 - STT on *exercised* options (0.15% of intrinsic) is not modelled; the engine
   trades out of positions rather than simulating exercise.
 
@@ -914,8 +913,7 @@ CASH budget was actually re-checked afterwards.
 
 ### Why it was latent rather than live
 
-`book_optimizer.py` in the backend never passes `no_trade_band`, so production
-could not reach this. It becomes reachable the moment anyone sets one -- which
+No caller passed `no_trade_band`, so this could not be reached. It becomes reachable the moment anyone sets one -- which
 is a reasonable thing to want, since a no-trade band is exactly how you stop a
 book churning on tiny adjustments.
 
@@ -1391,7 +1389,7 @@ it. Now there is, and the results change materially.**
 
 ### Measured
 
-On a real NIFTY option corpus (7 sessions, one expiry), enforcing a 15:25
+On a NIFTY option corpus (7 sessions, one expiry), enforcing a 15:25
 squareoff moved net-of-cost P&L by:
 
 | Strategy | No squareoff | With squareoff | Change |
@@ -1431,7 +1429,7 @@ Patch. The 0.7.0 deprecated names resolved but could not be enumerated.
   That is not merely cosmetic. A consumer guard comparing `_raptorbt.pyi`
   against `dir(_raptorbt)` read the stub's alias block as 21 declarations for
   symbols the engine had dropped -- precisely the "type-checks clean,
-  `AttributeError` in production" drift such a guard exists to catch. The
+  `AttributeError`" drift such a guard exists to catch. The
   aliases are real, so they are listed.
 
 - **The stub-completeness test in this repo had two blind spots** and so never
@@ -1641,7 +1639,7 @@ through this code path.
 ## [0.6.3] - 2026-08-06
 
 Two defects in position adoption, both on the path that seeds a strategy with
-shares a user already owns. Neither was firing in production — the supported
+shares a user already owns. Neither was reachable — the supported
 entry point adopts before the run starts, and today's seeded strategies are
 long-only — but both were reachable.
 
@@ -1738,7 +1736,7 @@ always has, pinned by test.
 
   `TickStrategyStream(initial_positions=...)` is unaffected — it adopts before
   warmup replay and before the first push, which is why this never fired in
-  production. `EngineKernel::adopt_position` holds no equity curve and cannot
+  practice. `EngineKernel::adopt_position` holds no equity curve and cannot
   check this itself; a Rust consumer driving the kernel directly owns the
   ordering, and its doc comment now says so.
 

@@ -160,12 +160,16 @@ impl TickBacktest {
                 let target_hit = ltp >= target_level;
 
                 let (exit_price, reason) = if stop_hit {
-                    // Fill at stop level (not ltp — avoid worse-than-stop fills)
-                    let fill = stop_level * (1.0 - slippage_frac);
+                    // A stop becomes a market sell once touched. If the book
+                    // gapped through the level, nothing traded at the stop:
+                    // the sell executes at the bid, so the fill is the worse
+                    // of the stop and the bid.
+                    let fill = stop_level.min(bid) * (1.0 - slippage_frac);
                     (fill, ExitReason::StopLoss)
                 } else if target_hit {
-                    let fill = target_level * (1.0 - slippage_frac);
-                    (fill, ExitReason::TakeProfit)
+                    // A target is a resting limit: it fills at its level, never
+                    // worse, so market slippage does not apply.
+                    (target_level, ExitReason::TakeProfit)
                 } else if time_exit || signal_exit {
                     let fill = bid * (1.0 - slippage_frac);
                     let reason = if time_exit { ExitReason::TimeExit } else { ExitReason::Signal };
@@ -371,6 +375,33 @@ mod tests {
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::TakeProfit);
         assert!(result.trades[0].pnl > 0.0);
+    }
+
+    #[test]
+    fn a_take_profit_fills_at_its_level_despite_slippage() {
+        let ticks = make_ticks(100, 100.0, 0.5);
+        let mut entries = vec![false; 100];
+        entries[0] = true;
+        let exits = vec![false; 100];
+        let config = TickBacktestConfig {
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.01,
+                ..Default::default()
+            },
+            stop_loss_pct: 5.0,
+            take_profit_pct: 10.0,
+            max_hold_seconds: 0,
+            ..Default::default()
+        };
+        let result = TickBacktest::new(config).run(&ticks, &entries, &exits, "TEST");
+
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::TakeProfit);
+        // Entry slips against the buyer; the target is 10% above that fill.
+        assert_eq!(trade.entry_price, 100.5 * 1.01);
+        assert_eq!(trade.exit_price, trade.entry_price * (1.0 + 0.10));
     }
 
     #[test]

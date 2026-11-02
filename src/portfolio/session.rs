@@ -24,24 +24,20 @@
 //! balance, so the strategy owns sizing via `size_frac`. The array runner's
 //! `EqualWeight` budget has no counterpart here yet.
 
-use std::collections::HashMap;
-
-use crate::accounts::{AccountMode, SharedAccount};
+use crate::accounts::AccountMode;
+use crate::core::error::RaptorError;
 use crate::core::types::OhlcvBar;
 use crate::core::types::TickData;
-use crate::core::types::{
-    BacktestConfig, BacktestResult, Direction, InstrumentConfig, Timestamp, Trade,
-};
+use crate::core::types::{BacktestConfig, BacktestResult, Direction, InstrumentConfig, Timestamp};
+use crate::core::Result as RaptorResult;
 use crate::data::{
-    tick_data_to_events, DepthRef, DepthTick, EventFeed, EventPayload, MarketEvent, QuoteTick,
-    TradeTick,
+    ensure_time_sorted, tick_data_to_events, DepthRef, DepthTick, EventFeed, EventPayload,
+    MarketEvent, QuoteTick, TradeTick,
 };
 use crate::instruments::InstrumentSpec;
-use crate::metrics::streaming::StreamingMetrics;
-use crate::portfolio::engine::compute_backtest_metrics_with_config;
+use crate::portfolio::book::PortfolioBook;
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
-use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 // Used by `session_tests.rs` via `use super::*`.
 #[cfg(test)]
 use crate::portfolio::risk::RejectReason;
@@ -55,6 +51,15 @@ pub enum ScheduleData {
     /// A depth snapshot, held in the session's store; the handle keeps
     /// schedule entries small and `Copy`.
     Depth(DepthRef),
+}
+
+fn data_timestamp(data: &ScheduleData) -> i64 {
+    match data {
+        ScheduleData::Bar(bar) => bar.timestamp,
+        ScheduleData::Trade(t) => t.timestamp,
+        ScheduleData::Quote(q) => q.timestamp,
+        ScheduleData::Depth(d) => d.timestamp,
+    }
 }
 
 /// One entry of the merged schedule.
@@ -90,12 +95,7 @@ impl ScheduleEntry {
 
     /// Event timestamp, whatever the payload.
     pub fn timestamp(&self) -> i64 {
-        match self.data {
-            ScheduleData::Bar(bar) => bar.timestamp,
-            ScheduleData::Trade(t) => t.timestamp,
-            ScheduleData::Quote(q) => q.timestamp,
-            ScheduleData::Depth(d) => d.timestamp,
-        }
+        data_timestamp(&self.data)
     }
 }
 
@@ -123,19 +123,9 @@ pub struct SessionOutcome {
     pub halted_at: Option<usize>,
 }
 
-/// Why a portfolio-wide halt latched.
-#[derive(Debug, Clone, Copy)]
-enum HaltCause {
-    /// Equity fell below the summed maintenance requirement.
-    MarginCall,
-    /// The drawdown kill-switch tripped on portfolio equity.
-    Drawdown,
-}
-
-/// Multi-instrument session over merged bar streams.
+/// Multi-instrument session over merged bar streams: the market tape plus
+/// one [`PortfolioBook`] that trades it.
 pub struct EventSession {
-    config: BacktestConfig,
-    kernels: Vec<EngineKernel>,
     symbols: Vec<String>,
     bars: Vec<Vec<KernelBar>>,
     ticks: Vec<Option<TickData>>,
@@ -147,17 +137,11 @@ pub struct EventSession {
     /// Next per-instrument event ordinal, shared by the batch merge and the
     /// streaming pushes so `local_idx` stays monotone across both.
     local_idx_next: Vec<usize>,
+    /// Latest event timestamp per instrument, so a live push can refuse one
+    /// that goes backwards.
+    last_ts: Vec<i64>,
     cursor: usize,
-    account: SharedAccount,
-    last_close: Vec<Option<f64>>,
-    last_seen: Vec<Option<(usize, KernelBar)>>,
-    equity_curve: Vec<f64>,
-    drawdown_curve: Vec<f64>,
-    returns: Vec<f64>,
-    timestamps: Vec<i64>,
-    trades: Vec<Trade>,
-    streaming: StreamingMetrics,
-    peak_equity: f64,
+    book: PortfolioBook,
     sealed: bool,
 }
 
@@ -171,10 +155,7 @@ impl EventSession {
     /// The mode applies to every instrument: they share one balance and, in
     /// margin mode, one pool of locked initial margin.
     pub fn with_account(config: BacktestConfig, mode: AccountMode) -> Self {
-        let pool = config.initial_capital;
         Self {
-            config,
-            kernels: Vec::new(),
             symbols: Vec::new(),
             bars: Vec::new(),
             ticks: Vec::new(),
@@ -182,17 +163,9 @@ impl EventSession {
             depth_input: Vec::new(),
             schedule: Vec::new(),
             local_idx_next: Vec::new(),
+            last_ts: Vec::new(),
             cursor: 0,
-            account: SharedAccount::new(mode, pool),
-            last_close: Vec::new(),
-            last_seen: Vec::new(),
-            equity_curve: Vec::new(),
-            drawdown_curve: Vec::new(),
-            returns: Vec::new(),
-            timestamps: Vec::new(),
-            trades: Vec::new(),
-            streaming: StreamingMetrics::new(),
-            peak_equity: pool,
+            book: PortfolioBook::new(config, mode),
             sealed: false,
         }
     }
@@ -206,38 +179,27 @@ impl EventSession {
         inst_config: Option<&InstrumentConfig>,
         policy: PositionPolicy,
     ) -> usize {
-        let engine = crate::portfolio::engine::PortfolioEngine::new(self.config.clone());
-        let mut kernel = EngineKernel::new(
-            self.config.clone(),
-            engine.fee_model.clone(),
-            engine.slippage_model.clone(),
-            engine.fill_price,
-            symbol.clone(),
-            direction,
-            inst_config,
-        )
-        .with_risk_gate(self.config.risk_gate())
-        .with_position_policy(policy)
-        .with_account_mode(self.account.mode());
-        if let Some(spec) = spec {
-            kernel.set_instrument(spec);
-        }
-        // The account owns all capital; kernels borrow it per step.
-        kernel.set_cash(0.0);
-        self.kernels.push(kernel);
+        let index = self.book.add_instrument(symbol.clone(), direction, spec, inst_config, policy);
         self.symbols.push(symbol);
         self.bars.push(Vec::new());
         self.ticks.push(None);
         self.depth_input.push(Vec::new());
         self.local_idx_next.push(0);
-        self.last_close.push(None);
-        self.last_seen.push(None);
-        self.kernels.len() - 1
+        self.last_ts.push(i64::MIN);
+        index
     }
 
     /// Attach an instrument's bar series (ascending timestamps).
-    pub fn set_bars(&mut self, instrument: usize, bars: Vec<KernelBar>) {
+    ///
+    /// Errors, attaching nothing, if a timestamp decreases. Equal timestamps
+    /// are allowed.
+    pub fn set_bars(&mut self, instrument: usize, bars: Vec<KernelBar>) -> RaptorResult<()> {
+        ensure_time_sorted(
+            &format!("{} bars", self.symbols[instrument]),
+            bars.iter().map(|b| b.timestamp),
+        )?;
         self.bars[instrument] = bars;
+        Ok(())
     }
 
     /// Attach an instrument's tick series (ascending timestamps).
@@ -245,8 +207,15 @@ impl EventSession {
     /// Trades and quotes are merged into the schedule alongside any bars,
     /// ordered by timestamp then phase — a trade precedes the quote of the
     /// same feed row, and both precede a bar closing at that timestamp.
-    pub fn set_ticks(&mut self, instrument: usize, ticks: TickData) {
+    ///
+    /// Errors, attaching nothing, if a timestamp decreases.
+    pub fn set_ticks(&mut self, instrument: usize, ticks: TickData) -> RaptorResult<()> {
+        ensure_time_sorted(
+            &format!("{} ticks", self.symbols[instrument]),
+            ticks.timestamps.iter().copied(),
+        )?;
         self.ticks[instrument] = Some(ticks);
+        Ok(())
     }
 
     /// Attach an instrument's depth snapshots (ascending timestamps).
@@ -254,8 +223,15 @@ impl EventSession {
     /// Book updates are observation only: like quotes, they never fill an
     /// order or mark equity. They do inform later fills, by sizing the
     /// queue a resting limit joins.
-    pub fn set_depth(&mut self, instrument: usize, depth: Vec<DepthTick>) {
+    ///
+    /// Errors, attaching nothing, if a timestamp decreases.
+    pub fn set_depth(&mut self, instrument: usize, depth: Vec<DepthTick>) -> RaptorResult<()> {
+        ensure_time_sorted(
+            &format!("{} depth", self.symbols[instrument]),
+            depth.iter().map(|d| d.timestamp),
+        )?;
         self.depth_input[instrument] = depth;
+        Ok(())
     }
 
     /// A depth snapshot by slot.
@@ -353,6 +329,7 @@ impl EventSession {
             };
             let local_idx = self.local_idx_next[instrument];
             self.local_idx_next[instrument] += 1;
+            self.last_ts[instrument] = self.last_ts[instrument].max(data_timestamp(&data));
             self.schedule.push(ScheduleEntry { instrument, local_idx, data });
         }
         self.sealed = true;
@@ -366,6 +343,7 @@ impl EventSession {
     /// order *is* the schedule.
     fn push_entry(&mut self, instrument: usize, data: ScheduleData) {
         self.seal();
+        self.last_ts[instrument] = data_timestamp(&data);
         let local_idx = self.local_idx_next[instrument];
         self.local_idx_next[instrument] += 1;
         self.schedule.push(ScheduleEntry { instrument, local_idx, data });
@@ -389,7 +367,8 @@ impl EventSession {
         bid_qty: f64,
         ask_qty: f64,
         oi: f64,
-    ) -> usize {
+    ) -> RaptorResult<usize> {
+        self.check_live_timestamp(instrument, timestamp)?;
         let mut appended = 0;
         if ltp > 0.0 {
             // The exchange's last traded quantity when supplied, else the
@@ -415,20 +394,39 @@ impl EventSession {
             );
             appended += 1;
         }
-        appended
+        Ok(appended)
     }
 
     /// Append a live bar to the schedule tail.
-    pub fn push_bar(&mut self, instrument: usize, bar: KernelBar) {
+    pub fn push_bar(&mut self, instrument: usize, bar: KernelBar) -> RaptorResult<()> {
+        self.check_live_timestamp(instrument, bar.timestamp)?;
         self.push_entry(instrument, ScheduleData::Bar(bar));
+        Ok(())
     }
 
     /// Append a live depth snapshot to the schedule tail.
-    pub fn push_depth(&mut self, instrument: usize, snapshot: DepthTick) {
+    pub fn push_depth(&mut self, instrument: usize, snapshot: DepthTick) -> RaptorResult<()> {
+        self.check_live_timestamp(instrument, snapshot.timestamp)?;
         let slot = self.depth.len() as u32;
         let timestamp = snapshot.timestamp;
         self.depth.push(snapshot);
         self.push_entry(instrument, ScheduleData::Depth(DepthRef { slot, timestamp }));
+        Ok(())
+    }
+
+    /// Refuse a live event older than the instrument's latest one (batch data
+    /// attached earlier counts). Equal timestamps are allowed.
+    fn check_live_timestamp(&mut self, instrument: usize, timestamp: i64) -> RaptorResult<()> {
+        self.seal();
+        let last = self.last_ts[instrument];
+        if timestamp < last {
+            return Err(RaptorError::invalid_parameter(format!(
+                "{} live feed: timestamps must not decrease, but event {} is {timestamp} \
+                 after {last}",
+                self.symbols[instrument], self.local_idx_next[instrument],
+            )));
+        }
+        Ok(())
     }
 
     /// Events pushed or merged but not yet applied.
@@ -451,92 +449,34 @@ impl EventSession {
     }
 
     /// The `submitted_idx` an order placed during the current event should
-    /// carry on `instrument`'s own clock.
-    ///
-    /// Ordinals are per instrument, so an order routed to another
-    /// instrument (a hedge leg placed from the index's print, or from a
-    /// timer that fired on it) must not carry the dispatching event's
-    /// ordinal: the two clocks are unrelated, and the order would match
-    /// late, or never. It is stamped with the target's last stepped print
-    /// instead, so it works from that instrument's next print — the first
-    /// evidence of a trade after it was placed. An instrument that has not
-    /// printed yet stamps 0, its first print.
+    /// carry on `instrument`'s own clock; see [`PortfolioBook::submission_idx`].
     pub fn submission_idx(&self, instrument: usize, event_idx: usize) -> usize {
-        match self.current() {
-            Some(entry) if entry.instrument == instrument => event_idx,
-            _ => self
-                .last_seen
-                .get(instrument)
-                .and_then(|seen| seen.map(|(idx, _)| idx))
-                .unwrap_or(0),
-        }
+        self.book.submission_idx(instrument, event_idx, self.current().map(|e| e.instrument))
     }
 
     /// Kernel of an instrument, for order routing and queries.
     pub fn kernel_mut(&mut self, instrument: usize) -> &mut EngineKernel {
-        &mut self.kernels[instrument]
+        self.book.kernel_mut(instrument)
     }
 
     pub fn kernel(&self, instrument: usize) -> &EngineKernel {
-        &self.kernels[instrument]
+        self.book.kernel(instrument)
     }
 
-    /// Portfolio equity: the account balance plus each instrument's mark at
-    /// its last known close.
-    ///
-    /// Cash mode marks positions at full value (historical model, pinned by
-    /// the golden fixtures); margin mode marks direction-aware unrealized
-    /// PnL, which prices winning shorts upward. The balance already includes
-    /// notionally-locked margin — locks do not debit cash — so the margin arm
-    /// does not double-count.
+    /// Portfolio equity; see [`PortfolioBook::equity`].
     pub fn equity(&self) -> f64 {
-        match self.account.mode() {
-            AccountMode::Cash => {
-                let positions: f64 = self
-                    .kernels
-                    .iter()
-                    .zip(&self.last_close)
-                    .map(|(k, close)| close.map(|c| k.position_value(c)).unwrap_or(0.0))
-                    .sum();
-                self.account.balance() + positions
-            }
-            AccountMode::Margin { .. } => {
-                let unrealized: f64 = self
-                    .kernels
-                    .iter()
-                    .zip(&self.last_close)
-                    .map(|(k, close)| close.map(|c| k.unrealized_value(c)).unwrap_or(0.0))
-                    .sum();
-                self.account.balance() + unrealized
-            }
-        }
+        self.book.equity()
     }
 
     /// Shared cash balance. In margin mode this includes locked initial
     /// margin; see [`EventSession::free_capital`] for what can fund a new
     /// position.
     pub fn cash(&self) -> f64 {
-        self.account.balance()
+        self.book.cash()
     }
 
-    /// Adopt a pre-existing position on one instrument (broker-truth
-    /// seeding) — see [`EngineKernel::adopt_position`], which owns the
-    /// account-mode rules. Same lend/drain pool discipline as
-    /// [`Self::apply_current`], so the cost basis comes out of the shared
-    /// pool with no fees, no fill, and no trade: debited from the balance in
-    /// cash mode, locked as initial margin in a fully funded margin book.
-    ///
-    /// Must be called before the first equity sample, and this is enforced:
-    /// adopting mid-run leaves the curve flat for the pre-adoption stretch,
-    /// which holds the running peak down and makes the decline that follows
-    /// measure against the wrong high-water mark. Max drawdown then reads
-    /// *better* than reality — 0.199% for a decline that is really 0.495%.
-    /// The curve is written streaming, so this cannot be repaired later.
-    ///
-    /// The gate is the equity curve, not the event cursor: a quote or depth
-    /// snapshot advances the cursor without sampling equity, and a live feed
-    /// routinely delivers those before the first trade print. Adopting after
-    /// one corrupts nothing and stays allowed.
+    /// Adopt a pre-existing position on one instrument; see
+    /// [`PortfolioBook::adopt_position`].
     pub fn adopt_position(
         &mut self,
         instrument: usize,
@@ -544,324 +484,46 @@ impl EventSession {
         price: f64,
         size: f64,
     ) -> Result<u64, String> {
-        if instrument >= self.kernels.len() {
-            return Err(format!("unknown instrument index {instrument}"));
-        }
-        if !self.equity_curve.is_empty() {
-            return Err("adopt_position must be called before the first applied event".to_string());
-        }
-        let kernel = &mut self.kernels[instrument];
-        let locked_before = kernel.locked_margin();
-        // Same lend/drain discipline as `apply_current`: in margin mode the
-        // kernel computes free capital from its own cash less its own locks,
-        // so hand it the balance less every *other* kernel's locks.
-        let injected = match self.account.mode() {
-            AccountMode::Cash => self.account.balance(),
-            AccountMode::Margin { .. } => {
-                self.account.balance() - (self.account.locked() - locked_before)
-            }
-        };
-        kernel.set_cash(injected);
-        let result = kernel.adopt_position(timestamp, price, size);
-        let delta_cash = kernel.cash() - injected;
-        // Carry the locked delta too. Leaving this at 0.0 would mean the
-        // shared account never learns about the adopted margin, so portfolio
-        // free capital would read high by the whole cost basis — a risk
-        // constraint silently weakened.
-        let delta_locked = kernel.locked_margin() - locked_before;
-        kernel.set_cash(0.0);
-        self.account.reconcile(delta_cash, delta_locked);
-        self.regroup_option_margin();
-        result
-    }
-
-    /// Re-price every group of option legs that share an underlying and
-    /// expiry, so sold legs that hedge each other lock the group's
-    /// requirement rather than the sum of their naked deposits.
-    ///
-    /// Runs after every applied event and every adoption. In cash mode, or
-    /// with no deposit-modelled option leg open, it does nothing. See
-    /// [`crate::portfolio::option_groups`] for the arithmetic and the
-    /// measurements it is held to.
-    fn regroup_option_margin(&mut self) {
-        if matches!(self.account.mode(), AccountMode::Cash) {
-            return;
-        }
-        let mut groups: HashMap<(String, Option<Timestamp>), Vec<OptionLeg>> = HashMap::new();
-        for (index, kernel) in self.kernels.iter().enumerate() {
-            let legs = kernel.open_option_legs(index);
-            if legs.is_empty() {
-                continue;
-            }
-            let Some(key) = kernel.option_group_key() else { continue };
-            groups.entry(key).or_default().extend(legs);
-        }
-        let mut delta_locked = 0.0;
-        for legs in groups.values() {
-            let Some(requirement) = group_requirement(legs) else { continue };
-            for (kernel, position_id, share) in apportion(legs, requirement.total) {
-                delta_locked += self.kernels[kernel].set_locked_margin(position_id, share);
-            }
-        }
-        if delta_locked != 0.0 {
-            self.account.reconcile(0.0, delta_locked);
-        }
+        self.book.adopt_position(instrument, timestamp, price, size)
     }
 
     /// Capital available to open new positions across all instruments.
     pub fn free_capital(&self) -> f64 {
-        self.account.free()
+        self.book.free_capital()
     }
 
     /// Whether a margin call or drawdown kill-switch has latched.
     pub fn is_halted(&self) -> bool {
-        self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted())
+        self.book.is_halted()
     }
 
-    /// Step the current schedule entry through its kernel and advance.
-    ///
-    /// The kernel is re-pointed at the portfolio's capital, stepped, then
-    /// drained: cash and locked-margin movements are folded back into the
-    /// shared account. Cash mode is exactly the historical lend/drain of the
-    /// whole pool.
-    ///
-    /// `max_positions` is counted across every instrument, so the kernel's
-    /// gate refuses an entry once the *portfolio* is full — on the resting
-    /// order path too, which is why the count is injected rather than
-    /// pre-checked here. The count is snapshotted before the step, mirroring
-    /// the array runner: an instrument that exits and re-enters on the same
-    /// bar is still counted as holding its outgoing position.
+    /// Halt the book; see [`PortfolioBook::halt`].
+    pub fn halt(&mut self, reason: &str, flatten: bool) {
+        self.book.halt(reason, flatten);
+    }
+
+    /// Step the current schedule entry through the book and advance. See
+    /// [`PortfolioBook::apply`].
     pub fn apply_current(&mut self, input: StepInput) -> Vec<EngineEvent> {
         let Some(entry) = self.current() else { return Vec::new() };
-        let instrument = entry.instrument;
-
-        // Portfolio-wide open count, skipped entirely when no limit is set.
-        // Summing every kernel's ledger covers hedging policies, where one
-        // instrument can hold several positions at once.
-        let portfolio_open = self
-            .config
-            .max_positions
-            .map(|_| self.kernels.iter().map(|k| k.open_count()).sum::<usize>());
-
-        // In margin mode the kernel computes free capital as its own cash
-        // minus its own locked margin, so hand it the balance less every
-        // *other* kernel's locks — then its arithmetic sees the portfolio's
-        // free capital.
-        // Copy the snapshot out before borrowing the kernel mutably.
-        let depth_snapshot = match entry.data {
+        let depth = match entry.data {
             ScheduleData::Depth(handle) => self.depth_at(handle.slot),
             _ => None,
         };
-
-        let kernel = &mut self.kernels[instrument];
-        let locked_before = kernel.locked_margin();
-        let injected = match self.account.mode() {
-            AccountMode::Cash => self.account.balance(),
-            AccountMode::Margin { .. } => {
-                self.account.balance() - (self.account.locked() - locked_before)
-            }
-        };
-        kernel.set_cash(injected);
-        kernel.set_external_open_count(portfolio_open);
-        let mut events = match entry.data {
-            ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
-            ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
-            ScheduleData::Quote(quote) => kernel.step_quote(&quote),
-            ScheduleData::Depth(_) => match depth_snapshot {
-                Some(snapshot) => kernel.step_depth(&snapshot),
-                None => Vec::new(),
-            },
-        };
-        let delta_cash = kernel.cash() - injected;
-        let delta_locked = kernel.locked_margin() - locked_before;
-        kernel.set_cash(0.0);
-        kernel.set_external_open_count(None);
-        self.account.reconcile(delta_cash, delta_locked);
-        self.regroup_option_margin();
-
-        // A kernel-local call sees only its own slice of the portfolio, but
-        // the account is shared: escalate it so every instrument halts.
-        if events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })) {
-            self.halt_all(self.cursor, HaltCause::MarginCall);
-        }
-
-        for event in &events {
-            if let EngineEvent::Exited { trade, .. } = event {
-                self.streaming.update(trade.return_pct / 100.0);
-                self.trades.push((**trade).clone());
-            }
-        }
-
-        // Quotes carry no traded price: they leave the mark alone, and the
-        // print that follows updates it.
-        if let Some(bar) = entry.as_bar() {
-            self.last_close[instrument] = Some(bar.close);
-            self.last_seen[instrument] = Some((entry.local_idx, bar));
-        }
-
-        // A quote does not sample equity. Marking on one would append a
-        // zero return per quote, inflating the period count and distorting
-        // annualized metrics purely from how chatty the feed is.
-        if matches!(entry.data, ScheduleData::Quote(_) | ScheduleData::Depth(_)) {
-            self.cursor += 1;
-            return events;
-        }
-
-        // Sample the portfolio once per event; feed every kernel's
-        // kill-switch so a portfolio-level drawdown halts all entries.
-        let equity = self.equity();
-        let prev = self.equity_curve.last().copied();
-        self.equity_curve.push(equity);
-        if equity > self.peak_equity {
-            self.peak_equity = equity;
-        }
-        self.drawdown_curve.push((self.peak_equity - equity) / self.peak_equity * 100.0);
-        let ret = match prev {
-            Some(p) if p != 0.0 => (equity - p) / p,
-            _ => 0.0,
-        };
-        self.returns.push(ret);
-        self.timestamps.push(entry.timestamp());
-
-        // Portfolio maintenance: the requirement is the sum of every
-        // instrument's own requirement, so per-instrument `margin_maint`
-        // rates apply. No single kernel can see this.
-        if matches!(self.account.mode(), AccountMode::Margin { .. }) && !self.account.is_halted() {
-            let required: f64 = self
-                .kernels
-                .iter()
-                .zip(&self.last_close)
-                .map(|(k, close)| close.map(|c| k.maintenance_requirement(c)).unwrap_or(0.0))
-                .sum();
-            if required > 0.0 && equity < required {
-                self.halt_all(self.cursor, HaltCause::MarginCall);
-                events.push(EngineEvent::MarginCall { idx: entry.local_idx, equity, required });
-                if self.config.liquidate_on_margin_call {
-                    // Every instrument liquidates at its own last mark, and
-                    // the cash it returns flows back through the shared
-                    // account like any other close.
-                    for i in 0..self.kernels.len() {
-                        let Some((last_idx, last_bar)) = self.last_seen[i] else { continue };
-                        let kernel = &mut self.kernels[i];
-                        let locked_before = kernel.locked_margin();
-                        let injected = match self.account.mode() {
-                            AccountMode::Cash => self.account.balance(),
-                            AccountMode::Margin { .. } => {
-                                self.account.balance() - (self.account.locked() - locked_before)
-                            }
-                        };
-                        kernel.set_cash(injected);
-                        let closed = kernel.liquidate_all(last_idx, &last_bar);
-                        let delta_cash = kernel.cash() - injected;
-                        let delta_locked = kernel.locked_margin() - locked_before;
-                        kernel.set_cash(0.0);
-                        self.account.reconcile(delta_cash, delta_locked);
-                        for event in &closed {
-                            if let EngineEvent::Exited { trade, .. } = event {
-                                self.streaming.update(trade.return_pct / 100.0);
-                                self.trades.push((**trade).clone());
-                            }
-                        }
-                        events.extend(closed);
-                    }
-                }
-            }
-        }
-
-        // Kernels all see the same portfolio equity, so their drawdown gates
-        // latch in lockstep; record the rising edge once.
-        let peak = self.peak_equity;
-        let risk_halted_before = self.kernels.iter().any(|k| k.risk_halted());
-        for kernel in &mut self.kernels {
-            kernel.observe_equity(equity, peak);
-        }
-        if !risk_halted_before && self.kernels.iter().any(|k| k.risk_halted()) {
-            self.halt_all(self.cursor, HaltCause::Drawdown);
-        }
-
+        let events = self.book.apply(&entry, depth, input);
         self.cursor += 1;
         events
     }
 
-    /// Latch a portfolio-wide halt on the shared account.
-    ///
-    /// The cause decides what else is needed. A margin call must trip every
-    /// kernel's margin kill-switch so entries are refused with
-    /// `RejectReason::MarginCall`; a drawdown halt must *not*, because each
-    /// kernel's own risk gate has already latched from the portfolio equity
-    /// it was fed and reports `RejectReason::DrawdownHalt`. Tripping the
-    /// margin switch for a drawdown would mislabel the reason.
-    fn halt_all(&mut self, idx: usize, cause: HaltCause) {
-        self.account.halt(idx);
-        if matches!(cause, HaltCause::MarginCall) {
-            for kernel in &mut self.kernels {
-                kernel.halt_margin();
-            }
-        }
-    }
-
     /// Force-close every instrument at its last seen bar and compute
     /// portfolio metrics.
-    pub fn finish(mut self) -> SessionOutcome {
-        for i in 0..self.kernels.len() {
-            if let Some((idx, bar)) = self.last_seen[i] {
-                let kernel = &mut self.kernels[i];
-                let locked_before = kernel.locked_margin();
-                let injected = match self.account.mode() {
-                    AccountMode::Cash => self.account.balance(),
-                    AccountMode::Margin { .. } => {
-                        self.account.balance() - (self.account.locked() - locked_before)
-                    }
-                };
-                kernel.set_cash(injected);
-                for trade in kernel.finalize_all(idx, &bar) {
-                    self.streaming.update(trade.return_pct / 100.0);
-                    self.trades.push(trade);
-                }
-                let delta_cash = kernel.cash() - injected;
-                let delta_locked = kernel.locked_margin() - locked_before;
-                kernel.set_cash(0.0);
-                self.account.reconcile(delta_cash, delta_locked);
-                self.last_close[i] = None;
-            }
-        }
-        // Positions are flat; the final mark is the balance itself.
-        if let Some(last) = self.equity_curve.last_mut() {
-            *last = self.account.balance();
-        }
+    pub fn finish(self) -> SessionOutcome {
+        self.book.finish()
+    }
 
-        let metrics = compute_backtest_metrics_with_config(
-            &self.equity_curve,
-            &self.drawdown_curve,
-            &self.returns,
-            &self.trades,
-            &self.timestamps,
-            &self.config,
-        );
-        let outcomes = self
-            .symbols
-            .iter()
-            .enumerate()
-            .map(|(i, symbol)| InstrumentOutcome {
-                symbol: symbol.clone(),
-                trades: self.trades.iter().filter(|t| &t.symbol == symbol).count(),
-                pnl: self.trades.iter().filter(|t| &t.symbol == symbol).map(|t| t.pnl).sum(),
-                rejected_entries: self.kernels[i].rejected_entries(),
-            })
-            .collect();
-
-        let rejected_entries: usize = self.kernels.iter().map(|k| k.rejected_entries()).sum();
-        let halted = self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted());
-        let halted_at = self.account.halted_at();
-
-        let result = BacktestResult::new(
-            metrics,
-            self.equity_curve,
-            self.drawdown_curve,
-            self.trades,
-            self.returns,
-        );
-        SessionOutcome { result, instruments: outcomes, rejected_entries, halted, halted_at }
+    /// The merged schedule, applied or not.
+    pub fn entries(&self) -> &[ScheduleEntry] {
+        &self.schedule
     }
 }
 

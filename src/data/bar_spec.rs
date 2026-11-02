@@ -77,6 +77,49 @@ impl AggregationUnit {
             _ => None,
         }
     }
+
+    /// Whether bars of this unit are cut by clock windows (fixed-width,
+    /// month or year), as opposed to counts or thresholds.
+    pub fn is_time_window(&self) -> bool {
+        self.fixed_ns().is_some() || matches!(self, AggregationUnit::Month | AggregationUnit::Year)
+    }
+}
+
+/// What the timestamp of an input *bar* means.
+///
+/// `Open`: the instant the bar starts; the bar contains data in
+/// `[ts, ts + width)`. `Close`: the instant it ends; the bar contains data in
+/// `(ts - width, ts]`. Trades carry no stamp convention, so this applies only
+/// to bar records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BarStamp {
+    Open,
+    Close,
+}
+
+impl BarStamp {
+    /// Parse the Python-facing string.
+    pub fn parse(s: &str) -> Result<Self, SpecError> {
+        match s {
+            "open" => Ok(BarStamp::Open),
+            "close" => Ok(BarStamp::Close),
+            other => Err(SpecError::UnknownStamp(other.to_string())),
+        }
+    }
+
+    /// The timestamp a time-window builder buckets an input bar by.
+    ///
+    /// A close-stamped bar stamped exactly on a window boundary belongs to the
+    /// window that boundary ends, so it is bucketed by the last nanosecond it
+    /// covers (right-closed windows). Count and threshold units stamp their
+    /// output with the record's own timestamp and are left alone.
+    pub fn bucket_ts(self, unit: AggregationUnit, ts: i64) -> i64 {
+        if self == BarStamp::Close && unit.is_time_window() {
+            ts - 1
+        } else {
+            ts
+        }
+    }
 }
 
 /// One aggregation: `step` × `unit` (e.g. 5 × Minute).
@@ -122,6 +165,8 @@ impl BuilderParams {
 pub enum SpecError {
     #[error("unknown aggregation unit {0:?}")]
     UnknownUnit(String),
+    #[error("unknown bar stamp {0:?}; valid values are \"open\" and \"close\"")]
+    UnknownStamp(String),
     #[error("aggregation step must be >= 1")]
     ZeroStep,
     #[error("aggregation unit {0:?} is not implemented yet")]
@@ -155,6 +200,17 @@ mod tests {
         let spec = BarSpec::new(1, AggregationUnit::Renko).unwrap();
         let params = BuilderParams { brick_size: f64::INFINITY };
         assert!(matches!(params.resolved_brick(spec), Err(SpecError::InvalidParam(_))));
+    }
+
+    #[test]
+    fn close_stamp_buckets_boundary_bar_into_the_window_it_ends() {
+        let min = AggregationUnit::Minute;
+        assert_eq!(BarStamp::Open.bucket_ts(min, 600), 600);
+        assert_eq!(BarStamp::Close.bucket_ts(min, 600), 599);
+        // Count units stamp with the record itself.
+        assert_eq!(BarStamp::Close.bucket_ts(AggregationUnit::Tick, 600), 600);
+        assert_eq!(BarStamp::parse("close"), Ok(BarStamp::Close));
+        assert!(BarStamp::parse("mid").is_err());
     }
 
     #[test]

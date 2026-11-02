@@ -5,12 +5,11 @@
 //! over the identity deliberately: an Indian long-only equity book has
 //! materially positive average pairwise correlation, and shrinking toward the
 //! identity pulls correlations toward zero, *understating* portfolio risk --
-//! the wrong direction for a platform whose doctrine is to refuse optimistic
-//! numbers.
+//! the wrong direction for a risk estimate.
 //!
 //! The result is carried in a [`RiskModel`] that pins two things structurally:
-//! `periods_per_year` (annualization must travel with the matrix -- the
-//! platform has measured a 7.75x Sharpe inflation from an inferred basis) and
+//! `periods_per_year` (annualization must travel with the matrix -- an inferred
+//! basis can inflate a Sharpe ratio several-fold) and
 //! `asset_ids` (consumers validate their own ordering against the model's, so
 //! a re-sorted universe is a hard error, not a silently wrong number).
 

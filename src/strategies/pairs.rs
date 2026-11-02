@@ -119,12 +119,17 @@ impl PairsBacktest {
             // Check for exit
             if exits[i] {
                 if let Some(pos) = position.take() {
-                    let (pnl, fees) = self.close_position(&pos, leg1_fill, leg2_fill);
+                    let (pnl, exit_fees) = self.close_position(&pos, leg1_fill, leg2_fill);
+                    let fees = pos.entry_fees + exit_fees;
                     let cost_basis = pos.leg1_cost + pos.leg2_cost;
                     let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
-                    // Return capital
-                    cash += pos.leg1_size * leg1_fill + pos.leg2_size * leg2_fill - fees;
+                    // Return the posted collateral plus realised PnL. `pnl` is
+                    // net of both sides' fees, but the entry fees left cash at
+                    // entry, so they are added back here. Crediting size *
+                    // fill would treat the short leg as a long and match
+                    // neither the trade PnL nor the mark-to-market below.
+                    cash += cost_basis + pnl + pos.entry_fees;
 
                     // Record trades for both legs
                     trades.push(Trade {
@@ -141,8 +146,8 @@ impl PairsBacktest {
                         entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg1_ohlcv.timestamps[i],
                         fees: fees / 2.0,
-                        entry_fees: 0.0,
-                        exit_fees: fees / 2.0,
+                        entry_fees: pos.entry_fees / 2.0,
+                        exit_fees: exit_fees / 2.0,
                         fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                         // This path synthesises the trade record rather than closing a
@@ -170,8 +175,8 @@ impl PairsBacktest {
                         entry_time: leg2_ohlcv.timestamps[pos.entry_idx],
                         exit_time: leg2_ohlcv.timestamps[i],
                         fees: fees / 2.0,
-                        entry_fees: 0.0,
-                        exit_fees: fees / 2.0,
+                        entry_fees: pos.entry_fees / 2.0,
+                        exit_fees: exit_fees / 2.0,
                         fee_breakdown: None,
                         exit_reason: ExitReason::Signal,
                         // This path synthesises the trade record rather than closing a
@@ -232,6 +237,7 @@ impl PairsBacktest {
                     leg2_direction: leg2_dir,
                     leg1_cost,
                     leg2_cost,
+                    entry_fees,
                     hedge_ratio,
                 });
             }
@@ -275,7 +281,8 @@ impl PairsBacktest {
             let leg1_price = leg1_ohlcv.close[last_idx];
             let leg2_price = leg2_ohlcv.close[last_idx];
 
-            let (pnl, fees) = self.close_position(&pos, leg1_price, leg2_price);
+            let (pnl, exit_fees) = self.close_position(&pos, leg1_price, leg2_price);
+            let fees = pos.entry_fees + exit_fees;
             let cost_basis = pos.leg1_cost + pos.leg2_cost;
             let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
 
@@ -293,8 +300,8 @@ impl PairsBacktest {
                 entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
                 exit_time: leg1_ohlcv.timestamps[last_idx],
                 fees,
-                entry_fees: 0.0,
-                exit_fees: fees,
+                entry_fees: pos.entry_fees,
+                exit_fees,
                 fee_breakdown: None,
                 exit_reason: ExitReason::EndOfData,
                 // This path synthesises the trade record rather than closing a
@@ -305,6 +312,21 @@ impl PairsBacktest {
                 mae_pnl: None,
                 mfe_pnl: None,
             });
+
+            // The close pays exit fees and the entry fees are in the pnl:
+            // the last equity point is the cash after both, so it matches
+            // initial capital plus the sum of trade pnl.
+            cash += cost_basis + pnl + pos.entry_fees;
+            let equity = cash;
+            equity_curve[last_idx] = equity;
+            if equity > peak_equity {
+                peak_equity = equity;
+            }
+            drawdown_curve[last_idx] = (peak_equity - equity) / peak_equity * 100.0;
+            if last_idx > 0 {
+                returns[last_idx] =
+                    (equity - equity_curve[last_idx - 1]) / equity_curve[last_idx - 1];
+            }
         }
 
         // Calculate metrics
@@ -340,7 +362,8 @@ impl PairsBacktest {
         beta.clamp(0.1, 10.0) // Constrain to reasonable range
     }
 
-    /// Close position and calculate P&L.
+    /// Close position and calculate P&L, net of entry and exit fees.
+    /// Returns `(pnl, exit_fees)`.
     fn close_position(
         &self,
         position: &PairsPosition,
@@ -359,7 +382,7 @@ impl PairsBacktest {
             self.fee_model.calculate(leg1_price, position.leg1_size, position.leg1_direction)
                 + self.fee_model.calculate(leg2_price, position.leg2_size, position.leg2_direction);
 
-        let total_pnl = leg1_pnl + leg2_pnl - exit_fees;
+        let total_pnl = leg1_pnl + leg2_pnl - position.entry_fees - exit_fees;
 
         (total_pnl, exit_fees)
     }
@@ -465,6 +488,8 @@ struct PairsPosition {
     leg2_direction: Direction,
     leg1_cost: f64,
     leg2_cost: f64,
+    /// Fees debited from cash when the pair was opened (both legs).
+    entry_fees: f64,
     #[allow(dead_code)]
     hedge_ratio: f64,
 }

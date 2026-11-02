@@ -1,0 +1,461 @@
+{
+  "schema": 1,
+  "package": "raptorbt",
+  "skills": [
+    {
+      "name": "raptorbt-core",
+      "domain": "core",
+      "title": "Core",
+      "path": "core/SKILL.md",
+      "description": "Engine concepts, the backtest lifecycle (data in, configuration, run, result) and the settings every run shares. Load this first.",
+      "load_when": [
+        "Starting a RaptorBT project or choosing which API to use.",
+        "Learning the engine lifecycle: data in, config, run, result.",
+        "Setting capital, fees, slippage, fill timing or session length."
+      ],
+      "depends_on": [],
+      "api_version": "2.x",
+      "status": "stable",
+      "modules": [
+        "raptorbt.BacktestConfig",
+        "raptorbt.SESSION_NSE",
+        "raptorbt.SESSION_MCX",
+        "raptorbt.SESSION_CDS",
+        "raptorbt.SESSION_CONTINUOUS",
+        "raptorbt.IST_OFFSET_NS",
+        "raptorbt.skills"
+      ]
+    },
+    {
+      "name": "raptorbt-strategy",
+      "domain": "strategy",
+      "title": "Strategy",
+      "path": "strategy/SKILL.md",
+      "description": "Strategy creation, hooks and callback semantics.",
+      "load_when": [
+        "Writing a class-based strategy.",
+        "Choosing hooks (on_start, on_bar, on_stop, order and position events).",
+        "Running one strategy or many over the same data."
+      ],
+      "depends_on": [
+        "raptorbt-core"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.strategy",
+        "raptorbt.Strategy",
+        "raptorbt.StrategyConfig",
+        "raptorbt.StrategyContext",
+        "raptorbt.Bar",
+        "raptorbt.run_strategy_backtest",
+        "raptorbt.run_strategies",
+        "raptorbt.KernelSession",
+        "raptorbt.PortfolioSession",
+        "raptorbt.EngineEvent",
+        "raptorbt.PositionSnapshot"
+      ]
+    },
+    {
+      "name": "raptorbt-instruments",
+      "domain": "instruments",
+      "title": "Instruments",
+      "path": "instruments/SKILL.md",
+      "description": "Instrument definitions, asset classes, options and multi-instrument runs.",
+      "load_when": [
+        "Trading several symbols or asset classes.",
+        "Defining lot size, tick size, multiplier, expiry or sessions.",
+        "Working with option chains, pricing and Greeks."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.InstrumentSpec",
+        "raptorbt.SessionSchedule",
+        "raptorbt.InstrumentConfig",
+        "raptorbt.OptionChain",
+        "raptorbt.pricing"
+      ]
+    },
+    {
+      "name": "raptorbt-market-data",
+      "domain": "market-data",
+      "title": "Market data",
+      "path": "market-data/SKILL.md",
+      "description": "Bars, trades, quotes and order-book inputs, and tick-level features.",
+      "load_when": [
+        "Preparing OHLCV arrays or tick streams.",
+        "Handling timestamps, bar stamps and ordering.",
+        "Computing tick features or running tick-level simulation."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-instruments"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.bars_from_ticks",
+        "raptorbt.TickStrategyStream",
+        "raptorbt.run_tick_strategy",
+        "raptorbt.run_tick_backtest",
+        "raptorbt.compute_tick_entry_signals",
+        "raptorbt.compute_tick_exit_signals",
+        "raptorbt.tick_spread_pct",
+        "raptorbt.buy_sell_imbalance_delta",
+        "raptorbt.return_window",
+        "raptorbt.realized_vol_rolling",
+        "raptorbt.oi_position_pct",
+        "raptorbt.tick_velocity",
+        "raptorbt.strategy.TradeTick",
+        "raptorbt.strategy.QuoteTick"
+      ]
+    },
+    {
+      "name": "raptorbt-subscriptions",
+      "domain": "subscriptions",
+      "title": "Subscriptions",
+      "path": "subscriptions/SKILL.md",
+      "description": "Declaring which streams and bar histories a strategy receives.",
+      "load_when": [
+        "Subscribing a strategy to extra bar streams or timeframes.",
+        "Reading bar history inside a hook."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy",
+        "raptorbt-market-data"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.strategy.BarHistory",
+        "raptorbt.InvalidSubscription"
+      ]
+    },
+    {
+      "name": "raptorbt-timeframes",
+      "domain": "timeframes",
+      "title": "Timeframes",
+      "path": "timeframes/SKILL.md",
+      "description": "Multi-timeframe aggregation and composite bars.",
+      "load_when": [
+        "Combining 1m, 5m, 15m, hourly or daily data.",
+        "Building custom bar aggregations."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy",
+        "raptorbt-market-data"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.BarAggregator",
+        "raptorbt.aggregate_bars",
+        "raptorbt.strategy.Timeframe",
+        "raptorbt.strategy.CompositeBar",
+        "raptorbt.Resampler",
+        "raptorbt.ResampledBar",
+        "raptorbt.resample_bars",
+        "raptorbt.resample_trades",
+        "raptorbt.sampling"
+      ]
+    },
+    {
+      "name": "raptorbt-indicators",
+      "domain": "indicators",
+      "title": "Indicators",
+      "path": "indicators/SKILL.md",
+      "description": "Built-in vectorised and streaming indicators.",
+      "load_when": [
+        "Computing SMA, EMA, RSI, ATR, MACD, Bollinger, ADX or supertrend.",
+        "Registering a streaming indicator on a strategy."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.Indicator",
+        "raptorbt.sma",
+        "raptorbt.ema",
+        "raptorbt.rsi",
+        "raptorbt.macd",
+        "raptorbt.stochastic",
+        "raptorbt.atr",
+        "raptorbt.bollinger_bands",
+        "raptorbt.adx",
+        "raptorbt.vwap",
+        "raptorbt.supertrend",
+        "raptorbt.rolling_min",
+        "raptorbt.rolling_max",
+        "raptorbt.resolve_atr_period"
+      ]
+    },
+    {
+      "name": "raptorbt-orders",
+      "domain": "orders",
+      "title": "Orders",
+      "path": "orders/SKILL.md",
+      "description": "Order construction, stops, targets and lifecycle.",
+      "load_when": [
+        "Submitting or managing orders.",
+        "Implementing stop-losses, targets or brackets."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy",
+        "raptorbt-instruments"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.strategy.orders",
+        "raptorbt.MarketOrder",
+        "raptorbt.ClosePosition",
+        "raptorbt.StopConfig",
+        "raptorbt.TargetConfig"
+      ]
+    },
+    {
+      "name": "raptorbt-execution",
+      "domain": "execution",
+      "title": "Execution",
+      "path": "execution/SKILL.md",
+      "description": "Matching, fill timing, slippage and fee models.",
+      "load_when": [
+        "Choosing fill timing, slippage or partial-fill behaviour.",
+        "Setting fees or a custom rate card."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-orders"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.costs",
+        "raptorbt.FeeSchedule",
+        "raptorbt.RateCard",
+        "raptorbt.indian_cost_schedule"
+      ]
+    },
+    {
+      "name": "raptorbt-portfolio",
+      "domain": "portfolio",
+      "title": "Portfolio",
+      "path": "portfolio/SKILL.md",
+      "description": "Positions, capital, accounts and portfolio construction math.",
+      "load_when": [
+        "Running several instruments against one capital pool.",
+        "Using account groups, optimizers, factor panels or rebalancing."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy",
+        "raptorbt-instruments"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.AccountSpec",
+        "raptorbt.run_portfolio_strategy",
+        "raptorbt.run_portfolio_backtest",
+        "raptorbt.PortfolioResult",
+        "raptorbt.AccountResult",
+        "raptorbt.InstrumentSummary",
+        "raptorbt.OptimizerConfig",
+        "raptorbt.OptimizationResult",
+        "raptorbt.OptimizeItem",
+        "raptorbt.optimize_portfolio",
+        "raptorbt.batch_optimize_portfolios",
+        "raptorbt.winsorize_panel",
+        "raptorbt.zscore_panel",
+        "raptorbt.rank_panel",
+        "raptorbt.momentum_panel",
+        "raptorbt.composite_scores",
+        "raptorbt.rank_ic",
+        "raptorbt.RankIC",
+        "raptorbt.simulate_rebalance_policy",
+        "raptorbt.RebalanceSimResult"
+      ]
+    },
+    {
+      "name": "raptorbt-risk",
+      "domain": "risk",
+      "title": "Risk",
+      "path": "risk/SKILL.md",
+      "description": "Risk limits, margin models and safety controls.",
+      "load_when": [
+        "Capping order size, exposure, positions or daily loss.",
+        "Modelling margin.",
+        "Estimating covariance or risk contributions."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-portfolio"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.margin",
+        "raptorbt.MarginModel",
+        "raptorbt.RiskModel",
+        "raptorbt.RiskContributions",
+        "raptorbt.estimate_covariance",
+        "raptorbt.compute_risk_contributions"
+      ]
+    },
+    {
+      "name": "raptorbt-backtesting",
+      "domain": "backtesting",
+      "title": "Backtesting",
+      "path": "backtesting/SKILL.md",
+      "description": "Historical simulation runners.",
+      "load_when": [
+        "Running a historical simulation from arrays.",
+        "Choosing between single, basket, pairs, spread, options and multi runners."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-instruments"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.run_single_backtest",
+        "raptorbt.run_basket_backtest",
+        "raptorbt.run_options_backtest",
+        "raptorbt.run_pairs_backtest",
+        "raptorbt.run_multi_backtest",
+        "raptorbt.run_spread_backtest"
+      ]
+    },
+    {
+      "name": "raptorbt-optimization",
+      "domain": "optimization",
+      "title": "Optimization",
+      "path": "optimization/SKILL.md",
+      "description": "Parameter sweeps, batch runs and Monte Carlo validation.",
+      "load_when": [
+        "Sweeping parameters across many runs.",
+        "Checking robustness with Monte Carlo."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-backtesting",
+        "raptorbt-results"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.BatchSingleItem",
+        "raptorbt.BatchSpreadItem",
+        "raptorbt.batch_single_backtest",
+        "raptorbt.batch_spread_backtest",
+        "raptorbt.simulate_portfolio_mc",
+        "raptorbt.research"
+      ]
+    },
+    {
+      "name": "raptorbt-live-trading",
+      "domain": "live-trading",
+      "title": "Live trading",
+      "path": "live-trading/SKILL.md",
+      "description": "Live runtime and broker-facing integration.",
+      "load_when": [
+        "Driving a strategy from a live feed.",
+        "Preparing paper or live operation."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-strategy",
+        "raptorbt-market-data",
+        "raptorbt-risk"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.LiveNode"
+      ]
+    },
+    {
+      "name": "raptorbt-results",
+      "domain": "results",
+      "title": "Results",
+      "path": "results/SKILL.md",
+      "description": "Performance analysis, trades and diagnostics.",
+      "load_when": [
+        "Reading metrics, equity and drawdown curves, trades or orders.",
+        "Judging whether a result is trustworthy."
+      ],
+      "depends_on": [
+        "raptorbt-core"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.BacktestResult",
+        "raptorbt.BacktestMetrics",
+        "raptorbt.Trade",
+        "raptorbt.full_report",
+        "raptorbt.report"
+      ]
+    },
+    {
+      "name": "raptorbt-deployment",
+      "domain": "deployment",
+      "title": "Deployment",
+      "path": "deployment/SKILL.md",
+      "description": "Runtime configuration, versioning and deployment checks.",
+      "load_when": [
+        "Moving a validated strategy to a runtime.",
+        "Pinning versions and checking compatibility."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-live-trading",
+        "raptorbt-risk"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.version_check"
+      ]
+    },
+    {
+      "name": "raptorbt-troubleshooting",
+      "domain": "troubleshooting",
+      "title": "Troubleshooting",
+      "path": "troubleshooting/SKILL.md",
+      "description": "Structured errors, common failures and debugging.",
+      "load_when": [
+        "A call raised a RaptorBT error.",
+        "Results look wrong or a run was refused."
+      ],
+      "depends_on": [
+        "raptorbt-core"
+      ],
+      "api_version": "2.x",
+      "status": "draft",
+      "modules": [
+        "raptorbt.errors",
+        "raptorbt.RaptorBTError",
+        "raptorbt.InvalidParameter",
+        "raptorbt.InvalidData",
+        "raptorbt.InvalidOrder",
+        "raptorbt.UnsupportedOperation",
+        "raptorbt.StateError",
+        "raptorbt.SessionFinished",
+        "raptorbt.UnknownSymbol"
+      ]
+    }
+  ]
+}
