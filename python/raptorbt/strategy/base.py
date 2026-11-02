@@ -28,6 +28,10 @@ class Strategy:
     #: The run's API state (subscriptions, views); set by the runner.
     _api = None
 
+    #: What the strategy needs, declared as data (see ``raptorbt.strategy.Requirements``);
+    #: a subclass sets ``requirements = Requirements(...)``.
+    requirements = None
+
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         api.check_class(cls)

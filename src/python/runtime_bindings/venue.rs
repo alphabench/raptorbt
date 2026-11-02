@@ -380,6 +380,7 @@ impl VenueRoute {
             tags,
             submitted_ns: ts,
             submitted_idx: sub_idx,
+            size_frac: spec.size_frac,
         };
         {
             let mut ledger = self.ledger.borrow_mut();
@@ -724,6 +725,22 @@ impl VenueRoute {
                 .param("client_order_id")
                 .value(venue_id)
                 .into());
+        }
+        // A venue that amends an order on its own (a simulated one sizing a
+        // capital-fraction order as it fills) is recorded as the change asked
+        // and answered.
+        if matches!(report, ExecutionReport::ReplaceAck { .. }) {
+            let pending = sh.with_book(st.sid, |b, _| {
+                Ok(b.kernel(placed.local)
+                    .order(placed.order_id)
+                    .is_some_and(|o| o.status == OrderStatus::PendingReplace))
+            })?;
+            if !pending {
+                // Not a working order any more: the acknowledgement is late.
+                let _ = sh.with_book_mut(st.sid, |b, _| {
+                    Ok(b.request_venue_replace(placed.local, placed.order_id))
+                })?;
+            }
         }
         let (outcome, events) = sh.with_book_mut(st.sid, |book, _| {
             book.apply_venue_report(placed.local, idx, ts, placed.order_id, report)

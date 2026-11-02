@@ -65,6 +65,9 @@ pub struct PaperVenue {
     placed: HashMap<String, Placed>,
     /// Fills reported so far per order, for execution ids.
     fills: HashMap<String, u32>,
+    /// The quantity the strategy's book holds each order that the venue sizes
+    /// at its fill.
+    quantity: HashMap<String, f64>,
     /// Answers to requests that have no market event of their own (a refused
     /// cancel, an acknowledged change), delivered with the next event.
     queued: Vec<Report>,
@@ -88,6 +91,7 @@ impl PaperVenue {
                 .collect(),
             placed: HashMap::new(),
             fills: HashMap::new(),
+            quantity: HashMap::new(),
             queued: Vec::new(),
             now_ns: 0,
         }
@@ -164,6 +168,22 @@ impl PaperVenue {
                         }
                         _ => 0.0,
                     };
+                    // An order sized by the venue at the fill: amend the
+                    // strategy's quantity to what traded.
+                    if let Some(held) = self.quantity.get_mut(client_id) {
+                        if (*held - *size).abs() > 1e-9 * held.abs().max(1.0) {
+                            *held = *size;
+                            out.push((
+                                client_id.clone(),
+                                ExecutionReport::ReplaceAck {
+                                    new_qty: Some(*size),
+                                    new_limit: None,
+                                    new_trigger: None,
+                                    ts_ns: ts,
+                                },
+                            ));
+                        }
+                    }
                     let n = self.fills.entry(client_id.clone()).or_insert(0);
                     let exec_id = format!("{client_id}.{n}");
                     *n += 1;
@@ -224,6 +244,13 @@ impl PaperVenue {
                 // The strategy's own book raises its margin call from the
                 // same equity; the shadow's only halts its entries.
                 EngineEvent::MarginCall { .. } => {}
+                // Expiry, settlement and corporate actions are applied by the
+                // strategy's own book from the same declared events; the
+                // shadow's copy keeps the venue's position in step and sends
+                // nothing.
+                EngineEvent::Settled { .. }
+                | EngineEvent::CorporateAction { .. }
+                | EngineEvent::LifecycleRefused { .. } => {}
                 other @ (EngineEvent::Entered { .. }
                 | EngineEvent::Exited { .. }
                 | EngineEvent::AlgoStarted { .. }
@@ -257,7 +284,7 @@ impl ExecutionAdapter for PaperVenue {
         };
         let order_id = shadow.book.kernel_mut(instrument).submit_order_full(
             req.side,
-            QtySpec::Units(req.quantity),
+            req.size_frac.map_or(QtySpec::Units(req.quantity), QtySpec::CapitalFrac),
             req.kind,
             req.tif,
             req.submitted_idx,
@@ -270,6 +297,9 @@ impl ExecutionAdapter for PaperVenue {
             parent,
         );
         self.now_ns = self.now_ns.max(req.submitted_ns);
+        if req.size_frac.is_some() {
+            self.quantity.insert(req.client_order_id.clone(), req.quantity);
+        }
         self.placed.insert(req.client_order_id.clone(), Placed { strategy, instrument, order_id });
         Ok(())
     }

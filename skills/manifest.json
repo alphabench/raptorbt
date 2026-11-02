@@ -44,6 +44,28 @@
       "status": "draft",
       "modules": [
         "raptorbt.strategy",
+        "raptorbt.strategy.Requirements",
+        "raptorbt.strategy.Underlying",
+        "raptorbt.strategy.Instrument",
+        "raptorbt.strategy.Future",
+        "raptorbt.strategy.Chain",
+        "raptorbt.strategy.StrikeWindow",
+        "raptorbt.strategy.ByDelta",
+        "raptorbt.strategy.Holding",
+        "raptorbt.strategy.Bars",
+        "raptorbt.strategy.Duration",
+        "raptorbt.strategy.Legs",
+        "raptorbt.strategy.ParamSchema",
+        "raptorbt.strategy.ParamSpec",
+        "raptorbt.strategy.Issue",
+        "raptorbt.strategy.RequirementsError",
+        "raptorbt.strategy.SymbolPlan",
+        "raptorbt.strategy.RolePlan",
+        "raptorbt.strategy.check_requirements",
+        "raptorbt.strategy.params_schema",
+        "raptorbt.strategy.param",
+        "raptorbt.strategy.requirements_hash",
+        "raptorbt.strategy.resolve",
         "raptorbt.Strategy",
         "raptorbt.StrategyConfig",
         "raptorbt.StrategyContext",
@@ -256,7 +278,8 @@
         "raptorbt.costs",
         "raptorbt.FeeSchedule",
         "raptorbt.RateCard",
-        "raptorbt.indian_cost_schedule"
+        "raptorbt.indian_cost_schedule",
+        "raptorbt.execution"
       ]
     },
     {
@@ -397,7 +420,8 @@
       "api_version": "2.x",
       "status": "draft",
       "modules": [
-        "raptorbt.LiveNode"
+        "raptorbt.LiveNode",
+        "raptorbt.adapters"
       ]
     },
     {

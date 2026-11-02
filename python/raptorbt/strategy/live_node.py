@@ -38,6 +38,7 @@ from raptorbt._raptorbt import (
     AccountResult,
     ExecutionReport,
     BacktestConfig,
+    CorporateAction,
     InstrumentConfig,
     MarketData,
     PortfolioResult,
@@ -56,6 +57,7 @@ from raptorbt.strategy.accounts import (
     check_group_sizes,
     unpack_entries,
 )
+from raptorbt.strategy._validate import ensure_prices_finite, ensure_pushed_finite
 from raptorbt.strategy._commands import dispatch_events, reject_atr_stops, session_tz_offset_ns
 from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy.base import Strategy
@@ -67,7 +69,7 @@ from raptorbt.strategy.context import (
     TradeTick,
     WorkingOrder,
 )
-from raptorbt.strategy.multi_runner import _add_strategy, _normalise, _primary_bars
+from raptorbt.strategy.multi_runner import _add_strategy, _lifecycle, _normalise, _primary_bars
 
 #: Rows kept per symbol and kind (bars, tick rows, depth snapshots) when
 #: ``history`` is not given. About 1 MB per active symbol for bars and ticks,
@@ -155,6 +157,12 @@ class LiveNode:
     ``tags["client_id"]``. See :mod:`raptorbt.execution` for the parity of
     each mode with a backtest.
 
+    ``corporate_actions`` (:class:`~raptorbt.CorporateAction`) and
+    ``adjustment_policy`` are as in :func:`~raptorbt.run_strategies`, except
+    that a live node takes ``"raw"`` only: prices are as traded and positions
+    are rescaled, and dividends paid, at the ex-date. Declare them for every
+    action the node will see; without a policy there must be none.
+
     ``processing_latency_ns`` declares how long the engine takes to act on an
     event after it arrives. Every event has three times (see
     ``docs/architecture/event-semantics.md``): the exchange's, the arrival and
@@ -190,6 +198,8 @@ class LiveNode:
         execution: ExecutionAdapter | PaperExecution | SimulatedExecution | None = None,
         venue_account: str | None = None,
         protective: Literal["venue", "local"] = "venue",
+        corporate_actions: Iterable[CorporateAction] | None = None,
+        adjustment_policy: Literal["raw", "adjusted"] | None = None,
         processing_latency_ns: int = 0,
         _via: str | None = None,
     ):
@@ -255,6 +265,12 @@ class LiveNode:
         entries = _normalise(strategies, dict.fromkeys(symbols), name)
         seeds = _seeds(initial_positions, entries)
         reject_atr_stops(config, instrument_configs, symbols)
+        # Pushed events cannot be put on one later basis, so every symbol counts
+        # as a tick symbol: only the policy 'raw' (prices as traded, positions
+        # rescaled at the ex-date) is open to a live node.
+        corporate_actions, adjustment_policy = _lifecycle(
+            corporate_actions, adjustment_policy, set(symbols), set(symbols), name
+        )
 
         self._protective = protective
         self._symbols = symbols
@@ -336,6 +352,8 @@ class LiveNode:
                 self._ctxs.append(ctx)
                 self._views.append(view)
                 self._symbols_of.append(syms)
+            if adjustment_policy is not None:
+                rt.set_corporate_actions(corporate_actions, adjustment_policy)
             rt.finalize()
             # Prime indicators and strategy state from the warmup history now,
             # so the node is warm before the first live event.
@@ -385,6 +403,7 @@ class LiveNode:
         a decreasing one raises ``ValueError`` and changes nothing.
         """
         self._check_open()
+        ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
         return self._rt.push_tick(
             self._index_of[symbol],
             timestamp,
@@ -417,6 +436,9 @@ class LiveNode:
         ``timestamp`` is stamped as the node's ``bar_stamp`` declares.
         """
         self._check_open()
+        ensure_pushed_finite(
+            symbol, f"{self._name}.push_bar", open=open, high=high, low=low, close=close
+        )
         self._stamps.warn_missing(f"{self._name}.push_bar", stacklevel=3 + self._extra)
         self._rt.push_bar(
             self._index_of[symbol], timestamp, open, high, low, close, volume, arrival_ns
@@ -433,6 +455,11 @@ class LiveNode:
     ) -> None:
         """Feed one depth snapshot: ``(price, size)`` lists, best first."""
         self._check_open()
+        ensure_pushed_finite(
+            symbol,
+            f"{self._name}.push_depth",
+            **{f"{side}[{i}]": price for side, levels in (("bids", bids), ("asks", asks)) for i, (price, _) in enumerate(levels)},
+        )
         self._rt.push_depth(self._index_of[symbol], timestamp, bids, asks, arrival_ns)
 
     def advance_time(self, timestamp: int) -> None:
@@ -649,6 +676,7 @@ def _warmup(warmup_bars, index_of, stamps):
                     value=len(col),
                     valid=[len(ts)],
                 )
+        ensure_prices_finite(f"{symbol} warmup bars", "LiveNode", dict(zip(_BAR_FIELDS, cols)))
         closes = stamps.visible(symbol, ts)
         rows.extend(
             (int(closes[j]), i, j, (i, int(ts[j]), *(float(c[j]) for c in cols)))

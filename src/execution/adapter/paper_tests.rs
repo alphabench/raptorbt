@@ -125,6 +125,7 @@ fn run_venue(
                         tags: Default::default(),
                         submitted_ns: bar.timestamp,
                         submitted_idx: i,
+                        size_frac: None,
                     })
                     .unwrap();
             }
@@ -272,6 +273,7 @@ fn cancelling_and_changing_an_order_go_through_the_venue() {
             tags: Default::default(),
             submitted_ns: MIN,
             submitted_idx: 0,
+            size_frac: None,
         })
         .unwrap();
     // The same id sent twice is one order.
@@ -330,6 +332,7 @@ fn sample_request() -> OrderRequest {
         tags: Default::default(),
         submitted_ns: MIN,
         submitted_idx: 0,
+        size_frac: None,
     }
 }
 

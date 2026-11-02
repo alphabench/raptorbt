@@ -39,6 +39,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+# The broker mappings use only the standard library for HTTP, so the extras add
+# no packages today. They exist so a project can depend on `raptorbt[kite]` and
+# keep working if a mapping later needs a client library.
+kite = []
+upstox = []
+dhan = []
+
 [project.urls]
 Homepage = "https://www.alphabench.in/raptorbt"
 Repository = "https://github.com/alphabench/raptorbt"

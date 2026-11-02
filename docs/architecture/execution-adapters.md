@@ -125,10 +125,13 @@ trailing orders, `Twap`, timers, risk limits, drawdown and margin halts,
 adopted positions, warmup, order latency, the session square-off and
 structures. Not equal, each a strict `xfail` naming its reason:
 
-1. **Sizing time.** A capital-fraction order that rests, or is deferred to the
-   next open, is sized when sent; in-process it is sized when it fills, with
-   the capital of that moment (`pf_typed_resting`, `pf_fill_same_bar_close`,
-   `pf_fill_next_bar_open`).
+1. **Sizing time of an entry intent.** `enter()` under `fill_timing="next_bar_open"`
+   is sized from the capital on the signal bar and fills at the next open;
+   in-process it is sized there (`pf_fill_next_bar_open`). (A capital-fraction
+   *order* is sized by the simulated venue as it fills, which amends the
+   order's quantity with a replace acknowledgement, so resting and sliced
+   fraction orders equal in-process; a real adapter works the quantity
+   estimated when the order was sent.)
 2. **Hedging.** Under `oms_type="hedging"` every order opens, so no order can
    close one position: closes, protection and flattening by order are not
    representable (`pf_margin_hedging`, `pf_cash_hedging`, `st_margin_hedging`).
@@ -136,9 +139,7 @@ structures. Not equal, each a strict `xfail` naming its reason:
    typed market order made earlier in the same step: in-process the entry fills
    first; at a venue they fill in the order they were sent
    (`st_refused_rows_timers`).
-4. **Slicing.** With `partial_fills`, a capital-fraction order fills whole
-   in-process but, being units, in slices at a venue (`st_queue_depth_latency`).
-5. Closes and protection exit with reason `Order`, not `Signal`, `StopLoss` or
+4. Closes and protection exit with reason `Order`, not `Signal`, `StopLoss` or
    `TakeProfit`; the engine's own orders are extra order records.
 
 Refused up front: ATR-based stops on a live node (it has no bar series, with

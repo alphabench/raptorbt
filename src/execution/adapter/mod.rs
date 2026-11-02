@@ -87,6 +87,12 @@ pub struct OrderRequest {
     /// needs it to keep an order from matching on the event that produced it;
     /// a real venue ignores it.
     pub submitted_idx: usize,
+    /// The order was sized as this fraction of the capital on hand, and
+    /// `quantity` is the engine's estimate from when it was sent. A simulated
+    /// venue sizes it again when it fills, as a backtest does, and amends the
+    /// order's quantity to what traded; a real venue works `quantity` and
+    /// ignores this.
+    pub size_frac: Option<f64>,
 }
 
 /// A change to a working order. `None` leaves a field as it is.

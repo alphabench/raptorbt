@@ -896,8 +896,6 @@ def stream_digest(name, execution):
 DIFFERS = {
     "st_refused_rows_timers": "an entry intent held for the next print fills after a typed market "
     "order made earlier in the same step; in-process it fills first",
-    "st_queue_depth_latency": "a capital-fraction order is sliced by print size at a venue "
-    "(it is units there); in-process it fills whole",
     "st_margin_hedging": "under hedging every order opens, so no order can close a position",
 }
 
@@ -954,9 +952,7 @@ PORTFOLIO_OK = [
     "pf_bar_stamp_dict_tz", "pf_legacy_stamp_warning",
 ]
 PORTFOLIO_DIFFERS = {
-    "pf_fill_next_bar_open": "an entry sized from the capital on the signal bar fills at the next open; in-process it is sized there",
-    "pf_fill_same_bar_close": "a resting limit sized from the capital when it was sent; in-process it is sized when it fills",
-    "pf_typed_resting": "the same: capital-fraction orders resting for bars are sized when sent",
+    "pf_fill_next_bar_open": "an entry intent is sized from the capital on the signal bar and fills at the next open; in-process it is sized there",
     "pf_margin_hedging": "under hedging every order opens, so no order can close a position",
     "pf_cash_hedging": "under hedging every order opens, so no order can close a position",
 }
@@ -1157,3 +1153,72 @@ def test_twap_sends_its_slices_as_market_orders_on_its_schedule():
     sliced = [(r.order_type, r.side, r.quantity) for r in venue.requests]
     assert sliced == [("market", "buy", 3.0)] * 3
     assert [r.submitted_ns for r in venue.requests] == [MIN, 3 * MIN, 5 * MIN]
+
+
+# -- pushed prices must be finite; corporate actions on a live node -------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_pushed_price_that_is_not_finite_is_refused_and_changes_nothing(bad):
+    for execution in (None, PaperExecution(), Venue()):
+        strategy = Hooked()
+        node = node_with(execution, [strategy], symbols=("A",))
+        bar(node, "A", 0)
+        with pytest.raises(InvalidData) as e:
+            node.push_bar("A", 2 * MIN, 100.0, bad, 99.0, 100.0, 10.0)
+        assert e.value.code == "non_finite_price" and e.value.parameter == "high"
+        with pytest.raises(InvalidData) as e:
+            node.push_tick("A", 3 * MIN, bad, 99.0, 101.0)
+        assert e.value.parameter == "ltp"
+        with pytest.raises(InvalidData) as e:
+            node.push_tick("A", 3 * MIN, 100.0, 99.0, bad)
+        assert e.value.parameter == "ask"
+        with pytest.raises(InvalidData) as e:
+            node.push_depth("A", 3 * MIN, [(99.0, 5.0), (bad, 5.0)], [(101.0, 5.0)])
+        assert e.value.parameter == "bids[1]"
+        assert strategy.n == 1, "nothing was delivered"
+        bar(node, "A", 1)  # the node still takes good data
+        assert strategy.n == 2
+
+
+def test_warmup_bars_are_checked_for_finite_prices_too():
+    warm = {"timestamps": np.array([MIN, 2 * MIN], dtype=np.int64), "open": np.array([1.0, 1.0]), "high": np.array([1.0, float("nan")]), "low": np.array([1.0, 1.0]), "close": np.array([1.0, 1.0]), "volume": np.array([1.0, 1.0])}
+    with pytest.raises(InvalidData) as e:
+        LiveNode([Hooked()], ["A"], bar_stamp="close", warmup_bars={"A": warm})
+    assert e.value.code == "non_finite_price"
+
+
+def test_a_live_node_takes_corporate_actions_as_a_batch_run_does():
+    import test_lifecycle as tl
+    from raptorbt import CorporateAction
+
+    closes = [100.0, 100.0, 50.0, 50.0, 55.0]
+    data = {"A": tl.bars(closes)}
+    actions = [CorporateAction.split("A", 2, 2.0)]
+    batch_strategy = tl.holder("A", units=10.0)
+    batch = tl.run(batch_strategy, data, corporate_actions=actions, adjustment_policy="raw")
+    for execution in (None, PaperExecution()):
+        live_strategy = tl.holder("A", units=10.0)
+        node = LiveNode([live_strategy], ["A"], tl.config(), bar_stamp="close", corporate_actions=actions, adjustment_policy="raw", execution=execution)
+        a = data["A"]
+        for i in range(len(closes)):
+            node.push_bar("A", int(a["timestamps"][i]), *(float(a[c][i]) for c in ("open", "high", "low", "close", "volume")))
+        live = node.finish()[0]
+        assert [(t.size, t.entry_price, t.pnl) for t in live.result.trades()] == [(t.size, t.entry_price, t.pnl) for t in batch.result.trades()]
+        assert list(live.result.equity_curve()) == list(batch.result.equity_curve())
+        assert [e.outcome for e in live_strategy.lifecycle if e.kind == "corporate_action"] == ["split"]
+
+
+def test_a_live_node_refuses_what_a_batch_run_refuses_about_corporate_actions():
+    from raptorbt import CorporateAction
+
+    split = [CorporateAction.split("A", 2, 2.0)]
+    with pytest.raises(InvalidParameter) as e:
+        LiveNode([Hooked()], ["A"], bar_stamp="close", corporate_actions=split)
+    assert e.value.code == "invalid_adjustment_policy"
+    with pytest.raises(InvalidParameter) as e:  # pushed events cannot be put on a later basis
+        LiveNode([Hooked()], ["A"], bar_stamp="close", corporate_actions=split, adjustment_policy="adjusted")
+    assert e.value.code == "invalid_adjustment_policy"
+    with pytest.raises(Exception) as e:
+        LiveNode([Hooked()], ["A"], bar_stamp="close", corporate_actions=[CorporateAction.split("B", 2, 2.0)], adjustment_policy="raw")
+    assert e.value.code == "unknown_symbol"
