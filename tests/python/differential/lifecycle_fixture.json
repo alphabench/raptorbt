@@ -1,0 +1,1124 @@
+{
+ "generated_with": "reference implementation",
+ "capital": 1000000.0,
+ "t0": 1760000000000000000,
+ "minute": 60000000000,
+ "scenarios": [
+  {
+   "name": "future_cash_at_the_underlying",
+   "kind": "FUTURE",
+   "side": "BUY",
+   "qty": 2,
+   "multiplier": 1,
+   "der_closes": [
+    100,
+    100,
+    100
+   ],
+   "und_closes": [
+    200,
+    200,
+    201,
+    202,
+    203,
+    204
+   ],
+   "expiry_min": 4,
+   "old": {
+    "cash": 1000206.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      203.0,
+      2.0,
+      206.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "future_short_with_multiplier",
+   "kind": "FUTURE",
+   "side": "SELL",
+   "qty": 3,
+   "multiplier": 100,
+   "der_closes": [
+    50,
+    50,
+    50
+   ],
+   "und_closes": [
+    60,
+    60,
+    61,
+    62,
+    59.5,
+    58
+   ],
+   "expiry_min": 4,
+   "old": {
+    "cash": 997150.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      59.5,
+      3.0,
+      -2850.0,
+      -1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "future_at_a_declared_final_price",
+   "kind": "FUTURE",
+   "side": "BUY",
+   "qty": 2,
+   "multiplier": 1,
+   "der_closes": [
+    100,
+    100,
+    101
+   ],
+   "und_closes": [
+    200,
+    200,
+    201,
+    202,
+    203
+   ],
+   "expiry_min": 4,
+   "declared": 321.5,
+   "old": {
+    "cash": 1000443.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      321.5,
+      2.0,
+      443.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "call_cash_in_the_money",
+   "kind": "CALL",
+   "side": "BUY",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    32
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1540
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "old": {
+    "cash": 1004000.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      40.0,
+      400.0,
+      4000.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "call_cash_out_of_the_money",
+   "kind": "CALL",
+   "side": "BUY",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    28
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1480
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "old": {
+    "cash": 988000.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      0.0,
+      400.0,
+      -12000.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "put_cash_short_in_the_money",
+   "kind": "PUT",
+   "side": "SELL",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    29
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1460
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "old": {
+    "cash": 996000.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      40.0,
+      400.0,
+      -4000.0,
+      -1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "call_physical_long_exercised",
+   "kind": "CALL",
+   "side": "BUY",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    32
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1540
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "settlement": "PHYSICAL",
+   "old": {
+    "cash": 988000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      400.0,
+      1500.0
+     ]
+    ],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      0.0,
+      400.0,
+      -12000.0,
+      1,
+      0.0,
+      0.0
+     ],
+     [
+      "NSE:UND",
+      "EndOfData",
+      1540.0,
+      400.0,
+      16000.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": [
+     [
+      "EXERCISE",
+      400.0,
+      1500.0
+     ]
+    ]
+   }
+  },
+  {
+   "name": "call_physical_short_assigned",
+   "kind": "CALL",
+   "side": "SELL",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    32
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1540
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "settlement": "PHYSICAL",
+   "old": {
+    "cash": 1012000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      -400.0,
+      1500.0
+     ]
+    ],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      0.0,
+      400.0,
+      12000.0,
+      -1,
+      0.0,
+      0.0
+     ],
+     [
+      "NSE:UND",
+      "EndOfData",
+      1540.0,
+      400.0,
+      -16000.0,
+      -1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": [
+     [
+      "ASSIGNMENT",
+      400.0,
+      1500.0
+     ]
+    ]
+   }
+  },
+  {
+   "name": "put_physical_short_assigned",
+   "kind": "PUT",
+   "side": "SELL",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    32
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1460
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "settlement": "PHYSICAL",
+   "old": {
+    "cash": 1012000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      400.0,
+      1500.0
+     ]
+    ],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      0.0,
+      400.0,
+      12000.0,
+      -1,
+      0.0,
+      0.0
+     ],
+     [
+      "NSE:UND",
+      "EndOfData",
+      1460.0,
+      400.0,
+      -16000.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": [
+     [
+      "ASSIGNMENT",
+      400.0,
+      1500.0
+     ]
+    ]
+   }
+  },
+  {
+   "name": "call_physical_out_of_the_money",
+   "kind": "CALL",
+   "side": "BUY",
+   "qty": 400,
+   "multiplier": 1,
+   "der_closes": [
+    30,
+    30,
+    28
+   ],
+   "und_closes": [
+    1490,
+    1500,
+    1510,
+    1520,
+    1480
+   ],
+   "expiry_min": 4,
+   "strike": 1500,
+   "settlement": "PHYSICAL",
+   "old": {
+    "cash": 988000.0,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      0.0,
+      400.0,
+      -12000.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": [
+     [
+      "EXPIRY",
+      400.0,
+      1500.0
+     ]
+    ]
+   }
+  },
+  {
+   "name": "split_two_for_one",
+   "kind": "SHARE",
+   "side": "BUY",
+   "qty": 10,
+   "multiplier": 1,
+   "und_closes": [
+    100,
+    100,
+    50,
+    50,
+    55
+   ],
+   "action": {
+    "minute": 2,
+    "kind": "SPLIT",
+    "ratio": 2
+   },
+   "old": {
+    "cash": 1000000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      20.0,
+      50.0
+     ]
+    ],
+    "trades": [
+     [
+      "NSE:UND",
+      "EndOfData",
+      55.0,
+      20.0,
+      100.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "bonus_one_for_one_short",
+   "kind": "SHARE",
+   "side": "SELL",
+   "qty": 10,
+   "multiplier": 1,
+   "und_closes": [
+    100,
+    100,
+    50,
+    50,
+    55
+   ],
+   "action": {
+    "minute": 2,
+    "kind": "BONUS",
+    "ratio": 2
+   },
+   "old": {
+    "cash": 1000000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      -20.0,
+      50.0
+     ]
+    ],
+    "trades": [
+     [
+      "NSE:UND",
+      "EndOfData",
+      55.0,
+      20.0,
+      -100.0,
+      -1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "split_with_a_fraction_of_a_share",
+   "kind": "SHARE",
+   "side": "BUY",
+   "qty": 3,
+   "multiplier": 1,
+   "und_closes": [
+    100,
+    100,
+    66,
+    66,
+    70
+   ],
+   "action": {
+    "minute": 2,
+    "kind": "SPLIT",
+    "ratio": 1.5
+   },
+   "old": {
+    "cash": 1000000.0,
+    "positions": [
+     [
+      "NSE:UND",
+      4.0,
+      66.66666666666667
+     ]
+    ],
+    "trades": [
+     [
+      "NSE:UND",
+      "EndOfData",
+      70.0,
+      4.0,
+      13.333333333333314,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "future_charged_on_the_settlement_row",
+   "kind": "FUTURE",
+   "side": "BUY",
+   "qty": 50,
+   "multiplier": 1,
+   "der_closes": [
+    100,
+    100,
+    100
+   ],
+   "und_closes": [
+    200,
+    200,
+    201,
+    202,
+    203,
+    204
+   ],
+   "expiry_min": 4,
+   "cards": [
+    {
+     "name": "lifecycle-a",
+     "effective_from": "2025-10-01T00:00:00+05:30",
+     "source": "differential fixture",
+     "rates": [
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "20"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "INTRADAY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "DELIVERY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.125",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.0005",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0",
+       "gst_percent": "18",
+       "event": "SETTLEMENT"
+      }
+     ]
+    }
+   ],
+   "old": {
+    "cash": 1005113.53,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      203.0,
+      50.0,
+      5113.53,
+      1,
+      23.71,
+      12.76
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "future_with_no_settlement_row_settles_free",
+   "kind": "FUTURE",
+   "side": "BUY",
+   "qty": 50,
+   "multiplier": 1,
+   "der_closes": [
+    100,
+    100,
+    100
+   ],
+   "und_closes": [
+    200,
+    200,
+    201,
+    202,
+    203,
+    204
+   ],
+   "expiry_min": 4,
+   "cards": [
+    {
+     "name": "lifecycle-c",
+     "effective_from": "2025-10-01T00:00:00+05:30",
+     "source": "differential fixture",
+     "rates": [
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "20"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "INTRADAY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "DELIVERY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      }
+     ]
+    }
+   ],
+   "old": {
+    "cash": 1005126.29,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Settlement",
+      203.0,
+      50.0,
+      5126.29,
+      1,
+      23.71,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "fills_are_charged_on_the_row_of_their_day",
+   "kind": "FUTURE",
+   "side": "BUY",
+   "qty": 50,
+   "multiplier": 1,
+   "step": 86400000000000,
+   "plan": [
+    [
+     0,
+     "BUY",
+     50
+    ],
+    [
+     3,
+     "SELL",
+     50
+    ]
+   ],
+   "der_closes": [
+    100,
+    100,
+    100,
+    110,
+    110,
+    110
+   ],
+   "und_closes": [
+    200,
+    200,
+    200,
+    210,
+    210,
+    210
+   ],
+   "expiry_min": null,
+   "cards": [
+    {
+     "name": "lifecycle-a",
+     "effective_from": "2025-10-01T00:00:00+05:30",
+     "source": "differential fixture",
+     "rates": [
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "20"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "INTRADAY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "DELIVERY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.05",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.125",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.0005",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0",
+       "gst_percent": "18",
+       "event": "SETTLEMENT"
+      }
+     ]
+    },
+    {
+     "name": "lifecycle-b",
+     "effective_from": "2025-10-11T00:00:00+05:30",
+     "source": "differential fixture",
+     "rates": [
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "35"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.06",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "INTRADAY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.06",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NSE",
+       "segment": "DELIVERY",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.06",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.00183",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0.002",
+       "gst_percent": "18"
+      },
+      {
+       "exchange": "NFO",
+       "segment": "FUTURES",
+       "underlying": null,
+       "brokerage": {
+        "per_order": "0"
+       },
+       "transaction_tax": {
+        "kind": "STT",
+        "percent": "0.2",
+        "sides": [
+         "SELL"
+        ]
+       },
+       "exchange_turnover_percent": "0.0005",
+       "sebi_percent": "0.0001",
+       "stamp_duty_percent": "0",
+       "gst_percent": "18",
+       "event": "SETTLEMENT"
+      }
+     ]
+    }
+   ],
+   "old": {
+    "cash": 1000431.56,
+    "positions": [],
+    "trades": [
+     [
+      "NFO:DER",
+      "Order",
+      110.0,
+      50.0,
+      431.56,
+      1,
+      23.71,
+      44.73
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "dividend_long",
+   "kind": "SHARE",
+   "side": "BUY",
+   "qty": 10,
+   "multiplier": 1,
+   "und_closes": [
+    100,
+    100,
+    100,
+    100
+   ],
+   "action": {
+    "minute": 2,
+    "kind": "DIVIDEND",
+    "amount": 3.5
+   },
+   "old": {
+    "cash": 1000035.0,
+    "positions": [
+     [
+      "NSE:UND",
+      10.0,
+      100.0
+     ]
+    ],
+    "trades": [
+     [
+      "NSE:UND",
+      "EndOfData",
+      100.0,
+      10.0,
+      0.0,
+      1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  },
+  {
+   "name": "dividend_short_pays",
+   "kind": "SHARE",
+   "side": "SELL",
+   "qty": 10,
+   "multiplier": 1,
+   "und_closes": [
+    100,
+    100,
+    100,
+    100
+   ],
+   "action": {
+    "minute": 2,
+    "kind": "DIVIDEND",
+    "amount": 3.5
+   },
+   "old": {
+    "cash": 999965.0,
+    "positions": [
+     [
+      "NSE:UND",
+      -10.0,
+      100.0
+     ]
+    ],
+    "trades": [
+     [
+      "NSE:UND",
+      "EndOfData",
+      100.0,
+      10.0,
+      -0.0,
+      -1,
+      0.0,
+      0.0
+     ]
+    ],
+    "lifecycle": []
+   }
+  }
+ ]
+}

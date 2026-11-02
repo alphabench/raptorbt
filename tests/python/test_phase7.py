@@ -56,7 +56,8 @@ class TestStreamingIndicators:
         assert boll.update_bar(0, 0, 0, 100.0) is None
         assert not boll.initialized
         boll.update_bar(0, 0, 0, 102.0)
-        mid, upper, lower = boll.update_bar(0, 0, 0, 104.0)
+        bands = boll.update_bar(0, 0, 0, 104.0)
+        mid, upper, lower = bands.middle, bands.upper, bands.lower
         assert mid == pytest.approx(102.0)
         assert upper > mid > lower
         assert boll.initialized

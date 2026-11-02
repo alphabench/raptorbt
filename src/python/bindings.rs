@@ -6,7 +6,6 @@ use pyo3::prelude::*;
 
 use super::errors::Fail;
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::core::types::{
@@ -183,6 +182,10 @@ pub struct PyBacktestConfig {
     /// both setters), or `None` for the built-in presets.
     fee_rates: Option<crate::execution::costs::FeeRates>,
     fee_schedule: Option<super::costs_bindings::PyFeeSchedule>,
+    /// Decimals cash, fees and realised P&L are booked in (default 2).
+    #[pyo3(get)]
+    money_decimals: u32,
+    margin_model: Option<super::margin_bindings::PyMarginModel>,
     stop_config: StopConfig,
     target_config: TargetConfig,
     /// Execution-timing policy, parsed at construction; `None` derives it
@@ -228,6 +231,8 @@ impl PyBacktestConfig {
         max_daily_loss_pct=None,
         flatten_on_daily_loss=false,
         fee_schedule=None,
+        money_decimals=2,
+        margin_model=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -263,7 +268,10 @@ impl PyBacktestConfig {
         max_daily_loss_pct: Option<f64>,
         flatten_on_daily_loss: bool,
         fee_schedule: Option<super::costs_bindings::PyFeeSchedule>,
+        money_decimals: u32,
+        margin_model: Option<super::margin_bindings::PyMarginModel>,
     ) -> PyResult<Self> {
+        check_money_decimals(money_decimals)?;
         let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
         let fill_timing = parse_fill_timing(fill_timing.as_deref())?;
         let fee_rates = Self::resolve_fee_rates(fee_schedule.as_ref(), fee_segment.as_deref())?;
@@ -299,11 +307,31 @@ impl PyBacktestConfig {
             flatten_on_daily_loss,
             fee_rates,
             fee_schedule,
+            money_decimals,
+            margin_model,
             stop_config: StopConfig::None,
             target_config: TargetConfig::None,
             squareoff_time_minutes,
             fill_timing,
         })
+    }
+
+    #[setter]
+    fn set_money_decimals(&mut self, decimals: u32) -> PyResult<()> {
+        check_money_decimals(decimals)?;
+        self.money_decimals = decimals;
+        Ok(())
+    }
+
+    /// How a margin account funds an entry, or `None` for the built-in rule.
+    #[getter]
+    fn margin_model(&self) -> Option<super::margin_bindings::PyMarginModel> {
+        self.margin_model.clone()
+    }
+
+    #[setter]
+    fn set_margin_model(&mut self, model: Option<super::margin_bindings::PyMarginModel>) {
+        self.margin_model = model;
     }
 
     /// The fee schedule that prices `fee_segment`, or `None` for the built-in
@@ -463,6 +491,15 @@ impl PyBacktestConfig {
     }
 }
 
+fn check_money_decimals(decimals: u32) -> PyResult<()> {
+    crate::accounts::MoneyScale::new(decimals).map(|_| ()).map_err(|e| {
+        Fail::new("invalid_money_decimals", e.to_string())
+            .param("money_decimals")
+            .value(f64::from(decimals))
+            .into()
+    })
+}
+
 impl From<&PyBacktestConfig> for BacktestConfig {
     fn from(py_config: &PyBacktestConfig) -> Self {
         BacktestConfig {
@@ -480,6 +517,22 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             squareoff_time_minutes: py_config.squareoff_time_minutes,
             fee_segment: py_config.fee_segment.clone(),
             fee_rates: py_config.fee_rates,
+            // Validated when the schedule was attached, so the row exists.
+            fee_binding: match (&py_config.fee_schedule, py_config.fee_segment.as_deref()) {
+                (Some(s), Some(seg)) => super::costs_bindings::resolve_row(&s.inner, seg).ok().map(
+                    |(venue, segment, _)| crate::execution::fees::FeeBinding {
+                        schedule: s.inner.clone(),
+                        venue,
+                        segment,
+                    },
+                ),
+                _ => None,
+            },
+            money_decimals: py_config.money_decimals,
+            margin_model: py_config
+                .margin_model
+                .as_ref()
+                .map(|m| std::sync::Arc::new(m.inner.clone())),
             max_positions: py_config.max_positions,
             max_drawdown_pct: py_config.max_drawdown_pct,
             legacy_annualization: py_config.legacy_annualization,
@@ -779,6 +832,23 @@ pub struct PyTrade {
     /// best point of the trade, before costs. Never negative.
     #[pyo3(get)]
     pub mfe_pnl: Option<f64>,
+    /// Decimals of the minor units below, or `None` on paths that account in
+    /// floats (the multi-leg simulators).
+    #[pyo3(get)]
+    pub money_decimals: Option<u8>,
+    /// Realised P&L as an exact integer count of minor units; `pnl` is this
+    /// divided by `10 ** money_decimals`.
+    #[pyo3(get)]
+    pub pnl_minor: Option<i128>,
+    /// Entry plus exit costs, in minor units.
+    #[pyo3(get)]
+    pub fees_minor: Option<i128>,
+    /// Booked notional of the entry (`price * size * multiplier`), in minor units.
+    #[pyo3(get)]
+    pub entry_notional_minor: Option<i128>,
+    /// Booked notional of the exit, in minor units.
+    #[pyo3(get)]
+    pub exit_notional_minor: Option<i128>,
 }
 
 /// Python-exposed order record.
@@ -896,7 +966,9 @@ pub struct PyBacktestMetrics {
     #[pyo3(get)]
     pub total_return_pct: f64,
     #[pyo3(get)]
-    pub sharpe_ratio: f64,
+    /// None when the equity curve has too few samples or no variance (a run
+    /// that never traded): the ratio is undefined, not zero.
+    pub sharpe_ratio: Option<f64>,
     #[pyo3(get)]
     pub sortino_ratio: Option<f64>,
     #[pyo3(get)]
@@ -920,8 +992,13 @@ pub struct PyBacktestMetrics {
     /// Share of equity samples strictly below the running high-water mark.
     #[pyo3(get)]
     pub time_under_water_pct: f64,
+    /// Closed trades that made money, as a percentage of closed trades (net of
+    /// fees; a position still open when the data ended is not counted). None
+    /// when no trade closed.
     #[pyo3(get)]
-    pub win_rate_pct: f64,
+    pub win_rate_pct: Option<f64>,
+    /// Gross profit over gross loss across closed trades, net of fees. None
+    /// when no closed trade lost: the ratio has no denominator.
     #[pyo3(get)]
     pub profit_factor: Option<f64>,
     #[pyo3(get)]
@@ -1011,8 +1088,11 @@ pub struct PyBacktestMetrics {
 impl PyBacktestMetrics {
     fn __repr__(&self) -> String {
         format!(
-            "BacktestMetrics(return={:.2}%, sharpe={:.2}, max_dd={:.2}%, trades={})",
-            self.total_return_pct, self.sharpe_ratio, self.max_drawdown_pct, self.total_trades
+            "BacktestMetrics(return={:.2}%, sharpe={}, max_dd={:.2}%, trades={})",
+            self.total_return_pct,
+            self.sharpe_ratio.map_or("None".to_string(), |s| format!("{s:.2}")),
+            self.max_drawdown_pct,
+            self.total_trades
         )
     }
 
@@ -1155,16 +1235,17 @@ pub fn run_single_backtest<'py>(
     // them doubled peak memory for no benefit -- 1.25 GB of duplicates on a
     // 25M-bar run, where the copy alone was 13.6% of total runtime.
     let ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
+        timestamps: numpy_cow_i64(&timestamps),
+        open: numpy_cow_f64(&open),
+        high: numpy_cow_f64(&high),
+        low: numpy_cow_f64(&low),
+        close: numpy_cow_f64(&close),
+        volume: numpy_cow_f64(&volume),
     };
 
     let dir = parse_direction(direction)?;
     crate::data::ensure_time_sorted(&format!("{symbol} bars"), ohlcv.timestamps.iter().copied())?;
+    crate::data::ensure_prices_finite(&format!("{symbol} bars"), &ohlcv)?;
 
     let signals = CompiledSignals {
         symbol: symbol.to_string(),
@@ -1201,21 +1282,22 @@ pub fn run_basket_backtest<'py>(
         .iter()
         .map(|(ts, o, h, l, c, v, entries, exits, dir, weight, sym)| {
             let ohlcv = OhlcvData {
-                timestamps: Cow::Borrowed(numpy_as_slice_i64(ts)),
-                open: Cow::Borrowed(numpy_as_slice_f64(o)),
-                high: Cow::Borrowed(numpy_as_slice_f64(h)),
-                low: Cow::Borrowed(numpy_as_slice_f64(l)),
-                close: Cow::Borrowed(numpy_as_slice_f64(c)),
-                volume: Cow::Borrowed(numpy_as_slice_f64(v)),
+                timestamps: numpy_cow_i64(ts),
+                open: numpy_cow_f64(o),
+                high: numpy_cow_f64(h),
+                low: numpy_cow_f64(l),
+                close: numpy_cow_f64(c),
+                volume: numpy_cow_f64(v),
             };
             crate::data::ensure_time_sorted(
                 &format!("{sym} bars"),
                 ohlcv.timestamps.iter().copied(),
             )?;
+            crate::data::ensure_prices_finite(&format!("{sym} bars"), &ohlcv)?;
             let signals = CompiledSignals {
                 symbol: sym.clone(),
-                entries: entries.as_slice().expect("contiguous").to_vec(),
-                exits: exits.as_slice().expect("contiguous").to_vec(),
+                entries: entries.as_array().iter().copied().collect(),
+                exits: exits.as_array().iter().copied().collect(),
                 position_sizes: None,
                 direction: parse_direction(*dir)?,
                 weight: *weight,
@@ -1355,21 +1437,22 @@ pub fn run_portfolio_backtest<'py>(
         .iter()
         .map(|(ts, o, h, l, c, v, entries, exits, dir, weight, sym)| {
             let ohlcv = OhlcvData {
-                timestamps: Cow::Borrowed(numpy_as_slice_i64(ts)),
-                open: Cow::Borrowed(numpy_as_slice_f64(o)),
-                high: Cow::Borrowed(numpy_as_slice_f64(h)),
-                low: Cow::Borrowed(numpy_as_slice_f64(l)),
-                close: Cow::Borrowed(numpy_as_slice_f64(c)),
-                volume: Cow::Borrowed(numpy_as_slice_f64(v)),
+                timestamps: numpy_cow_i64(ts),
+                open: numpy_cow_f64(o),
+                high: numpy_cow_f64(h),
+                low: numpy_cow_f64(l),
+                close: numpy_cow_f64(c),
+                volume: numpy_cow_f64(v),
             };
             crate::data::ensure_time_sorted(
                 &format!("{sym} bars"),
                 ohlcv.timestamps.iter().copied(),
             )?;
+            crate::data::ensure_prices_finite(&format!("{sym} bars"), &ohlcv)?;
             let signals = CompiledSignals {
                 symbol: sym.clone(),
-                entries: entries.as_slice().expect("contiguous").to_vec(),
-                exits: exits.as_slice().expect("contiguous").to_vec(),
+                entries: entries.as_array().iter().copied().collect(),
+                exits: exits.as_array().iter().copied().collect(),
                 position_sizes: None,
                 direction: parse_direction(*dir)?,
                 weight: *weight,
@@ -1470,15 +1553,16 @@ pub fn run_options_backtest<'py>(
     option_open_prices: Option<PyReadonlyArray1<f64>>,
 ) -> PyResult<PyBacktestResult> {
     let ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
+        timestamps: numpy_cow_i64(&timestamps),
+        open: numpy_cow_f64(&open),
+        high: numpy_cow_f64(&high),
+        low: numpy_cow_f64(&low),
+        close: numpy_cow_f64(&close),
+        volume: numpy_cow_f64(&volume),
     };
 
     crate::data::ensure_time_sorted(&format!("{symbol} bars"), ohlcv.timestamps.iter().copied())?;
+    crate::data::ensure_prices_finite(&format!("{symbol} bars"), &ohlcv)?;
 
     let opt_prices = numpy_to_vec_f64(option_prices);
     let opt_opens = option_open_prices.map(numpy_to_vec_f64);
@@ -1611,21 +1695,21 @@ pub fn run_pairs_backtest<'py>(
     dynamic_hedge: bool,
 ) -> PyResult<PyBacktestResult> {
     let leg1_ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&leg1_timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&leg1_open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&leg1_high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&leg1_low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&leg1_close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&leg1_volume)),
+        timestamps: numpy_cow_i64(&leg1_timestamps),
+        open: numpy_cow_f64(&leg1_open),
+        high: numpy_cow_f64(&leg1_high),
+        low: numpy_cow_f64(&leg1_low),
+        close: numpy_cow_f64(&leg1_close),
+        volume: numpy_cow_f64(&leg1_volume),
     };
 
     let leg2_ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&leg2_timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&leg2_open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&leg2_high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&leg2_low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&leg2_close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&leg2_volume)),
+        timestamps: numpy_cow_i64(&leg2_timestamps),
+        open: numpy_cow_f64(&leg2_open),
+        high: numpy_cow_f64(&leg2_high),
+        low: numpy_cow_f64(&leg2_low),
+        close: numpy_cow_f64(&leg2_close),
+        volume: numpy_cow_f64(&leg2_volume),
     };
 
     let dir = parse_direction(direction)?;
@@ -1654,6 +1738,8 @@ pub fn run_pairs_backtest<'py>(
         &format!("{symbol} leg 2 bars"),
         leg2_ohlcv.timestamps.iter().copied(),
     )?;
+    crate::data::ensure_prices_finite(&format!("{symbol} leg 1 bars"), &leg1_ohlcv)?;
+    crate::data::ensure_prices_finite(&format!("{symbol} leg 2 bars"), &leg2_ohlcv)?;
 
     let backtest = PairsBacktest::new(pairs_config);
     let result = backtest.run(&leg1_ohlcv, &leg2_ohlcv, &signals);
@@ -2033,17 +2119,18 @@ pub fn batch_single_backtest(
     // Shared price data: converted once, under the GIL, then borrowed by every
     // worker. This is the whole point of the batch entry point.
     let ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
+        timestamps: numpy_cow_i64(&timestamps),
+        open: numpy_cow_f64(&open),
+        high: numpy_cow_f64(&high),
+        low: numpy_cow_f64(&low),
+        close: numpy_cow_f64(&close),
+        volume: numpy_cow_f64(&volume),
     };
     crate::data::ensure_time_sorted(
         "batch single shared price series",
         ohlcv.timestamps.iter().copied(),
     )?;
+    crate::data::ensure_prices_finite("batch single shared price series", &ohlcv)?;
     let n = ohlcv.len();
     let base_config = config.map(BacktestConfig::from).unwrap_or_default();
 
@@ -2144,15 +2231,16 @@ pub fn run_multi_backtest<'py>(
     combine_mode: &str,
 ) -> PyResult<PyBacktestResult> {
     let ohlcv = OhlcvData {
-        timestamps: Cow::Borrowed(numpy_as_slice_i64(&timestamps)),
-        open: Cow::Borrowed(numpy_as_slice_f64(&open)),
-        high: Cow::Borrowed(numpy_as_slice_f64(&high)),
-        low: Cow::Borrowed(numpy_as_slice_f64(&low)),
-        close: Cow::Borrowed(numpy_as_slice_f64(&close)),
-        volume: Cow::Borrowed(numpy_as_slice_f64(&volume)),
+        timestamps: numpy_cow_i64(&timestamps),
+        open: numpy_cow_f64(&open),
+        high: numpy_cow_f64(&high),
+        low: numpy_cow_f64(&low),
+        close: numpy_cow_f64(&close),
+        volume: numpy_cow_f64(&volume),
     };
 
     crate::data::ensure_time_sorted("multi-strategy bars", ohlcv.timestamps.iter().copied())?;
+    crate::data::ensure_prices_finite("multi-strategy bars", &ohlcv)?;
 
     let rust_strategies: Vec<CompiledSignals> = strategies
         .into_iter()
@@ -2192,7 +2280,7 @@ pub fn run_multi_backtest<'py>(
 ///
 /// All arrays must be the same length N (one element per tick).
 /// `buy_qty_delta` and `sell_qty_delta` must already be per-tick deltas —
-/// pass the difference from the previous tick, not Zerodha's cumulative totals.
+/// pass the difference from the previous tick, not a feed's cumulative session totals.
 /// `entries` / `exits` are caller-computed boolean signal arrays.
 ///
 /// Returns a `PyBacktestResult` with the same fields as `run_single_backtest`.
@@ -2403,10 +2491,11 @@ pub fn tick_spread_pct<'py>(
     ))
 }
 
-/// Per-tick delta BSI from Zerodha cumulative session totals.
+/// Per-tick buy share of volume from cumulative session totals.
 ///
-/// buy_qty_cumulative / sell_qty_cumulative must be the raw cumulative running sums
-/// from Zerodha (NOT already-converted deltas). Returns [0, 1] per tick; 0.5 = neutral.
+/// buy_qty_cumulative / sell_qty_cumulative are the raw running sums of buy and sell
+/// quantity since the session open (NOT already-converted deltas); the function takes the
+/// per-tick differences itself. Returns [0, 1] per tick; 0.5 = neutral.
 #[pyfunction]
 pub fn buy_sell_imbalance_delta<'py>(
     py: Python<'py>,
@@ -2607,15 +2696,16 @@ pub fn bollinger_bands<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
     std_dev: f64,
-) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
+) -> PyResult<Py<PyAny>> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::volatility::bollinger_bands(&vec, period, std_dev)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    Ok((
+    super::indicator_bindings::bollinger_bands_obj(
+        py,
         vec_to_numpy_f64(py, result.upper),
         vec_to_numpy_f64(py, result.middle),
         vec_to_numpy_f64(py, result.lower),
-    ))
+    )
 }
 
 /// Average Directional Index.
@@ -2740,12 +2830,12 @@ pub fn simulate_portfolio_mc(
 
     // Convert numpy arrays to Rust vecs
     let rust_returns: Vec<Vec<f64>> =
-        returns.iter().map(|arr| arr.as_slice().unwrap().to_vec()).collect();
+        returns.iter().map(|arr| arr.as_array().iter().copied().collect()).collect();
 
-    let rust_weights: Vec<f64> = weights.as_slice().unwrap().to_vec();
+    let rust_weights: Vec<f64> = weights.as_array().iter().copied().collect();
 
     let rust_corr: Vec<Vec<f64>> =
-        correlation_matrix.iter().map(|arr| arr.as_slice().unwrap().to_vec()).collect();
+        correlation_matrix.iter().map(|arr| arr.as_array().iter().copied().collect()).collect();
 
     // Refuse mismatched shapes here rather than indexing past the end inside a
     // Rayon worker. A panic on a worker thread crosses PyO3 as PanicException,
@@ -2871,14 +2961,26 @@ pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
         mfe_price: t.mfe_price,
         mae_pnl: t.mae_pnl,
         mfe_pnl: t.mfe_pnl,
+        money_decimals: t.money.map(|m| m.places),
+        pnl_minor: t.money.map(|m| m.pnl),
+        fees_minor: t.money.map(|m| m.entry_fees + m.exit_fees),
+        entry_notional_minor: t.money.map(|m| m.entry_notional),
+        exit_notional_minor: t.money.map(|m| m.exit_notional),
     }
 }
 
 /// Convert Rust BacktestResult to Python PyBacktestResult.
 pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBacktestResult {
+    // Undefined is absent, never a zero (the full report says the same, with
+    // its reason): no Sharpe over a curve whose returns do not vary, no win
+    // rate without a closed trade, no profit factor without a losing one.
+    // Sharpe and Sortino arrive as NaN when the return series has no variation
+    // (or fewer than two returns) and when there is no downside; `finite` makes
+    // that None.
+    let closed = result.metrics.total_closed_trades;
     let metrics = PyBacktestMetrics {
         total_return_pct: result.metrics.total_return_pct,
-        sharpe_ratio: result.metrics.sharpe_ratio,
+        sharpe_ratio: finite(result.metrics.sharpe_ratio),
         sortino_ratio: finite(result.metrics.sortino_ratio),
         calmar_ratio: finite(result.metrics.calmar_ratio),
         omega_ratio: finite(result.metrics.omega_ratio),
@@ -2887,8 +2989,12 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         max_drawdown_duration_secs: result.metrics.max_drawdown_duration_secs,
         ulcer_index: result.metrics.ulcer_index,
         time_under_water_pct: result.metrics.time_under_water_pct,
-        win_rate_pct: result.metrics.win_rate_pct,
-        profit_factor: finite(result.metrics.profit_factor),
+        win_rate_pct: (closed > 0).then_some(result.metrics.win_rate_pct),
+        profit_factor: if result.metrics.losing_trades > 0 {
+            finite(result.metrics.profit_factor)
+        } else {
+            None
+        },
         expectancy: result.metrics.expectancy,
         sqn: result.metrics.sqn,
         total_trades: result.metrics.total_trades,

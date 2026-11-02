@@ -205,6 +205,7 @@ impl BasketBacktest {
                             mfe_price: None,
                             mae_pnl: None,
                             mfe_pnl: None,
+                            money: None,
                         });
 
                         trade_counter += 1;
@@ -302,6 +303,7 @@ impl BasketBacktest {
                     mfe_price: None,
                     mae_pnl: None,
                     mfe_pnl: None,
+                    money: None,
                 });
 
                 trade_counter += 1;

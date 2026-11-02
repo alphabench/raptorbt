@@ -167,9 +167,10 @@ impl TickBacktest {
                     let fill = stop_level.min(bid) * (1.0 - slippage_frac);
                     (fill, ExitReason::StopLoss)
                 } else if target_hit {
-                    // A target is a resting limit: it fills at its level, never
-                    // worse, so market slippage does not apply.
-                    (target_level, ExitReason::TakeProfit)
+                    // A target is a resting limit: it fills at its level or
+                    // better, so market slippage does not apply. If the book
+                    // jumped past the level the sale executes at the bid.
+                    (target_level.max(bid), ExitReason::TakeProfit)
                 } else if time_exit || signal_exit {
                     let fill = bid * (1.0 - slippage_frac);
                     let reason = if time_exit { ExitReason::TimeExit } else { ExitReason::Signal };
@@ -230,6 +231,7 @@ impl TickBacktest {
                     mfe_price: None,
                     mae_pnl: None,
                     mfe_pnl: None,
+                    money: None,
                 });
 
                 trade_id += 1;
@@ -619,6 +621,44 @@ mod tests {
             ..Default::default()
         };
         TickBacktest::new(config).run(&ticks, &entries, &exits, "TEST")
+    }
+
+    #[test]
+    fn a_target_reached_by_a_jump_in_the_book_fills_at_the_bid() {
+        // Enter at 100, target 110. The book jumps to 120/120: the resting
+        // sell at 110 is marketable and fills at the bid, not at its own level.
+        let n = 4;
+        let ltp = vec![100.0, 100.0, 120.0, 120.0];
+        let ticks = TickData {
+            timestamps: (0..n as i64).map(|i| i * 1_000_000_000).collect(),
+            ltp: ltp.clone(),
+            bid: ltp.clone(),
+            ask: ltp,
+            buy_qty_delta: vec![0.0; n],
+            sell_qty_delta: vec![0.0; n],
+            oi: vec![0.0; n],
+            ltq: vec![0.0; n],
+            bid_qty: vec![0.0; n],
+            ask_qty: vec![0.0; n],
+        };
+        let mut entries = vec![false; n];
+        entries[0] = true;
+        let config = TickBacktestConfig {
+            base: BacktestConfig {
+                initial_capital: 500_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
+            stop_loss_pct: 50.0,
+            take_profit_pct: 10.0,
+            quantity: 1,
+            ..Default::default()
+        };
+        let result = TickBacktest::new(config).run(&ticks, &entries, &vec![false; n], "TEST");
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::TakeProfit);
+        assert_eq!(trade.exit_price, 120.0);
     }
 
     #[test]

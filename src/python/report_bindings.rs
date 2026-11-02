@@ -101,6 +101,8 @@ fn trade_from(item: &Bound<'_, PyAny>) -> PyResult<ReportTrade> {
         fees,
         tag: tag_of(item)?,
         settlement,
+        open_at_end: optional::<String>(item, "exit_reason")?
+            .is_some_and(|r| r.eq_ignore_ascii_case("endofdata")),
     })
 }
 

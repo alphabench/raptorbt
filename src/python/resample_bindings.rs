@@ -23,11 +23,11 @@ fn code(e: &ResampleError) -> &'static str {
 }
 
 fn fail(e: ResampleError) -> PyErr {
-    Fail::new(code(&e), e.to_string()).into()
+    Fail::new(code(&e), e.to_string()).skill("timeframes").into()
 }
 
 fn fail_at((row, e): (usize, ResampleError)) -> PyErr {
-    Fail::new(code(&e), format!("row {row}: {e}")).into()
+    Fail::new(code(&e), format!("row {row}: {e}")).skill("timeframes").into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,7 +323,9 @@ fn arrays<'py>(py: Python<'py>, bars: Vec<ResampledBar>) -> PyResult<Bound<'py, 
 
 fn same_length(n: usize, others: &[usize]) -> PyResult<()> {
     if others.iter().any(|&l| l != n) {
-        return Err(Fail::new("length_mismatch", "all input arrays must share one length").into());
+        return Err(Fail::new("length_mismatch", "all input arrays must share one length")
+            .skill("timeframes")
+            .into());
     }
     Ok(())
 }

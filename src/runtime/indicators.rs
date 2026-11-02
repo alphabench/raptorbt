@@ -188,12 +188,7 @@ pub enum SessionPolicy {
     Continuous,
 }
 
-/// Price adjustment semantics. Only inputs as given exist today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum AdjustmentPolicy {
-    #[default]
-    AsGiven,
-}
+pub use crate::instruments::lifecycle::AdjustmentPolicy;
 
 /// A kind with its parameters, before canonicalisation.
 #[derive(Debug, Clone, Copy, PartialEq)]

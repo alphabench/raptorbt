@@ -18,7 +18,7 @@ pub use aggregate_resample::{
 pub use bar_spec::{AggregationUnit, BarSpec, BarStamp, BuilderParams, SpecError};
 pub use book::{BookLevel, BookSide, DepthTick, OrderBook, BOOK_DEPTH};
 pub use events::{tick_data_to_events, DepthRef, EventPayload, MarketEvent, QuoteTick, TradeTick};
-pub use feed::{ensure_time_sorted, EventFeed};
+pub use feed::{ensure_prices_finite, ensure_time_sorted, EventFeed};
 pub use flow_bars::{FlowBarBuilder, FlowMagnitude, FlowRule};
 pub use renko::RenkoBarBuilder;
 pub use session_bars::{builder_for_session, follows_calendar};

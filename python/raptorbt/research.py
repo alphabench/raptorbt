@@ -318,12 +318,16 @@ class _Null:
 def row_from(result: Any) -> dict[str, Any]:
     """A sweep row from a finished run (a ``BacktestResult``, or a ``PortfolioResult``, whose
     combined result is read): the run's own figures, the return moments a deflated Sharpe
-    needs, and its sample count. Ratios are fractions, as the engine reports them."""
+    needs, and its sample count. Ratios are fractions, as the engine reports them.
+
+    A run that never traded has no Sharpe (``metrics.sharpe_ratio`` is ``None``). The row
+    holds ``0.0`` for it: a sweep ranks and deflates numbers, and a trial that earned
+    nothing ranks as zero."""
     result = getattr(result, "result", result)
     m = result.metrics
     orders = result.orders()
     return {
-        "sharpe": m.sharpe_ratio,
+        "sharpe": m.sharpe_ratio if m.sharpe_ratio is not None else 0.0,
         "sortino": m.sortino_ratio,
         "total_return": m.total_return_pct / 100.0,
         "max_drawdown": m.max_drawdown_pct / 100.0,

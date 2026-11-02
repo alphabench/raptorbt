@@ -710,6 +710,7 @@ impl SpreadBacktest {
             mfe_price: None,
             mae_pnl: None,
             mfe_pnl: None,
+            money: None,
         }
     }
 

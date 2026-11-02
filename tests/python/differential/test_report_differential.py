@@ -6,6 +6,12 @@ Floats agree to 1e-9 relative (the reference report summed with a correctly roun
 takes its mean and standard deviation from ``StreamingMetrics``, a Welford pass). One figure
 differs by definition, and the test states the difference instead of loosening a tolerance:
 
+trade statistics
+    The reference report classified a trade as a win or a loss on its P&L before fees and counted a
+    position still open at the end of the data. This one counts closed trades only, on P&L
+    after fees (the definition ``BacktestMetrics`` uses). ``expected_trade_figures`` computes
+    those figures independently from the fixture's trades; they replace the reference values.
+
 ``sortino``
     This engine has one Sortino, ``StreamingMetrics``' (downside deviation over ``n - 1``
     returns, as ``BacktestMetrics.sortino_ratio``). The reference report divided by ``n``. The
@@ -43,6 +49,32 @@ def same(got, want, path, scale=None):
         assert math.isclose(got, want, rel_tol=REL, abs_tol=1e-9), (path, got, want)
 
 
+TRADE_FIGURES = (
+    "trade_count", "breakeven", "win_rate", "expectancy_gross", "expectancy_net",
+    "avg_win", "avg_loss", "profit_factor", "payoff_ratio",
+)
+
+
+def expected_trade_figures(trades):
+    """The trade statistics on closed trades and net P&L; ``None`` where undefined."""
+    closed = [t for t in trades if t["exit_reason"].lower() != "endofdata"]
+    net = [t["pnl"] for t in closed]
+    wins = [x for x in net if x > 0]
+    losses = [x for x in net if x < 0]
+    n = len(closed)
+    out = {"trade_count": n, "breakeven": n - len(wins) - len(losses)}
+    out["win_rate"] = len(wins) / n if n else None
+    out["expectancy_gross"] = sum(t["pnl"] + t["fees"] for t in closed) / n if n else None
+    out["expectancy_net"] = sum(net) / n if n else None
+    out["avg_win"] = sum(wins) / len(wins) if wins else None
+    out["avg_loss"] = -sum(losses) / len(losses) if losses else None
+    out["profit_factor"] = sum(wins) / -sum(losses) if losses else None
+    out["payoff_ratio"] = (
+        (sum(wins) / len(wins)) / (-sum(losses) / len(losses)) if wins and losses else None
+    )
+    return out
+
+
 def replay(case):
     kw = dict(case["kwargs"])
     if "period" in kw:
@@ -63,6 +95,16 @@ def replay(case):
 def test_full_report_matches_the_old_engine(case):
     got, want = replay(case), case["result"]
     n = want["counters"]["returns"]
+    expected = expected_trade_figures(case["trades"])
+    for key in TRADE_FIGURES:
+        figure = got["report"].pop(key, None)
+        want["report"].pop(key, None)
+        got["report_unavailable"].pop(key, None)
+        want["report_unavailable"].pop(key, None)
+        if expected[key] is None:
+            assert figure is None, key
+        else:
+            assert math.isclose(figure, expected[key], rel_tol=REL, abs_tol=1e-9), (key, figure)
     got_sortino, want_sortino = got["report"].pop("sortino"), want["report"].pop("sortino")
     if want_sortino is None:
         assert got_sortino is None

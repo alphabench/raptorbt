@@ -8,31 +8,72 @@
 use std::collections::BTreeMap;
 
 use super::{Grouped, PortfolioBook};
+use crate::accounts::{LineView, MarginModel, Money};
 use crate::core::types::Timestamp;
+use crate::instruments::InstrumentSpec;
 use crate::portfolio::kernel::EngineEvent;
 use crate::portfolio::option_groups::OptionLeg;
 
 /// Option legs by underlying and expiry.
 pub type OptionLegs = BTreeMap<(String, Option<Timestamp>), Vec<OptionLeg>>;
 
+/// One open option position as a line of a chosen margin model.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelLine<'a> {
+    /// The kernel's index in the book (or in its group).
+    pub kernel: usize,
+    pub position_id: u64,
+    pub spec: &'a InstrumentSpec,
+    /// Signed: negative is short.
+    pub quantity: f64,
+    pub price: f64,
+}
+
+/// Model lines by underlying and, unless the model groups across expiries,
+/// expiry.
+pub type ModelLines<'a> = BTreeMap<(String, Option<Timestamp>), Vec<ModelLine<'a>>>;
+
+/// What each line of one group locks under `model` at `now`:
+/// `(kernel, position id, share)`. This is `MarginModel::group_shares`, so the
+/// locks of a structure add up to what `MarginModel.required_legs` says for
+/// its legs. A group the model cannot price keeps the locks its lines took
+/// when they entered (each priced alone by the same model), so nothing here
+/// invents a requirement.
+pub fn model_shares(
+    model: &MarginModel,
+    lines: &[ModelLine<'_>],
+    now: Timestamp,
+) -> Vec<(usize, u64, f64)> {
+    let views: Vec<LineView<'_>> =
+        lines.iter().map(|l| LineView::new(l.spec, l.quantity, l.price)).collect();
+    match model.group_shares(&views, now) {
+        Ok(shares) => lines.iter().zip(shares).map(|(l, s)| (l.kernel, l.position_id, s)).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 impl PortfolioBook {
     /// Put the book in a group. `share` is the part of the account's
     /// starting cash the strategy is credited with: its equity curve starts
     /// there. Call before the first event.
     pub fn join_group(&mut self, share: f64) {
+        let cash =
+            self.account.scale().money(share).unwrap_or_else(|e| {
+                crate::accounts::money::money_fault(format!("account share: {e}"))
+            });
         self.grouped =
-            Some(Grouped { cash: share, start: share, external_open: 0, external_exposure: 0.0 });
+            Some(Grouped { cash, start: share, external_open: 0, external_exposure: 0.0 });
         self.peak_equity = share;
         self.peak_before_sample = share;
     }
 
     /// The account's cash and locked margin, as the book last saw them.
-    pub fn pool(&self) -> (f64, f64) {
-        (self.account.balance(), self.account.locked())
+    pub fn pool(&self) -> (crate::accounts::Money, f64) {
+        (self.account.balance_money(), self.account.locked())
     }
 
     /// Point the book at the group's cash and locked margin.
-    pub fn set_pool(&mut self, balance: f64, locked: f64) {
+    pub fn set_pool(&mut self, balance: crate::accounts::Money, locked: f64) {
         self.account.set_pool(balance, locked);
     }
 
@@ -179,6 +220,55 @@ impl PortfolioBook {
             }
             let Some(key) = kernel.option_group_key() else { continue };
             groups.entry(key).or_default().extend(legs);
+        }
+    }
+
+    /// The book's option positions as lines of its margin model, by group.
+    /// `across` groups by underlying alone (a model that credits calendars).
+    pub fn collect_model_lines<'a>(
+        &'a self,
+        base: usize,
+        across: bool,
+        groups: &mut ModelLines<'a>,
+    ) {
+        for (index, kernel) in self.kernels.iter().enumerate() {
+            let Some((spec, lines)) = kernel.model_option_lines() else { continue };
+            let Some((underlying, expiry)) = kernel.option_group_key() else { continue };
+            let key = (underlying, if across { None } else { expiry });
+            for (position_id, quantity, price) in lines {
+                groups.entry(key.clone()).or_default().push(ModelLine {
+                    kernel: base + index,
+                    position_id,
+                    spec,
+                    quantity,
+                    price,
+                });
+            }
+        }
+    }
+
+    /// The latest bar time any of the book's instruments has been stepped on.
+    pub fn latest_time(&self) -> Timestamp {
+        self.last_seen.iter().flatten().map(|(_, bar)| bar.timestamp).max().unwrap_or(0)
+    }
+
+    /// Re-lock the book's option lines by its chosen model's group shares.
+    pub(super) fn regroup_modelled(&mut self, model: &MarginModel) {
+        let now = self.latest_time();
+        let mut shares = Vec::new();
+        {
+            let mut groups = ModelLines::new();
+            self.collect_model_lines(0, model.groups_across_expiries(), &mut groups);
+            for lines in groups.values() {
+                shares.extend(model_shares(model, lines, now));
+            }
+        }
+        let mut delta_locked = 0.0;
+        for (kernel, position_id, share) in shares {
+            delta_locked += self.kernels[kernel].set_locked_margin(position_id, share);
+        }
+        if delta_locked != 0.0 {
+            self.account.reconcile(Money::ZERO, delta_locked);
         }
     }
 

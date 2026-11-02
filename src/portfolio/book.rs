@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::accounts::{AccountMode, SharedAccount};
+use crate::accounts::{AccountMode, Money, SharedAccount};
 use crate::core::types::{
     BacktestConfig, BacktestResult, Direction, InstrumentConfig, Timestamp, Trade,
 };
@@ -32,6 +32,8 @@ use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 use crate::portfolio::runner::OrderLog;
 use crate::portfolio::session::{InstrumentOutcome, ScheduleData, ScheduleEntry, SessionOutcome};
+
+mod venue;
 
 /// Why a portfolio-wide halt latched.
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +103,13 @@ pub struct PortfolioBook {
     /// being stepped (a group liquidation closing its positions). They are
     /// returned ahead of the next event's own, so the strategy hears of them.
     deferred: Vec<EngineEvent>,
+    /// Corporate actions, dividends owed and the adjustment policy.
+    lifecycle: lifecycle::Lifecycle,
+    /// Whether any instrument has an expiry, so the lifecycle clock runs.
+    has_expiries: bool,
+    /// Per instrument, the instant its expiry was first noticed while its
+    /// settlement waited for the underlying's print.
+    noticed: Vec<Option<Timestamp>>,
 }
 
 /// What a book keeps when its account belongs to a group.
@@ -114,8 +123,10 @@ pub struct PortfolioBook {
 struct Grouped {
     /// The share of the account's starting cash the strategy is credited
     /// with, plus the cash its own entries, exits and fees have moved since.
-    cash: f64,
+    cash: Money,
     /// The share the strategy started with.
+    //
+    // (`cash` is booked minor units; `start` is the f64 the curve starts from.)
     start: f64,
     /// Positions the group's other members hold, for `max_positions`.
     external_open: usize,
@@ -126,10 +137,12 @@ struct Grouped {
 impl PortfolioBook {
     pub fn new(config: BacktestConfig, mode: AccountMode) -> Self {
         let pool = config.initial_capital;
+        let scale = crate::accounts::MoneyScale::new(config.money_decimals)
+            .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}"));
         Self {
             config,
             kernels: Vec::new(),
-            account: SharedAccount::new(mode, pool),
+            account: SharedAccount::new(mode, pool, scale),
             last_close: Vec::new(),
             last_seen: Vec::new(),
             equity_curve: Vec::new(),
@@ -147,6 +160,9 @@ impl PortfolioBook {
             pending_halt: None,
             grouped: None,
             deferred: Vec::new(),
+            lifecycle: lifecycle::Lifecycle::default(),
+            has_expiries: false,
+            noticed: Vec::new(),
         }
     }
 
@@ -173,12 +189,14 @@ impl PortfolioBook {
         .with_position_policy(policy)
         .with_account_mode(self.account.mode());
         if let Some(spec) = spec {
+            self.has_expiries |= spec.expiration_ns.is_some();
             kernel.set_instrument(spec);
         }
         // The account owns all capital; kernels borrow it per step.
-        kernel.set_cash(0.0);
+        kernel.set_cash_money(Money::ZERO);
         self.kernels.push(kernel);
         self.order_logs.push(OrderLog::default());
+        self.noticed.push(None);
         self.last_close.push(None);
         self.last_seen.push(None);
         self.kernels.len() - 1
@@ -270,7 +288,7 @@ impl PortfolioBook {
     /// the cash this strategy's own trades have moved.
     fn base_cash(&self) -> f64 {
         match &self.grouped {
-            Some(g) => g.cash,
+            Some(g) => self.account.scale().to_f64(g.cash),
             None => self.account.balance(),
         }
     }
@@ -295,7 +313,7 @@ impl PortfolioBook {
 
     /// Apply a stepped kernel's cash and margin movement to the account, and
     /// to the strategy's own cash when it is in a group.
-    fn settle(&mut self, delta_cash: f64, delta_locked: f64) {
+    fn settle(&mut self, delta_cash: Money, delta_locked: f64) {
         self.account.reconcile(delta_cash, delta_locked);
         if let Some(g) = &mut self.grouped {
             g.cash += delta_cash;
@@ -374,15 +392,15 @@ impl PortfolioBook {
                 self.account.balance() - (self.account.locked() - locked_before)
             }
         };
-        kernel.set_cash(injected);
+        let injected = kernel.lend_cash(injected);
         let result = kernel.adopt_position(timestamp, price, size);
-        let delta_cash = kernel.cash() - injected;
+        let delta_cash = kernel.cash_money() - injected;
         // Carry the locked delta too. Leaving this at 0.0 would mean the
         // shared account never learns about the adopted margin, so portfolio
         // free capital would read high by the whole cost basis — a risk
         // constraint silently weakened.
         let delta_locked = kernel.locked_margin() - locked_before;
-        kernel.set_cash(0.0);
+        kernel.set_cash_money(Money::ZERO);
         self.settle(delta_cash, delta_locked);
         self.regroup_option_margin();
         result
@@ -398,6 +416,13 @@ impl PortfolioBook {
     /// measurements it is held to.
     fn regroup_option_margin(&mut self) {
         if matches!(self.account.mode(), AccountMode::Cash) {
+            return;
+        }
+        if let Some(model) = self.config.margin_model.clone() {
+            // A chosen model margins its own option lines together.
+            if model.groups_options() {
+                self.regroup_modelled(&model);
+            }
             return;
         }
         let mut groups: BTreeMap<(String, Option<Timestamp>), Vec<OptionLeg>> = BTreeMap::new();
@@ -417,7 +442,7 @@ impl PortfolioBook {
             }
         }
         if delta_locked != 0.0 {
-            self.account.reconcile(0.0, delta_locked);
+            self.account.reconcile(Money::ZERO, delta_locked);
         }
     }
 
@@ -474,11 +499,11 @@ impl PortfolioBook {
                     self.account.balance() - (self.account.locked() - locked_before)
                 }
             };
-            kernel.set_cash(injected);
+            let injected = kernel.lend_cash(injected);
             let closed = kernel.halt_cleanup(last_idx, last_bar.as_ref(), cancel_orders, flatten);
-            let delta_cash = kernel.cash() - injected;
+            let delta_cash = kernel.cash_money() - injected;
             let delta_locked = kernel.locked_margin() - locked_before;
-            kernel.set_cash(0.0);
+            kernel.set_cash_money(Money::ZERO);
             self.settle(delta_cash, delta_locked);
             for event in &closed {
                 if let EngineEvent::Exited { trade, .. } = event {
@@ -527,7 +552,27 @@ impl PortfolioBook {
         events
     }
 
+    /// The lifecycle first (corporate actions, dividends, contracts expired
+    /// with no bar of their own), then the event. See `book/lifecycle.rs`.
     fn apply_entry(
+        &mut self,
+        entry: &ScheduleEntry,
+        depth: Option<DepthTick>,
+        input: StepInput,
+    ) -> Vec<EngineEvent> {
+        if !self.lifecycle_active() {
+            return self.apply_entry_event(entry, depth, input);
+        }
+        let ts = entry.timestamp();
+        let mut events = self.advance_lifecycle(ts, Some(entry.instrument));
+        self.prepare_expiry(entry.instrument, ts);
+        events.extend(self.apply_entry_event(entry, depth, input));
+        // contracts waiting for this instrument's print settle on it
+        events.extend(self.settle_waiting(entry.instrument, ts));
+        events
+    }
+
+    fn apply_entry_event(
         &mut self,
         entry: &ScheduleEntry,
         depth: Option<DepthTick>,
@@ -573,7 +618,7 @@ impl PortfolioBook {
                 self.account.balance() - (self.account.locked() - locked_before)
             }
         };
-        kernel.set_cash(injected);
+        let injected = kernel.lend_cash(injected);
         kernel.set_external_open_count(portfolio_open);
         kernel.set_external_exposure(external_exposure);
         let mut events = match entry.data {
@@ -585,9 +630,9 @@ impl PortfolioBook {
                 None => Vec::new(),
             },
         };
-        let delta_cash = kernel.cash() - injected;
+        let delta_cash = kernel.cash_money() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
-        kernel.set_cash(0.0);
+        kernel.set_cash_money(Money::ZERO);
         kernel.set_external_open_count(None);
         kernel.set_external_exposure(None);
         self.settle(delta_cash, delta_locked);
@@ -612,6 +657,12 @@ impl PortfolioBook {
             }
             self.order_logs[instrument].observe(&self.kernels[instrument], event);
         }
+        // A physically settled line the kernel just ended delivers its
+        // underlying before the equity is sampled.
+        if self.has_expiries {
+            let delivered = self.deliver_contract_ends(instrument, entry.timestamp());
+            events.extend(delivered);
+        }
 
         // Quotes carry no traded price: they leave the mark alone, and the
         // print that follows updates it.
@@ -633,7 +684,7 @@ impl PortfolioBook {
         // are one observation, not N. A later event at the same timestamp
         // replaces the sample taken after the previous one. Kernels still see
         // equity after every event, so the kill-switch reacts per event.
-        let mut equity = self.equity();
+        let equity = self.equity();
         let ts = entry.timestamp();
         if self.timestamps.last() == Some(&ts) {
             self.equity_curve.pop();
@@ -673,6 +724,26 @@ impl PortfolioBook {
             return events;
         }
 
+        self.account_checks(instrument, ts, entry.local_idx, equity, self.applied, &mut events);
+
+        self.applied += 1;
+        events
+    }
+
+    /// The account-level checks that follow an equity sample: margin
+    /// maintenance, the day's loss limit and the drawdown kill-switch.
+    /// `equity` is the sample just taken, `idx` the event's ordinal on its
+    /// instrument and `halt_idx` the ordinal a halt latched here is reported
+    /// at.
+    fn account_checks(
+        &mut self,
+        instrument: usize,
+        ts: Timestamp,
+        idx: usize,
+        mut equity: f64,
+        halt_idx: usize,
+        events: &mut Vec<EngineEvent>,
+    ) {
         // Portfolio maintenance: the requirement is the sum of every
         // instrument's own requirement, so per-instrument `margin_maint`
         // rates apply. No single kernel can see this.
@@ -684,8 +755,8 @@ impl PortfolioBook {
                 .map(|(k, close)| close.map(|c| k.maintenance_requirement(c)).unwrap_or(0.0))
                 .sum();
             if required > 0.0 && equity < required {
-                self.halt_all(self.applied, HaltCause::MarginCall);
-                events.push(EngineEvent::MarginCall { idx: entry.local_idx, equity, required });
+                self.halt_all(halt_idx, HaltCause::MarginCall);
+                events.push(EngineEvent::MarginCall { idx, equity, required });
                 if self.config.liquidate_on_margin_call {
                     events.extend(self.liquidate_marked());
                 }
@@ -703,10 +774,7 @@ impl PortfolioBook {
             breached |= kernel.observe_day_in(day, equity);
         }
         if breached && !day_blocked_before {
-            events.push(EngineEvent::RiskHalted {
-                idx: entry.local_idx,
-                reason: "daily_loss".to_string(),
-            });
+            events.push(EngineEvent::RiskHalted { idx, reason: "daily_loss".to_string() });
             if self.config.flatten_on_daily_loss {
                 let closed = self.cleanup_all(false, true);
                 events.extend(closed);
@@ -725,11 +793,8 @@ impl PortfolioBook {
             kernel.observe_equity(equity, peak);
         }
         if !risk_halted_before && self.kernels.iter().any(|k| k.risk_halted()) {
-            self.halt_all(self.applied, HaltCause::Drawdown);
+            self.halt_all(halt_idx, HaltCause::Drawdown);
         }
-
-        self.applied += 1;
-        events
     }
 
     /// Close every instrument at its last mark after a margin call, folding
@@ -746,11 +811,11 @@ impl PortfolioBook {
                     self.account.balance() - (self.account.locked() - locked_before)
                 }
             };
-            kernel.set_cash(injected);
+            let injected = kernel.lend_cash(injected);
             let closed = kernel.liquidate_all(last_idx, &last_bar);
-            let delta_cash = kernel.cash() - injected;
+            let delta_cash = kernel.cash_money() - injected;
             let delta_locked = kernel.locked_margin() - locked_before;
-            kernel.set_cash(0.0);
+            kernel.set_cash_money(Money::ZERO);
             self.settle(delta_cash, delta_locked);
             for event in &closed {
                 if let EngineEvent::Exited { trade, .. } = event {
@@ -810,14 +875,14 @@ impl PortfolioBook {
                         self.account.balance() - (self.account.locked() - locked_before)
                     }
                 };
-                kernel.set_cash(injected);
+                let injected = kernel.lend_cash(injected);
                 for trade in kernel.finalize_all(idx, &bar) {
                     self.streaming.update(trade.return_pct / 100.0);
                     self.trades.push(trade);
                 }
-                let delta_cash = kernel.cash() - injected;
+                let delta_cash = kernel.cash_money() - injected;
                 let delta_locked = kernel.locked_margin() - locked_before;
-                kernel.set_cash(0.0);
+                kernel.set_cash_money(Money::ZERO);
                 self.settle(delta_cash, delta_locked);
                 self.last_close[i] = None;
             }
@@ -908,8 +973,9 @@ impl crate::runtime::memory::HeapSize for PortfolioBook {
 }
 
 mod group;
+mod lifecycle;
 
-pub use group::OptionLegs;
+pub use group::{model_shares, ModelLine, ModelLines, OptionLegs};
 
 #[cfg(test)]
 #[path = "book_tests.rs"]

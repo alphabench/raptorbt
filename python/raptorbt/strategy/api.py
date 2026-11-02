@@ -209,6 +209,8 @@ PLAIN_EVENT_BITS: dict[str, int] = {
     "on_algo_started": 1 << 16,
     "on_algo_completed": 1 << 17,
     "on_margin_call": 1 << 18,
+    "on_contract_event": 1 << 19,
+    "on_corporate_action": 1 << 20,
 }
 
 #: Channels that carry a subscribable data type.
@@ -819,10 +821,10 @@ class IndicatorsView:
         )
 
     def bollinger(self, *, instrument, period, k=2.0, timeframe=None, field="close"):
-        """Bands ``k`` deviations out; ``.values`` is ``(middle, upper, lower)``."""
+        """Bands ``k`` deviations out; ``.values`` is ``(upper, middle, lower)``."""
         return self._make(
             Indicator.bollinger(period, k), instrument, timeframe, field,
-            ("middle", "upper", "lower"),
+            ("upper", "middle", "lower"),
         )
 
     def macd(self, *, instrument, fast=12, slow=26, signal=9, timeframe=None, field="close"):

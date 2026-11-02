@@ -869,7 +869,8 @@ pub fn risk_metrics_with_moments(
     risk_free_rate: f64,
 ) -> (f64, f64, f64, Option<f64>, Option<f64>) {
     if returns.len() < 2 {
-        return (0.0, 0.0, 1.0, None, None);
+        // Fewer than two returns: Sharpe and Sortino are undefined (NaN), not zero.
+        return (f64::NAN, f64::NAN, 1.0, None, None);
     }
 
     // NaN is skipped inline rather than collected into a filtered Vec. The
@@ -940,7 +941,7 @@ pub fn risk_metrics_with_moments(
     // Sharpe Ratio = (excess * periods_per_year) / (std_dev * sqrt(periods_per_year))
     // Simplified: Sharpe = excess / std_dev * sqrt(periods_per_year)
     let sharpe_ratio =
-        if std_dev > 0.0 { (excess_mean / std_dev) * periods_per_year.sqrt() } else { 0.0 };
+        if std_dev > 0.0 { (excess_mean / std_dev) * periods_per_year.sqrt() } else { f64::NAN };
 
     // Sortino Ratio - uses downside deviation (only negative returns)
     let downside_variance = if has_downside {
@@ -952,10 +953,9 @@ pub fn risk_metrics_with_moments(
 
     let sortino_ratio = if downside_std > 0.0 {
         (excess_mean / downside_std) * periods_per_year.sqrt()
-    } else if excess_mean > 0.0 {
-        f64::INFINITY
     } else {
-        0.0
+        // No downside deviation: the ratio has no denominator.
+        f64::NAN
     };
 
     // Omega Ratio = sum of returns above threshold / |sum of returns below threshold|
@@ -1281,6 +1281,7 @@ mod tests {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             }
         }
 
@@ -1404,6 +1405,7 @@ mod tests {
             mfe_price: None,
             mae_pnl: None,
             mfe_pnl: None,
+            money: None,
         };
 
         let timestamps: Vec<i64> = (0..10).map(|i| i as i64 * ONE_SEC).collect();

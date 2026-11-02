@@ -25,9 +25,9 @@ pub fn spread_pct(bid: &[f64], ask: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Per-tick delta BSI from Zerodha cumulative session totals.
+/// Per-tick delta BSI from cumulative session totals.
 ///
-/// Zerodha's `total_buy_qty` / `total_sell_qty` are running sums that grow
+/// Feeds that report `total_buy_qty` / `total_sell_qty` give running sums that grow
 /// monotonically from market open. Computing BSI from raw cumulative values
 /// yields ~0.95 for the whole day (artefact of early-session buy-side dominance).
 ///

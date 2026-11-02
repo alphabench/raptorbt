@@ -298,6 +298,7 @@ mod tests {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             },
             Trade {
                 id: 2,
@@ -321,6 +322,7 @@ mod tests {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             },
             Trade {
                 id: 3,
@@ -344,6 +346,7 @@ mod tests {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             },
         ]
     }

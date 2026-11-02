@@ -7,12 +7,14 @@ from raptorbt import BacktestConfig, Strategy, run_strategy_backtest
 from raptorbt.strategy import orders
 
 
-def _bars(closes, lows=None, highs=None, start_ts=0, step=1):
+def _bars(closes, lows=None, highs=None, opens=None, start_ts=0, step=1):
     closes = np.asarray(closes, dtype=np.float64)
     n = len(closes)
     return {
         "timestamps": np.arange(start_ts, start_ts + n * step, step, dtype=np.int64),
-        "open": closes.copy(),
+        "open": (
+            np.asarray(opens, dtype=np.float64) if opens is not None else closes.copy()
+        ),
         "high": (
             np.asarray(highs, dtype=np.float64) if highs is not None else closes + 1.0
         ),
@@ -145,7 +147,7 @@ class TestOrderFlow:
                 if ctx.idx == 1:
                     self.modify_order(self.oid, limit_price=98.0)
 
-        data = _bars([100.0, 100.0, 97.5])
+        data = _bars([100.0, 100.0, 97.5], opens=[100.0, 100.0, 99.0])
         strategy = S()
         result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
         assert strategy.kinds()[-1] == "order_filled"
@@ -188,7 +190,11 @@ class TestOrderFlow:
                     self.enter()  # legacy sugar still composes with orders
                     self.submit_order(orders.Limit(side="sell", price=105.0))
 
-        data = _bars([100.0, 102.0, 106.0], highs=[101.0, 103.0, 106.5])
+        data = _bars(
+            [100.0, 102.0, 106.0],
+            highs=[101.0, 103.0, 106.5],
+            opens=[100.0, 102.0, 104.0],
+        )
         strategy = S()
         result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
         assert "order_filled" in strategy.kinds()
@@ -208,6 +214,7 @@ class TestOrderFlow:
 
         data = _bars(
             [100.0, 102.5, 101.0, 101.0],
+            opens=[100.0, 102.5, 102.0, 101.0],
             highs=[100.5, 103.0, 102.0, 101.5],
             lows=[99.5, 101.8, 100.8, 100.5],
         )

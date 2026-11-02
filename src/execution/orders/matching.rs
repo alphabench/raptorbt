@@ -153,18 +153,26 @@ impl OrderEngine {
         &mut self.orders
     }
 
-    /// Cancel a working order. Returns `false` for unknown or finished ids.
+    /// Cancel a working order. Returns `false` for unknown or finished ids,
+    /// and for a venue-driven order, which only its venue can cancel
+    /// ([`Order::request_cancel`]).
     pub fn cancel(&mut self, id: u64) -> bool {
         match self.get_mut(id) {
-            Some(order) if !order.status.is_terminal() => order.transition(OrderStatus::Canceled),
+            Some(order) if !order.status.is_terminal() && !order.is_venue_driven() => {
+                order.transition(OrderStatus::Canceled)
+            }
             _ => false,
         }
     }
 
-    /// Cancel every working order, returning the ids canceled.
+    /// Cancel every working in-process order, returning the ids canceled.
     pub fn cancel_all(&mut self) -> Vec<u64> {
-        let ids: Vec<u64> =
-            self.orders.iter().filter(|o| !o.status.is_terminal()).map(|o| o.id).collect();
+        let ids: Vec<u64> = self
+            .orders
+            .iter()
+            .filter(|o| !o.status.is_terminal() && !o.is_venue_driven())
+            .map(|o| o.id)
+            .collect();
         for id in &ids {
             let _ = self.cancel(*id);
         }
@@ -183,7 +191,9 @@ impl OrderEngine {
         trigger_price: Option<Price>,
     ) -> bool {
         let Some(order) = self.get_mut(id) else { return false };
-        if order.status.is_terminal() {
+        // A venue-driven order changes terms only on the venue's replace
+        // acknowledgement.
+        if order.status.is_terminal() || order.is_venue_driven() {
             return false;
         }
         match (&mut order.kind, order.status) {
@@ -315,7 +325,8 @@ impl OrderEngine {
             self.orders.iter().map(|o| (o.id, o.status)).collect();
 
         for order in &mut self.orders {
-            if order.status.is_terminal() || order.submitted_idx >= idx {
+            // A venue-driven order is matched by its venue, never here.
+            if order.status.is_terminal() || order.submitted_idx >= idx || order.is_venue_driven() {
                 continue;
             }
             // Still in flight to the venue: this print cannot see it, so it
@@ -395,7 +406,7 @@ impl OrderEngine {
                 }
                 // If-touched orders trigger on the *favorable* side — the
                 // limit-style touch — then fill like a market at the touch
-                // price (conservative: no better-than-trigger assumption).
+                // price (a bar opening through the trigger fills at the open).
                 OrderKind::MarketIfTouched { trigger } => {
                     fill_model.get_limit_fill_price(trigger, bar, direction, is_entry).map(fill)
                 }

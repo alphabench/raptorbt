@@ -100,6 +100,11 @@ impl EngineKernel {
     /// close, the way a forced liquidation is marked, and cancel the working
     /// entry orders.
     pub(crate) fn squareoff_all(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
+        if self.venue_managed {
+            // A venue holds the positions: the runtime sends the closing orders.
+            self.squareoff_outbox = true;
+            return Vec::new();
+        }
         let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         let mut events = Vec::new();
         for position_id in ids {

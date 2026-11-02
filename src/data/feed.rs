@@ -35,6 +35,27 @@ pub fn ensure_time_sorted(label: &str, timestamps: impl IntoIterator<Item = i64>
     Ok(())
 }
 
+/// Refuse bars whose open, high, low or close holds a NaN or an infinity.
+///
+/// A non-finite price compares false against everything, so it would run
+/// silently and leave a NaN in the equity curve. The error names the column
+/// and the first offending index.
+pub fn ensure_prices_finite(label: &str, ohlcv: &crate::core::types::OhlcvData<'_>) -> Result<()> {
+    for (column, values) in
+        [("open", &ohlcv.open), ("high", &ohlcv.high), ("low", &ohlcv.low), ("close", &ohlcv.close)]
+    {
+        if let Some((index, value)) = values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+            return Err(RaptorError::NonFinitePrice {
+                label: label.to_string(),
+                column,
+                index,
+                value: *value,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Heap entry; reversed ordering turns `BinaryHeap` into a min-heap.
 struct Entry {
     event: MarketEvent,

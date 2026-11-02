@@ -5,10 +5,9 @@
 //! `.futures_contract(...)`, `.option(...)`, ...), so Python users get a
 //! typed-feeling surface without a Rust class hierarchy behind it.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::errors::Fail;
+use super::errors::{Fail, Val};
 use super::schedule_bindings::PySessionSchedule;
 use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 
@@ -17,6 +16,17 @@ use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 #[derive(Debug, Clone)]
 pub struct PyInstrumentSpec {
     pub(crate) inner: InstrumentSpec,
+}
+
+/// A refused argument of an `InstrumentSpec` factory.
+fn refuse(
+    code: &'static str,
+    operation: &str,
+    parameter: &str,
+    message: impl Into<String>,
+    value: impl Into<Val>,
+) -> PyErr {
+    Fail::new(code, message).op(operation).param(parameter).value(value).skill("instruments").into()
 }
 
 // The argument list IS the Python signature; collapsing it into a
@@ -36,14 +46,32 @@ fn apply_common(
     expiration_ns: Option<i64>,
 ) -> PyResult<InstrumentSpec> {
     if price_increment < 0.0 || size_increment < 0.0 || lot_size < 0.0 {
-        return Err(PyValueError::new_err("increments and lot_size must be >= 0"));
+        return Err(refuse(
+            "invalid_parameter",
+            "InstrumentSpec",
+            "price_increment",
+            "increments and lot_size must be >= 0",
+            price_increment.min(size_increment).min(lot_size),
+        ));
     }
     if multiplier <= 0.0 {
-        return Err(PyValueError::new_err("multiplier must be > 0"));
+        return Err(refuse(
+            "invalid_parameter",
+            "InstrumentSpec",
+            "multiplier",
+            "multiplier must be > 0",
+            multiplier,
+        ));
     }
     if let (Some(act), Some(exp)) = (activation_ns, expiration_ns) {
         if exp <= act {
-            return Err(PyValueError::new_err("expiration_ns must be after activation_ns"));
+            return Err(refuse(
+                "invalid_parameter",
+                "InstrumentSpec",
+                "expiration_ns",
+                "expiration_ns must be after activation_ns",
+                exp,
+            ));
         }
     }
     spec.price_increment = price_increment;
@@ -250,19 +278,36 @@ impl PyInstrumentSpec {
         session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
         if span_pct < 0.0 || exposure_pct < 0.0 {
-            return Err(PyValueError::new_err("span_pct and exposure_pct must be >= 0"));
+            return Err(refuse(
+                "invalid_parameter",
+                "InstrumentSpec.option",
+                "span_pct",
+                "span_pct and exposure_pct must be >= 0",
+                span_pct.min(exposure_pct),
+            ));
         }
         let right = match right.to_ascii_lowercase().as_str() {
             "call" | "c" | "ce" => OptionRight::Call,
             "put" | "p" | "pe" => OptionRight::Put,
             other => {
-                return Err(PyValueError::new_err(format!(
-                    "right must be 'call' or 'put', got {other:?}"
-                )))
+                return Err(Fail::new(
+                    "invalid_option_right",
+                    format!("right must be 'call' or 'put', got {other:?}"),
+                )
+                .op("InstrumentSpec.option")
+                .param("right")
+                .value(other.to_string())
+                .into())
             }
         };
         if strike <= 0.0 {
-            return Err(PyValueError::new_err("strike must be > 0"));
+            return Err(refuse(
+                "invalid_parameter",
+                "InstrumentSpec.option",
+                "strike",
+                "strike must be > 0",
+                strike,
+            ));
         }
         let mut spec = InstrumentSpec::new(
             symbol,
@@ -345,7 +390,13 @@ impl PyInstrumentSpec {
     ) -> PyResult<Self> {
         let mut spec = InstrumentSpec::new(symbol, InstrumentKind::Index);
         if price_increment < 0.0 {
-            return Err(PyValueError::new_err("price_increment must be >= 0"));
+            return Err(refuse(
+                "invalid_parameter",
+                "InstrumentSpec.index",
+                "price_increment",
+                "price_increment must be >= 0",
+                price_increment,
+            ));
         }
         spec.price_increment = price_increment;
         Ok(Self { inner: with_meta(spec, venue, currency, session)? })
@@ -412,6 +463,32 @@ impl PyInstrumentSpec {
     #[setter]
     fn set_settlement_fee(&mut self, fee: f64) {
         self.inner.settlement_fee = fee;
+    }
+
+    /// How the contract settles at expiry: `"cash"` (default) or
+    /// `"physical"` (the underlying is delivered).
+    #[getter]
+    fn settlement_style(&self) -> &'static str {
+        self.inner.settlement.style.as_str()
+    }
+
+    #[setter]
+    fn set_settlement_style(&mut self, style: &str) -> PyResult<()> {
+        self.inner.settlement.style = super::lifecycle_bindings::parse_style(style)?;
+        Ok(())
+    }
+
+    /// Where the settlement price comes from: `"auto"` (default),
+    /// `"last_price"`, `"underlying"`, or a number declared for the contract.
+    #[getter]
+    fn settlement_price(&self, py: Python<'_>) -> Py<PyAny> {
+        super::lifecycle_bindings::price_to_py(py, self.inner.settlement.price)
+    }
+
+    #[setter]
+    fn set_settlement_price(&mut self, price: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.settlement.price = super::lifecycle_bindings::parse_price(price)?;
+        Ok(())
     }
 
     #[setter]

@@ -10,6 +10,9 @@ An order is driven in one of two ways, and never both:
   them in. The reports can repeat, arrive late or arrive out of order, and
   a bad one returns an `OrderEventError`; the order is left unchanged.
 
+How an order gets to a venue, and what the book does with a fill, is in
+`execution-adapters.md`.
+
 An order the matcher has already moved (filled, ended, or with a filled
 quantity) refuses reports (`NotVenueDriven`), so the two modes cannot mix.
 

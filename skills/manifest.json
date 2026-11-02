@@ -64,21 +64,26 @@
       "description": "Instrument definitions, asset classes, options and multi-instrument runs.",
       "load_when": [
         "Trading several symbols or asset classes.",
-        "Defining lot size, tick size, multiplier, expiry or sessions.",
-        "Working with option chains, pricing and Greeks."
+        "Defining futures lot size, tick size, multiplier, expiry and settlement.",
+        "Picking option strikes and expiries from a chain; pricing options, Greeks and implied volatility.",
+        "Building iron condors, straddles and other multi-leg option structures.",
+        "Market hours, trading sessions and holidays."
       ],
       "depends_on": [
         "raptorbt-core",
         "raptorbt-strategy"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
+        "raptorbt.CorporateAction",
+        "raptorbt.adjust_history",
         "raptorbt.InstrumentSpec",
         "raptorbt.SessionSchedule",
         "raptorbt.InstrumentConfig",
         "raptorbt.OptionChain",
-        "raptorbt.pricing"
+        "raptorbt.pricing",
+        "raptorbt.structures"
       ]
     },
     {
@@ -88,8 +93,9 @@
       "path": "market-data/SKILL.md",
       "description": "Bars, trades, quotes and order-book inputs, and tick-level features.",
       "load_when": [
-        "Preparing OHLCV arrays or tick streams.",
-        "Handling timestamps, bar stamps and ordering.",
+        "Preparing OHLCV arrays, trade ticks, quotes and order-book depth.",
+        "Handling timestamps, bar_stamp, bar open versus close stamps and ordering.",
+        "Checking what a strategy can see at an event (no lookahead).",
         "Computing tick features or running tick-level simulation."
       ],
       "depends_on": [
@@ -97,7 +103,7 @@
         "raptorbt-instruments"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.bars_from_ticks",
         "raptorbt.TickStrategyStream",
@@ -122,8 +128,9 @@
       "path": "subscriptions/SKILL.md",
       "description": "Declaring which streams and bar histories a strategy receives.",
       "load_when": [
-        "Subscribing a strategy to extra bar streams or timeframes.",
-        "Reading bar history inside a hook."
+        "Subscribing a strategy to a symbol's trades, quotes or order books.",
+        "Subscribing to 5 minute, hourly or daily bars of a symbol.",
+        "Reading closed-bar history and the last quote or book with ctx.data."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -131,7 +138,7 @@
         "raptorbt-market-data"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.strategy.BarHistory",
         "raptorbt.InvalidSubscription"
@@ -145,7 +152,10 @@
       "description": "Multi-timeframe aggregation and composite bars.",
       "load_when": [
         "Combining 1m, 5m, 15m, hourly or daily data.",
-        "Building custom bar aggregations."
+        "Turning 1 minute bars into 5, 15 or 60 minute bars, or into daily bars.",
+        "Building bars from ticks: time, tick-count, volume, value or Renko bars.",
+        "Anchoring bars at the market open; resampling, aggregating and bar grids.",
+        "Choosing which edge of a bar a boundary record belongs to."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -153,7 +163,7 @@
         "raptorbt-market-data"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.BarAggregator",
         "raptorbt.aggregate_bars",
@@ -173,15 +183,16 @@
       "path": "indicators/SKILL.md",
       "description": "Built-in vectorised and streaming indicators.",
       "load_when": [
-        "Computing SMA, EMA, RSI, ATR, MACD, Bollinger, ADX or supertrend.",
-        "Registering a streaming indicator on a strategy."
+        "Computing SMA, EMA, RSI, ATR, MACD, Bollinger bands, ADX, VWAP or Supertrend.",
+        "Registering a streaming indicator on a strategy and waiting for warm-up.",
+        "Writing a custom indicator, or an indicator on a higher timeframe."
       ],
       "depends_on": [
         "raptorbt-core",
         "raptorbt-strategy"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.Indicator",
         "raptorbt.sma",
@@ -196,7 +207,8 @@
         "raptorbt.supertrend",
         "raptorbt.rolling_min",
         "raptorbt.rolling_max",
-        "raptorbt.resolve_atr_period"
+        "raptorbt.resolve_atr_period",
+        "raptorbt.BollingerBands"
       ]
     },
     {
@@ -306,6 +318,7 @@
       "status": "draft",
       "modules": [
         "raptorbt.margin",
+        "raptorbt.sizing",
         "raptorbt.MarginModel",
         "raptorbt.RiskModel",
         "raptorbt.RiskContributions",
@@ -345,8 +358,9 @@
       "path": "optimization/SKILL.md",
       "description": "Parameter sweeps, batch runs and Monte Carlo validation.",
       "load_when": [
-        "Sweeping parameters across many runs.",
-        "Checking robustness with Monte Carlo."
+        "Sweeping parameters across many runs; grid and random designs.",
+        "Walk-forward testing, the deflated Sharpe ratio and avoiding overfitting.",
+        "Checking robustness with a bootstrap or a portfolio Monte Carlo."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -354,7 +368,7 @@
         "raptorbt-results"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.BatchSingleItem",
         "raptorbt.BatchSpreadItem",
@@ -393,14 +407,15 @@
       "path": "results/SKILL.md",
       "description": "Performance analysis, trades and diagnostics.",
       "load_when": [
-        "Reading metrics, equity and drawdown curves, trades or orders.",
-        "Judging whether a result is trustworthy."
+        "Reading metrics, equity and drawdown curves, trades, orders and the full report.",
+        "Judging whether a result is trustworthy; why a Sharpe ratio looks huge (annualisation).",
+        "Reconciling a run: fees, P&L, drawdown, open trades."
       ],
       "depends_on": [
         "raptorbt-core"
       ],
       "api_version": "2.x",
-      "status": "draft",
+      "status": "stable",
       "modules": [
         "raptorbt.BacktestResult",
         "raptorbt.BacktestMetrics",

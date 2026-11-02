@@ -1,5 +1,7 @@
 //! Zero-copy numpy array interface.
 
+use std::borrow::Cow;
+
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
@@ -14,40 +16,38 @@ pub fn numpy_to_vec2_f64(arr: PyReadonlyArray2<f64>) -> (Vec<f64>, usize, usize)
 }
 
 /// Convert numpy array to Vec<f64>.
+///
+/// Iterates the view in logical order, so a strided input (a column of a
+/// transposed matrix, `a[::2]`) is copied correctly rather than refused.
 pub fn numpy_to_vec_f64(arr: PyReadonlyArray1<f64>) -> Vec<f64> {
-    arr.as_slice().unwrap().to_vec()
+    arr.as_array().iter().copied().collect()
 }
 
 /// Convert numpy array to Vec<i64>.
 pub fn numpy_to_vec_i64(arr: PyReadonlyArray1<i64>) -> Vec<i64> {
-    arr.as_slice().unwrap().to_vec()
+    arr.as_array().iter().copied().collect()
 }
 
-/// Borrow a numpy `f64` array as a slice, without copying it.
-///
-/// `PyReadonlyArray1` holds the GIL and a read lock on the buffer for as long
-/// as it lives, so the slice cannot be resized or freed underneath us; tying
-/// the returned lifetime to that guard is what makes the borrow sound. The
-/// caller must therefore keep the guard alive for as long as the slice is used
-/// — bind it to a variable, do not pass a temporary.
-///
-/// Panics on a non-contiguous array, which is the same contract
-/// [`numpy_to_vec_f64`] has always had (`as_slice().unwrap()`); NumPy arrays
-/// arriving from ordinary Python code are C-contiguous.
-pub fn numpy_as_slice_f64<'a>(arr: &'a PyReadonlyArray1<'_, f64>) -> &'a [f64] {
-    arr.as_slice().expect("numpy array must be contiguous")
+/// Borrow a numpy `f64` array when it is contiguous, copy it when it is not
+/// (a strided view such as `a[::2]` or a column of a transposed matrix).
+pub fn numpy_cow_f64<'a>(arr: &'a PyReadonlyArray1<'_, f64>) -> Cow<'a, [f64]> {
+    match arr.as_slice() {
+        Ok(slice) => Cow::Borrowed(slice),
+        Err(_) => Cow::Owned(arr.as_array().iter().copied().collect()),
+    }
 }
 
-/// Borrow a numpy `i64` array as a slice, without copying it.
-///
-/// See [`numpy_as_slice_f64`] for the lifetime contract.
-pub fn numpy_as_slice_i64<'a>(arr: &'a PyReadonlyArray1<'_, i64>) -> &'a [i64] {
-    arr.as_slice().expect("numpy array must be contiguous")
+/// Borrow a numpy `i64` array when it is contiguous, copy it when it is not.
+pub fn numpy_cow_i64<'a>(arr: &'a PyReadonlyArray1<'_, i64>) -> Cow<'a, [i64]> {
+    match arr.as_slice() {
+        Ok(slice) => Cow::Borrowed(slice),
+        Err(_) => Cow::Owned(arr.as_array().iter().copied().collect()),
+    }
 }
 
 /// Convert numpy bool array to Vec<bool>.
 pub fn numpy_to_vec_bool(arr: PyReadonlyArray1<bool>) -> Vec<bool> {
-    arr.as_slice().unwrap().to_vec()
+    arr.as_array().iter().copied().collect()
 }
 
 /// An owned-by-Python 1-D `f64` array, as returned to Python.

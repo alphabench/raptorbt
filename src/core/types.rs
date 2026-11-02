@@ -126,7 +126,7 @@ impl OhlcvData<'_> {
 /// All fields are parallel arrays of length N (one entry per tick).
 /// `buy_qty_delta` and `sell_qty_delta` must be per-tick deltas, not
 /// cumulative session totals — callers are responsible for converting
-/// Zerodha-style running sums before passing them here.
+/// running (cumulative) sums before passing them here.
 #[derive(Debug, Clone)]
 pub struct TickData {
     /// Nanoseconds-since-epoch timestamp for each tick.
@@ -246,6 +246,28 @@ impl CompiledSignals {
     }
 }
 
+/// The booked amounts of a trade, in minor units of `places` decimals.
+///
+/// These are the integers the account moved by; `Trade::pnl` and `fees` are
+/// their `f64` views. `pnl == gross - entry_fees - exit_fees` holds exactly,
+/// where `gross` is the exit notional less the entry notional for a long and
+/// the reverse for a short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeMoney {
+    /// Decimals of the minor unit (two: 100 minor units to the rupee).
+    pub places: u8,
+    /// Booked notional of the entry: `price * size * multiplier`.
+    pub entry_notional: i128,
+    /// Booked notional of the exit.
+    pub exit_notional: i128,
+    /// Entry costs.
+    pub entry_fees: i128,
+    /// Exit costs.
+    pub exit_fees: i128,
+    /// Realised profit or loss, net of both costs.
+    pub pnl: i128,
+}
+
 /// A single executed trade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
@@ -320,6 +342,11 @@ pub struct Trade {
     /// money, on the same multiplier as `pnl`. Never negative.
     #[serde(default)]
     pub mfe_pnl: Option<f64>,
+    /// The booked integer amounts behind `pnl` and `fees`, when the trade
+    /// closed through the accounting kernel. `None` on paths that still
+    /// account in `f64` (the multi-leg simulators).
+    #[serde(default)]
+    pub money: Option<TradeMoney>,
 }
 
 impl Trade {
@@ -351,8 +378,12 @@ pub enum ExitReason {
     EndOfData,
     /// Closed by an explicit order (class-based order API).
     Order,
-    /// Option expiry settlement.
+    /// Contract expiry settlement.
     Settlement,
+    /// A physical delivery closed the opposite line of the underlying.
+    Delivery,
+    /// The fraction of a unit a split or bonus left over, paid in cash.
+    CorporateAction,
     /// Force-closed by a margin call or a risk-limit flatten (daily loss,
     /// halt). Unlike a settlement this is a real
     /// trade-out and pays exit costs.
@@ -452,6 +483,14 @@ pub struct BacktestConfig {
     /// price the run in place of the built-in preset `fee_segment` names; the
     /// bindings fill it, refusing a schedule that has no such row.
     pub fee_rates: Option<crate::execution::costs::FeeRates>,
+
+    /// The schedule behind `fee_rates`, when the run was priced on one. A fill
+    /// on day D is then charged by the row in force on D, a contract's
+    /// settlement by the schedule's settlement row, and a delivery sell owes
+    /// the per-instrument-day fee once per trading date. Without it the run
+    /// is priced on the single row `fee_rates` holds.
+    #[serde(skip)]
+    pub fee_binding: Option<crate::execution::fees::FeeBinding>,
 
     /// Maximum concurrent open positions. `None` is unlimited.
     ///
@@ -613,6 +652,23 @@ pub struct BacktestConfig {
     /// only refusing new entries.
     #[serde(default)]
     pub flatten_on_daily_loss: bool,
+
+    /// Decimals cash, fees and realised P&L are booked in (see
+    /// `accounts::money`): 2 means a rupee or dollar is 100 minor units.
+    #[serde(default = "default_money_decimals")]
+    pub money_decimals: u32,
+
+    /// How a margin account funds an entry. `None` keeps the built-in rule
+    /// (the instrument's `margin_init`, else one over the leverage, and the
+    /// span-and-exposure deposit for a sold option), bit for bit. Only a
+    /// margin account reads it. Not serialised: nothing in the engine writes a
+    /// config out, and a model is not part of a config document.
+    #[serde(skip)]
+    pub margin_model: Option<std::sync::Arc<crate::accounts::MarginModel>>,
+}
+
+fn default_money_decimals() -> u32 {
+    2
 }
 
 fn default_one() -> f64 {
@@ -636,6 +692,9 @@ impl Default for BacktestConfig {
             squareoff_time_minutes: None,
             fee_segment: None,
             fee_rates: None,
+            fee_binding: None,
+            money_decimals: 2,
+            margin_model: None,
             max_positions: None,
             max_drawdown_pct: None,
             legacy_annualization: false,
@@ -681,6 +740,16 @@ impl BacktestConfig {
     pub fn fee_model(&self) -> crate::execution::FeeModel {
         use crate::execution::{indian_costs::Segment, FeeModel};
 
+        if let Some(b) = &self.fee_binding {
+            let dated = crate::execution::fees::DatedFees::new(
+                b.schedule.clone(),
+                b.venue.clone(),
+                b.segment,
+                self.session_tz_offset_ns,
+            )
+            .expect("a fee binding is validated when the schedule is attached");
+            return FeeModel::Dated(Box::new(dated));
+        }
         if let Some(rates) = self.fee_rates {
             return FeeModel::Rates(rates);
         }

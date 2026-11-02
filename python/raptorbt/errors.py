@@ -157,6 +157,14 @@ class SessionFinished(StateError, ValueError):
     """
 
 
+class MoneyOverflow(RaptorBTError, ArithmeticError):
+    """A booked amount or balance cannot be represented.
+
+    Cash, fees and P&L are integer minor units (``BacktestConfig.money_decimals``);
+    an amount that is not finite, or a sum past the range of the integer, stops
+    the run with this error rather than wrapping or going quietly wrong."""
+
+
 class UnknownSymbol(RaptorBTError, KeyError, ValueError):
     """A symbol was named that the run does not know."""
 
@@ -325,6 +333,10 @@ CODES: dict[str, Code] = {
     "insufficient_data": _c(
         InvalidData, "market-data", "Fewer elements than the calculation needs."
     ),
+    "non_finite_price": _c(
+        InvalidData, "market-data",
+        "A bar's open, high, low or close is NaN or infinite; the message names the column and first index.",
+    ),
     "invalid_data": _c(
         InvalidData, "market-data", "Other malformed input data (division by zero, index out of range, conversion)."
     ),
@@ -412,6 +424,18 @@ CODES: dict[str, Code] = {
         InvalidParameter, "instruments",
         "A SessionSchedule is invalid: a bad window, weekday, holiday date, offset or square-off minute.",
     ),
+    "invalid_corporate_action": _c(
+        InvalidParameter, "execution",
+        "A corporate action is invalid: an unknown kind, a ratio that is not positive, a negative dividend, or a pay date before the ex-date.",
+    ),
+    "invalid_adjustment_policy": _c(
+        InvalidParameter, "execution",
+        "Corporate actions were given without an adjustment_policy, or the policy is not raw or adjusted.",
+    ),
+    "invalid_settlement": _c(
+        InvalidParameter, "instruments",
+        "An instrument's settlement style or settlement price is invalid.",
+    ),
     "invalid_fee_schedule": _c(
         InvalidParameter, "execution",
         "A fee schedule or rate card document is invalid, or fee_schedule is set without a fee_segment.",
@@ -422,7 +446,15 @@ CODES: dict[str, Code] = {
     ),
     "invalid_margin_model": _c(
         InvalidParameter, "risk",
-        "A margin model or the line it prices is invalid: an unknown name, a missing rule for an instrument type, or legs that do not fit.",
+        "A margin model or the line it prices is invalid: an unknown name, a missing rule for an instrument type, legs that do not fit, or a config.margin_model given to a cash account.",
+    ),
+    "money_overflow": _c(
+        MoneyOverflow, "execution",
+        "A booked amount is not finite or a balance or sum is past the integer range of minor units; the run stops instead of wrapping.",
+    ),
+    "invalid_money_decimals": _c(
+        InvalidParameter, "execution",
+        "config.money_decimals is outside 0..=9: the decimals cash, fees and realised P&L are booked in.",
     ),
     "invalid_session_date": _c(
         InvalidParameter, "instruments", "A session date is not a real yyyymmdd date."
@@ -430,11 +462,40 @@ CODES: dict[str, Code] = {
     "invalid_instrument_metadata": _c(
         InvalidParameter, "instruments", "An instrument's venue or currency is an empty string."
     ),
+    "invalid_option_right": _c(
+        InvalidParameter, "instruments", "An option's right is not call or put.", ["call", "put"]
+    ),
+    "invalid_expiry_pick": _c(
+        InvalidParameter, "instruments", "OptionChain.pick_expiry was given an unknown rule, or 'date' without date_ns.",
+        ["nearest", "nth", "weekly", "monthly", "date"],
+    ),
     "invalid_parameter": _c(
         InvalidParameter, "core", "A parameter value is invalid (engine-side check)."
     ),
     "invalid_config": _c(
         InvalidParameter, "core", "A configuration value is invalid (engine-side check)."
+    ),
+    # Option structures and sizing
+    "invalid_structure": _c(
+        InvalidParameter, "instruments", "A structure, leg, selector, exit or submission argument is invalid."
+    ),
+    "structure_contract_missing": _c(
+        InvalidParameter, "instruments", "The chain lists no contract (or expiry) a structure's leg selects at the event time."
+    ),
+    "structure_limit_breached": _c(
+        InvalidParameter, "orders", "The legs' prices make the net premium worse than net_limit."
+    ),
+    "structure_margin_exceeded": _c(
+        InvalidParameter, "risk", "The margin model needs more for the group than is available."
+    ),
+    "structure_missing_mark": _c(
+        StateError, "instruments", "A price or mark a structure needs was not supplied."
+    ),
+    "below_one_lot": _c(
+        InvalidParameter, "risk", "The sizing rule yields less than one lot; nothing is rounded up or to zero."
+    ),
+    "invalid_sizing_input": _c(
+        InvalidParameter, "risk", "A sizing input is not a positive finite number (or a fraction out of range)."
     ),
     # Lifecycle
     "session_finished": _c(
@@ -442,6 +503,41 @@ CODES: dict[str, Code] = {
     ),
     "node_finished": _c(
         StateError, "live-trading", "The live node is finished; create a new one."
+    ),
+    # Execution adapters and venues
+    "invalid_execution": _c(
+        InvalidParameter, "live-trading",
+        "execution is not an execution adapter, or the run cannot send its orders to one.",
+    ),
+    "unsupported_in_venue_run": _c(
+        UnsupportedOperation, "live-trading",
+        "The request has no equivalent when orders go to an execution adapter.",
+    ),
+    "venue_requires_units": _c(
+        InvalidOrder, "live-trading",
+        "An order sent to an execution adapter gave its size as a capital fraction or the whole position.",
+    ),
+    "duplicate_client_order_id": _c(
+        InvalidOrder, "live-trading", "An order id was reused for a different order."
+    ),
+    "unknown_client_order_id": _c(
+        InvalidParameter, "live-trading", "A report names an order that was never sent."
+    ),
+    "invalid_execution_report": _c(
+        InvalidData, "live-trading",
+        "A venue report contradicts the order it is about, or cannot be applied to it.",
+    ),
+    "venue_fill_not_booked": _c(
+        StateError, "live-trading",
+        "The venue filled an order but the book could not take the fill: reconcile the position.",
+    ),
+    "venue_unavailable": _c(
+        StateError, "live-trading",
+        "A request may not have reached the venue; the order stays as it was until the venue reports.",
+    ),
+    "paper_unsolicited_position_change": _c(
+        StateError, "live-trading",
+        "The simulated venue changed a position with no order behind it.",
     ),
     "runtime_busy": _c(
         StateError, "backtesting", "The runtime is in use; a call re-entered it from a hook."

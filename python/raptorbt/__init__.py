@@ -10,6 +10,13 @@ production quantitative trading:
 - Full tick-level simulation (no bar resampling required)
 """
 
+import raptorbt._raptorbt as _native
+from raptorbt import _guard
+from raptorbt._bands import BollingerBands
+
+# Money faults leave the extension as a panic; make them the structured
+# ``money_overflow`` error at every entry point.
+_guard.install(_native)
 
 from raptorbt._raptorbt import (
     # Session lengths (minutes) for BacktestConfig(session_minutes=...)
@@ -93,6 +100,8 @@ from raptorbt._raptorbt import (
     # Instrument market definitions
     InstrumentSpec,
     SessionSchedule,
+    CorporateAction,
+    adjust_history,
     # Option chain (pricing lives in raptorbt.pricing)
     OptionChain,
     # Fees as data and margin models
@@ -249,6 +258,7 @@ __all__ = [
     "stochastic",
     "atr",
     "bollinger_bands",
+    "BollingerBands",
     "adx",
     "vwap",
     "supertrend",
@@ -258,6 +268,8 @@ __all__ = [
     "InstrumentSpec",
     "OptionChain",
     "SessionSchedule",
+    "CorporateAction",
+    "adjust_history",
     "FeeSchedule",
     "RateCard",
     "MarginModel",

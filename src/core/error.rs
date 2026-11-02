@@ -36,6 +36,10 @@ pub enum RaptorError {
     #[error("Index {index} out of bounds for length {length}")]
     IndexOutOfBounds { index: usize, length: usize },
 
+    /// A price column holds a NaN or an infinity.
+    #[error("{label}: {column} is not finite ({value}) at index {index}")]
+    NonFinitePrice { label: String, column: &'static str, index: usize, value: f64 },
+
     /// Python conversion error.
     #[error("Python conversion error: {message}")]
     PythonError { message: String },
@@ -82,6 +86,7 @@ impl From<RaptorError> for pyo3::PyErr {
             RaptorError::InsufficientData { .. } => "insufficient_data",
             RaptorError::InvalidConfig { .. } => "invalid_config",
             RaptorError::EmptyData { .. } => "empty_data",
+            RaptorError::NonFinitePrice { .. } => "non_finite_price",
             RaptorError::DivisionByZero { .. }
             | RaptorError::IndexOutOfBounds { .. }
             | RaptorError::PythonError { .. } => "invalid_data",
@@ -90,6 +95,7 @@ impl From<RaptorError> for pyo3::PyErr {
         match err {
             RaptorError::LengthMismatch { actual, .. } => fail.value(actual),
             RaptorError::InsufficientData { available, .. } => fail.value(available),
+            RaptorError::NonFinitePrice { column, index, .. } => fail.param(column).value(index),
             _ => fail,
         }
         .into()

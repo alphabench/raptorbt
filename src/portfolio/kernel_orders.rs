@@ -66,6 +66,11 @@ impl EngineKernel {
             return;
         }
         for slice in self.algos.release_due(now_ns) {
+            if self.venue_managed {
+                // The runtime sends it to the venue.
+                self.slice_outbox.push(slice);
+                continue;
+            }
             let order_id = self.submit_order_full(
                 slice.side,
                 QtySpec::Units(slice.units),
@@ -172,6 +177,22 @@ impl EngineKernel {
         order.reduce_only = reduce_only;
         order.parent_id = parent_id;
         let id = self.orders.submit(order);
+
+        // An expired contract takes no orders: the refusal is a rejection with
+        // the stable reason `expired`, counted and delivered like any other.
+        if self.expired_at(submitted_ts) {
+            if let Some(order) = self.orders.get_mut(id) {
+                let _ = order.transition(OrderStatus::Rejected);
+            }
+            self.risk.record_rejection();
+            self.pending_events.push(EngineEvent::OrderRejected {
+                idx: submitted_idx,
+                order_id: id,
+                client_id,
+                reason: RejectReason::Expired.as_str(),
+            });
+            return id;
+        }
 
         // A closed market takes no orders. The refusal is an ordinary
         // rejection, so it is counted and reaches the strategy as an event.
@@ -402,9 +423,15 @@ impl EngineKernel {
                 }
             }
         }
+        // The queue grants the limit price, or the print when the print
+        // traded through the limit: the better of the two for the trader.
+        let granted = |price: Price| match side {
+            OrderSide::Buy => price.min(bar.close),
+            OrderSide::Sell => price.max(bar.close),
+        };
         let matched_price = match (queue_granted, kind) {
-            (true, OrderKind::Limit { price }) => price,
-            (true, OrderKind::StopLimit { price, .. }) => price,
+            (true, OrderKind::Limit { price }) => granted(price),
+            (true, OrderKind::StopLimit { price, .. }) => granted(price),
             _ => matched_price,
         };
         let matched_price = if !is_limit_fill

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::{Direction, Price, Timestamp};
+use crate::instruments::lifecycle::SettlementTerms;
 
 /// Which side an option contract is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +92,12 @@ pub struct InstrumentSpec {
     /// and assignment differently from a trade-out — Indian STT on exercised
     /// options is the standard example.
     pub settlement_fee: f64,
+    /// How the contract settles at its expiry: cash or physical delivery, and
+    /// where the settlement price comes from. The default settles in cash at
+    /// intrinsic value when the underlying's price is supplied, else at the
+    /// last price, and says which on the settlement event.
+    #[serde(default)]
+    pub settlement: SettlementTerms,
     /// Risk-scenario (SPAN-style) margin for a SHORT option, as a fraction of
     /// the underlying notional at the strike. `0.0` (default) leaves a short
     /// option funded at its premium, as before.
@@ -138,6 +145,7 @@ impl InstrumentSpec {
             activation_ns: None,
             expiration_ns: None,
             settlement_fee: 0.0,
+            settlement: SettlementTerms::default(),
             span_pct: 0.0,
             exposure_pct: 0.0,
             venue: None,
@@ -160,6 +168,16 @@ impl InstrumentSpec {
         }
         match &self.kind {
             InstrumentKind::Option { strike, .. } => Some(rate * strike * self.multiplier),
+            _ => None,
+        }
+    }
+
+    /// The underlying's symbol, for a contract or option that names one.
+    pub fn underlying(&self) -> Option<&str> {
+        match &self.kind {
+            InstrumentKind::Contract { underlying } | InstrumentKind::Option { underlying, .. } => {
+                underlying.as_deref()
+            }
             _ => None,
         }
     }

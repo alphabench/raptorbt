@@ -8,7 +8,7 @@
 //!
 //! [`PortfolioEngine`]: crate::portfolio::engine::PortfolioEngine
 
-use crate::accounts::{AccountMode, MarginBook};
+use crate::accounts::{AccountMode, MarginBook, Money, MoneyScale};
 use crate::core::types::{
     BacktestConfig, Direction, ExitReason, FillTiming, InstrumentConfig, OhlcvBar, Price,
     StopConfig, TargetConfig, Timestamp, Trade,
@@ -25,7 +25,7 @@ use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::instruments::{InstrumentKind, InstrumentSpec};
 use crate::portfolio::kernel_session::SessionState;
-use crate::portfolio::ledger::{marked_value, PositionLedger, PositionPolicy};
+use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
 use crate::portfolio::option_groups::OptionLeg;
 use crate::portfolio::position::ExitDetails;
 use crate::portfolio::risk::{RejectReason, RiskGate, SizeLimits};
@@ -77,9 +77,18 @@ enum EntryFunding {
     /// evaluated in that order so existing runs reproduce bit-for-bit.
     /// `modelled` marks a rate the instrument spec set (`margin_init`).
     Rate { rate: f64, modelled: bool },
-    /// A sold option's SPAN-style deposit per contract, from the spec.
+    /// A sold option's SPAN-style deposit per contract, from the spec, or the
+    /// per-unit requirement of the margin model the account was given.
     Deposit { per_contract: f64 },
+    /// The margin model requires nothing (`no_margin`). Nothing is locked.
+    /// Capital-fraction sizing still prices the lot at its full notional, so
+    /// a fraction of capital never buys more than the same fraction in cash.
+    Unmargined,
 }
+
+/// An option instrument and its open positions as `(id, signed quantity,
+/// entry price)`.
+pub type ModelOptionLines<'a> = (&'a InstrumentSpec, Vec<(u64, f64, f64)>);
 
 /// A single bar handed to the kernel.
 ///
@@ -157,6 +166,45 @@ pub enum EngineEvent {
     /// (`reason` is `"daily_loss"`) or the strategy was halted (`reason` is
     /// the halt reason, `"manual"` by default).
     RiskHalted { idx: usize, reason: String },
+    /// A contract expired and a position in it settled. Follows the
+    /// position's [`EngineEvent::Exited`] (reason `Settlement`).
+    ///
+    /// `outcome` is `"settled"` (cash), or for a physically settled
+    /// contract `"exercised"` (a long option in the money), `"assigned"` (a
+    /// short one), `"expired"` (out of the money, nothing delivered) or
+    /// `"delivered"` (a future). `price` is what the position closed at and
+    /// `source` says where it came from. `deliver` is the underlying units
+    /// the book takes in (positive) or gives away (negative) at
+    /// `delivery_price`; `0.0` when nothing is delivered.
+    Settled {
+        idx: usize,
+        outcome: &'static str,
+        style: crate::instruments::SettlementStyle,
+        source: crate::instruments::SettlementSource,
+        price: Price,
+        size: f64,
+        direction: Direction,
+        deliver: f64,
+        delivery_price: Price,
+    },
+    /// A corporate action was applied to the instrument. `ratio` is the
+    /// split or bonus ratio (`0.0` for a dividend), `amount` the dividend per
+    /// unit (`0.0` otherwise), `cash` the money the account received for it
+    /// (a short pays a dividend, so it is negative; for a split, the cash in
+    /// lieu of a fractional unit).
+    CorporateAction {
+        idx: usize,
+        kind: crate::instruments::CorporateKind,
+        ratio: f64,
+        amount: f64,
+        cash: f64,
+    },
+    /// Something the lifecycle needed was not there, so it did not happen: a
+    /// settlement price the contract's terms require, a mark to pay a
+    /// fractional unit at. `what` is `"settlement"` or `"corporate_action"`;
+    /// `reason` a stable identifier. The position or action is left as it
+    /// was.
+    LifecycleRefused { idx: usize, what: &'static str, reason: String },
 }
 
 /// Per-bar inputs that vary independently of the bar itself.
@@ -248,6 +296,18 @@ pub struct PositionSnapshot {
     pub target_price: Option<Price>,
 }
 
+/// The protection a newly opened position would have had in-process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtectRequest {
+    pub direction: Direction,
+    pub size: f64,
+    pub entry_price: Price,
+    pub stop: Option<Price>,
+    pub target: Option<Price>,
+    /// The stop trails: its distance from the entry, in price.
+    pub trail: Option<f64>,
+}
+
 /// Stateful simulation core.
 ///
 /// One instance simulates one instrument. All mutable simulation state that the
@@ -270,7 +330,13 @@ pub struct EngineKernel {
     /// Open positions. Net policy holds at most one, reproducing the
     /// original single-position behavior; Independent allows hedging.
     pub(crate) ledger: PositionLedger,
-    cash: f64,
+    /// Uninvested cash in minor units; see `accounts::money`.
+    cash: Money,
+    /// `cash` as an `f64`, kept in step so a bar's equity reads it without a
+    /// conversion.
+    cash_view: f64,
+    /// Decimals cash, fees and realised P&L are booked in.
+    money_scale: MoneyScale,
     /// Default direction for signal-path entries (`enter()` and the signal
     /// arrays). The order path does NOT consult this: an order's own side
     /// decides the direction it opens in, so one kernel can hold a long and
@@ -280,6 +346,16 @@ pub struct EngineKernel {
     /// open can honor an ATR stop/target config. Signal entries read
     /// `input.atr` directly.
     pub(crate) last_atr: f64,
+    /// Positions here move only on orders sent to a venue: stops, targets,
+    /// execution schedules and the session square-off do not act in-process
+    /// but leave requests for the runtime to send (see `kernel_venue.rs`).
+    pub(crate) venue_managed: bool,
+    /// Protective levels of the positions opened since the runtime last asked.
+    pub(crate) protect_outbox: Vec<ProtectRequest>,
+    /// Schedule slices released since the runtime last asked.
+    pub(crate) slice_outbox: Vec<crate::execution::algos::PendingSlice>,
+    /// The session square-off came due: the book must be flattened by orders.
+    pub(crate) squareoff_outbox: bool,
     /// Position ids the strategy asked to close, applied on the next step.
     pub(crate) pending_closes: Vec<u64>,
     /// Cash (default, historical) vs leveraged margin funding.
@@ -327,6 +403,17 @@ pub struct EngineKernel {
     /// Latest underlying price, for settling options to intrinsic value.
     /// `None` settles at the contract's own close.
     underlying_price: Option<Price>,
+    /// Physically settled lines the last expiry ended, for the owning book
+    /// to deliver (see `kernel_lifecycle`).
+    pub(crate) contract_ends: Vec<ContractEnd>,
+    /// Whether a refused settlement has been reported already.
+    settlement_refused: bool,
+    /// Whether the owner holds this contract's settlement until its
+    /// underlying has printed at the instant the expiry was noticed.
+    settlement_held: bool,
+    /// Whether an owner (a portfolio book) delivers physically settled
+    /// lines; without one a physical settlement is refused.
+    delivers: bool,
     /// Whether the current step is driven by a trade print. Only a print
     /// carries volume at a price, which is what the queue model consumes.
     pub(crate) stepping_trade: bool,
@@ -352,7 +439,13 @@ impl EngineKernel {
         let effective_target =
             inst_config.and_then(|ic| ic.target.as_ref()).copied().unwrap_or(config.target);
 
-        let cash = config.initial_capital;
+        let money_scale = MoneyScale::new(config.money_decimals)
+            .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}"));
+        let cash = money_scale.money(config.initial_capital).unwrap_or_else(|e| {
+            crate::accounts::money::money_fault(format!("initial_capital: {e}"))
+        });
+        let mut ledger = PositionLedger::new(symbol, PositionPolicy::Net);
+        ledger.set_money_scale(money_scale);
         let config_seed = config.fill_seed;
         let tz_offset_ns = config.session_tz_offset_ns;
         let order_latency_ns = config.order_latency_ns;
@@ -368,10 +461,16 @@ impl EngineKernel {
             fill_timing,
             deferred: None,
             fill_model: FillModel { fill_price, limit_slippage },
-            ledger: PositionLedger::new(symbol, PositionPolicy::Net),
+            ledger,
+            cash_view: money_scale.to_f64(cash),
             cash,
+            money_scale,
             direction,
             last_atr: 0.0,
+            venue_managed: false,
+            protect_outbox: Vec::new(),
+            slice_outbox: Vec::new(),
+            squareoff_outbox: false,
             pending_closes: Vec::new(),
             account: AccountMode::Cash,
             margin: MarginBook::default(),
@@ -391,6 +490,10 @@ impl EngineKernel {
             queue: QueueTracker::new(),
             algos: AlgoEngine::new(),
             underlying_price: None,
+            contract_ends: Vec::new(),
+            settlement_refused: false,
+            settlement_held: false,
+            delivers: false,
             stepping_trade: false,
             session_state: SessionState::default(),
         }
@@ -416,6 +519,7 @@ impl EngineKernel {
         debug_assert!(!self.ledger.is_in_position());
         let mut ledger = PositionLedger::new(self.ledger.symbol().to_string(), policy);
         ledger.set_contract_multiplier(self.ledger.contract_multiplier());
+        ledger.set_money_scale(self.money_scale);
         self.ledger = ledger;
     }
 
@@ -483,7 +587,51 @@ impl EngineKernel {
     /// × multiplier` per contract, with the premium it collects left in the
     /// balance rather than the requirement. A BOUGHT option can lose only
     /// its premium and keeps the rate path (at leverage 1.0, the premium).
-    fn entry_funding(&self, direction: Direction) -> Option<EntryFunding> {
+    fn entry_funding(
+        &self,
+        direction: Direction,
+        price: Price,
+    ) -> std::result::Result<Option<EntryFunding>, RejectReason> {
+        if let Some(model) = self.chosen_margin_model() {
+            return self.modelled_funding(model, direction, price).map(Some);
+        }
+        Ok(self.built_in_funding(direction))
+    }
+
+    /// The margin model the config chose, when the account is on margin.
+    /// A cash account never reads it.
+    fn chosen_margin_model(&self) -> Option<&crate::accounts::MarginModel> {
+        match self.account {
+            AccountMode::Margin { .. } => self.config.margin_model.as_deref(),
+            AccountMode::Cash => None,
+        }
+    }
+
+    /// One funding path for a chosen model: the model's requirement for one
+    /// unit at `price`, locked per unit. A requirement of zero locks nothing
+    /// ([`EntryFunding::Unmargined`]); one that is infinite (delivery cash
+    /// refuses a short) or cannot be priced refuses the entry, with a stable
+    /// reason each, never a requirement of zero.
+    fn modelled_funding(
+        &self,
+        model: &crate::accounts::MarginModel,
+        direction: Direction,
+        price: Price,
+    ) -> std::result::Result<EntryFunding, RejectReason> {
+        use crate::accounts::LineView;
+        let Some(spec) = &self.spec else { return Err(RejectReason::MarginUnpriced) };
+        let sign = if direction == Direction::Long { 1.0 } else { -1.0 };
+        match model.required(&LineView::new(spec, sign, price)) {
+            Err(_) => Err(RejectReason::MarginUnpriced),
+            Ok(per_unit) if per_unit.is_nan() || per_unit.is_infinite() => {
+                Err(RejectReason::InsufficientMargin)
+            }
+            Ok(per_unit) if per_unit <= 0.0 => Ok(EntryFunding::Unmargined),
+            Ok(per_unit) => Ok(EntryFunding::Deposit { per_contract: per_unit }),
+        }
+    }
+
+    fn built_in_funding(&self, direction: Direction) -> Option<EntryFunding> {
         let rate = self.margin_rate()?;
         let Some(spec) = &self.spec else {
             return Some(EntryFunding::Rate { rate, modelled: false });
@@ -499,7 +647,8 @@ impl EngineKernel {
     /// Whether a SHORT option position in this kernel is margined by the
     /// spec's SPAN-style model rather than by the account's leverage rate.
     fn short_option_margin_modelled(&self) -> bool {
-        self.margin_rate().is_some()
+        self.chosen_margin_model().is_none()
+            && self.margin_rate().is_some()
             && self.spec.as_ref().is_some_and(|s| s.short_option_margin_per_contract().is_some())
     }
 
@@ -528,6 +677,7 @@ impl EngineKernel {
         }
         self.ledger.set_contract_multiplier(spec.multiplier);
         self.orders.set_session(spec.session.clone());
+        self.fee_model.bind_underlying(spec.underlying());
         self.spec = Some(spec);
     }
 
@@ -543,7 +693,27 @@ impl EngineKernel {
     /// Current uninvested cash.
     #[inline]
     pub fn cash(&self) -> f64 {
+        self.cash_view
+    }
+
+    /// Current uninvested cash, in booked minor units.
+    #[inline]
+    pub fn cash_money(&self) -> Money {
         self.cash
+    }
+
+    /// The scale cash, fees and realised P&L are booked at.
+    #[inline]
+    pub fn money_scale(&self) -> MoneyScale {
+        self.money_scale
+    }
+
+    /// The booked cost basis and entry fees of the open positions, in minor
+    /// units: what a reconciliation sets against cash and realised P&L.
+    pub fn open_booked(&self) -> (Money, Money) {
+        self.ledger.positions().iter().fold((Money::ZERO, Money::ZERO), |(cost, fees), p| {
+            (cost + p.cost, fees + p.entry_fees_money)
+        })
     }
 
     /// Entries refused by the risk gate.
@@ -563,7 +733,31 @@ impl EngineKernel {
     /// several kernels and re-points each one at the pool before stepping it.
     #[inline]
     pub fn set_cash(&mut self, cash: f64) {
+        let cash = self
+            .money_scale
+            .money(cash)
+            .unwrap_or_else(|e| crate::accounts::money::money_fault(format!("lending cash: {e}")));
+        self.set_cash_money(cash);
+    }
+
+    /// Lend `cash` to the kernel and return the booked amount it holds, so
+    /// the caller can take the kernel's movement back as an exact difference.
+    pub fn lend_cash(&mut self, cash: f64) -> Money {
+        self.set_cash(cash);
+        self.cash
+    }
+
+    /// [`EngineKernel::set_cash`] in booked minor units, which loses nothing.
+    #[inline]
+    pub fn set_cash_money(&mut self, cash: Money) {
         self.cash = cash;
+        self.cash_view = self.money_scale.to_f64(cash);
+    }
+
+    /// Move cash by a booked amount.
+    #[inline]
+    fn move_cash(&mut self, delta: Money) {
+        self.set_cash_money(self.cash + delta);
     }
 
     /// Market value of open positions at the given price, or 0.0 when flat.
@@ -623,7 +817,30 @@ impl EngineKernel {
         // capital — the number that gates every later entry. Fully funded
         // (rate >= 1.0) is the one case where it IS derivable, because the
         // whole notional is locked and the posted margin is the cost basis.
-        let margin_rate = self.margin_rate();
+        let mut margin_rate = self.margin_rate();
+        if let Some(model) = self.chosen_margin_model() {
+            // A chosen model must demand the whole cost basis, for the same
+            // reason: a smaller posted margin is not derivable.
+            use crate::accounts::LineView;
+            let required = self
+                .spec
+                .as_ref()
+                .ok_or_else(|| {
+                    "adopt_position needs an instrument for the margin model".to_string()
+                })
+                .and_then(|spec| {
+                    model.required(&LineView::new(spec, size, price)).map_err(|e| e.to_string())
+                })?;
+            if required < price * size * self.multiplier() {
+                return Err(format!(
+                    "adopt_position requires a cash or fully funded account (the margin model \
+                     requires {required} against a cost basis of {}); posted margin on a \
+                     broker-held position is not derivable under leverage",
+                    price * size * self.multiplier()
+                ));
+            }
+            margin_rate = Some(1.0);
+        }
         if let Some(rate) = margin_rate {
             if rate < 1.0 {
                 return Err(format!(
@@ -633,6 +850,10 @@ impl EngineKernel {
                 ));
             }
         }
+        let cost = self
+            .ledger
+            .try_notional(price, size)
+            .map_err(|e| format!("adopt_position cannot book size {size} @ {price}: {e}"))?;
         let id = self
             .ledger
             .open_position(0, timestamp, price, size, Direction::Long, None, None, 0.0, None)
@@ -645,7 +866,7 @@ impl EngineKernel {
         // understate equity by the cost basis for the whole run. No fee term
         // in either arm: an adoption is not a trade and charges nothing.
         match margin_rate {
-            None => self.cash -= price * size * self.multiplier(),
+            None => self.move_cash(-cost),
             Some(rate) => self.margin.lock(id, price * size * self.multiplier() * rate),
         }
         Ok(id)
@@ -754,8 +975,8 @@ impl EngineKernel {
     #[inline]
     pub fn equity(&self, close: Price) -> f64 {
         match self.account {
-            AccountMode::Cash => self.cash + self.position_value(close),
-            AccountMode::Margin { .. } => self.cash + self.ledger.unrealized_total(close),
+            AccountMode::Cash => self.cash() + self.position_value(close),
+            AccountMode::Margin { .. } => self.cash() + self.ledger.unrealized_total(close),
         }
     }
 
@@ -763,8 +984,8 @@ impl EngineKernel {
     #[inline]
     pub fn free_capital(&self) -> f64 {
         match self.account {
-            AccountMode::Cash => self.cash,
-            AccountMode::Margin { .. } => self.cash - self.margin.total_locked(),
+            AccountMode::Cash => self.cash(),
+            AccountMode::Margin { .. } => self.cash() - self.margin.total_locked(),
         }
     }
 
@@ -979,6 +1200,45 @@ impl EngineKernel {
     /// which a single blended rate would get wrong.
     #[inline]
     pub fn maintenance_requirement(&self, close: Price) -> f64 {
+        if let Some(model) = self.chosen_margin_model() {
+            // A chosen model gives an initial requirement only. Maintenance
+            // is half of that requirement re-read at the mark, and nothing
+            // when the requirement covers the whole notional (fully funded),
+            // as for the built-in rule. A line the model cannot price keeps
+            // half of what it locked at entry.
+            use crate::accounts::LineView;
+            let multiplier = self.multiplier();
+            let grouped_options = self.model_option_lines().is_some();
+            return self
+                .ledger
+                .positions()
+                .iter()
+                .map(|managed| {
+                    let size = managed.position.size;
+                    let notional = close * size * multiplier;
+                    if grouped_options {
+                        // An option leg's lock is its share of its group's
+                        // requirement, which a leg priced alone would
+                        // overstate (a hedged leg is not naked).
+                        let locked = self.margin.locked_for(managed.id);
+                        return if locked >= notional { 0.0 } else { locked * 0.5 };
+                    }
+                    let signed =
+                        if managed.position.direction == Direction::Long { size } else { -size };
+                    let required = self
+                        .spec
+                        .as_ref()
+                        .and_then(|spec| model.required(&LineView::new(spec, signed, close)).ok())
+                        .filter(|r| r.is_finite())
+                        .unwrap_or_else(|| self.margin.locked_for(managed.id));
+                    if required >= notional {
+                        0.0
+                    } else {
+                        required * 0.5
+                    }
+                })
+                .sum();
+        }
         let rate = self.maint_rate();
         let modelled_shorts = self.short_option_margin_modelled();
         if rate.is_none() && !modelled_shorts {
@@ -1007,6 +1267,11 @@ impl EngineKernel {
     /// instrument is an option whose sold side is deposit-modelled. Empty
     /// otherwise, so a share or a plain future never joins a group.
     pub fn open_option_legs(&self, kernel_index: usize) -> Vec<OptionLeg> {
+        // A chosen margin model locks each line by its own requirement; the
+        // built-in grouping of sold legs does not apply.
+        if self.chosen_margin_model().is_some() {
+            return Vec::new();
+        }
         let Some(spec) = &self.spec else { return Vec::new() };
         let InstrumentKind::Option { strike, right, .. } = &spec.kind else {
             return Vec::new();
@@ -1030,6 +1295,35 @@ impl EngineKernel {
                 exposure_pct: spec.exposure_pct,
             })
             .collect()
+    }
+
+    /// The margin model of the account when it margins option lines together
+    /// (`defined_risk`, `spread_credit`, `from_spec`, directly or as the
+    /// `OPTION` entry of a `by_type`).
+    pub fn grouping_margin_model(&self) -> Option<&crate::accounts::MarginModel> {
+        self.chosen_margin_model().filter(|m| m.groups_options())
+    }
+
+    /// This kernel's open option positions as lines of a chosen margin model:
+    /// the instrument, and per position its id, signed quantity and entry
+    /// price. `None` unless the account's model groups option lines and the
+    /// instrument is an option with positions open.
+    pub fn model_option_lines(&self) -> Option<ModelOptionLines<'_>> {
+        self.grouping_margin_model()?;
+        let spec = self.spec.as_ref()?;
+        if !matches!(spec.kind, InstrumentKind::Option { .. }) || !self.ledger.is_in_position() {
+            return None;
+        }
+        let lines = self
+            .ledger
+            .positions()
+            .iter()
+            .map(|m| {
+                let sign = if m.position.direction == Direction::Long { 1.0 } else { -1.0 };
+                (m.id, sign * m.position.size, m.position.entry_price)
+            })
+            .collect();
+        Some((spec, lines))
     }
 
     /// The key that says which legs hedge each other: the underlying (or
@@ -1210,6 +1504,8 @@ impl EngineKernel {
         mode: StepMode,
     ) -> Vec<EngineEvent> {
         self.stepping_trade = mode == StepMode::Trade;
+        // A fill on this step is priced on the fee row in force on its date.
+        self.fee_model.set_time(bar.timestamp);
         // Carried for order-path opens, which have no StepInput of their own.
         self.last_atr = input.atr;
         // Acknowledgments queued between steps (order accepted/canceled)
@@ -1485,6 +1781,7 @@ impl EngineKernel {
         let is_plain_market = |o: &&crate::execution::orders::Order| {
             matches!(o.kind, OrderKind::Market)
                 && o.parent_id.is_none()
+                && !o.is_venue_driven()
                 && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
         };
         if defer_signals {
@@ -1520,7 +1817,9 @@ impl EngineKernel {
                         && bar.timestamp
                             >= o.submitted_ts.saturating_add(self.config.order_latency_ns)
                 }
-                (false, StepMode::Bar) => o.submitted_idx == idx,
+                // `<=`: an order routed here from another instrument's event is stamped
+                // with this instrument's last stepped bar and fills on its next one.
+                (false, StepMode::Bar) => o.submitted_idx <= idx,
             })
             .map(|o| o.id)
             .collect();
@@ -1648,6 +1947,7 @@ impl EngineKernel {
             Some(EntryFunding::Deposit { per_contract }) => {
                 per_contract + contract_value * fee_rate
             }
+            Some(EntryFunding::Unmargined) => contract_value * (1.0 + fee_rate),
         }
     }
 
@@ -1663,6 +1963,7 @@ impl EngineKernel {
             None => contract_value * size,
             Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
             Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+            Some(EntryFunding::Unmargined) => 0.0,
         };
         funding_cost + self.fee_model.calculate_side(contract_value, size, direction, true)
     }
@@ -1745,6 +2046,87 @@ impl EngineKernel {
         }
     }
 
+    /// A fill's charge, booked: the itemised breakdown (when the model has
+    /// one) with its total set to the booked amount, and that amount's `f64`
+    /// view. The parts stay as computed; the total is what moved cash, so a
+    /// trade's `fee_breakdown.total()` equals its `fees` to the last digit.
+    fn booked_charge(
+        &self,
+        breakdown: Option<crate::execution::costs::FeeBreakdown>,
+        flat: impl FnOnce() -> f64,
+    ) -> (Option<crate::execution::costs::FeeBreakdown>, f64) {
+        let fees = self.booked_fee(breakdown.map_or_else(flat, |b| b.total()));
+        self.fee_model.note_booked(breakdown.as_ref());
+        (
+            breakdown
+                .map(|b| crate::execution::costs::FeeBreakdown { exact_total: Some(fees), ..b }),
+            fees,
+        )
+    }
+
+    /// A computed charge as the booked amount's `f64` view: what the account
+    /// is debited, so the fee a trade reports is the fee that moved cash.
+    #[inline]
+    fn booked_fee(&self, raw: f64) -> f64 {
+        self.money_scale.to_f64(self.ledger.book(raw))
+    }
+
+    /// Units a `budget` buys: closed form for a flat percentage or no fees,
+    /// stepped by [`Self::size_within_fees`] for any other model.
+    fn sized_units(
+        &self,
+        budget: f64,
+        contract_value: f64,
+        direction: Direction,
+        funding: Option<EntryFunding>,
+    ) -> f64 {
+        match self.fee_model {
+            FeeModel::Percentage(rate) => self
+                .quantize_units(budget / Self::sizing_denominator(funding, contract_value, rate)),
+            FeeModel::None => {
+                self.quantize_units(budget / Self::sizing_denominator(funding, contract_value, 0.0))
+            }
+            _ => self.size_within_fees(budget, contract_value, direction, funding),
+        }
+    }
+
+    /// Sizing fits the budget in `f64`, but the account is debited the
+    /// notional and the fee each rounded to the booked scale, which can come
+    /// to one minor unit more. When the booked debit of a cash-funded entry
+    /// would exceed what is available, size again on a budget one unit
+    /// tighter (up to four times) rather than overdraw; `0.0` if none fits.
+    fn fit_booked_debit(
+        &self,
+        mut size: f64,
+        budget: f64,
+        available: f64,
+        contract_value: f64,
+        direction: Direction,
+        funding: Option<EntryFunding>,
+    ) -> f64 {
+        let unit = 10f64.powi(-(self.money_scale.places() as i32));
+        for tighten in 1..=4 {
+            if size <= 0.0 {
+                return size;
+            }
+            let fee = match self.fee_model.breakdown(contract_value, size, direction, true) {
+                Some(b) => b.total(),
+                None => self.fee_model.calculate(contract_value, size, direction),
+            };
+            let debit = self.ledger.book(contract_value * size) + self.ledger.book(fee);
+            if self.money_scale.to_f64(debit) <= available {
+                return size;
+            }
+            size = self.sized_units(
+                budget - f64::from(tighten) * unit,
+                contract_value,
+                direction,
+                funding,
+            );
+        }
+        0.0
+    }
+
     /// Apply a close at a determined raw price: slippage, fees, position
     /// close, cash credit. Shared by the signal path ([`Self::try_exit`])
     /// and order-driven closes, so both produce identical arithmetic.
@@ -1777,11 +2159,10 @@ impl EngineKernel {
         // (percentage, tiered, itemized) then charge on true notional while
         // per-contract schedules charge per contract, not per notional unit.
         let fee_price = exit_price * self.multiplier();
-        let exit_breakdown = self.fee_model.breakdown(fee_price, size, direction, false);
-        let fees = match exit_breakdown {
-            Some(b) => b.total(),
-            None => self.fee_model.calculate(fee_price, size, direction),
-        };
+        let (exit_breakdown, fees) = self
+            .booked_charge(self.fee_model.breakdown(fee_price, size, direction, false), || {
+                self.fee_model.calculate(fee_price, size, direction)
+            });
 
         // Round-trip breakdown: entry components plus exit components, so the
         // itemized total equals the fees actually deducted from the equity curve.
@@ -1807,81 +2188,44 @@ impl EngineKernel {
             },
         )?;
 
-        self.credit_close(position_id, &trade, fees, exit_price);
+        self.credit_close(position_id, &trade);
 
         Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
     }
 
-    /// Credit a closed position back to the account.
+    /// Credit a closed position back to the account, in booked minor units.
     ///
-    /// Cash mode returns the marked value (collateral plus gain for a short)
-    /// minus exit fees. Margin mode releases the locked margin
-    /// and books realized PnL: `trade.pnl + entry_fees` equals gross PnL
-    /// minus exit fees, and entry fees were already debited at entry.
-    fn credit_close(&mut self, position_id: u64, trade: &Trade, exit_fees: f64, exit_price: Price) {
-        match self.account {
-            AccountMode::Cash => {
-                self.cash += marked_value(
-                    trade.direction,
-                    trade.entry_price,
-                    exit_price,
-                    trade.size,
-                    self.multiplier(),
-                ) - exit_fees;
-            }
-            AccountMode::Margin { .. } => {
-                self.margin.release(position_id);
-                let entry_fees = trade.fees - exit_fees;
-                self.cash += trade.pnl + entry_fees;
-            }
+    /// Cash mode returns the marked value (the booked entry notional plus the
+    /// gain for a short, so `2 * cost - exit` there) minus exit fees. Margin
+    /// mode releases the locked margin and books realised P&L: `pnl +
+    /// entry_fees` is gross P&L minus exit fees, and entry fees were already
+    /// debited at entry. Both are integer sums of the trade's booked
+    /// amounts, so cash, cost basis and realised P&L reconcile exactly.
+    fn credit_close(&mut self, position_id: u64, trade: &Trade) {
+        if matches!(self.account, AccountMode::Margin { .. }) {
+            self.margin.release(position_id);
         }
+        self.credit_slice(trade);
     }
 
-    /// Force-close the open position at contract expiry.
-    ///
-    /// Options settle to intrinsic value against the underlying when one has
-    /// been supplied via [`EngineKernel::set_underlying_price`]; without it
-    /// they settle at the contract's own close, since an option's bars carry
-    /// the option's price and the engine has no second series to read.
-    /// Linear contracts always settle at the close.
-    ///
-    /// A settlement fee is charged when the spec declares one: exercise and
-    /// assignment are commonly priced differently from a trade-out.
-    fn settle_expiry(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
-        let settle_price = match &self.spec {
-            Some(spec) => spec.settlement_value(bar.close, self.underlying_price),
-            None => bar.close,
-        };
-        let fee_rate = self.spec.as_ref().map(|s| s.settlement_fee).unwrap_or(0.0);
-
-        let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-        let mut events = Vec::new();
-        for position_id in ids {
-            let Some(managed) = self.ledger.get(position_id) else { continue };
-            let entry_ts = managed.entry_timestamp;
-            let entry_breakdown = managed.entry_breakdown;
-            let settle_fee = if fee_rate > 0.0 {
-                settle_price * managed.position.size * self.multiplier() * fee_rate
-            } else {
-                0.0
-            };
-            if let Some(trade) = self.ledger.close_position(
-                position_id,
-                ExitDetails {
-                    idx,
-                    timestamp: bar.timestamp,
-                    price: settle_price,
-                    entry_timestamp: entry_ts,
-                    reason: ExitReason::Settlement,
-                    fees: settle_fee,
-                    fee_breakdown: entry_breakdown,
-                },
-            ) {
-                self.credit_close(position_id, &trade, settle_fee, settle_price);
-                events.push(EngineEvent::Exited { idx, trade: Box::new(trade) });
+    /// The cash movement of a closed trade or slice (see
+    /// [`Self::credit_close`]), without touching the lock.
+    fn credit_slice(&mut self, trade: &Trade) {
+        let m = trade.money.expect("a trade closed by the kernel carries its booked amounts");
+        match self.account {
+            AccountMode::Cash => {
+                let cost = Money::from_minor(m.entry_notional);
+                let exit = Money::from_minor(m.exit_notional);
+                let marked = match trade.direction {
+                    Direction::Long => exit,
+                    Direction::Short => cost + cost - exit,
+                };
+                self.move_cash(marked - Money::from_minor(m.exit_fees));
+            }
+            AccountMode::Margin { .. } => {
+                self.move_cash(Money::from_minor(m.pnl) + Money::from_minor(m.entry_fees));
             }
         }
-        events
     }
 
     /// Entry path: size against available capital, round to lot, open.
@@ -1904,6 +2248,40 @@ impl EngineKernel {
             input.target_price_override,
             false,
         )
+    }
+
+    /// The units an entry sized by `size_mult` of the capital on hand would
+    /// open at `entry_price` on `bar`, as `open_at` would size it, without
+    /// opening anything. `None` when the sizing yields nothing.
+    pub(crate) fn planned_entry_units(
+        &self,
+        bar: &KernelBar,
+        direction: Direction,
+        entry_price: Price,
+        size_mult: Option<f64>,
+        limit_priced: bool,
+    ) -> Result<f64, &'static str> {
+        let adjusted_price = self.executed_price(entry_price, direction, true, limit_priced, bar);
+        let free = self.free_capital();
+        let available = self.alloted_capital.map(|cap| cap.min(free)).unwrap_or(free);
+        let contract_value = adjusted_price * self.multiplier();
+        let funding = self.entry_funding(direction, adjusted_price).map_err(|r| r.as_str())?;
+        let budget = size_mult.map_or(available, |mult| mult * available);
+        let size = self.sized_units(budget, contract_value, direction, funding);
+        let size = if funding.is_none() {
+            self.fit_booked_debit(size, budget, available, contract_value, direction, funding)
+        } else {
+            size
+        };
+        if size > 0.0 {
+            return Ok(size);
+        }
+        Err(match funding {
+            Some(EntryFunding::Deposit { .. })
+            | Some(EntryFunding::Rate { modelled: true, .. }) => RejectReason::InsufficientMargin,
+            _ => RejectReason::ZeroSize,
+        }
+        .as_str())
     }
 
     /// Apply an open at a determined raw price: slippage, sizing, fees,
@@ -1938,19 +2316,26 @@ impl EngineKernel {
         // model: a flat percentage solves in closed form; any other model
         // (itemised, per-share, fixed, tiered) is sized by `size_within_fees`.
         let contract_value = adjusted_price * self.multiplier();
-        let funding = self.entry_funding(direction);
+        let funding = match self.entry_funding(direction, adjusted_price) {
+            Ok(funding) => funding,
+            Err(reason) => return Some(EngineEvent::EntryRejected { idx, reason }),
+        };
         let size = match explicit_units {
             Some(units) => self.quantize_units(units),
             None => {
                 let budget = size_mult.map_or(available, |mult| mult * available);
-                match self.fee_model {
-                    FeeModel::Percentage(rate) => self.quantize_units(
-                        budget / Self::sizing_denominator(funding, contract_value, rate),
-                    ),
-                    FeeModel::None => self.quantize_units(
-                        budget / Self::sizing_denominator(funding, contract_value, 0.0),
-                    ),
-                    _ => self.size_within_fees(budget, contract_value, direction, funding),
+                let size = self.sized_units(budget, contract_value, direction, funding);
+                if funding.is_none() {
+                    self.fit_booked_debit(
+                        size,
+                        budget,
+                        available,
+                        contract_value,
+                        direction,
+                        funding,
+                    )
+                } else {
+                    size
                 }
             }
         };
@@ -1980,11 +2365,10 @@ impl EngineKernel {
 
         // Same per-contract price convention as the exit path: notional
         // scaling rides on the price, contract count stays raw.
-        let entry_breakdown = self.fee_model.breakdown(contract_value, size, direction, true);
-        let entry_fees = match entry_breakdown {
-            Some(b) => b.total(),
-            None => self.fee_model.calculate(contract_value, size, direction),
-        };
+        let (entry_breakdown, entry_fees) = self
+            .booked_charge(self.fee_model.breakdown(contract_value, size, direction, true), || {
+                self.fee_model.calculate(contract_value, size, direction)
+            });
 
         // Capital-fraction sizing fits by construction; explicit unit counts
         // (order API) can exceed the account and are refused instead of
@@ -1993,6 +2377,7 @@ impl EngineKernel {
             None => contract_value * size,
             Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
             Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+            Some(EntryFunding::Unmargined) => 0.0,
         };
         if explicit_units.is_some() && funding_cost + entry_fees > available {
             return Some(EngineEvent::EntryRejected {
@@ -2010,6 +2395,23 @@ impl EngineKernel {
         };
         let stop_price = stop_override.or(config_stop.map(quantize));
         let target_price = target_override.or(config_target.map(quantize));
+        let (stop_price, target_price) = if self.venue_managed {
+            let trail = match (self.effective_stop, stop_override) {
+                (StopConfig::Trailing { percent }, None) => Some(adjusted_price * percent),
+                _ => None,
+            };
+            self.protect_outbox.push(ProtectRequest {
+                direction,
+                size,
+                entry_price: adjusted_price,
+                stop: stop_price,
+                target: target_price,
+                trail,
+            });
+            (None, None)
+        } else {
+            (stop_price, target_price)
+        };
 
         let position_id = self.ledger.open_position(
             idx,
@@ -2022,15 +2424,20 @@ impl EngineKernel {
             entry_fees,
             entry_breakdown,
         )?;
+        let fees_money = self.ledger.book(entry_fees);
         match funding {
-            None => self.cash -= contract_value * size + entry_fees,
+            None => self.move_cash(-(self.ledger.notional(adjusted_price, size) + fees_money)),
             Some(EntryFunding::Rate { rate, .. }) => {
                 self.margin.lock(position_id, contract_value * size * rate);
-                self.cash -= entry_fees;
+                self.move_cash(-fees_money);
             }
             Some(EntryFunding::Deposit { per_contract }) => {
                 self.margin.lock(position_id, per_contract * size);
-                self.cash -= entry_fees;
+                self.move_cash(-fees_money);
+            }
+            Some(EntryFunding::Unmargined) => {
+                self.margin.lock(position_id, 0.0);
+                self.move_cash(-fees_money);
             }
         }
 
@@ -2060,11 +2467,10 @@ impl EngineKernel {
         let entry_ts = managed.entry_timestamp;
         let exit_price = self.executed_price(exit_price, direction, false, limit_priced, bar);
         let fee_price = exit_price * self.multiplier();
-        let exit_breakdown = self.fee_model.breakdown(fee_price, qty, direction, false);
-        let fees = match exit_breakdown {
-            Some(b) => b.total(),
-            None => self.fee_model.calculate(fee_price, qty, direction),
-        };
+        let (exit_breakdown, fees) = self
+            .booked_charge(self.fee_model.breakdown(fee_price, qty, direction, false), || {
+                self.fee_model.calculate(fee_price, qty, direction)
+            });
         let fraction = qty / size;
         let trade = self.ledger.reduce_position(
             position_id,
@@ -2079,25 +2485,15 @@ impl EngineKernel {
                 fee_breakdown: exit_breakdown,
             },
         )?;
-        match self.account {
-            AccountMode::Cash => {
-                self.cash += marked_value(
-                    trade.direction,
-                    trade.entry_price,
-                    exit_price,
-                    trade.size,
-                    self.multiplier(),
-                ) - fees;
-            }
-            AccountMode::Margin { .. } => {
-                // Release the closed slice's share of the lock; the rest
-                // stays locked against the remaining size.
-                let locked = self.margin.locked_for(position_id);
-                let _ = self.margin.set_locked(position_id, locked * (1.0 - fraction));
-                let entry_fees = trade.fees - fees;
-                self.cash += trade.pnl + entry_fees;
-            }
+        if matches!(self.account, AccountMode::Margin { .. }) {
+            // Release the closed slice's share of the lock; the rest
+            // stays locked against the remaining size.
+            let locked = self.margin.locked_for(position_id);
+            let _ = self.margin.set_locked(position_id, locked * (1.0 - fraction));
         }
+        // The slice's cash movement is the whole-close arithmetic on the
+        // slice's booked amounts; the lock was released above, not here.
+        self.credit_slice(&trade);
         Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
     }
 
@@ -2138,15 +2534,18 @@ impl EngineKernel {
             self.risk.record_rejection();
             return None;
         }
-        let entry_fees = match self.fee_model.breakdown(contract_value, size, direction, true) {
-            Some(b) => b.total(),
-            None => self.fee_model.calculate(contract_value, size, direction),
-        };
-        let funding = self.entry_funding(direction);
+        let entry_fees = self.booked_fee(
+            match self.fee_model.breakdown(contract_value, size, direction, true) {
+                Some(b) => b.total(),
+                None => self.fee_model.calculate(contract_value, size, direction),
+            },
+        );
+        let funding = self.entry_funding(direction, price).ok()?;
         let funding_cost = match funding {
             None => contract_value * size,
             Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
             Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+            Some(EntryFunding::Unmargined) => 0.0,
         };
         let free = self.free_capital();
         let available = self.alloted_capital.map(|cap| cap.min(free)).unwrap_or(free);
@@ -2157,18 +2556,20 @@ impl EngineKernel {
         // Either level explicit: leave both, as the caller fixed them.
         let shift = stop_attach.is_none() && target_attach.is_none();
         self.ledger.add_to_position(position_id, price, size, entry_fees, shift)?;
+        let fees_money = self.ledger.book(entry_fees);
         match funding {
-            None => self.cash -= contract_value * size + entry_fees,
+            None => self.move_cash(-(self.ledger.notional(price, size) + fees_money)),
             Some(EntryFunding::Rate { rate, .. }) => {
                 let locked = self.margin.locked_for(position_id);
                 let _ = self.margin.set_locked(position_id, locked + contract_value * size * rate);
-                self.cash -= entry_fees;
+                self.move_cash(-fees_money);
             }
             Some(EntryFunding::Deposit { per_contract }) => {
                 let locked = self.margin.locked_for(position_id);
                 let _ = self.margin.set_locked(position_id, locked + per_contract * size);
-                self.cash -= entry_fees;
+                self.move_cash(-fees_money);
             }
+            Some(EntryFunding::Unmargined) => self.move_cash(-fees_money),
         }
         let _ = idx;
         Some((price, size))
@@ -2231,7 +2632,7 @@ impl EngineKernel {
                     fee_breakdown: entry_breakdown,
                 },
             ) {
-                self.credit_close(position_id, &trade, 0.0, bar.close);
+                self.credit_close(position_id, &trade);
                 trades.push(trade);
             }
         }
@@ -2300,6 +2701,11 @@ impl EngineKernel {
 #[cfg(test)]
 #[path = "kernel_tests.rs"]
 mod tests;
+
+#[path = "kernel_lifecycle.rs"]
+mod lifecycle;
+pub(crate) use lifecycle::ContractEnd;
+pub use lifecycle::SplitOutcome;
 
 #[cfg(test)]
 #[path = "kernel_partial_tests.rs"]

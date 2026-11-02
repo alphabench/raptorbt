@@ -315,6 +315,15 @@ impl PyFeeSchedule {
 /// built-in presets; the venue and segment must have a row, or this is an
 /// error: a schedule never silently charges nothing.
 pub(crate) fn resolve_rates(schedule: &FeeSchedule, fee_segment: &str) -> PyResult<FeeRates> {
+    resolve_row(schedule, fee_segment).map(|(_, _, rates)| rates)
+}
+
+/// [`resolve_rates`] with the venue and segment the name selected, which a
+/// run binds to price each fill on the row in force on its date.
+pub(crate) fn resolve_row(
+    schedule: &FeeSchedule,
+    fee_segment: &str,
+) -> PyResult<(String, FeeSegment, FeeRates)> {
     let (seg, ty) = match fee_segment.split_once('-') {
         Some((s, t)) => (s, Some(t)),
         None => (fee_segment, None),
@@ -335,6 +344,6 @@ pub(crate) fn resolve_rates(schedule: &FeeSchedule, fee_segment: &str) -> PyResu
     };
     schedule
         .row_for(&venue, segment, None, i64::MAX, false)
-        .map(|row| row.rates)
+        .map(|row| (venue.clone(), segment, row.rates))
         .map_err(schedule_err)
 }

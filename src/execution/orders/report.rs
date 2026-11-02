@@ -247,6 +247,21 @@ fn finite_pos(v: f64) -> bool {
 }
 
 impl Order {
+    /// Make the order venue-driven from the moment it exists. The in-process
+    /// matcher then never touches it: its whole life is the reports.
+    pub fn into_venue_driven(mut self) -> Self {
+        if self.broker.is_none() {
+            self.broker = Some(Box::default());
+        }
+        self
+    }
+
+    /// Whether venue reports, not the in-process matcher, drive this order.
+    #[inline]
+    pub fn is_venue_driven(&self) -> bool {
+        self.broker.is_some()
+    }
+
     /// Venue-assigned id, once the venue has acknowledged the order.
     pub fn venue_order_id(&self) -> Option<&str> {
         self.broker.as_ref().and_then(|b| b.venue_order_id.as_deref())

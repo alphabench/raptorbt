@@ -40,10 +40,12 @@ from raptorbt._raptorbt import (
     AccountResult,
     BarAggregator,
     BacktestConfig,
+    CorporateAction,
     InstrumentConfig,
     MarketData,
     PortfolioResult,
     Runtime,
+    adjust_history,
 )
 from raptorbt.strategy._commands import (
     CommandPath,
@@ -61,6 +63,7 @@ from raptorbt.strategy.accounts import (
     unpack_entries,
 )
 from raptorbt.strategy._stamps import BarStamps
+from raptorbt.strategy._validate import ensure_prices_finite
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
@@ -83,7 +86,7 @@ _TICK_OPTIONAL = (
 _DEPTH_FIELDS = ("bid_prices", "bid_sizes", "ask_prices", "ask_sizes")
 
 
-def _as_arrays(arrays: dict) -> dict[str, np.ndarray]:
+def _as_arrays(arrays: dict, symbol: str, call: str) -> dict[str, np.ndarray]:
     out = {
         "timestamps": np.ascontiguousarray(arrays["timestamps"], dtype=np.int64),
     }
@@ -93,6 +96,7 @@ def _as_arrays(arrays: dict) -> dict[str, np.ndarray]:
     for key, arr in out.items():
         if len(arr) != n:
             raise ValueError(f"{key} has length {len(arr)}, expected {n}")
+    ensure_prices_finite(f"{symbol} bars", call, out)
     return out
 
 
@@ -379,6 +383,8 @@ def _run_group(
     stacklevel=4,
     names=None,
     accounts=None,
+    corporate_actions=(),
+    adjustment_policy=None,
 ):
     """One runtime over ``entries``; returns ``(results, report, account_results)``.
 
@@ -429,6 +435,8 @@ def _run_group(
             gid = gids.get(names[k]) if names else None
             sid, ctx, _ = _add_strategy(rt, strategy, symbols, stacklevel=stacklevel, account=gid)
             setups.append((strategy, sid, ctx))
+        if adjustment_policy is not None:
+            rt.set_corporate_actions(list(corporate_actions), adjustment_policy)
         rt.finalize()
         rt.run()
         report = rt.memory_report() if want_report else None
@@ -440,6 +448,68 @@ def _run_group(
         return results, report, account_results
     finally:
         rt.close()
+
+
+def _lifecycle(actions, policy, universe, tick_symbols, call):
+    """The declared corporate actions and policy, checked against the data."""
+    actions = list(actions or ())
+    if policy is not None and policy not in ("raw", "adjusted"):
+        raise InvalidParameter(
+            f"adjustment_policy must be 'raw' or 'adjusted', got {policy!r}",
+            code="invalid_adjustment_policy",
+            operation=call,
+            parameter="adjustment_policy",
+            value=policy,
+            valid=["raw", "adjusted"],
+        )
+    for action in actions:
+        if not isinstance(action, CorporateAction):
+            raise InvalidParameter(
+                f"corporate_actions holds CorporateAction objects, got {type(action).__name__}",
+                code="invalid_corporate_action",
+                operation=call,
+                parameter="corporate_actions",
+                value=type(action).__name__,
+            )
+        if action.instrument not in universe:
+            raise UnknownSymbol(
+                f"{call}: corporate action on {action.instrument!r} but there is no data for it",
+                code="unknown_symbol",
+                operation=call,
+                parameter="corporate_actions",
+                value=action.instrument,
+                valid=list(universe),
+            )
+    if actions and policy is None:
+        raise InvalidParameter(
+            f"{call}: corporate_actions need an adjustment_policy: 'raw' (prices as traded, "
+            "positions rescaled at the ex-date) or 'adjusted' (history rescaled onto the "
+            "basis after the last split)",
+            code="invalid_adjustment_policy",
+            operation=call,
+            parameter="adjustment_policy",
+            valid=["raw", "adjusted"],
+        )
+    if policy == "adjusted":
+        for action in actions:
+            if action.instrument in tick_symbols:
+                raise InvalidParameter(
+                    f"{call}: adjustment_policy='adjusted' cannot put the ticks of "
+                    f"{action.instrument!r} on one basis; use 'raw'",
+                    code="invalid_adjustment_policy",
+                    operation=call,
+                    parameter="adjustment_policy",
+                    value=policy,
+                    valid=["raw"],
+                )
+    return actions, policy
+
+
+def _adjusted(symbol, actions, arrays, call):
+    """``arrays`` with the bars before each split or bonus on the later basis."""
+    if not any(a.instrument == symbol and a.ratio is not None for a in actions):
+        return arrays
+    return _as_arrays(adjust_history(symbol, actions, arrays), symbol, call)
 
 
 def _merge_reports(reports, strategies, size):
@@ -474,6 +544,8 @@ def run_strategies(
     share: bool = True,
     batch_size: int | None = None,
     memory_report: bool = False,
+    corporate_actions: Iterable[CorporateAction] | None = None,
+    adjustment_policy: Literal["raw", "adjusted"] | None = None,
     _via: str | None = None,
 ) -> (
     list[PortfolioResult]
@@ -566,6 +638,20 @@ def run_strategies(
     count, measured at 5 instruments per strategy. ``batch_size`` must be at least 1 and is moot with
     ``share=False``, which is a batch of one.
 
+    ``corporate_actions`` are the splits, bonuses and cash dividends of the
+    run (:class:`~raptorbt.CorporateAction`), data you supply and the engine
+    never infers. They need ``adjustment_policy``, which says what the bars
+    are: ``"raw"`` (prices as traded: a split shows as a jump, indicators see
+    it, and the engine rescales each position at the ex-date, so cash stays
+    exact) or ``"adjusted"`` (the engine puts every bar before a split or
+    bonus on the basis after it, so indicators see a continuous series; it
+    trades that one basis and does not rescale positions again; a dividend's
+    per-unit amount is restated to it). The policy is part of an indicator's
+    identity. An action on a symbol that has no data raises ``unknown_symbol``.
+    ``"adjusted"`` needs bars (it refuses a symbol with ticks that has actions).
+    A dividend is credited on its ``pay_ts`` (default the ex-date) to the
+    holder at the ex-date; a short pays it. See ``docs/architecture/lifecycle.md``.
+
     ``keep_curves=False`` drops the equity, drawdown and returns curves from
     the results (the final equity value stays as a one-element curve); trades,
     orders and metrics are unchanged. The curves are still sampled during the
@@ -652,7 +738,13 @@ def run_strategies(
     stamps = BarStamps.resolve(
         bar_stamp, bar_ns, bar_symbols, call, warn=bool(bar_symbols), stacklevel=4 + extra
     )
-    arrays = {s: _as_arrays(data[s]) for s in bar_symbols}
+    arrays = {s: _as_arrays(data[s], s, call) for s in bar_symbols}
+    corporate_actions, adjustment_policy = _lifecycle(
+        corporate_actions, adjustment_policy, universe, tick_symbols, call
+    )
+    if adjustment_policy == "adjusted":
+        for s in bar_symbols:
+            arrays[s] = _adjusted(s, corporate_actions, arrays[s], call)
     tick_arrays = {s: _tick_arrays(s, ticks[s]) for s in tick_symbols}
     depth_arrays = {s: _depth_arrays(s, depth[s]) for s in tick_symbols if s in depth}
     market = MarketData(
@@ -674,6 +766,8 @@ def run_strategies(
         want_report=memory_report,
         primary_bars=primary_bars,
         stacklevel=4 + extra,
+        corporate_actions=corporate_actions,
+        adjustment_policy=adjustment_policy,
     )
     size = 1 if not share else (batch_size or _AUTO_BATCH)
     results: list = [None] * len(entries)

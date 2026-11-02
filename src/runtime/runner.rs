@@ -107,6 +107,9 @@ pub struct RuntimeBuilder {
     declared: Vec<usize>,
     /// Each strategy's group.
     group_of: Vec<Option<u32>>,
+    /// Positions adopted so far, `(strategy, instrument, timestamp, price,
+    /// size)`, so a shadow book can be seeded with the same ones.
+    adopted: Vec<(StrategyId, usize, crate::core::types::Timestamp, f64, f64)>,
 }
 
 impl RuntimeBuilder {
@@ -153,6 +156,7 @@ impl RuntimeBuilder {
             groups: Vec::new(),
             declared: Vec::new(),
             group_of: Vec::new(),
+            adopted: Vec::new(),
         })
     }
 
@@ -171,6 +175,11 @@ impl RuntimeBuilder {
         self.groups.push(AccountGroup::new(spec, &self.config));
         self.declared.push(members);
         Ok(gid)
+    }
+
+    /// The run's base config.
+    pub fn config(&self) -> &BacktestConfig {
+        &self.config
     }
 
     pub fn group_mut(&mut self, group: u32) -> &mut AccountGroup {
@@ -283,9 +292,82 @@ impl RuntimeBuilder {
         price: f64,
         size: f64,
     ) -> std::result::Result<u64, String> {
-        adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
+        let id = adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
             book.adopt_position(instrument, timestamp, price, size)
-        })
+        })?;
+        self.adopted.push((strategy, instrument, timestamp, price, size));
+        Ok(id)
+    }
+
+    /// Refuse a run that cannot be sent to a venue. Positions move only on
+    /// orders there, so stops, targets, schedules and the session square-off
+    /// are turned into orders by the runtime; what cannot be is refused here:
+    /// a shared account group has one pool that no copy can follow, and a
+    /// forced liquidation on a margin call is made in-process.
+    pub fn check_venue_safe(&self) -> Result<()> {
+        if !self.groups.is_empty() {
+            return Err(RaptorError::invalid_parameter(
+                "a venue-driven run cannot share an account group between strategies",
+            ));
+        }
+        if self.config.liquidate_on_margin_call {
+            return Err(RaptorError::invalid_parameter(
+                "a venue-driven run cannot liquidate on a margin call: the venue does that",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Hand every strategy's protection, schedule slices and square-off to
+    /// the runtime (see [`EngineKernel::set_venue_managed`]).
+    ///
+    /// [`EngineKernel::set_venue_managed`]: crate::portfolio::kernel::EngineKernel::set_venue_managed
+    pub fn manage_books_by_venue(&mut self) {
+        for (k, slot) in self.slots.iter().enumerate() {
+            if let Some(book) = self.books[k].as_mut() {
+                for i in 0..slot.inst_len as usize {
+                    book.kernel_mut(i).set_venue_managed();
+                }
+            }
+        }
+    }
+
+    /// A fresh book for every strategy registered so far, configured as the
+    /// strategy's own is (same account, instruments, fees and adopted
+    /// positions), with the symbols of its instruments in order. A venue that
+    /// simulates an exchange steps these. See [`Self::check_venue_safe`] for
+    /// what is refused.
+    pub fn shadow_books(&self) -> Result<Vec<(Vec<String>, PortfolioBook)>> {
+        self.check_venue_safe()?;
+        let mut out = Vec::with_capacity(self.slots.len());
+        for (k, slot) in self.slots.iter().enumerate() {
+            let sid = StrategyId::new(k as u32);
+            let mut book = PortfolioBook::new(self.config.clone(), self.mode);
+            // Nothing reads a shadow book's curves, so keep them small.
+            book.set_curve_window(Some(1));
+            let mut symbols = Vec::new();
+            let range = slot.inst_start as usize..(slot.inst_start + slot.inst_len) as usize;
+            for &id in &self.strat_insts[range] {
+                let p = &self.params[id.index()];
+                let symbol = self.store.symbols().symbol(id).unwrap_or_default().to_string();
+                book.add_instrument(
+                    symbol.clone(),
+                    p.direction,
+                    p.spec.clone(),
+                    p.config.as_ref(),
+                    self.policy,
+                );
+                symbols.push(symbol);
+            }
+            for &(strategy, instrument, ts, price, size) in &self.adopted {
+                if strategy == sid {
+                    book.adopt_position(instrument, ts, price, size)
+                        .map_err(RaptorError::invalid_parameter)?;
+                }
+            }
+            out.push((symbols, book));
+        }
+        Ok(out)
     }
 
     /// Subscribe `strategy` to an aggregation of one of its instruments.
@@ -708,6 +790,37 @@ impl RuntimeCore {
 
     pub fn book_mut(&mut self, strategy: StrategyId) -> Option<&mut PortfolioBook> {
         self.books.get_mut(strategy.index())?.as_mut()
+    }
+
+    /// Run the strategy's lifecycle for the current event (corporate actions
+    /// effective by now, dividends due, contracts expired with no bar of
+    /// their own) and return its events. Call once per event per subscribed
+    /// strategy, before its hooks, so the strategy sees the position after
+    /// the action. [`RuntimeCore::apply`] finds nothing left to do.
+    pub fn begin_event(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
+        // The common case, a book with no expiry and no action to apply,
+        // costs one flag read per event.
+        if self.group_of[strategy.index()].is_none()
+            && self.books[strategy.index()].as_ref().is_some_and(|b| !b.lifecycle_active())
+        {
+            return Ok(Vec::new());
+        }
+        let Some(cur) = self.current else { return Ok(Vec::new()) };
+        let local = local_of(&self.slots, &self.strat_insts, strategy, cur.event.instrument)
+            .ok_or_else(|| {
+                RaptorError::invalid_parameter("strategy is not subscribed to the current event")
+            })?;
+        let ts = ScheduleEntry { instrument: local, local_idx: 0, data: cur.data }.timestamp();
+        if let Some(g) = self.group_of[strategy.index()] {
+            return Ok(self.groups[g as usize].begin_event(
+                &mut self.books,
+                strategy.index(),
+                ts,
+                local,
+            ));
+        }
+        let book = self.books[strategy.index()].as_mut().expect("strategy book already finished");
+        Ok(book.begin_event(ts, local))
     }
 
     /// Step the strategy's book with the current event.

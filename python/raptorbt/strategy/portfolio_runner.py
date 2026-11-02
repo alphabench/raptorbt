@@ -50,6 +50,8 @@ def run_portfolio_strategy(
     leverage: float = 1.0,
     bar_stamp: Literal["open", "close"] | None = None,
     bar_ns: int | dict[str, int] | None = None,
+    corporate_actions=None,
+    adjustment_policy: Literal["raw", "adjusted"] | None = None,
 ) -> PortfolioResult:
     """Run one strategy over N instruments sharing a capital pool.
 
@@ -87,6 +89,9 @@ def run_portfolio_strategy(
     runtime. ``ctx.series()`` returns read-only views cut at the bars that
     have closed, not the full arrays, so a strategy cannot read data from its
     own future.
+
+    ``corporate_actions`` and ``adjustment_policy`` are those of
+    :func:`~raptorbt.run_strategies`.
     """
     return run_strategies(
         [strategy],
@@ -100,5 +105,7 @@ def run_portfolio_strategy(
         leverage=leverage,
         bar_stamp=bar_stamp,
         bar_ns=bar_ns,
+        corporate_actions=corporate_actions,
+        adjustment_policy=adjustment_policy,
         _via="run_portfolio_strategy",
     )[0]

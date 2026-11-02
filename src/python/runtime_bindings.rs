@@ -46,9 +46,13 @@ use crate::runtime::{
     SlotId, StrategyId, TickRow,
 };
 
+mod venue;
+
+use self::venue::VenueRoute;
 use super::account_bindings::{convert_group, PyAccountResult};
 use super::bindings::{PyBacktestConfig, PyInstrumentConfig, PyPortfolioResult, PyTrade};
 use super::errors::{Fail, Val};
+use super::execution_bindings::{report_ts, PyAdapter, PyExecutionReport};
 use super::indicator_bindings::PyIndicator;
 use super::instrument_bindings::PyInstrumentSpec;
 use super::session_bindings::{
@@ -83,6 +87,8 @@ const HOOK_ORDER_EVENT: u32 = 1 << 15;
 const HOOK_ALGO_STARTED: u32 = 1 << 16;
 const HOOK_ALGO_COMPLETED: u32 = 1 << 17;
 const HOOK_MARGIN_CALL: u32 = 1 << 18;
+const HOOK_CONTRACT_EVENT: u32 = 1 << 19;
+const HOOK_CORPORATE_ACTION: u32 = 1 << 20;
 
 const SERIES_KEYS: [&str; 6] = ["timestamps", "open", "high", "low", "close", "volume"];
 
@@ -236,6 +242,44 @@ struct Shared {
     keep_curves: bool,
     plans: RefCell<Vec<Plan>>,
     strats: RefCell<Vec<Rc<Strat>>>,
+    /// Declared corporate actions and the adjustment policy the history is
+    /// on; given to every book and every indicator key when finalized.
+    lifecycle:
+        RefCell<(Vec<crate::instruments::CorporateAction>, crate::instruments::AdjustmentPolicy)>,
+    /// Where orders go instead of the in-process matcher, once chosen.
+    venue: RefCell<Option<Rc<VenueRoute>>>,
+    /// `venue` is set: one flag read per event, no borrow.
+    venue_on: Cell<bool>,
+    /// The venue chosen with `set_execution`, built when the runtime is.
+    exec_choice: RefCell<Option<ExecChoice>>,
+    /// The three times of the event or report in flight, when they are not
+    /// all the event's own: see [`Times`].
+    times: Cell<Option<Times>>,
+    /// Declared processing latency of a live node (ns).
+    processing_latency_ns: Cell<i64>,
+    /// The bars being pushed are history, replayed to prime the strategies.
+    warmup: Cell<bool>,
+}
+
+/// The venue a node was told to use.
+struct ExecChoice {
+    /// `"paper"`, or `"adapter"` for a Python object.
+    kind: String,
+    adapter: Option<Py<PyAny>>,
+    account_id: Option<String>,
+    /// Protective orders are watched by the engine, not held by the venue.
+    protective_local: bool,
+}
+
+/// The three times of an event: when the exchange says it happened, when it
+/// reached the engine, and when the engine acted on it. In a batch run all
+/// three are the event's own time; a live node may declare an arrival time
+/// per push and a processing latency.
+#[derive(Debug, Clone, Copy)]
+struct Times {
+    event: i64,
+    arrival: i64,
+    processing: i64,
 }
 
 impl Shared {
@@ -269,6 +313,20 @@ impl Shared {
             }
             Inner::Gone => Err(finished()),
         }
+    }
+
+    /// The bar of the event in flight when it is `local`'s instrument's, else
+    /// the last print the strategy's book stepped on it.
+    fn current_bar(&self, sid: StrategyId, local: usize) -> Option<KernelBar> {
+        let now = match &*self.inner.borrow() {
+            Inner::Running(c) => c
+                .current()
+                .filter(|cur| c.local_of(sid, cur.event.instrument) == Some(local))
+                .map(|cur| cur.bar)
+                .filter(|bar| bar.close > 0.0),
+            _ => None,
+        };
+        now.or_else(|| self.with_book(sid, |b, _| Ok(b.last_bar(local))).ok().flatten())
     }
 
     fn watermark(&self, instrument: InstrumentId) -> u64 {
@@ -489,6 +547,18 @@ fn book_object(
 }
 
 impl PyRuntimeContext {
+    /// The three times of the event or report in flight.
+    fn times(&self) -> Option<Times> {
+        self.shared.times.get().or_else(|| match &*self.shared.inner.borrow() {
+            Inner::Running(c) => c.current().map(|cur| Times {
+                event: cur.event.ts,
+                arrival: cur.event.ts,
+                processing: cur.event.ts,
+            }),
+            _ => None,
+        })
+    }
+
     fn index_of(&self, symbol: Option<&str>) -> PyResult<usize> {
         match symbol {
             None | Some("") => Ok(self.local.get()),
@@ -518,6 +588,26 @@ impl PyRuntimeContext {
     }
 
     /// Bar ordinal within the current symbol.
+    /// When the exchange says the event in flight happened (ns).
+    #[getter]
+    fn event_ns(&self) -> Option<i64> {
+        self.times().map(|t| t.event)
+    }
+
+    /// When the event reached the engine (ns). Equal to `event_ns` unless
+    /// the live node was given an arrival time for the push.
+    #[getter]
+    fn arrival_ns(&self) -> Option<i64> {
+        self.times().map(|t| t.arrival)
+    }
+
+    /// When the engine acted on the event (ns): its arrival plus the node's
+    /// declared processing latency. Deterministic: a replay reads the same.
+    #[getter]
+    fn processing_ns(&self) -> Option<i64> {
+        self.times().map(|t| t.processing)
+    }
+
     #[getter]
     fn idx(&self) -> usize {
         self.idx.get()
@@ -622,6 +712,12 @@ impl PyRuntimeContext {
     /// closed at the last seen prices when the next event is applied.
     #[pyo3(signature = (reason="manual", flatten=false))]
     fn halt(&self, reason: &str, flatten: bool) -> PyResult<()> {
+        if self.shared.venue_on.get() {
+            let venue = self.shared.venue.borrow().clone();
+            if let Some(venue) = venue {
+                return venue.halt(&self.shared, self.sid, reason, flatten);
+            }
+        }
         self.shared.with_book_mut(self.sid, |b, _| {
             b.halt(reason, flatten);
             Ok(())
@@ -1002,6 +1098,12 @@ impl PyStrategyView {
     /// Halt the strategy; see `RuntimeContext.halt`.
     #[pyo3(signature = (reason="manual", flatten=false))]
     fn halt(&self, reason: &str, flatten: bool) -> PyResult<()> {
+        if self.shared.venue_on.get() {
+            let venue = self.shared.venue.borrow().clone();
+            if let Some(venue) = venue {
+                return venue.halt(&self.shared, self.sid, reason, flatten);
+            }
+        }
         self.shared.with_book_mut(self.sid, |b, _| {
             b.halt(reason, flatten);
             Ok(())
@@ -1587,6 +1689,7 @@ impl PyRuntime {
         let rust_config: BacktestConfig =
             config.as_deref().map(BacktestConfig::from).unwrap_or_default();
         let mode: AccountMode = parse_account_mode(account_type, leverage)?;
+        super::strategy_bindings::check_margin_model(&rust_config, mode)?;
         let stamp = BarStamp::parse(stamp).map_err(|e| {
             Fail::new("invalid_bar_stamp", e.to_string())
                 .param("stamp")
@@ -1657,7 +1760,14 @@ impl PyRuntime {
             share,
             keep_curves,
             plans: RefCell::new(Vec::new()),
+            lifecycle: RefCell::new(Default::default()),
             strats: RefCell::new(Vec::new()),
+            venue: RefCell::new(None),
+            venue_on: Cell::new(false),
+            exec_choice: RefCell::new(None),
+            times: Cell::new(None),
+            processing_latency_ns: Cell::new(0),
+            warmup: Cell::new(false),
         };
         Ok(Self { shared: Rc::new(shared), live_state: RefCell::new(None) })
     }
@@ -1735,9 +1845,16 @@ impl PyRuntime {
             .value(initial_capital)
             .into());
         }
+        let mode = parse_account_mode(account_type, leverage)?;
+        if let Inner::Building(b) = &*self.shared.inner.borrow() {
+            // A margin model funds entries on a margin account; a cash
+            // account would ignore it, so the pair is refused here as it is
+            // for the plain account.
+            super::strategy_bindings::check_margin_model(b.config(), mode)?;
+        }
         let spec = GroupSpec {
             initial_capital,
-            mode: parse_account_mode(account_type, leverage)?,
+            mode,
             max_drawdown_pct,
             max_daily_loss,
             max_daily_loss_pct,
@@ -1756,6 +1873,13 @@ impl PyRuntime {
 
     /// Halt every strategy on an account; see `LiveNode.halt_account`.
     fn halt_account(&self, account: u32, reason: &str, flatten: bool) -> PyResult<()> {
+        if self.shared.venue_on.get() {
+            return Err(Fail::new(
+                "unsupported_in_venue_run",
+                "halting an account is not supported when orders go to an execution adapter",
+            )
+            .into());
+        }
         match &mut *self.shared.inner.borrow_mut() {
             Inner::Running(core) => core.halt_group(account, reason, flatten).map_err(runtime_err),
             _ => Err(not_ready("finalize() before halting an account")),
@@ -1919,8 +2043,42 @@ impl PyRuntime {
     }
 
     /// Freeze the registrations: link what can be linked and build the core.
+    /// Declare the corporate actions of the run and the adjustment policy its
+    /// history is on (`"raw"` or `"adjusted"`). Call before `finalize`.
+    ///
+    /// Every action must name a symbol of the run. The policy is part of
+    /// every indicator's identity, so strategies on different bases never
+    /// share one.
+    #[pyo3(signature = (actions, policy))]
+    fn set_corporate_actions(
+        &self,
+        actions: Vec<super::lifecycle_bindings::PyCorporateAction>,
+        policy: &str,
+    ) -> PyResult<()> {
+        let (actions, policy) =
+            super::lifecycle_bindings::extract_actions(Some(actions), Some(policy))?;
+        if let Some(a) = actions.iter().find(|a| !self.shared.sym_ids.contains_key(&a.instrument)) {
+            let mut valid: Vec<&String> = self.shared.sym_ids.keys().collect();
+            valid.sort();
+            return Err(Fail::new(
+                "unknown_symbol",
+                format!("corporate action on {:?}: no data for that symbol", a.instrument),
+            )
+            .param("corporate_actions")
+            .value(a.instrument.as_str())
+            .valid(valid)
+            .into());
+        }
+        if !matches!(&*self.shared.inner.borrow(), Inner::Building(_)) {
+            return Err(not_ready("corporate actions must be declared before finalize"));
+        }
+        *self.shared.lifecycle.borrow_mut() = (actions, policy);
+        Ok(())
+    }
+
     fn finalize(&self, py: Python<'_>) -> PyResult<()> {
         let plans = std::mem::take(&mut *self.shared.plans.borrow_mut());
+        let (actions, policy) = self.shared.lifecycle.borrow().clone();
         let mut builder = match std::mem::replace(&mut *self.shared.inner.borrow_mut(), Inner::Gone)
         {
             Inner::Building(b) => b,
@@ -1994,13 +2152,62 @@ impl PyRuntime {
                         // Fed by every symbol's stream, or by none: private.
                         _ => continue,
                     };
-                    let reg = builder
-                        .register_indicator(plan.sid, IndKey::new(input, spec), stream)
-                        .map_err(runtime_err)?;
+                    let mut key = IndKey::new(input, spec);
+                    key.adjustment = policy;
+                    let reg =
+                        builder.register_indicator(plan.sid, key, stream).map_err(runtime_err)?;
                     linked.insert((pi, ii), reg.slot);
                 }
             }
         }
+
+        for plan in &plans {
+            builder
+                .book_mut(plan.sid)
+                .set_corporate_actions(&actions, policy)
+                .map_err(super::lifecycle_bindings::action_err)?;
+        }
+        let route = match self.shared.exec_choice.borrow_mut().take() {
+            None => None,
+            Some(choice) => {
+                if self.shared.live_history.is_none() {
+                    return Err(Fail::new(
+                        "invalid_execution",
+                        "an execution adapter belongs to a live node; a batch run is simulated in-process",
+                    )
+                    .param("execution")
+                    .into());
+                }
+                if plans.iter().any(|p| p.commands.is_some()) {
+                    return Err(Fail::new(
+                        "invalid_execution",
+                        "an execution adapter needs the native command path (RAPTORBT_PY_COMMANDS is set)",
+                    )
+                    .param("execution")
+                    .into());
+                }
+                builder.manage_books_by_venue();
+                builder.check_venue_safe().map_err(|e| {
+                    PyErr::from(Fail::new("invalid_execution", e.to_string()).param("execution"))
+                })?;
+                let raised = Rc::new(RefCell::new(None));
+                let adapter: Box<dyn crate::execution::adapter::ExecutionAdapter> =
+                    match (choice.kind.as_str(), choice.adapter) {
+                        ("paper", _) => Box::new(crate::execution::adapter::PaperVenue::new(
+                            builder.shadow_books().map_err(runtime_err)?,
+                        )),
+                        (_, Some(obj)) => Box::new(PyAdapter::new(obj, raised.clone())),
+                        _ => unreachable!("set_execution checks the adapter"),
+                    };
+                Some(Rc::new(VenueRoute::new(
+                    adapter,
+                    choice.account_id,
+                    raised,
+                    plans.len(),
+                    choice.protective_local,
+                )))
+            }
+        };
 
         let core = builder.build().map_err(runtime_err)?;
         let bank: std::sync::Arc<IndicatorBank> = core.bank().clone();
@@ -2082,6 +2289,8 @@ impl PyRuntime {
             }));
         }
         *self.shared.strats.borrow_mut() = strats;
+        self.shared.venue_on.set(route.is_some());
+        *self.shared.venue.borrow_mut() = route;
         *self.shared.inner.borrow_mut() = Inner::Running(Box::new(core));
         if let Some(rows) = live_rows {
             let mut feed =
@@ -2093,6 +2302,140 @@ impl PyRuntime {
             *self.live_state.borrow_mut() = Some(LoopState::new(&self.shared)?);
         }
         Ok(())
+    }
+
+    /// Send this node's orders to a venue instead of matching them
+    /// in-process. `kind` is `"paper"` (a simulated exchange) or `"adapter"`
+    /// (a Python object with `submit`, `cancel` and `modify`). Call before
+    /// `finalize()`.
+    #[pyo3(signature = (kind, adapter=None, account_id=None, protective="venue"))]
+    fn set_execution(
+        &self,
+        py: Python<'_>,
+        kind: &str,
+        adapter: Option<Py<PyAny>>,
+        account_id: Option<String>,
+        protective: &str,
+    ) -> PyResult<()> {
+        if !matches!(protective, "venue" | "local") {
+            return Err(Fail::new("invalid_execution", "protective must be 'venue' or 'local'")
+                .param("protective")
+                .value(protective)
+                .valid(["venue", "local"])
+                .into());
+        }
+        match kind {
+            "paper" => {}
+            "adapter" => {
+                let obj = adapter.as_ref().ok_or_else(|| {
+                    PyErr::from(Fail::new("invalid_execution", "kind='adapter' needs an adapter"))
+                })?;
+                for method in ["submit", "cancel", "modify"] {
+                    if !obj.bind(py).getattr_opt(method)?.is_some_and(|m| m.is_callable()) {
+                        return Err(Fail::new(
+                            "invalid_execution",
+                            format!("an execution adapter needs a callable {method}()"),
+                        )
+                        .param("execution")
+                        .value(obj.bind(py).get_type().name()?.to_string())
+                        .into());
+                    }
+                }
+            }
+            other => {
+                return Err(Fail::new(
+                    "invalid_execution",
+                    format!("unknown execution kind {other:?}"),
+                )
+                .param("execution")
+                .value(other)
+                .valid(["paper", "adapter"])
+                .into())
+            }
+        }
+        if !matches!(&*self.shared.inner.borrow(), Inner::Building(_)) {
+            return Err(not_ready("set_execution() before finalize()"));
+        }
+        *self.shared.exec_choice.borrow_mut() = Some(ExecChoice {
+            kind: kind.to_string(),
+            adapter,
+            account_id,
+            protective_local: protective == "local",
+        });
+        Ok(())
+    }
+
+    /// Mark the pushes that follow as history replayed to prime the
+    /// strategies. A real venue is never sent an order made on history.
+    fn set_warmup(&self, warmup: bool) {
+        self.shared.warmup.set(warmup);
+    }
+
+    /// Declare how long the engine takes to act on an event after it
+    /// arrives (ns): the gap between a push's arrival and processing times.
+    fn set_processing_latency(&self, latency_ns: i64) {
+        self.shared.processing_latency_ns.set(latency_ns);
+    }
+
+    /// Hand the node what the venue said about an order. The report is
+    /// applied at once, in the order pushes arrive, like market data;
+    /// `client_order_id` is the id the order was sent under (the request's
+    /// `client_order_id`). Returns `"applied"`, `"duplicate"` or `"late"`.
+    fn push_report(
+        &self,
+        py: Python<'_>,
+        client_order_id: &str,
+        report: PyRef<'_, PyExecutionReport>,
+        arrival_ns: i64,
+    ) -> PyResult<&'static str> {
+        let sh = &*self.shared;
+        let _guard = self.live_loop()?;
+        self.settle_push();
+        let venue = sh.venue.borrow().clone().ok_or_else(|| {
+            PyErr::from(Fail::new(
+                "invalid_execution",
+                "this node sends its orders in-process; there is no venue to report",
+            ))
+        })?;
+        let (sid, local) = venue.lookup(client_order_id).ok_or_else(|| {
+            PyErr::from(
+                Fail::new(
+                    "unknown_client_order_id",
+                    format!("no order was sent under {client_order_id:?}"),
+                )
+                .param("client_order_id")
+                .value(client_order_id),
+            )
+        })?;
+        let st = sh
+            .strats
+            .borrow()
+            .iter()
+            .find(|s| s.sid.index() == sid)
+            .cloned()
+            .expect("an order's strategy is registered");
+        let g = sh.global_of(st.sid, local)?;
+        let report = &report.0;
+        let ts = report_ts(report);
+        let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(g)))?;
+        sh.times.set(Some(Times {
+            event: ts,
+            arrival: arrival_ns,
+            processing: arrival_ns.saturating_add(sh.processing_latency_ns.get()),
+        }));
+        let outcome = venue.deliver(py, sh, &st, client_order_id, report, idx, ts);
+        let settled = outcome.and_then(|outcome| {
+            if has_commands(py, &st) || has_intents(py, &st) {
+                settle(py, sh, &st, g, local, idx, ts)?;
+            }
+            Ok(outcome)
+        });
+        sh.times.set(None);
+        Ok(match settled? {
+            crate::execution::orders::ReportOutcome::Applied => "applied",
+            crate::execution::orders::ReportOutcome::Duplicate => "duplicate",
+            crate::execution::orders::ReportOutcome::Late => "late",
+        })
     }
 
     /// Run the whole tape.
@@ -2157,7 +2500,7 @@ impl PyRuntime {
     /// (0..=2). See `LiveNode.push_tick`.
     #[pyo3(signature = (
         instrument, timestamp, ltp, bid=0.0, ask=0.0, buy_qty_delta=0.0, sell_qty_delta=0.0,
-        ltq=0.0, bid_qty=0.0, ask_qty=0.0, oi=0.0,
+        ltq=0.0, bid_qty=0.0, ask_qty=0.0, oi=0.0, arrival_ns=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn push_tick(
@@ -2174,11 +2517,13 @@ impl PyRuntime {
         bid_qty: f64,
         ask_qty: f64,
         oi: f64,
+        arrival_ns: Option<i64>,
     ) -> PyResult<usize> {
         let sh = &*self.shared;
         let mut guard = self.live_loop()?;
         let g = self.instrument(instrument)?;
         let ts = timestamp;
+        self.stamp(ts, arrival_ns);
         with_feed(sh, |feed| feed.check_timestamp(g, ts).map_err(runtime_err))?;
         let trade = ltp > 0.0;
         let quote = bid > 0.0 && ask > 0.0;
@@ -2234,6 +2579,7 @@ impl PyRuntime {
 
     /// Feed one closed bar to a live node; `timestamp` is as the caller
     /// stamps bars, and the symbol's offset moves it to the close.
+    #[pyo3(signature = (instrument, timestamp, open, high, low, close, volume, arrival_ns=None))]
     #[allow(clippy::too_many_arguments)]
     fn push_bar(
         &self,
@@ -2245,11 +2591,13 @@ impl PyRuntime {
         low: f64,
         close: f64,
         volume: f64,
+        arrival_ns: Option<i64>,
     ) -> PyResult<()> {
         let sh = &*self.shared;
         let mut guard = self.live_loop()?;
         let g = self.instrument(instrument)?;
         let close_ts = timestamp + sh.offsets[g.index()];
+        self.stamp(close_ts, arrival_ns);
         with_feed(sh, |feed| feed.check_timestamp(g, close_ts).map_err(runtime_err))?;
         let stamped = KernelBar { timestamp, open, high, low, close, volume };
         let event = store_row(sh, g, RingKind::Bars, |feed| feed.push_bar(g, close_ts, stamped))?;
@@ -2261,6 +2609,7 @@ impl PyRuntime {
 
     /// Feed one depth snapshot to a live node: `(price, size)` lists, best
     /// level first.
+    #[pyo3(signature = (instrument, timestamp, bids, asks, arrival_ns=None))]
     fn push_depth(
         &self,
         py: Python<'_>,
@@ -2268,10 +2617,12 @@ impl PyRuntime {
         timestamp: i64,
         bids: Vec<(f64, f64)>,
         asks: Vec<(f64, f64)>,
+        arrival_ns: Option<i64>,
     ) -> PyResult<()> {
         let sh = &*self.shared;
         let mut guard = self.live_loop()?;
         let g = self.instrument(instrument)?;
+        self.stamp(timestamp, arrival_ns);
         with_feed(sh, |feed| feed.check_timestamp(g, timestamp).map_err(runtime_err))?;
         let levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
             levels
@@ -2425,9 +2776,27 @@ impl PyRuntime {
 
     /// Nothing is in flight between pushes.
     fn settle_push(&self) {
+        self.shared.times.set(None);
         if let Inner::Running(core) = &mut *self.shared.inner.borrow_mut() {
             core.clear_current();
         }
+    }
+
+    /// Record the three times of the event being pushed. With no declared
+    /// arrival and no processing latency they are all the event's own time,
+    /// which is what an unset value reads as.
+    fn stamp(&self, event_ns: i64, arrival_ns: Option<i64>) {
+        let sh = &*self.shared;
+        let latency = sh.processing_latency_ns.get();
+        if arrival_ns.is_none() && latency == 0 {
+            return;
+        }
+        let arrival = arrival_ns.unwrap_or(event_ns);
+        sh.times.set(Some(Times {
+            event: event_ns,
+            arrival,
+            processing: arrival.saturating_add(latency),
+        }));
     }
 
     /// A refused row: advance the clock of its instrument for every strategy
@@ -2666,6 +3035,16 @@ fn has_intents(py: Python<'_>, st: &Strat) -> bool {
     st.queue.bind(py).borrow().queue.has_intents()
 }
 
+impl Strat {
+    /// Intents are held for the next step of some instrument.
+    fn has_held(&self, py: Python<'_>) -> bool {
+        match &self.route {
+            Route::Python { held, .. } => !held.bind(py).is_empty(),
+            Route::Native(state) => state.borrow().has_held(),
+        }
+    }
+}
+
 /// What every event starts with: point the context at the event's symbol and
 /// ordinal, advance that symbol's clock and fire the timers it crossed.
 /// Returns the local instrument and whether a time-event hook ran.
@@ -2695,6 +3074,16 @@ fn enter(
         }
     }
     let strategy = st.strategy.bind(py);
+    // Corporate actions and expiries effective by this event land before the
+    // strategy sees it.
+    let lifecycle = match &mut *sh.inner.borrow_mut() {
+        Inner::Running(c) => c.begin_event(st.sid).map_err(runtime_err)?,
+        _ => return Err(finished()),
+    };
+    if !lifecycle.is_empty() {
+        let symbol = sh.symbols[ev.event.instrument.index()].bind(py);
+        deliver(py, sh, st, lifecycle, symbol)?;
+    }
     let cs = &st.clocks[local];
     let clock = cs.clock.bind(py);
     if st.active_clock.get() != local {
@@ -2817,7 +3206,7 @@ fn route_commands(
         }
         Route::Native(state) => {
             let commands = st.queue.bind(py).borrow_mut().queue.take_commands();
-            let mut target = RuntimeTarget { sh, sid: st.sid };
+            let mut target = RuntimeTarget { sh, sid: st.sid, idx, ts };
             state.borrow_mut().apply(&mut target, commands, current, idx, ts)?;
         }
     }
@@ -2878,6 +3267,20 @@ fn refusal(error: CmdError) -> PyErr {
 struct RuntimeTarget<'a> {
     sh: &'a Shared,
     sid: StrategyId,
+    /// The ordinal and time of the event the commands were queued on.
+    idx: usize,
+    ts: i64,
+}
+
+impl RuntimeTarget<'_> {
+    /// The venue orders go to, if the node has one.
+    fn venue(&self) -> Option<Rc<VenueRoute>> {
+        if self.sh.venue_on.get() {
+            self.sh.venue.borrow().clone()
+        } else {
+            None
+        }
+    }
 }
 
 impl Target for RuntimeTarget<'_> {
@@ -2912,6 +3315,9 @@ impl Target for RuntimeTarget<'_> {
         client_id: &str,
         parent: Option<u64>,
     ) -> PyResult<u64> {
+        if let Some(venue) = self.venue() {
+            return venue.submit(self.sh, self.sid, instrument, spec, idx, ts, client_id, parent);
+        }
         self.sh.with_book_mut(self.sid, |book, current| {
             let idx = book.submission_idx(instrument, idx, current);
             submit_order_on(
@@ -2971,6 +3377,9 @@ impl Target for RuntimeTarget<'_> {
     }
 
     fn cancel_order(&mut self, instrument: usize, idx: usize, order_id: u64) -> PyResult<()> {
+        if let Some(venue) = self.venue() {
+            return venue.cancel(self.sh, self.sid, instrument, idx, order_id);
+        }
         self.sh.with_book_mut(self.sid, |b, _| {
             b.kernel_mut(instrument).cancel_order(idx, order_id);
             Ok(())
@@ -2978,6 +3387,9 @@ impl Target for RuntimeTarget<'_> {
     }
 
     fn cancel_all_orders(&mut self, instrument: usize, idx: usize) -> PyResult<()> {
+        if let Some(venue) = self.venue() {
+            return venue.cancel_all(self.sh, self.sid, instrument, idx);
+        }
         self.sh.with_book_mut(self.sid, |b, _| {
             b.kernel_mut(instrument).cancel_all_orders(idx);
             Ok(())
@@ -2985,6 +3397,9 @@ impl Target for RuntimeTarget<'_> {
     }
 
     fn link_oco(&mut self, instrument: usize, order_ids: &[u64]) -> PyResult<()> {
+        if let Some(venue) = self.venue() {
+            return venue.link_oco(self.sid, instrument, order_ids);
+        }
         self.sh.with_book_mut(self.sid, |b, _| {
             b.kernel_mut(instrument).link_oco(order_ids);
             Ok(())
@@ -2992,6 +3407,9 @@ impl Target for RuntimeTarget<'_> {
     }
 
     fn request_close(&mut self, instrument: usize, position_id: u64) -> PyResult<()> {
+        if let Some(venue) = self.venue() {
+            return venue.close(self.sh, self.sid, instrument, self.idx, self.ts, position_id);
+        }
         self.sh.with_book_mut(self.sid, |b, _| {
             b.kernel_mut(instrument).request_close(position_id);
             Ok(())
@@ -3013,6 +3431,19 @@ impl Target for RuntimeTarget<'_> {
         limit_price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
+        if let Some(venue) = self.venue() {
+            return venue.modify(
+                self.sh,
+                self.sid,
+                instrument,
+                self.idx,
+                order_id,
+                units,
+                size_frac,
+                limit_price,
+                trigger_price,
+            );
+        }
         let qty = parse_qty_spec(units, size_frac)?;
         self.sh.with_book_mut(self.sid, |b, _| {
             b.kernel_mut(instrument).modify_order(order_id, qty, limit_price, trigger_price);
@@ -3315,6 +3746,8 @@ enum Tag {
     Canceled,
     Expired,
     Rejected,
+    Contract,
+    Corporate,
 }
 
 fn tag_of(event: &EngineEvent) -> Tag {
@@ -3333,6 +3766,10 @@ fn tag_of(event: &EngineEvent) -> Tag {
         EngineEvent::OrderCanceled { .. } => Tag::Canceled,
         EngineEvent::OrderExpired { .. } => Tag::Expired,
         EngineEvent::OrderRejected { .. } => Tag::Rejected,
+        EngineEvent::Settled { .. } => Tag::Contract,
+        EngineEvent::LifecycleRefused { what: "corporate_action", .. }
+        | EngineEvent::CorporateAction { .. } => Tag::Corporate,
+        EngineEvent::LifecycleRefused { .. } => Tag::Contract,
     }
 }
 
@@ -3354,6 +3791,8 @@ fn hooks_of(tag: Tag, preceded: bool) -> u32 {
         Tag::Canceled => HOOK_ORDER_CANCELED | HOOK_ORDER_EVENT,
         Tag::Expired => HOOK_ORDER_EXPIRED | HOOK_ORDER_EVENT,
         Tag::Rejected => HOOK_ORDER_REJECTED | HOOK_ORDER_EVENT,
+        Tag::Contract => HOOK_CONTRACT_EVENT,
+        Tag::Corporate => HOOK_CORPORATE_ACTION,
     }
 }
 
@@ -3512,6 +3951,9 @@ fn dispatch_events(
             Tag::RiskRejected | Tag::RiskHalted => {
                 call(HOOK_RISK_EVENT, intern!(py, "on_risk_event"))?;
             }
+            // Lifecycle events reach their own hook and leave `preceded` as it was.
+            Tag::Contract => call(HOOK_CONTRACT_EVENT, intern!(py, "on_contract_event"))?,
+            Tag::Corporate => call(HOOK_CORPORATE_ACTION, intern!(py, "on_corporate_action"))?,
             order => {
                 let (bit, name) = match order {
                     Tag::Accepted => (HOOK_ORDER_ACCEPTED, intern!(py, "on_order_accepted")),
@@ -3527,6 +3969,31 @@ fn dispatch_events(
             }
         }
     }
+    Ok(())
+}
+
+/// Route engine events to the strategy's hooks, natively or through the
+/// Python command path.
+fn deliver(
+    py: Python<'_>,
+    sh: &Shared,
+    st: &Strat,
+    events: Vec<EngineEvent>,
+    symbol: &Bound<'_, PyString>,
+) -> PyResult<()> {
+    let strategy = st.strategy.bind(py);
+    let ctx = st.ctx.bind(py);
+    if matches!(st.route, Route::Native(_)) {
+        return dispatch_events(py, strategy, ctx.as_any(), st.mask, events, Some(symbol));
+    }
+    let list = PyList::new(
+        py,
+        events
+            .into_iter()
+            .map(|e| Py::new(py, PyEngineEvent::from(e)))
+            .collect::<PyResult<Vec<_>>>()?,
+    )?;
+    sh.classes.dispatch.bind(py).call1((strategy, ctx, list))?;
     Ok(())
 }
 
@@ -3550,11 +4017,24 @@ fn step(
     let sid = st.sid;
     let local_idx = ev.event.local_idx as usize;
     let ts = ev.event.ts;
-    let strategy = st.strategy.bind(py);
-    let ctx = st.ctx.bind(py);
     let symbol = sh.symbols[ev.event.instrument.index()].bind(py);
 
-    // 4. Commands, only when work is queued; then the step.
+    // 4. Commands, only when work is queued; then the step. Sent to a venue,
+    // the entry and close intents go first: in-process they fill ahead of
+    // the market orders the step sweeps.
+    let mut venue_intents = None;
+    if sh.venue_on.get() && fold && (has_intents(py, st) || st.has_held(py)) {
+        let atr = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.atr_at(sid, local, local_idx),
+            _ => return Err(finished()),
+        };
+        let input = fold_step(py, st, symbol, local, local_idx, atr)?;
+        let venue = sh.venue.borrow().clone();
+        if let Some(venue) = venue {
+            venue.intents(sh, st, local, &input, local_idx, ts)?;
+        }
+        venue_intents = Some(());
+    }
     if fold || hooked {
         drain_commands(py, sh, st, local, ev)?;
     }
@@ -3570,7 +4050,9 @@ fn step(
         Route::Python { held, .. } => !held.bind(py).is_empty(),
         Route::Native(state) => state.borrow().has_held(),
     };
-    let input = if fold && (has_intents(py, st) || any_held) {
+    // A venue holds the positions: its intents became orders above, and the
+    // book steps with none.
+    let input = if venue_intents.is_none() && fold && (has_intents(py, st) || any_held) {
         fold_step(py, st, symbol, local, local_idx, atr)?
     } else {
         StepInput { atr, ..StepInput::default() }
@@ -3581,19 +4063,17 @@ fn step(
     };
 
     // 5. Engine events to hooks; 6. work those hooks queued.
-    let dispatched = !events.is_empty();
+    let mut dispatched = !events.is_empty();
     if dispatched {
-        if matches!(st.route, Route::Native(_)) {
-            dispatch_events(py, strategy, ctx.as_any(), st.mask, events, Some(symbol))?;
-        } else {
-            let list = PyList::new(
-                py,
-                events
-                    .into_iter()
-                    .map(|e| Py::new(py, PyEngineEvent::from(e)))
-                    .collect::<PyResult<Vec<_>>>()?,
-            )?;
-            sh.classes.dispatch.bind(py).call1((strategy, ctx, list))?;
+        deliver(py, sh, st, events, symbol)?;
+    }
+    // 5b. A simulated venue answers once the strategy has seen the event: the
+    // reports it makes are booked and heard like a real venue's.
+    if sh.venue_on.get() {
+        let venue = sh.venue.borrow().clone();
+        if let Some(venue) = venue {
+            venue.flush(sh, st, local, local_idx, ts)?;
+            dispatched |= venue.poll(py, sh, st, ev, local, atr)?;
         }
     }
     if (dispatched || (!fold && hooked)) && (has_commands(py, st) || has_intents(py, st)) {

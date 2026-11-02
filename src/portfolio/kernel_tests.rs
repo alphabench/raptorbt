@@ -637,7 +637,8 @@ fn market_order_placed_off_this_clock_fills_on_the_next_print() {
         }
         other => panic!("expected accept + fill + entered, got {other:?}"),
     }
-    // A bar step keeps the equality rule: bar semantics are unchanged.
+    // A bar step sweeps it too: an order routed here from another instrument's event is stamped
+    // with this instrument's last stepped bar, and equality would leave it working forever.
     let mut kernel = zero_fee_kernel();
     kernel.submit_order(
         OrderSide::Buy,
@@ -651,7 +652,17 @@ fn market_order_placed_off_this_clock_fills_on_the_next_print() {
         None,
     );
     let events = kernel.step(8, &bar(8, 100.0), StepInput::default());
-    assert!(events.is_empty(), "a bar sweeps only its own submissions: {events:?}");
+    assert!(
+        matches!(
+            events.as_slice(),
+            [
+                EngineEvent::OrderAccepted { .. },
+                EngineEvent::OrderFilled { price, .. },
+                EngineEvent::Entered { .. }
+            ] if *price == 100.0
+        ),
+        "expected accept + fill + entered, got {events:?}"
+    );
 }
 
 #[test]
@@ -706,8 +717,9 @@ fn sell_limit_closes_position_as_order_exit() {
     assert!(matches!(events.as_slice(), [EngineEvent::OrderAccepted { .. }]));
     assert!(kernel.is_in_position());
 
-    // Bar 2 trades through it.
-    let events = kernel.step(2, &bar(2, 105.5), StepInput::default());
+    // Bar 2 opens below the limit and trades through it: the limit fills.
+    let through = KernelBar { open: 104.0, ..bar(2, 105.5) };
+    let events = kernel.step(2, &through, StepInput::default());
     match events.as_slice() {
         [EngineEvent::OrderFilled { price, .. }, EngineEvent::Exited { trade, .. }] => {
             assert_eq!(*price, 105.0);
@@ -716,6 +728,33 @@ fn sell_limit_closes_position_as_order_exit() {
         other => panic!("expected fill + exit, got {other:?}"),
     }
     assert!(!kernel.is_in_position());
+}
+
+#[test]
+fn sell_limit_below_the_market_fills_at_the_open_not_its_own_price() {
+    // A resting sell at 105 meets a bar that opens at 107: the bar gapped
+    // through the limit, so the sale executes at the open.
+    let mut kernel = zero_fee_kernel();
+    enter(&mut kernel, 0, 100.0);
+    kernel.submit_order(
+        OrderSide::Sell,
+        QtySpec::FullPosition,
+        OrderKind::Limit { price: 105.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "tp-gap".into(),
+        None,
+        None,
+    );
+    kernel.step(1, &bar(1, 103.0), StepInput::default());
+    let events = kernel.step(2, &bar(2, 107.0), StepInput::default());
+    match events.as_slice() {
+        [EngineEvent::OrderFilled { price, .. }, EngineEvent::Exited { .. }] => {
+            assert_eq!(*price, 107.0);
+        }
+        other => panic!("expected fill + exit, got {other:?}"),
+    }
 }
 
 #[test]
@@ -794,7 +833,8 @@ fn per_contract_fees_charge_on_contracts_not_notional() {
             // Round trip: 2.5 per contract per side, NOT 2.5 * 50.
             let expected = 2.0 * 2.5 * size;
             assert!(
-                (trade.fees - expected).abs() < 1e-9,
+                // Booked fees are whole minor units: one per side at most.
+                (trade.fees - expected).abs() <= 0.01,
                 "fees {} != {expected} (size {size})",
                 trade.fees
             );
@@ -833,7 +873,7 @@ fn percentage_fees_charge_on_notional() {
             // 0.1% of true notional (price * size * multiplier), each side.
             let expected = 2.0 * 0.001 * 100.0 * size * 50.0;
             assert!(
-                (trade.fees - expected).abs() < 1e-6,
+                (trade.fees - expected).abs() <= 0.01,
                 "fees {} != {expected} (size {size})",
                 trade.fees
             );
@@ -868,7 +908,7 @@ fn expiry_settles_position_and_rejects_entries() {
     // Bar at the expiry timestamp: settle at close, no signal needed.
     let events = kernel.step(5, &bar(5, 103.0), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => {
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
             assert_eq!(trade.exit_reason, ExitReason::Settlement);
             assert!((trade.exit_price - 103.0).abs() < 1e-9);
         }
@@ -1190,7 +1230,9 @@ fn settlement_is_free_by_default() {
     enter(&mut kernel, 0, 100.0);
     let events = kernel.step(5, &bar(5, 110.0), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => assert_eq!(trade.fees, 0.0),
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
+            assert_eq!(trade.fees, 0.0)
+        }
         other => panic!("expected settlement, got {other:?}"),
     }
 }
@@ -1206,7 +1248,7 @@ fn a_settlement_fee_is_charged_on_the_settled_notional() {
     enter(&mut kernel, 0, 100.0);
     let events = kernel.step(5, &bar(5, 110.0), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => {
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
             // 1% of the settled notional, not of the entry price.
             let expected = 110.0 * trade.size * 0.01;
             assert!(
@@ -1238,7 +1280,7 @@ fn an_option_settles_at_its_own_close_without_an_underlying() {
     // No underlying supplied: the contract's own close is all we know.
     let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => {
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
             assert!((trade.exit_price - 9.0).abs() < 1e-9);
         }
         other => panic!("expected settlement, got {other:?}"),
@@ -1266,7 +1308,7 @@ fn an_option_settles_to_intrinsic_against_a_supplied_underlying() {
     kernel.set_underlying_price(Some(112.0));
     let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => {
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
             assert!(
                 (trade.exit_price - 12.0).abs() < 1e-9,
                 "expected intrinsic 12.0, got {}",
@@ -1296,7 +1338,7 @@ fn an_out_of_the_money_option_settles_worthless() {
     kernel.set_underlying_price(Some(95.0));
     let events = kernel.step(5, &bar(5, 0.5), StepInput::default());
     match events.as_slice() {
-        [EngineEvent::Exited { trade, .. }] => {
+        [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {
             assert_eq!(trade.exit_price, 0.0, "a 100 call with spot at 95 expires worthless");
         }
         other => panic!("expected settlement, got {other:?}"),
@@ -2102,7 +2144,8 @@ fn full_capital_entry_under_itemised_fees_never_overdraws_cash() {
                     kernel.cash()
                 );
                 assert!(
-                    (charged - expected).abs() < 1e-9 * before,
+                    // The notional and the fee are each booked to the paisa.
+                    (charged - expected).abs() <= 0.01 + 1e-9 * before,
                     "{segment} price {price}: charged {charged} vs fee {expected}"
                 );
             }

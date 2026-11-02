@@ -11,8 +11,10 @@
 //! maintenance requirement.
 
 pub mod margin_model;
+pub mod money;
 
 pub use margin_model::{LineView, MarginClass, MarginModel};
+pub use money::{Money, MoneyScale};
 
 use std::collections::BTreeMap;
 
@@ -103,15 +105,27 @@ impl MarginBook {
 #[derive(Debug)]
 pub struct SharedAccount {
     mode: AccountMode,
-    balance: f64,
+    scale: MoneyScale,
+    /// Booked cash, in minor units.
+    balance: Money,
     locked: f64,
     halted: bool,
     halted_at: Option<usize>,
 }
 
 impl SharedAccount {
-    pub fn new(mode: AccountMode, initial_capital: f64) -> Self {
-        Self { mode, balance: initial_capital, locked: 0.0, halted: false, halted_at: None }
+    /// An account holding `initial_capital`, booked at `scale` (rounded half
+    /// to even; a capital that cannot be booked is refused).
+    pub fn new(mode: AccountMode, initial_capital: f64, scale: MoneyScale) -> Self {
+        let balance = scale
+            .money(initial_capital)
+            .unwrap_or_else(|e| money::money_fault(format!("initial capital: {e}")));
+        Self { mode, scale, balance, locked: 0.0, halted: false, halted_at: None }
+    }
+
+    #[inline]
+    pub fn scale(&self) -> MoneyScale {
+        self.scale
     }
 
     pub fn mode(&self) -> AccountMode {
@@ -120,6 +134,11 @@ impl SharedAccount {
 
     /// Cash balance, including amounts notionally locked as margin.
     pub fn balance(&self) -> f64 {
+        self.scale.to_f64(self.balance)
+    }
+
+    /// The cash balance in booked minor units.
+    pub fn balance_money(&self) -> Money {
         self.balance
     }
 
@@ -130,7 +149,7 @@ impl SharedAccount {
 
     /// Capital available to open new positions.
     pub fn free(&self) -> f64 {
-        self.balance - self.locked
+        self.balance() - self.locked
     }
 
     /// Whether the margin-call kill-switch has tripped.
@@ -153,13 +172,13 @@ impl SharedAccount {
 
     /// Overwrite the cash and locked margin. An account group does this to
     /// each member's copy before the member is stepped.
-    pub fn set_pool(&mut self, balance: f64, locked: f64) {
+    pub fn set_pool(&mut self, balance: Money, locked: f64) {
         self.balance = balance;
         self.locked = locked;
     }
 
     /// Apply a stepped kernel's cash and locked-margin movement.
-    pub fn reconcile(&mut self, delta_cash: f64, delta_locked: f64) {
+    pub fn reconcile(&mut self, delta_cash: Money, delta_locked: f64) {
         self.balance += delta_cash;
         self.locked += delta_locked;
     }
@@ -190,32 +209,40 @@ mod tests {
 
     #[test]
     fn cash_account_never_locks() {
-        let mut account = SharedAccount::new(AccountMode::Cash, 100_000.0);
+        let mut account = SharedAccount::new(AccountMode::Cash, 100_000.0, MoneyScale::default());
         assert_eq!(account.locked(), 0.0);
         assert_eq!(account.free(), 100_000.0);
         // A cash-mode step only ever moves cash.
-        account.reconcile(-25_000.0, 0.0);
+        account.reconcile(Money::from_minor(-2_500_000), 0.0);
         assert_eq!(account.balance(), 75_000.0);
         assert_eq!(account.free(), 75_000.0);
     }
 
     #[test]
     fn margin_locks_do_not_debit_balance() {
-        let mut account = SharedAccount::new(AccountMode::Margin { leverage: 5.0 }, 100_000.0);
+        let mut account = SharedAccount::new(
+            AccountMode::Margin { leverage: 5.0 },
+            100_000.0,
+            MoneyScale::default(),
+        );
         // Entry: locks margin, debits only fees.
-        account.reconcile(-50.0, 20_000.0);
+        account.reconcile(Money::from_minor(-5_000), 20_000.0);
         assert_eq!(account.balance(), 99_950.0);
         assert_eq!(account.locked(), 20_000.0);
         assert_eq!(account.free(), 79_950.0);
         // Exit: releases the lock, books PnL.
-        account.reconcile(1_000.0, -20_000.0);
+        account.reconcile(Money::from_minor(100_000), -20_000.0);
         assert_eq!(account.locked(), 0.0);
         assert_eq!(account.free(), 100_950.0);
     }
 
     #[test]
     fn shared_halt_records_first_index_only() {
-        let mut account = SharedAccount::new(AccountMode::Margin { leverage: 10.0 }, 10_000.0);
+        let mut account = SharedAccount::new(
+            AccountMode::Margin { leverage: 10.0 },
+            10_000.0,
+            MoneyScale::default(),
+        );
         assert!(!account.is_halted());
         assert_eq!(account.halted_at(), None);
         account.halt(7);

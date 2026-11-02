@@ -14,8 +14,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
+use super::errors::Fail;
 use super::instrument_bindings::PyInstrumentSpec;
-use super::numpy_bridge::{numpy_as_slice_f64, vec_to_numpy_f64};
+use super::numpy_bridge::{numpy_cow_f64, vec_to_numpy_f64};
 use crate::pricing::{
     self, ExpiryPick, Greeks, IvSearch, IvStatus, Model, OptionChain, OptionInputs, OptionRight,
     PricingError,
@@ -27,6 +28,8 @@ const PARALLEL_MIN: usize = 4096;
 fn value_err(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
+
+const EXPIRY_PICKS: [&str; 5] = ["nearest", "nth", "weekly", "monthly", "date"];
 
 fn model_of(text: &str) -> PyResult<Model> {
     Model::parse(text).map_err(|PricingError::InvalidInput(m)| value_err(m))
@@ -196,8 +199,12 @@ fn same_len(lens: &[usize]) -> PyResult<usize> {
     Ok(n)
 }
 
-fn bools<'a>(arr: &'a PyReadonlyArray1<'_, bool>) -> &'a [bool] {
-    arr.as_slice().expect("numpy array must be contiguous")
+/// Borrow a bool array when contiguous, copy it when it is not.
+fn bools<'a>(arr: &'a PyReadonlyArray1<'_, bool>) -> std::borrow::Cow<'a, [bool]> {
+    match arr.as_slice() {
+        Ok(slice) => std::borrow::Cow::Borrowed(slice),
+        Err(_) => std::borrow::Cow::Owned(arr.as_array().iter().copied().collect()),
+    }
 }
 
 /// `(iv, status)`.
@@ -212,7 +219,7 @@ type Greeks6<'py> = (
     Bound<'py, PyArray1<f64>>,
 );
 
-/// Prices of many options. Inputs are equal-length C-contiguous arrays;
+/// Prices of many options. Inputs are equal-length arrays (a strided view is copied);
 /// an invalid element prices as NaN.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
@@ -230,12 +237,12 @@ pub fn pricing_price_array<'py>(
     let model = model_of(model)?;
     let (c, s, k, t, v, r, q) = (
         bools(&is_call),
-        numpy_as_slice_f64(&underlying),
-        numpy_as_slice_f64(&strike),
-        numpy_as_slice_f64(&tau),
-        numpy_as_slice_f64(&vol),
-        numpy_as_slice_f64(&rate),
-        numpy_as_slice_f64(&dividend_yield),
+        numpy_cow_f64(&underlying),
+        numpy_cow_f64(&strike),
+        numpy_cow_f64(&tau),
+        numpy_cow_f64(&vol),
+        numpy_cow_f64(&rate),
+        numpy_cow_f64(&dividend_yield),
     );
     let n = same_len(&[c.len(), s.len(), k.len(), t.len(), v.len(), r.len(), q.len()])?;
     let out = py.detach(|| {
@@ -264,12 +271,12 @@ pub fn pricing_greeks_array<'py>(
     let model = model_of(model)?;
     let (c, s, k, t, v, r, q) = (
         bools(&is_call),
-        numpy_as_slice_f64(&underlying),
-        numpy_as_slice_f64(&strike),
-        numpy_as_slice_f64(&tau),
-        numpy_as_slice_f64(&vol),
-        numpy_as_slice_f64(&rate),
-        numpy_as_slice_f64(&dividend_yield),
+        numpy_cow_f64(&underlying),
+        numpy_cow_f64(&strike),
+        numpy_cow_f64(&tau),
+        numpy_cow_f64(&vol),
+        numpy_cow_f64(&rate),
+        numpy_cow_f64(&dividend_yield),
     );
     let n = same_len(&[c.len(), s.len(), k.len(), t.len(), v.len(), r.len(), q.len()])?;
     let g = py.detach(|| {
@@ -313,13 +320,13 @@ pub fn pricing_implied_vol_array<'py>(
     let search = IvSearch { lo, hi, tol, max_iter };
     search.validate().map_err(|PricingError::InvalidInput(m)| value_err(m))?;
     let (p, c, s, k, t, r, q) = (
-        numpy_as_slice_f64(&price),
+        numpy_cow_f64(&price),
         bools(&is_call),
-        numpy_as_slice_f64(&underlying),
-        numpy_as_slice_f64(&strike),
-        numpy_as_slice_f64(&tau),
-        numpy_as_slice_f64(&rate),
-        numpy_as_slice_f64(&dividend_yield),
+        numpy_cow_f64(&underlying),
+        numpy_cow_f64(&strike),
+        numpy_cow_f64(&tau),
+        numpy_cow_f64(&rate),
+        numpy_cow_f64(&dividend_yield),
     );
     let n = same_len(&[p.len(), c.len(), s.len(), k.len(), t.len(), r.len(), q.len()])?;
     let res = py.detach(|| {
@@ -458,13 +465,24 @@ impl PyOptionChain {
             "nth" => ExpiryPick::Nth(n),
             "weekly" => ExpiryPick::Weekly(n),
             "monthly" => ExpiryPick::Monthly(n),
-            "date" => {
-                ExpiryPick::Date(date_ns.ok_or_else(|| value_err("which='date' needs date_ns"))?)
-            }
+            "date" => ExpiryPick::Date(date_ns.ok_or_else(|| {
+                Fail::new("invalid_expiry_pick", "which='date' needs date_ns")
+                    .op("OptionChain.pick_expiry")
+                    .param("date_ns")
+                    .valid(EXPIRY_PICKS)
+                    .skill("instruments")
+            })?),
             other => {
-                return Err(value_err(format!(
-                    "which is nearest, nth, weekly, monthly or date, got {other:?}"
-                )))
+                return Err(Fail::new(
+                    "invalid_expiry_pick",
+                    format!("which is nearest, nth, weekly, monthly or date, got {other:?}"),
+                )
+                .op("OptionChain.pick_expiry")
+                .param("which")
+                .value(other.to_string())
+                .valid(EXPIRY_PICKS)
+                .skill("instruments")
+                .into())
             }
         };
         Ok(self.inner.pick_expiry(underlying, now_ns, pick, utc_offset_ns))

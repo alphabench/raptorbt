@@ -67,6 +67,8 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register instrument market definitions
     m.add_class::<python::instrument_bindings::PyInstrumentSpec>()?;
     m.add_class::<python::schedule_bindings::PySessionSchedule>()?;
+    m.add_class::<python::lifecycle_bindings::PyCorporateAction>()?;
+    m.add_function(wrap_pyfunction!(python::lifecycle_bindings::adjust_history, m)?)?;
     m.add_class::<python::costs_bindings::PyRateCard>()?;
     m.add_class::<python::costs_bindings::PyFeeSchedule>()?;
     m.add_class::<python::margin_bindings::PyMarginModel>()?;
@@ -89,6 +91,8 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<python::runtime_bindings::PyStrategyView>()?;
     m.add_class::<python::runtime_bindings::PyCommandQueue>()?;
     m.add_class::<python::runtime_bindings::PyKernelDriver>()?;
+    m.add_class::<python::execution_bindings::PyOrderRequest>()?;
+    m.add_class::<python::execution_bindings::PyExecutionReport>()?;
     m.add_class::<python::strategy_bindings::PyEngineEvent>()?;
     m.add_class::<python::strategy_bindings::PyPositionSnapshot>()?;
     m.add_function(wrap_pyfunction!(python::strategy_bindings::resolve_atr_period, m)?)?;

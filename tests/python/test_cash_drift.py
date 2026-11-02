@@ -1,11 +1,9 @@
-"""Cash accumulation drift over many fills stays far below any visible level.
+"""Cash accumulation over many fills carries no drift at all.
 
-The engine adds each fill's cash effect to a plain f64 balance. This replays
-the trade list with ``math.fsum`` (exactly rounded) and compares the final
-equity with it. Measured on this corpus: about 4e-14 relative at 100k trades
-and 1e-14 at 500k, five orders under the 1e-9 bar that would justify
-compensated summation. The 1e-12 bound below pins that with headroom; a
-regression in the accumulation order or a lossy intermediate would break it.
+Cash is booked in integer minor units, so the final balance is the initial
+capital plus the sum of the trades' booked P&L, exactly: integer equality, not
+a tolerance. This replays 100k round trips and also checks the float view
+against ``math.fsum`` of the trade list.
 """
 
 import math
@@ -39,3 +37,6 @@ def test_final_equity_matches_an_exact_recomputation_from_the_trades():
     exact = CAPITAL + math.fsum(t.pnl for t in trades)
     final = float(result.equity_curve()[-1])
     assert abs(final - exact) / exact < 1e-12
+    # The books: initial capital plus the integer sum of booked P&L.
+    booked = round(CAPITAL * 100) + sum(t.pnl_minor for t in trades)
+    assert round(final * 100) == booked

@@ -1617,7 +1617,7 @@ import numpy as np
 import raptorbt
 
 # Raw tick arrays (one element per tick, same length N)
-# buy_qty_delta / sell_qty_delta must be per-tick deltas, NOT Zerodha cumulative sums
+# buy_qty_delta / sell_qty_delta must be per-tick deltas, NOT cumulative session sums
 result = raptorbt.run_tick_backtest(
     timestamps=timestamps_ns,       # int64 nanoseconds-since-epoch
     ltp=ltp_arr,                    # last traded price
@@ -1966,7 +1966,7 @@ oi_pos   = raptorbt.oi_position_pct(oi, oi_day_high, oi_day_low)  # [0, 100]
 velocity = raptorbt.tick_velocity(ts_ns, 60.0)              # ticks/min over last 60s
 ```
 
-**Important for Zerodha data:** `total_buy_qty` and `total_sell_qty` from KiteTicker are cumulative session running sums, not per-tick values. Pass them as-is to `buy_sell_imbalance_delta` (it computes deltas internally). For `run_tick_backtest`, convert first: `buy_delta = np.diff(buy_cum, prepend=0).clip(min=0)`.
+**Cumulative feeds:** when a feed's `total_buy_qty` and `total_sell_qty` are cumulative session running sums rather than per-tick values, pass them as-is to `buy_sell_imbalance_delta` (it computes deltas internally). For `run_tick_backtest`, convert first: `buy_delta = np.diff(buy_cum, prepend=0).clip(min=0)`.
 
 ---
 
@@ -1983,7 +1983,7 @@ access all 48. The most useful are grouped below.
 | Metric             | Description                            |
 | ------------------ | -------------------------------------- |
 | `total_return_pct` | Total return as percentage             |
-| `sharpe_ratio`     | Risk-adjusted return (annualized)      |
+| `sharpe_ratio`     | Risk-adjusted return (annualized); `None` when the equity curve does not vary |
 | `sortino_ratio`    | Downside risk-adjusted return          |
 | `calmar_ratio`     | Return / Max Drawdown (not annualized) |
 | `omega_ratio`      | Probability-weighted gains/losses      |
@@ -2769,13 +2769,13 @@ to reproduce old results bit-identically. See
 
 **Tick-level backtesting — full tick resolution, no bar resampling.**
 
-- Add `TickData` struct — parallel arrays of `timestamps`, `ltp`, `bid`, `ask`, `buy_qty_delta`, `sell_qty_delta`, `oi` (one element per tick). Callers must pre-convert Zerodha cumulative session totals to per-tick deltas before passing.
+- Add `TickData` struct — parallel arrays of `timestamps`, `ltp`, `bid`, `ask`, `buy_qty_delta`, `sell_qty_delta`, `oi` (one element per tick). Callers must pre-convert cumulative session totals to per-tick deltas before passing.
 - Add `ExitReason::TimeExit` — max hold-time exceeded exit for tick strategies.
 - Add `run_tick_backtest` — tick-native simulation engine. Entry fills at ask+slippage; stop/target checked against ltp on every tick (not OHLC approximation); max-hold-seconds time exit; configurable cooldown between entries. Returns the same `BacktestResult` / `BacktestMetrics` (33 fields) as all other strategy types.
 - Add `compute_tick_entry_signals` — compute momentum entry bool array from precomputed feature arrays (spread gate, delta BSI gate, 1-min return gate, cooldown enforcement). O(N) single pass.
 - Add `compute_tick_exit_signals` — time-based (EOD) exit bool array from tick timestamps.
 - Add `tick_spread_pct` — per-tick bid/ask spread as percentage of mid price.
-- Add `buy_sell_imbalance_delta` — per-tick delta BSI from Zerodha cumulative running sums. Fixes the raw-cumulative BSI artefact (~0.95 all day regardless of order flow).
+- Add `buy_sell_imbalance_delta` — per-tick delta BSI from cumulative running sums. Fixes the raw-cumulative BSI artefact (~0.95 all day regardless of order flow).
 - Add `return_window` — per-tick lookback return over a configurable time window using binary search (O(N log N)). Returns NaN where history is insufficient — correctly gates the entry filter rather than silently passing.
 - Add `realized_vol_rolling` — rolling realized volatility proxy (stddev of log-returns) over a time window.
 - Add `oi_position_pct` — OI position within the day's high/low range, per tick: [0, 100].

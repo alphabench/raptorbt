@@ -62,15 +62,17 @@ Instrument definitions, asset classes, options and multi-instrument runs.
 
 Name: `raptorbt-instruments`  
 Path: [instruments/SKILL.md](instruments/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy
 
 Load when:
 
 - Trading several symbols or asset classes.
-- Defining lot size, tick size, multiplier, expiry or sessions.
-- Working with option chains, pricing and Greeks.
+- Defining futures lot size, tick size, multiplier, expiry and settlement.
+- Picking option strikes and expiries from a chain; pricing options, Greeks and implied volatility.
+- Building iron condors, straddles and other multi-leg option structures.
+- Market hours, trading sessions and holidays.
 
 ## Market data
 
@@ -78,14 +80,15 @@ Bars, trades, quotes and order-book inputs, and tick-level features.
 
 Name: `raptorbt-market-data`  
 Path: [market-data/SKILL.md](market-data/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-instruments
 
 Load when:
 
-- Preparing OHLCV arrays or tick streams.
-- Handling timestamps, bar stamps and ordering.
+- Preparing OHLCV arrays, trade ticks, quotes and order-book depth.
+- Handling timestamps, bar_stamp, bar open versus close stamps and ordering.
+- Checking what a strategy can see at an event (no lookahead).
 - Computing tick features or running tick-level simulation.
 
 ## Subscriptions
@@ -94,14 +97,15 @@ Declaring which streams and bar histories a strategy receives.
 
 Name: `raptorbt-subscriptions`  
 Path: [subscriptions/SKILL.md](subscriptions/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data
 
 Load when:
 
-- Subscribing a strategy to extra bar streams or timeframes.
-- Reading bar history inside a hook.
+- Subscribing a strategy to a symbol's trades, quotes or order books.
+- Subscribing to 5 minute, hourly or daily bars of a symbol.
+- Reading closed-bar history and the last quote or book with ctx.data.
 
 ## Timeframes
 
@@ -109,14 +113,17 @@ Multi-timeframe aggregation and composite bars.
 
 Name: `raptorbt-timeframes`  
 Path: [timeframes/SKILL.md](timeframes/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data
 
 Load when:
 
 - Combining 1m, 5m, 15m, hourly or daily data.
-- Building custom bar aggregations.
+- Turning 1 minute bars into 5, 15 or 60 minute bars, or into daily bars.
+- Building bars from ticks: time, tick-count, volume, value or Renko bars.
+- Anchoring bars at the market open; resampling, aggregating and bar grids.
+- Choosing which edge of a bar a boundary record belongs to.
 
 ## Indicators
 
@@ -124,14 +131,15 @@ Built-in vectorised and streaming indicators.
 
 Name: `raptorbt-indicators`  
 Path: [indicators/SKILL.md](indicators/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy
 
 Load when:
 
-- Computing SMA, EMA, RSI, ATR, MACD, Bollinger, ADX or supertrend.
-- Registering a streaming indicator on a strategy.
+- Computing SMA, EMA, RSI, ATR, MACD, Bollinger bands, ADX, VWAP or Supertrend.
+- Registering a streaming indicator on a strategy and waiting for warm-up.
+- Writing a custom indicator, or an indicator on a higher timeframe.
 
 ## Orders
 
@@ -215,14 +223,15 @@ Parameter sweeps, batch runs and Monte Carlo validation.
 
 Name: `raptorbt-optimization`  
 Path: [optimization/SKILL.md](optimization/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-backtesting, raptorbt-results
 
 Load when:
 
-- Sweeping parameters across many runs.
-- Checking robustness with Monte Carlo.
+- Sweeping parameters across many runs; grid and random designs.
+- Walk-forward testing, the deflated Sharpe ratio and avoiding overfitting.
+- Checking robustness with a bootstrap or a portfolio Monte Carlo.
 
 ## Live trading
 
@@ -245,14 +254,15 @@ Performance analysis, trades and diagnostics.
 
 Name: `raptorbt-results`  
 Path: [results/SKILL.md](results/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core
 
 Load when:
 
-- Reading metrics, equity and drawdown curves, trades or orders.
-- Judging whether a result is trustworthy.
+- Reading metrics, equity and drawdown curves, trades, orders and the full report.
+- Judging whether a result is trustworthy; why a Sharpe ratio looks huge (annualisation).
+- Reconciling a run: fees, P&L, drawdown, open trades.
 
 ## Deployment
 

@@ -10,6 +10,8 @@ from typing import Any, Literal, Sequence
 import numpy as np
 import numpy.typing as npt
 
+from raptorbt._bands import BollingerBands
+
 _F64 = npt.NDArray[np.float64]
 _I64 = npt.NDArray[np.int64]
 _Bool = npt.NDArray[np.bool_]
@@ -72,6 +74,15 @@ class BacktestConfig:
     max_daily_loss: float | None  # money; "daily_loss" for the rest of the day
     max_daily_loss_pct: float | None  # percent of the day's starting equity
     flatten_on_daily_loss: bool  # also close open positions on a breach
+    # Decimals cash, fees and realised P&L are booked in (default 2: 100 minor
+    # units to the rupee). Amounts are rounded half to even when booked.
+    money_decimals: int
+    # How a margin account (account_type="margin") funds an entry; None keeps
+    # the built-in rule bit for bit. A cash account with a model is refused.
+    # Refusals reach on_order_rejected as "insufficient_margin" (the model
+    # demands more than is free, or refuses the side) or "margin_unpriced"
+    # (the model has no rule for the instrument). no_margin locks nothing.
+    margin_model: MarginModel | None
 
     def __init__(
         self,
@@ -107,6 +118,8 @@ class BacktestConfig:
         max_daily_loss_pct: float | None = ...,
         flatten_on_daily_loss: bool = ...,
         fee_schedule: FeeSchedule | None = ...,
+        money_decimals: int = ...,
+        margin_model: MarginModel | None = ...,
     ) -> None: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...
@@ -194,10 +207,20 @@ class Trade:
     # Maximum Favourable Excursion: unrealised profit at the best point, in
     # money, before costs. Never negative.
     mfe_pnl: float | None
+    # Exact booked amounts, in integer minor units of ``money_decimals``
+    # (2: 100 per rupee). ``pnl == pnl_minor / 10**money_decimals``. None on
+    # paths that account in floats (the multi-leg simulators).
+    money_decimals: int | None
+    pnl_minor: int | None
+    fees_minor: int | None
+    entry_notional_minor: int | None
+    exit_notional_minor: int | None
 
 class BacktestMetrics:
     total_return_pct: float
-    sharpe_ratio: float
+    # None when the equity curve has no variation (a run that never traded):
+    # the ratio is undefined, not zero.
+    sharpe_ratio: float | None
     max_drawdown_pct: float
     max_drawdown_duration: int
     max_drawdown_duration_secs: float | None
@@ -210,7 +233,10 @@ class BacktestMetrics:
     # companion to exposure_pct: how much of the run you were behind rather
     # than how much of it you were invested. Added in 0.13.2.
     time_under_water_pct: float
-    win_rate_pct: float
+    # Closed trades that made money over closed trades, in percent, on P&L net
+    # of fees; a position still open when the data ended is not counted. None
+    # when no trade closed. ``full_report`` uses the same definition.
+    win_rate_pct: float | None
     expectancy: float
     sqn: float
     total_trades: int
@@ -239,7 +265,7 @@ class BacktestMetrics:
     exposure_pct: float
 
     # None when the denominator is zero -- e.g. profit factor with no losing
-    # trades. Previously these were float('inf'), which is not JSON-serializable.
+    # closed trade (net of fees, as full_report counts it). Previously these were float('inf'), which is not JSON-serializable.
     sortino_ratio: float | None
     calmar_ratio: float | None
     omega_ratio: float | None
@@ -725,14 +751,14 @@ def stochastic(
 def atr(high: _F64, low: _F64, close: _F64, period: int) -> _F64: ...
 def bollinger_bands(
     data: _F64, period: int = ..., std_dev: float = ...
-) -> tuple[_F64, _F64, _F64]: ...
+) -> BollingerBands: ...
 def adx(high: _F64, low: _F64, close: _F64, period: int) -> _F64: ...
 def vwap(high: _F64, low: _F64, close: _F64, volume: _F64) -> _F64: ...
 def supertrend(
     high: _F64, low: _F64, close: _F64, period: int = ..., multiplier: float = ...
 ) -> tuple[_F64, _F64]: ...
-def rolling_min(data: _F64, window: int) -> _F64: ...
-def rolling_max(data: _F64, window: int) -> _F64: ...
+def rolling_min(data: _F64, period: int) -> _F64: ...
+def rolling_max(data: _F64, period: int) -> _F64: ...
 
 # --- Tick signals and features ---------------------------------------------
 
@@ -741,7 +767,9 @@ def compute_tick_exit_signals(
     timestamps_ns: _I64, eod_exit_time_ns: int = ...
 ) -> _Bool: ...
 def tick_spread_pct(bid: _F64, ask: _F64) -> _F64: ...
-def buy_sell_imbalance_delta(buy_qty_delta: _F64, sell_qty_delta: _F64) -> _F64: ...
+def buy_sell_imbalance_delta(
+    buy_qty_cumulative: _F64, sell_qty_cumulative: _F64
+) -> _F64: ...
 def return_window(
     timestamps_ns: _I64, ltp: _F64, window_seconds: float = ...
 ) -> _F64: ...
@@ -900,6 +928,11 @@ def defined_risk(legs: list[tuple[InstrumentSpec, float, float]]) -> float: ...
 
 class InstrumentSpec:
     settlement_fee: float
+    # "cash" (default) or "physical" (the underlying is delivered)
+    settlement_style: str
+    # "auto" (default), "last_price", "underlying", or a price declared for
+    # the contract
+    settlement_price: str | float
     symbol: str
     kind: str
     price_increment: float
@@ -1132,6 +1165,11 @@ class RuntimeContext:
     bar: Any | None
     timestamp: int
     bar_close_ts: int | None
+    #: The three times of the event (or report) in flight, in ns: the
+    #: exchange's, the arrival and the processing time. ``None`` between events.
+    event_ns: int | None
+    arrival_ns: int | None
+    processing_ns: int | None
     equity: float
     cash: float
     free_capital: float
@@ -1165,6 +1203,68 @@ class RuntimeContext:
     #: ``(locked_margin, realized_pnl, unrealized_pnl, gross_exposure,
     #: net_exposure)``; backs ``ctx.portfolio``.
     def _portfolio_totals(self) -> tuple[float, float, float, float, float]: ...
+
+class OrderRequest:
+    """One order as the engine hands it to an execution adapter. Immutable."""
+
+    client_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    order_type: str
+    limit_price: float | None
+    trigger_price: float | None
+    trail_offset: float | None
+    trail_kind: str | None
+    trail_limit_offset: float | None
+    time_in_force: str
+    expire_ns: int | None
+    strategy_id: int
+    account_id: str | None
+    reduce_only: bool
+    post_only: bool
+    parent_client_order_id: str | None
+    tags: dict[str, str]
+    submitted_ns: int
+
+class ExecutionReport:
+    """What a venue says about one order. Immutable."""
+
+    kind: str
+    ts_ns: int
+    exec_id: str | None
+    qty: float | None
+    price: float | None
+    fee: float | None
+    reason: str | None
+    venue_order_id: str | None
+    @staticmethod
+    def accepted(venue_order_id: str, ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def rejected(reason: str, ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def fill(
+        exec_id: str, qty: float, price: float, ts_ns: int, fee: float = ...
+    ) -> ExecutionReport: ...
+    @staticmethod
+    def cancel_ack(ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def cancel_rejected(reason: str, ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def replace_ack(
+        ts_ns: int,
+        new_qty: float | None = ...,
+        new_limit: float | None = ...,
+        new_trigger: float | None = ...,
+    ) -> ExecutionReport: ...
+    @staticmethod
+    def replace_rejected(reason: str, ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def expired(ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def correction(exec_id: str, qty: float, price: float, ts_ns: int) -> ExecutionReport: ...
+    @staticmethod
+    def bust(exec_id: str, ts_ns: int) -> ExecutionReport: ...
 
 class CommandQueue:
     """A strategy's queued commands and intents; orders are converted to
@@ -1361,6 +1461,7 @@ class Runtime:
         subscriptions: list[tuple[int, str, float]],
         indicators: list[tuple[Any, int | None, str | None]],
     ) -> bool: ...
+    def set_corporate_actions(self, actions: list[CorporateAction], policy: str) -> None: ...
     def finalize(self) -> None: ...
     def run(self) -> None: ...
     def set_curve_window(self, window: int | None) -> None: ...
@@ -1380,6 +1481,7 @@ class Runtime:
         bid_qty: float = ...,
         ask_qty: float = ...,
         oi: float = ...,
+        arrival_ns: int | None = ...,
     ) -> int: ...
     def push_bar(
         self,
@@ -1390,6 +1492,7 @@ class Runtime:
         low: float,
         close: float,
         volume: float,
+        arrival_ns: int | None = ...,
     ) -> None: ...
     def push_depth(
         self,
@@ -1397,8 +1500,21 @@ class Runtime:
         timestamp: int,
         bids: list[tuple[float, float]],
         asks: list[tuple[float, float]],
+        arrival_ns: int | None = ...,
     ) -> None: ...
     def advance_time(self, timestamp: int) -> None: ...
+    def set_execution(
+        self,
+        kind: str,
+        adapter: Any | None = ...,
+        account_id: str | None = ...,
+        protective: str = ...,
+    ) -> None: ...
+    def set_processing_latency(self, latency_ns: int) -> None: ...
+    def set_warmup(self, warmup: bool) -> None: ...
+    def push_report(
+        self, client_order_id: str, report: ExecutionReport, arrival_ns: int
+    ) -> str: ...
     def finish(self, sid: int) -> PortfolioResult: ...
     def close(self) -> None: ...
     def memory_report(self) -> dict[str, int]: ...
@@ -1552,6 +1668,9 @@ class PortfolioSession:
     # margin, long-only. Must be called after seal() and before the first
     # apply_current() — enforced, since adopting mid-run understates max
     # drawdown. Returns the new position id.
+    def set_corporate_actions(self, actions: list[CorporateAction], policy: str) -> None: ...
+    @property
+    def dividends_received(self) -> float: ...
     def adopt_position(
         self,
         instrument: int,
@@ -1590,6 +1709,55 @@ class EngineEvent:
     reject_reason: str | None
     order_id: int | None
     client_order_id: str | None
+    # "contract_settled", "corporate_action" and "lifecycle_refused" events:
+    # outcome is "settled"/"exercised"/"assigned"/"expired"/"delivered", or
+    # "split"/"bonus"/"dividend", or what was refused; style "cash"/"physical";
+    # source "declared"/"underlying"/"last_price"; quantity the underlying
+    # delivered (settlement) or the ratio (split, bonus); amount the delivery
+    # price or the dividend per unit; cash what the account received.
+    outcome: str | None
+    style: str | None
+    source: str | None
+    quantity: float | None
+    amount: float | None
+    cash: float | None
+
+class CorporateAction:
+    """A split, bonus or cash dividend on one instrument, effective at ``ts``
+    (the ex-date's first instant, ns)."""
+    def __init__(
+        self,
+        instrument: str,
+        kind: str,
+        ts: int,
+        ratio: float | None = ...,
+        amount: float | None = ...,
+        pay_ts: int | None = ...,
+    ) -> None: ...
+    @staticmethod
+    def split(instrument: str, ts: int, ratio: float) -> CorporateAction: ...
+    @staticmethod
+    def bonus(instrument: str, ts: int, ratio: float) -> CorporateAction: ...
+    @staticmethod
+    def dividend(
+        instrument: str, ts: int, amount: float, pay_ts: int | None = ...
+    ) -> CorporateAction: ...
+    @property
+    def instrument(self) -> str: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def ts(self) -> int: ...
+    @property
+    def ratio(self) -> float | None: ...
+    @property
+    def amount(self) -> float | None: ...
+    @property
+    def pay_ts(self) -> int | None: ...
+
+def adjust_history(
+    instrument: str, actions: list[CorporateAction], bars: dict[str, Any]
+) -> dict[str, Any]: ...
 
 class PositionSnapshot:
     position_id: int

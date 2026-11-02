@@ -169,6 +169,7 @@ impl PyPortfolioSession {
     fn new(config: Option<&PyBacktestConfig>, account_type: &str, leverage: f64) -> PyResult<Self> {
         let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
         let account = parse_account_mode(account_type, leverage)?;
+        super::strategy_bindings::check_margin_model(&rust_config, account)?;
         Ok(Self { session: Some(EventSession::with_account(rust_config, account)) })
     }
 
@@ -723,6 +724,40 @@ impl PyPortfolioSession {
         self.session_mut()?
             .adopt_position(instrument, timestamp_ns, price, size)
             .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    /// Declare the corporate actions of the run and the adjustment policy its
+    /// history is on (`"raw"` or `"adjusted"`). Call before the first event.
+    /// Every action must name a registered symbol.
+    #[pyo3(signature = (actions, policy))]
+    fn set_corporate_actions(
+        &mut self,
+        actions: Vec<super::lifecycle_bindings::PyCorporateAction>,
+        policy: &str,
+    ) -> PyResult<()> {
+        let (actions, policy) =
+            super::lifecycle_bindings::extract_actions(Some(actions), Some(policy))?;
+        let session = self.session_mut()?;
+        for a in &actions {
+            if !session.symbols().iter().any(|s| s == &a.instrument) {
+                return Err(Fail::new(
+                    "unknown_symbol",
+                    format!("corporate action on {:?}: no data for that symbol", a.instrument),
+                )
+                .param("corporate_actions")
+                .value(a.instrument.as_str())
+                .into());
+            }
+        }
+        session
+            .set_corporate_actions(&actions, policy)
+            .map_err(super::lifecycle_bindings::action_err)
+    }
+
+    /// Dividend cash credited so far (a short's debit is negative).
+    #[getter]
+    fn dividends_received(&self) -> PyResult<f64> {
+        Ok(self.session_ref()?.dividends_received())
     }
 
     fn request_close(&mut self, instrument: usize, position_id: u64) -> PyResult<()> {

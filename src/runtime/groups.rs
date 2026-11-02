@@ -91,6 +91,8 @@ pub struct AccountGroup {
     spec: GroupSpec,
     flatten_on_daily_loss: bool,
     liquidate_on_margin_call: bool,
+    /// The run's chosen margin model, when this account margins by it.
+    margin_model: Option<std::sync::Arc<crate::accounts::MarginModel>>,
     members: Vec<usize>,
     equity_curve: Vec<f64>,
     drawdown_curve: Vec<f64>,
@@ -108,10 +110,16 @@ pub struct AccountGroup {
 impl AccountGroup {
     pub fn new(spec: GroupSpec, base: &BacktestConfig) -> Self {
         Self {
-            account: SharedAccount::new(spec.mode, spec.initial_capital),
+            account: SharedAccount::new(
+                spec.mode,
+                spec.initial_capital,
+                crate::accounts::MoneyScale::new(base.money_decimals)
+                    .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}")),
+            ),
             spec,
             flatten_on_daily_loss: base.flatten_on_daily_loss,
             liquidate_on_margin_call: base.liquidate_on_margin_call,
+            margin_model: base.margin_model.clone(),
             members: Vec::new(),
             equity_curve: Vec::new(),
             drawdown_curve: Vec::new(),
@@ -177,7 +185,7 @@ impl AccountGroup {
         f: impl FnOnce(&mut PortfolioBook) -> R,
     ) -> Option<R> {
         let book = books[member].as_mut()?;
-        book.set_pool(self.account.balance(), self.account.locked());
+        book.set_pool(self.account.balance_money(), self.account.locked());
         let out = f(book);
         let (balance, locked) = book.pool();
         self.account.set_pool(balance, locked);
@@ -188,7 +196,7 @@ impl AccountGroup {
     fn sync(&self, books: &mut [Option<PortfolioBook>]) {
         for &m in &self.members {
             if let Some(book) = books[m].as_mut() {
-                book.set_pool(self.account.balance(), self.account.locked());
+                book.set_pool(self.account.balance_money(), self.account.locked());
             }
         }
     }
@@ -258,6 +266,22 @@ impl AccountGroup {
             })
             .expect("a stepped member's book is live");
         self.check(books, member, entry, &mut events);
+        self.sync(books);
+        events
+    }
+
+    /// The member's lifecycle before an event's hooks run; see
+    /// [`PortfolioBook::begin_event`].
+    pub fn begin_event(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        member: usize,
+        ts: crate::core::types::Timestamp,
+        instrument: usize,
+    ) -> Vec<EngineEvent> {
+        let events = self
+            .with_member(books, member, |book| book.begin_event(ts, instrument))
+            .expect("a stepped member's book is live");
         self.sync(books);
         events
     }
@@ -425,6 +449,12 @@ impl AccountGroup {
         if matches!(self.account.mode(), AccountMode::Cash) {
             return;
         }
+        if let Some(model) = self.margin_model.clone() {
+            if model.groups_options() {
+                self.regroup_modelled(books, &model);
+            }
+            return;
+        }
         let mut groups = crate::portfolio::book::OptionLegs::new();
         let mut bases = Vec::with_capacity(self.members.len());
         let mut base = 0;
@@ -452,7 +482,46 @@ impl AccountGroup {
             }
         }
         if delta_locked != 0.0 {
-            self.account.reconcile(0.0, delta_locked);
+            self.account.reconcile(crate::accounts::Money::ZERO, delta_locked);
+        }
+    }
+
+    /// [`AccountGroup::regroup_option_margin`] under a chosen margin model:
+    /// the option lines of every member, margined together by the model.
+    fn regroup_modelled(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        model: &crate::accounts::MarginModel,
+    ) {
+        use crate::portfolio::book::{model_shares, ModelLines};
+        let mut bases = Vec::with_capacity(self.members.len());
+        let mut shares = Vec::new();
+        {
+            let mut groups = ModelLines::new();
+            let mut now = 0;
+            let mut base = 0;
+            for &m in &self.members {
+                bases.push((base, m));
+                if let Some(book) = books[m].as_ref() {
+                    book.collect_model_lines(base, model.groups_across_expiries(), &mut groups);
+                    now = now.max(book.latest_time());
+                    base += book.kernel_count();
+                }
+            }
+            for lines in groups.values() {
+                shares.extend(model_shares(model, lines, now));
+            }
+        }
+        let mut delta_locked = 0.0;
+        for (kernel, position_id, share) in shares {
+            let &(start, member) =
+                bases.iter().rev().find(|(start, _)| *start <= kernel).expect("a base of 0");
+            if let Some(book) = books[member].as_mut() {
+                delta_locked += book.set_share(kernel - start, position_id, share);
+            }
+        }
+        if delta_locked != 0.0 {
+            self.account.reconcile(crate::accounts::Money::ZERO, delta_locked);
         }
     }
 

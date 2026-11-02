@@ -230,7 +230,8 @@ impl StreamingMetrics {
     pub fn sharpe_ratio_with_rf(&self, periods_per_year: f64, risk_free_rate: f64) -> f64 {
         let std = self.std_dev();
         if std == 0.0 || self.count < 2 {
-            return 0.0;
+            // Undefined (no variation, or fewer than two returns), not zero.
+            return f64::NAN;
         }
 
         let rf_per_period = risk_free_rate / periods_per_year;
@@ -251,7 +252,7 @@ impl StreamingMetrics {
     pub fn sortino_ratio(&self, periods_per_year: f64) -> f64 {
         let downside_std = self.downside_std_dev();
         if downside_std == 0.0 || self.count < 2 {
-            return if self.mean > 0.0 { f64::INFINITY } else { 0.0 };
+            return f64::NAN;
         }
 
         let excess_return = self.mean - self.target_return;

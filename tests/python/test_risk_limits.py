@@ -65,6 +65,10 @@ class Script(Strategy):
         for action in self.script.get(ctx.idx, []):
             kind, *args = action
             symbol = args.pop() if args and isinstance(args[-1], str) else None
+            if symbol is not None and ctx.symbol is not None and symbol != ctx.symbol:
+                # An order for another instrument, placed from this one's bar, fills on that
+                # instrument's next bar; the script means each action once, on its own bar.
+                continue
             if kind == "buy":
                 self.submit_order(orders.Market(side="buy", units=args[0]), symbol=symbol)
             elif kind == "sell":

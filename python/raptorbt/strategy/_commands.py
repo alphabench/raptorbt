@@ -89,6 +89,12 @@ def dispatch_events(strategy, ctx, events) -> None:
             strategy.on_order_event(ctx, event)
         elif event.kind in ("risk_rejected", "risk_halted"):
             strategy.on_risk_event(ctx, event)
+        elif event.kind == "contract_settled" or (
+            event.kind == "lifecycle_refused" and event.outcome == "settlement"
+        ):
+            strategy.on_contract_event(ctx, event)
+        elif event.kind == "corporate_action" or event.kind == "lifecycle_refused":
+            strategy.on_corporate_action(ctx, event)
         elif event.kind == "margin_call":
             strategy.on_margin_call(ctx, event)
             strategy.on_order_event(ctx, event)

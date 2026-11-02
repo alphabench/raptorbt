@@ -259,6 +259,20 @@ fn dir_sign(d: Direction) -> f64 {
     }
 }
 
+/// What booking leaves between kernel equity and the independent model while a
+/// position is open: the position's cost was debited rounded to the paisa
+/// (half a paisa at most; up to three half-paisas for a short, whose cost
+/// enters its marked value as collateral and again as gain, and whose booked
+/// close rounds the exit too), the model marks it at the exact price. Closed
+/// trades carry no such gap, because their P&L is the booked P&L.
+const BOOK_GRAIN: f64 = 0.015;
+
+/// `open` is the number of trade records that can be open at once (a position
+/// closed in slices books each slice's cost separately).
+fn near_booked(a: f64, b: f64, scale: f64, open: usize) -> bool {
+    (a - b).abs() <= BOOK_GRAIN * open.max(1) as f64 + MONEY_TOL * scale.max(1.0)
+}
+
 fn near(a: f64, b: f64, scale: f64) -> bool {
     (a - b).abs() <= MONEY_TOL * scale.max(1.0)
 }
@@ -307,7 +321,7 @@ proptest! {
         for i in 0..run.bars.len() {
             let want = model_equity(&run.closed, &run.finalized, &run.bars, env.mult, i);
             prop_assert!(
-                near(run.equity[i], want, INITIAL),
+                near_booked(run.equity[i], want, INITIAL, run.closed.len() + run.finalized.len()),
                 "bar {}: kernel equity {} vs model {} (env {:?})",
                 i, run.equity[i], want, env
             );
@@ -1010,7 +1024,7 @@ fn check_order_path_accounting(env: &Env, scn: &Scenario) -> Result<(), TestCase
     for i in 0..run.bars.len() {
         let want = model_equity(&run.closed, &run.finalized, &run.bars, env.mult, i);
         prop_assert!(
-            near(run.equity[i], want, INITIAL),
+            near_booked(run.equity[i], want, INITIAL, run.closed.len() + run.finalized.len()),
             "bar {}: kernel equity {} vs model {}",
             i,
             run.equity[i],

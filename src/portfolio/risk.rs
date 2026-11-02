@@ -26,6 +26,10 @@ pub enum RejectReason {
     /// initial margin) exceeds the available capital — the lot itself was
     /// affordable on notional, the margin was not.
     InsufficientMargin,
+    /// The margin model chosen for the account has no rule for this
+    /// instrument (a class it does not list, or an instrument without a
+    /// market definition). Never read as a requirement of zero.
+    MarginUnpriced,
     /// The margin-call kill-switch has tripped; no further entries.
     MarginCall,
     /// The instrument's trading session is closed (outside a window, or on a
@@ -57,6 +61,7 @@ impl RejectReason {
             RejectReason::Inactive => "inactive",
             RejectReason::InsufficientCapital => "insufficient_capital",
             RejectReason::InsufficientMargin => "insufficient_margin",
+            RejectReason::MarginUnpriced => "margin_unpriced",
             RejectReason::MarginCall => "margin_call",
             RejectReason::MarketClosed => "market_closed",
             RejectReason::Squareoff => "squareoff",

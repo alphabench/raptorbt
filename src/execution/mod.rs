@@ -1,5 +1,6 @@
 //! Order execution simulation for RaptorBT.
 
+pub mod adapter;
 pub mod algos;
 pub mod costs;
 pub mod fees;
@@ -9,6 +10,10 @@ pub mod orders;
 pub mod queue;
 pub mod slippage;
 
+pub use adapter::{
+    client_order_id, parse_client_order_id, AdapterError, ExecutionAdapter, OrderChange,
+    OrderRequest, PaperVenue,
+};
 pub use algos::{AlgoEngine, AlgoError, AlgoSchedule, ExecAlgorithm, PendingSlice};
 pub use costs::{FeeBreakdown, FeeRates, FeeRow, FeeSchedule, FeeSegment, RateCard};
 pub use fees::FeeModel;

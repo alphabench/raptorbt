@@ -157,6 +157,7 @@ impl PairsBacktest {
                         mfe_price: None,
                         mae_pnl: None,
                         mfe_pnl: None,
+                        money: None,
                     });
 
                     trade_counter += 1;
@@ -186,6 +187,7 @@ impl PairsBacktest {
                         mfe_price: None,
                         mae_pnl: None,
                         mfe_pnl: None,
+                        money: None,
                     });
 
                     trade_counter += 1;
@@ -311,6 +313,7 @@ impl PairsBacktest {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             });
 
             // The close pays exit fees and the entry fees are in the pnl:

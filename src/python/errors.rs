@@ -60,6 +60,7 @@ pub struct Fail {
     parameter: Option<String>,
     value: Option<Val>,
     valid: Vec<String>,
+    skill: Option<&'static str>,
 }
 
 impl Fail {
@@ -71,6 +72,7 @@ impl Fail {
             parameter: None,
             value: None,
             valid: Vec::new(),
+            skill: None,
         }
     }
 
@@ -98,6 +100,13 @@ impl Fail {
         self
     }
 
+    /// The skill that documents this refusal, when it is not the code's default
+    /// (the registry gives `invalid_parameter` the `core` skill).
+    pub fn skill(mut self, skill: &'static str) -> Self {
+        self.skill = Some(skill);
+        self
+    }
+
     fn build(&self, py: Python<'_>) -> PyResult<PyErr> {
         let make = MAKE.get_or_try_init(py, || {
             Ok::<_, PyErr>(py.import("raptorbt.errors")?.getattr("make")?.unbind())
@@ -119,6 +128,9 @@ impl Fail {
         }
         if !self.valid.is_empty() {
             kw.set_item("valid", &self.valid)?;
+        }
+        if let Some(skill) = self.skill {
+            kw.set_item("skill", skill)?;
         }
         let exc = make.bind(py).call((self.code, &self.message), Some(&kw))?;
         Ok(PyErr::from_value(exc))

@@ -202,6 +202,32 @@ class Strategy:
         accounts). ``event.price`` carries the equity, ``event.size`` the
         requirement; new entries halt for the rest of the run."""
 
+    def on_contract_event(self, ctx: StrategyContext, event) -> None:
+        """Called when a contract the strategy holds expires and settles
+        (``event.kind == "contract_settled"``), or when its settlement was
+        refused (``"lifecycle_refused"``).
+
+        ``event.outcome`` is ``"settled"`` (cash), or for physical settlement
+        ``"exercised"``, ``"assigned"``, ``"expired"`` (out of the money) or
+        ``"delivered"`` (a future); ``event.price`` is the price the position
+        closed at and ``event.source`` where it came from (``"declared"``,
+        ``"underlying"`` or ``"last_price"``). ``event.quantity`` is the
+        underlying taken in (positive) or given away (negative) at
+        ``event.amount``. The position's own close reaches
+        :meth:`on_position_event` first, with ``exit_reason == "settlement"``.
+        Orders on an expired contract are rejected with reason ``expired``."""
+
+    def on_corporate_action(self, ctx: StrategyContext, event) -> None:
+        """Called when a declared corporate action is applied to an
+        instrument (``event.kind == "corporate_action"``).
+
+        ``event.outcome`` is ``"split"``, ``"bonus"`` or ``"dividend"``;
+        ``event.quantity`` the ratio (new units per old; 0 for a dividend),
+        ``event.amount`` the dividend per unit and ``event.cash`` the cash the
+        account received (negative for a short that paid a dividend; for a
+        split, the cash in lieu of a fractional unit). A split the engine
+        could not apply arrives as ``"lifecycle_refused"``."""
+
     def on_position_opened(self, ctx: StrategyContext, event) -> None:
         """Deprecated: use :meth:`on_position_event`.
 
@@ -515,6 +541,46 @@ class Strategy:
         )
         self.link_oco(stop_id, target_id)
         return entry_id, stop_id, target_id
+
+    # -- option structures --------------------------------------------------
+
+    def _structure_book(self):
+        # One book per run: the run replaces ``self.cache``, which drops the old book.
+        from raptorbt.structures.book import StructureBook
+
+        book = self.__dict__.get("_structures")
+        if book is None or book.cache is not self.cache:
+            book = self.__dict__["_structures"] = StructureBook(self)
+        return book
+
+    @staticmethod
+    def _event_ns(ctx, now_ns):
+        if now_ns is not None:
+            return now_ns
+        ts = getattr(ctx, "bar_close_ts", None)
+        return ts if ts is not None else ctx.timestamp
+
+    def submit_structure(self, ctx, structure, *, now_ns: int | None = None, **kwargs):
+        """Resolve a :class:`~raptorbt.structures.Structure` against an option chain at the event
+        time and place its legs as one group of ordinary orders. Keyword arguments:
+        ``chain``, ``underlying``, ``spot``, ``lots``, ``underlying_spec``, ``order_type``
+        (``"market"``/``"limit"``), ``prices``, ``net_limit``, ``exit``, ``on_leg_failure``,
+        ``margin_model``, ``available``, ``tif``, ``group_id``. Returns the
+        :class:`~raptorbt.structures.StructureGroup`. See ``docs/structures.md``."""
+        return self._structure_book().submit(structure, now_ns=self._event_ns(ctx, now_ns), **kwargs)
+
+    def update_structures(self, ctx, marks=None, *, exits: bool = True, now_ns: int | None = None):
+        """Advance every structure group: leg-failure policy, exits (``marks`` maps leg symbol to
+        its last price) and pending cancels and closes. Call it from ``on_bar``."""
+        return self._structure_book().update(self._event_ns(ctx, now_ns), marks, exits=exits)
+
+    def close_structure(self, group, reason: str = "manual") -> None:
+        """Close a whole group: cancel its working legs, close its filled ones."""
+        self._structure_book().close(group, reason)
+
+    def structure_status(self, group) -> str:
+        """The group's status (see :meth:`StructureGroup.status`)."""
+        return group.status(self.cache)
 
     def cancel_order(self, client_id: str) -> None:
         """Queue cancellation of a working order, or of a ``Twap`` schedule's

@@ -168,7 +168,8 @@ class TestTickExecution:
 
         trades = result.result.trades()
         assert len(trades) == 1
-        assert trades[0].entry_price == pytest.approx(95.0)
+        # The print (94) traded through the 95 limit: the fill is the print.
+        assert trades[0].entry_price == pytest.approx(94.0)
 
     def test_quotes_do_not_lengthen_the_equity_curve(self):
         """Metrics must not shift with feed verbosity."""

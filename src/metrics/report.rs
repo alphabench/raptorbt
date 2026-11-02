@@ -10,6 +10,10 @@
 //! - money is `f64`, because raptorbt's equity curve is. Nothing here is digested.
 //! - a trade's `realised` is gross (the ledger convention): raptorbt's
 //!   `Trade.pnl` is net of fees, so the caller passes `pnl + fees`.
+//! - trade statistics (win rate, profit factor, payoff, averages, expectancy) count closed
+//!   trades only, and a trade wins or loses on its P&L net of its fees. A position still
+//!   open when the data ended is not a closed trade. `BacktestMetrics` uses the same
+//!   definition, so the two always agree.
 //! - the fill count and turnover come from orders (`fill_slices`, `filled_qty x
 //!   avg_fill_price x multiplier`) rather than ledger fill entries.
 //!
@@ -119,6 +123,10 @@ pub struct ReportTrade {
     pub fees: f64,
     pub tag: String,
     pub settlement: bool,
+    /// The position was still open when the data ended and was closed by the
+    /// run, not by a decision: it is not a closed trade and the trade
+    /// statistics leave it out.
+    pub open_at_end: bool,
 }
 
 /// One order, for the fill count, turnover and the counters.
@@ -583,18 +591,25 @@ pub fn full_report(input: &ReportInput<'_>) -> Result<FullReport> {
         }
     }
 
-    // trades: closed trades and settlements
-    let trades = input.trades;
+    // Trade statistics. One definition, the one `BacktestMetrics` uses: closed
+    // trades only (a position still open when the data ended is left out) and
+    // net P&L (after the trade's fees) decides a win from a loss.
+    let all_trades = input.trades;
     let fees_total = match input.fees {
         Some(f) => match f.get("total") {
             Some(t) => *t,
             None => fsum(f.values().copied()),
         },
-        None => fsum(trades.iter().map(|t| t.fees)),
+        None => fsum(all_trades.iter().map(|t| t.fees)),
     };
-    let wins: Vec<f64> = trades.iter().map(|t| t.realised).filter(|x| *x > 0.0).collect();
-    let losses: Vec<f64> = trades.iter().map(|t| t.realised).filter(|x| *x < 0.0).collect();
+    let trades: Vec<&ReportTrade> = all_trades.iter().filter(|t| !t.open_at_end).collect();
+    let net = |t: &&ReportTrade| t.realised - t.fees;
+    let wins: Vec<f64> = trades.iter().map(net).filter(|x| *x > 0.0).collect();
+    let losses: Vec<f64> = trades.iter().map(net).filter(|x| *x < 0.0).collect();
     let (gp, gl) = (fsum(wins.iter().copied()), -fsum(losses.iter().copied()));
+    // The cost ratio below is fees over the gross (before fees) profit of every
+    // winning trade; it is not a trade statistic and keeps its own base.
+    let gross_profit = fsum(all_trades.iter().map(|t| t.realised).filter(|x| *x > 0.0));
     let nt = trades.len();
     let fills: i64 = input.orders.iter().map(|o| i64::from(o.fill_slices)).sum();
     let settlements = trades.iter().filter(|t| t.settlement).count();
@@ -611,8 +626,9 @@ pub fn full_report(input: &ReportInput<'_>) -> Result<FullReport> {
         let rate = wins.len() as f64 / nt as f64;
         b.float("win_rate", rate);
         b.float("hit_rate", rate);
-        b.float("expectancy_gross", gp / nt as f64 - gl / nt as f64);
-        b.float("expectancy_net", (gp - gl - fees_total) / nt as f64);
+        let gross = fsum(trades.iter().map(|t| t.realised));
+        b.float("expectancy_gross", gross / nt as f64);
+        b.float("expectancy_net", fsum(trades.iter().map(net)) / nt as f64);
     }
     if wins.is_empty() {
         b.na("avg_win", Unavailable::NoWins, "no closed trade made money");
@@ -726,7 +742,7 @@ pub fn full_report(input: &ReportInput<'_>) -> Result<FullReport> {
     }
     b.maybe(
         "fees_pct_of_gross",
-        meaningful(gp, start).then(|| fees_total / gp),
+        meaningful(gross_profit, start).then(|| fees_total / gross_profit),
         Unavailable::NoGrossPnl,
         "the closed trades' gross profit is zero, or under 0.01% of the starting capital; \
          fees cannot be a share of it",
@@ -1006,6 +1022,7 @@ mod tests {
                 fees: 20.0,
                 tag: "a".into(),
                 settlement: false,
+                open_at_end: false,
             },
             ReportTrade {
                 opened_at: Some(T0),
@@ -1014,6 +1031,7 @@ mod tests {
                 fees: 10.0,
                 tag: "b".into(),
                 settlement: false,
+                open_at_end: false,
             },
         ];
         let fees = BTreeMap::from([("brokerage".to_string(), 12.0), ("stt".to_string(), 18.0)]);
@@ -1025,7 +1043,8 @@ mod tests {
             assert_eq!(r.values["fees"], ReportValue::Float(30.0));
             assert_eq!(r.values["trade_count"], ReportValue::Int(2));
             assert_eq!(r.values["win_rate"], ReportValue::Float(0.5));
-            assert_eq!(r.values["profit_factor"], ReportValue::Float(4.0));
+            // Net of fees: (120 - 20) / (30 + 10).
+            assert_eq!(r.values["profit_factor"], ReportValue::Float(2.5));
             assert_eq!(r.costs["brokerage"], Some(12.0));
             assert_eq!(r.costs["fees_total"], Some(30.0));
             assert!(r.values.contains_key("by_tag"));

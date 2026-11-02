@@ -265,7 +265,10 @@ class TestLimitSlippage:
 
         config = _config()
         config.limit_slippage = limit_slippage
-        bars = _flat_bars(3, price=98.0)
+        # The market opens above the limit and trades down through it, so the
+        # order rests and fills at its limit (not at the open).
+        bars = _flat_bars(3, price=100.0)
+        bars["low"] = np.full(3, 98.0)
         result = raptorbt.run_strategy_backtest(S(), **bars, config=config)
         return result.trades()[0].entry_price
 

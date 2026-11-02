@@ -167,6 +167,7 @@ impl PositionManager {
             mfe_price: Some(favourable_price),
             mae_pnl: Some(mae_pnl),
             mfe_pnl: Some(mfe_pnl),
+            money: None,
         }
     }
 

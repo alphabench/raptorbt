@@ -97,7 +97,10 @@ class StreamState:
                     f"register_indicator(symbol={symbol!r}) names a symbol that is "
                     f"not in this run; known symbols: {known}"
                 )
-            targets = [symbol] if symbol is not None else keys
+            # A run without declared symbols has one stream, keyed None: the
+            # symbol an indicator names (already checked by `ctx.indicators`
+            # against the run's instrument) is that stream.
+            targets = [symbol] if symbol is not None and symbols is not None else keys
             for key in targets:
                 if stream_id is None:
                     self._primary[key].append(indicator)

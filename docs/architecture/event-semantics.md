@@ -82,6 +82,38 @@ contains only data strictly before `t` (`src/data/aggregate.rs`). The bar is
 emitted when the first record of a later window arrives, or when the stream is
 flushed at the end of data.
 
+## Lifecycle: corporate actions and expiries
+
+Corporate actions are data the run is given (`CorporateAction`), never
+inferred from prices. At a timestamp `t` the order is:
+
+1. corporate actions with `ex <= t`, in effective order (ties keep input
+   order): a split or bonus rescales the position, a dividend fixes its
+   entitlement on the position held *before* anything at `t` trades;
+2. dividends whose pay date is `<= t` are credited;
+3. contracts expired by `t` that have no bar of their own at `t` settle (see
+   below);
+4. the market event at `t`, with its hooks and its orders.
+
+Steps 1 to 3 run before the strategy's hooks for the event, so `on_bar` at the
+ex-date sees the position on the new basis and the price after the action. The
+strategy hears each as an event first: `on_corporate_action`,
+`on_contract_event`. A bar-stamped action is therefore effective from the first
+bar at or after its timestamp, never mid-bar.
+
+A contract settles on the first event of its own at or after its expiry (the
+kernel's expired branch), or, when it has no later bar, on the first event of
+any instrument at or after the expiry (the book's timer). A contract whose
+terms read its underlying (`settlement_price="underlying"`, or physical
+settlement) and whose underlying has not printed at the instant the expiry
+was noticed waits for that print and settles on it; if the underlying does not
+print at that instant it settles on the underlying's last price at the next
+event. A live host that only moves the clock calls `advance_to(ts)`. Orders
+submitted on a contract at or after its expiry are rejected with reason
+`expired`.
+
+See `docs/architecture/lifecycle.md`.
+
 ## What a strategy sees, and when orders execute
 
 At a bar event the strategy sees that whole bar, close included. Execution
@@ -164,8 +196,54 @@ Scope:
   bar width late. The event session ignores `squareoff_time`: a strategy
   that squares off does so itself, from `ctx.bar_close_ts` or `ctx.datetime`.
 
-## Not yet specified
+## Three times of an event
 
-- Separate exchange, arrival and processing timestamps. Each event carries a
-  single timestamp, which serves as both its ordering key and the time at which
-  the engine acts on it.
+Every event has three times, kept apart and never rewritten:
+
+| time | what it is | where it comes from |
+| --- | --- | --- |
+| event time | when the exchange (or the venue, for a report) says it happened | the data: a row's timestamp, a report's `ts_ns` |
+| arrival time | when the event reached the engine | the caller: the `arrival_ns` of a push; the event's own time when none is given |
+| processing time | when the engine acted on it | arrival time plus the node's declared `processing_latency_ns` (default 0) |
+
+Nothing here reads a wall clock, so a replay of the same pushes (with the same
+arrival times) reproduces all three. In a batch run (`run_strategies`) they are
+equal to the event's time. A strategy reads them in any hook as
+`ctx.event_ns`, `ctx.arrival_ns` and `ctx.processing_ns`; for a hook run by a
+venue report they are the report's `ts_ns`, the `arrival_ns` it was pushed
+with and that plus the latency.
+
+Event time is what the engine orders by and what clocks, bars, order expiry,
+fills and trades carry. Arrival and processing time are for audit and latency
+analysis: a journal that records them can replay a live session exactly. The
+order-latency model (`order_latency_ns`, the delay before an order reaches a
+venue's book) is a separate setting, applied in event time.
+
+## Execution reports in the stream
+
+When orders go to an execution adapter (`LiveNode(execution=...)`), what
+became of them comes back as execution reports, and a report is an event in
+the same single-threaded stream as market data. The canonical key gains one
+phase, after the market data it can follow:
+
+    (timestamp, phase, ...)    phase: trade 0, quote 1, depth 2, bar 3, report 4
+
+* A report handed to `LiveNode.push_report` is applied when it is pushed, at
+  its place in the order of pushes, like a pushed tick. Live pushes are
+  ordered by arrival (see "Merge order"), so a journal of pushes, market data
+  and reports alike, replays to the same state.
+* The reports a simulated venue (`PaperExecution`) makes for an event are
+  phase 4 at that event's timestamp: they are applied after the strategy's
+  hooks for the event and the orders those hooks queued (the venue sees
+  them), after the event has stepped the strategy's book, and before the next
+  event. The fills they book are restated into the equity sample the event
+  took, and the account's limits (drawdown, margin, daily loss) are checked
+  on it again, so the book reads as if the matcher had filled in the step.
+* A report whose own time is earlier than the latest market event is applied
+  when it arrives. The fills and trades it books carry its time; the equity
+  sample of the latest event is left alone, and the next event marks the book.
+
+Reports may repeat, arrive late and arrive out of order; applying them again
+or in another order leaves the same orders, positions and cash
+(`order-lifecycle.md`, "Convergence"). Only the order a venue's reports are
+*pushed* in can differ between runs, never what they mean.

@@ -279,6 +279,7 @@ impl OptionsBacktest {
                         mfe_price: None,
                         mae_pnl: None,
                         mfe_pnl: None,
+                        money: None,
                     });
 
                     trade_counter += 1;
@@ -374,6 +375,7 @@ impl OptionsBacktest {
                 mfe_price: None,
                 mae_pnl: None,
                 mfe_pnl: None,
+                money: None,
             });
 
             // Closing out is a real trade, so it is paid for out of the curve.

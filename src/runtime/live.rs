@@ -208,6 +208,11 @@ impl LiveFeed {
         EventRef { ts, instrument, row, local_idx, kind }
     }
 
+    /// Ordinal of the instrument's latest event (`0` before it has had one).
+    pub fn last_ordinal(&self, instrument: InstrumentId) -> usize {
+        self.local_next[instrument.index()].saturating_sub(1) as usize
+    }
+
     /// Whether the instrument has ever been pushed a bar.
     pub fn has_bars(&self, instrument: InstrumentId) -> bool {
         self.rings[instrument.index()].bars.as_ref().is_some_and(|b| b.end_row() > 0)

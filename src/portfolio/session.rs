@@ -487,6 +487,26 @@ impl EventSession {
         self.book.adopt_position(instrument, timestamp, price, size)
     }
 
+    /// Give the session the corporate actions of the run and the adjustment
+    /// policy its history is on; see [`PortfolioBook::set_corporate_actions`].
+    pub fn set_corporate_actions(
+        &mut self,
+        actions: &[crate::instruments::CorporateAction],
+        policy: crate::instruments::AdjustmentPolicy,
+    ) -> crate::core::Result<()> {
+        self.book.set_corporate_actions(actions, policy)
+    }
+
+    /// The registered symbols, in instrument order.
+    pub fn symbols(&self) -> &[String] {
+        &self.symbols
+    }
+
+    /// Dividend cash credited so far.
+    pub fn dividends_received(&self) -> f64 {
+        self.book.dividends_received()
+    }
+
     /// Capital available to open new positions across all instruments.
     pub fn free_capital(&self) -> f64 {
         self.book.free_capital()

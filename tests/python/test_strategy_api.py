@@ -849,7 +849,7 @@ def test_indicator_handles_equal_the_legacy_indicators_and_are_shared():
         for ready, value, old_ready, old_value in row.values():
             assert (ready, value) == (old_ready, old_value)
     last = s.new["bollinger"].values
-    assert (last.middle, last.upper, last.lower) == s.new["bollinger"].value
+    assert (last.upper, last.middle, last.lower) == s.new["bollinger"].value
     assert s.new["macd"].values._fields == ("macd", "signal", "histogram")
     assert s.new["donchian"].values._fields == ("upper", "lower")
     with pytest.raises(AttributeError):

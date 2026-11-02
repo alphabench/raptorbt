@@ -141,7 +141,7 @@ impl PortfolioBacktest {
                     signals.direction,
                     inst_config,
                 );
-                kernel.set_cash(0.0);
+                kernel.set_cash_money(crate::accounts::Money::ZERO);
                 kernel
             })
             .collect();
@@ -149,12 +149,17 @@ impl PortfolioBacktest {
         let mut risk = self.config.base.risk_gate();
         let timestamps = &instruments[0].0.timestamps;
 
-        let mut cash = self.config.base.initial_capital;
-        let mut equity_curve = vec![cash; n_bars];
+        // The shared pool is booked cash, in minor units, like each kernel's.
+        let scale = crate::accounts::MoneyScale::new(self.config.base.money_decimals)
+            .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}"));
+        let mut cash = scale.money(self.config.base.initial_capital).unwrap_or_else(|e| {
+            crate::accounts::money::money_fault(format!("initial_capital: {e}"))
+        });
+        let mut equity_curve = vec![self.config.base.initial_capital; n_bars];
         let mut drawdown_curve = vec![0.0; n_bars];
         let mut returns = vec![0.0; n_bars];
         let mut trades: Vec<Trade> = Vec::new();
-        let mut peak_equity = cash;
+        let mut peak_equity = scale.to_f64(cash);
         let mut per_instrument_trades = vec![0usize; n_instruments];
         let mut per_instrument_pnl = vec![0.0f64; n_instruments];
         let mut rejected = vec![0usize; n_instruments];
@@ -180,7 +185,7 @@ impl PortfolioBacktest {
                     ..StepInput::default()
                 };
 
-                kernel.set_cash(0.0);
+                kernel.set_cash_money(crate::accounts::Money::ZERO);
                 for event in kernel.step(i, &bar, input) {
                     if let EngineEvent::Exited { trade, .. } = event {
                         per_instrument_trades[idx] += 1;
@@ -189,8 +194,8 @@ impl PortfolioBacktest {
                     }
                 }
                 // Whatever the exit produced returns to the pool.
-                cash += kernel.cash();
-                kernel.set_cash(0.0);
+                cash += kernel.cash_money();
+                kernel.set_cash_money(crate::accounts::Money::ZERO);
             }
 
             // Entries, gated on the shared pool and the shared constraints.
@@ -226,7 +231,7 @@ impl PortfolioBacktest {
                     continue;
                 }
 
-                let budget = self.entry_budget(cash, open_count, n_instruments);
+                let budget = self.entry_budget(scale.to_f64(cash), open_count, n_instruments);
                 if budget <= 0.0 {
                     if pending {
                         kernel.clear_pending_entry();
@@ -245,12 +250,12 @@ impl PortfolioBacktest {
 
                 // Lend the kernel its slice of the pool; it spends what it needs
                 // and hands back the remainder.
-                kernel.set_cash(budget);
+                let lent = kernel.lend_cash(budget);
                 kernel.set_external_exposure(external_exposure);
                 let events = kernel.step(i, &bar, input);
                 kernel.set_external_exposure(None);
-                let spent = budget - kernel.cash();
-                kernel.set_cash(0.0);
+                let spent = lent - kernel.cash_money();
+                kernel.set_cash_money(crate::accounts::Money::ZERO);
                 cash -= spent;
 
                 // A fill-bar stop can close the position in the same step that
@@ -283,7 +288,7 @@ impl PortfolioBacktest {
                 .enumerate()
                 .map(|(idx, k)| k.position_value(instruments[idx].0.close[i]))
                 .sum();
-            let mut equity = cash + position_value;
+            let mut equity = scale.to_f64(cash) + position_value;
 
             // The day's loss limit. Reaching it refuses entries for the rest
             // of the day (the gate's `check_entry` above) and, when asked,
@@ -297,7 +302,7 @@ impl PortfolioBacktest {
                         continue;
                     }
                     let bar = bar_at(&instruments[idx].0, i);
-                    kernel.set_cash(0.0);
+                    kernel.set_cash_money(crate::accounts::Money::ZERO);
                     for event in kernel.halt_cleanup(i, Some(&bar), false, true) {
                         if let EngineEvent::Exited { trade, .. } = event {
                             per_instrument_trades[idx] += 1;
@@ -305,10 +310,10 @@ impl PortfolioBacktest {
                             trades.push(*trade);
                         }
                     }
-                    cash += kernel.cash();
-                    kernel.set_cash(0.0);
+                    cash += kernel.cash_money();
+                    kernel.set_cash_money(crate::accounts::Money::ZERO);
                 }
-                equity = cash;
+                equity = scale.to_f64(cash);
             }
             equity_curve[i] = equity;
 
@@ -337,18 +342,18 @@ impl PortfolioBacktest {
                 continue;
             }
             let bar = bar_at(&instruments[idx].0, last_idx);
-            kernel.set_cash(0.0);
+            kernel.set_cash_money(crate::accounts::Money::ZERO);
             if let Some(trade) = kernel.finalize(last_idx, &bar) {
                 per_instrument_trades[idx] += 1;
                 per_instrument_pnl[idx] += trade.pnl;
                 trades.push(trade);
             }
-            cash += kernel.cash();
-            kernel.set_cash(0.0);
+            cash += kernel.cash_money();
+            kernel.set_cash_money(crate::accounts::Money::ZERO);
         }
 
         if n_bars > 0 {
-            equity_curve[last_idx] = cash;
+            equity_curve[last_idx] = scale.to_f64(cash);
         }
 
         let metrics = self.finalize_metrics(

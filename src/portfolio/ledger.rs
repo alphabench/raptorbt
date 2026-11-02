@@ -13,7 +13,8 @@
 //!
 //! [`PositionManager`]: crate::portfolio::position::PositionManager
 
-use crate::core::types::{Direction, Position, Price, Timestamp, Trade};
+use crate::accounts::{Money, MoneyScale};
+use crate::core::types::{Direction, Position, Price, Timestamp, Trade, TradeMoney};
 use crate::execution::indian_costs::FeeBreakdown;
 use crate::portfolio::position::ExitDetails;
 
@@ -42,6 +43,13 @@ pub struct ManagedPosition {
     /// slice of the same order adds to it instead of being refused as a
     /// second entry.
     pub entry_order_id: Option<u64>,
+    /// Booked notional of the open quantity at its average entry:
+    /// `entry_price * size * multiplier`, in minor units. What a close
+    /// subtracts from the exit notional to get gross P&L.
+    pub cost: Money,
+    /// Booked entry costs of the open quantity; `position.entry_fees` is its
+    /// `f64` view.
+    pub entry_fees_money: Money,
 }
 
 impl ManagedPosition {
@@ -94,6 +102,8 @@ pub struct PositionLedger {
     next_position_id: u64,
     /// Contract point value; see `PositionManager::set_contract_multiplier`.
     contract_multiplier: f64,
+    /// Decimals amounts are booked in.
+    scale: MoneyScale,
 }
 
 impl PositionLedger {
@@ -105,7 +115,37 @@ impl PositionLedger {
             trade_counter: 0,
             next_position_id: 0,
             contract_multiplier: 1.0,
+            scale: MoneyScale::default(),
         }
+    }
+
+    /// Set the decimals booked amounts carry. Call before the first open.
+    pub fn set_money_scale(&mut self, scale: MoneyScale) {
+        self.scale = scale;
+    }
+
+    #[inline]
+    pub fn money_scale(&self) -> MoneyScale {
+        self.scale
+    }
+
+    /// An amount computed in `f64`, booked at this ledger's scale. A price
+    /// or size that is not finite is a caller bug, and is refused loudly
+    /// rather than booked as zero.
+    #[inline]
+    pub(crate) fn book(&self, amount: f64) -> Money {
+        self.scale.money(amount).unwrap_or_else(|e| crate::accounts::money::money_fault(e))
+    }
+
+    /// [`Self::notional`] for input that has not been checked, as a message.
+    pub(crate) fn try_notional(&self, price: Price, size: f64) -> Result<Money, String> {
+        self.scale.money(price * size * self.contract_multiplier).map_err(|e| e.to_string())
+    }
+
+    /// The booked notional of `size` at `price`.
+    #[inline]
+    pub(crate) fn notional(&self, price: Price, size: f64) -> Money {
+        self.book(price * size * self.contract_multiplier)
     }
 
     /// Set the contract point value used for PnL and notional calculations.
@@ -193,6 +233,8 @@ impl PositionLedger {
         if self.policy == PositionPolicy::Net && !self.open.is_empty() {
             return None;
         }
+        let entry_fees_money = self.book(entry_fees);
+        let cost = self.notional(price, size);
         let mut position = Position::new();
         position.open(idx, price, size, direction, stop_price, target_price, entry_fees);
         let id = self.next_position_id;
@@ -203,6 +245,8 @@ impl PositionLedger {
             entry_timestamp: timestamp,
             entry_breakdown,
             entry_order_id: None,
+            cost,
+            entry_fees_money,
         });
         Some(id)
     }
@@ -221,14 +265,19 @@ impl PositionLedger {
         entry_fees: f64,
         shift_protective: bool,
     ) -> Option<Price> {
+        let slice_cost = self.notional(price, size);
+        let slice_fees = self.book(entry_fees);
+        let scale = self.scale;
         let managed = self.get_mut(id)?;
+        managed.cost += slice_cost;
+        managed.entry_fees_money += slice_fees;
         let pos = &mut managed.position;
         let old_avg = pos.entry_price;
         let total = pos.size + size;
         let new_avg = (pos.entry_price * pos.size + price * size) / total;
         pos.entry_price = new_avg;
         pos.size = total;
-        pos.entry_fees += entry_fees;
+        pos.entry_fees = scale.to_f64(managed.entry_fees_money);
         if shift_protective {
             let shift = new_avg - old_avg;
             pos.stop_price = pos.stop_price.map(|s| s + shift);
@@ -246,17 +295,27 @@ impl PositionLedger {
     /// stays open. `qty >= size` closes it whole via
     /// [`PositionLedger::close_position`].
     pub fn reduce_position(&mut self, id: u64, qty: f64, exit: ExitDetails) -> Option<Trade> {
+        let scale = self.scale;
         let managed = self.get_mut(id)?;
         if qty >= managed.position.size {
             return self.close_position(id, exit);
         }
         let fraction = qty / managed.position.size;
+        // The closed slice takes its share of the booked cost and entry
+        // fees; the open remainder keeps the rest, so the two always add
+        // back to what was booked.
+        let slice_cost = managed.cost.portion(fraction);
+        let slice_fees = managed.entry_fees_money.portion(fraction);
         let mut slice = managed.clone();
         slice.position.size = qty;
-        slice.position.entry_fees = managed.position.entry_fees * fraction;
+        slice.cost = slice_cost;
+        slice.entry_fees_money = slice_fees;
+        slice.position.entry_fees = scale.to_f64(slice_fees);
         slice.entry_breakdown = None;
         managed.position.size -= qty;
-        managed.position.entry_fees -= slice.position.entry_fees;
+        managed.cost -= slice_cost;
+        managed.entry_fees_money -= slice_fees;
+        managed.position.entry_fees = scale.to_f64(managed.entry_fees_money);
         managed.entry_breakdown = None;
         let trade = self.create_trade(&slice, exit);
         self.trade_counter += 1;
@@ -287,11 +346,29 @@ impl PositionLedger {
         } = exit;
 
         let pos = &managed.position;
-        let multiplier = pos.direction.multiplier() * self.contract_multiplier;
 
-        let gross_pnl = (exit_price - pos.entry_price) * pos.size * multiplier;
-        let total_fees = pos.entry_fees + exit_fees;
-        let pnl = gross_pnl - total_fees;
+        // Booked amounts: the exit notional and costs enter the books here,
+        // and P&L is their integer difference to the booked entry. The f64
+        // `pnl` and `fees` are views of these, so a trade reports the
+        // amounts the account moved by.
+        let scale = self.scale;
+        let exit_notional = self.notional(exit_price, pos.size);
+        let exit_fees_money = self.book(exit_fees);
+        let gross = match pos.direction {
+            Direction::Long => exit_notional - managed.cost,
+            Direction::Short => managed.cost - exit_notional,
+        };
+        let pnl_money = gross - managed.entry_fees_money - exit_fees_money;
+        let total_fees = scale.to_f64(managed.entry_fees_money + exit_fees_money);
+        let pnl = scale.to_f64(pnl_money);
+        let money = TradeMoney {
+            places: scale.places() as u8,
+            entry_notional: managed.cost.minor(),
+            exit_notional: exit_notional.minor(),
+            entry_fees: managed.entry_fees_money.minor(),
+            exit_fees: exit_fees_money.minor(),
+            pnl: pnl_money.minor(),
+        };
 
         let cost_basis = pos.entry_price * pos.size * self.contract_multiplier;
         let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
@@ -315,14 +392,15 @@ impl PositionLedger {
             entry_time: entry_timestamp,
             exit_time: exit_timestamp,
             fees: total_fees,
-            entry_fees: pos.entry_fees,
-            exit_fees,
+            entry_fees: scale.to_f64(managed.entry_fees_money),
+            exit_fees: scale.to_f64(exit_fees_money),
             fee_breakdown,
             exit_reason,
             mae_price: Some(adverse_price),
             mfe_price: Some(favourable_price),
             mae_pnl: Some(mae_pnl),
             mfe_pnl: Some(mfe_pnl),
+            money: Some(money),
         }
     }
 

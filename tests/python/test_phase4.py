@@ -204,6 +204,7 @@ class TestBrackets:
     def test_target_fill_cancels_stop(self):
         data = _bars(
             [100.0, 103.0, 107.0, 107.0],
+            opens=[100.0, 103.0, 105.5, 107.0],
             highs=[100.5, 103.5, 107.5, 107.5],
             lows=[99.5, 102.0, 105.0, 106.0],
         )

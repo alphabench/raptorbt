@@ -32,6 +32,13 @@ FAR_FUTURE_NS = 4 * 10**18
 # Relative tolerance on money: far above float accumulation over a few dozen
 # fills (numerics.md), far below any accounting mistake.
 REL = 1e-9
+# Cash is booked in whole minor units. While a position is open its cost was
+# debited rounded to the paisa (half a paisa at most); the model below marks
+# the position at the exact price. A short's cost enters its marked value
+# twice (the collateral and the gain), and the booked close at the end of the
+# data rounds the exit notional too, so up to three half-paisas per position.
+# Closed trades carry no such gap, because their P&L is the booked P&L.
+BOOK_GRAIN = 0.015
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +111,15 @@ def _assert_equity_matches(result, closes, n, label, mult=1.0):
     trades = result.trades()
     got = result.equity_curve()
     want = _model_equity(trades, closes, n, mult)
-    np.testing.assert_allclose(got, want, rtol=0, atol=REL * INITIAL, err_msg=label)
+    open_at = np.zeros(n)
+    for t in trades:
+        open_at[t.entry_idx : n if t.exit_reason == "EndOfData" else t.exit_idx] += 1
+    atol = REL * INITIAL + BOOK_GRAIN * max(1.0, open_at.max())
+    np.testing.assert_allclose(got, want, rtol=0, atol=atol, err_msg=label)
     total = sum(t.pnl for t in trades)
-    assert got[-1] == pytest.approx(INITIAL + total, rel=REL), label
+    # The last sample marks a position still open at the end of the data at its
+    # exact price; the booked close that follows rounds its notional.
+    assert got[-1] == pytest.approx(INITIAL + total, rel=REL, abs=atol), label
     for t in trades:
         assert t.fees == pytest.approx(t.entry_fees + t.exit_fees, rel=REL, abs=1e-12), label
     return trades

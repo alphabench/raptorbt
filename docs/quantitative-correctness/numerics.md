@@ -2,13 +2,111 @@
 
 One rule per conversion boundary. Each names the code that enforces it.
 
-## What is f64, and why
+## What is booked, and what is f64
 
-Prices, sizes, cash, fees and PnL are all `f64`. Order quantities are fractional
-(crypto, FX), contract multipliers and percentage fees are not integers, and
-every reported metric (Sharpe, drawdown) is a float ratio, so a fixed-point
-money type would need converting back at each of those edges. The exceptions
-are timestamps (`i64` nanoseconds) and counts (`usize`).
+Money that moves is **booked**: the cash balance, the notional of a fill, a
+fee, and realised P&L are integer counts of minor units (`Money`, an `i128`,
+in `src/accounts/money.rs`) at a scale declared once per run,
+`BacktestConfig(money_decimals=2)`. Two decimals is a rupee or a dollar at 100
+minor units; zero suits a whole-unit currency, four a crypto quote. The range
+is 0 to 9 decimals. `i128` leaves room for 1e36 whole units at two decimals,
+so a run on garbage prices books garbage amounts without wrapping; a sum that
+would overflow panics with a message rather than wrapping, and an amount past
+2^120 minor units, or one that is not finite, is refused at the boundary.
+
+Everything else stays `f64`: prices, quantities (fractional for crypto and FX),
+contract multipliers, percentage rates, marks and the unrealised side of
+equity, margin requirements, every indicator, and every statistic (Sharpe,
+drawdown, the equity curve itself). They are measurements or inputs, not
+amounts the account holds. Timestamps are `i64` nanoseconds and counts
+`usize`.
+
+An amount crosses from `f64` to booked exactly once, through
+`MoneyScale::money` (`src/accounts/money.rs`), which calls `to_minor`
+(`src/execution/costs/rounding.rs`, the one place a number is rounded to
+money). It crosses back through `MoneyScale::to_f64` (`minor / 10^places`,
+the double nearest the exact decimal). Python-visible results keep their float
+types; the exact integers ride alongside as `Trade.pnl_minor`, `fees_minor`,
+`entry_notional_minor`, `exit_notional_minor` and `money_decimals`, with
+`pnl == pnl_minor / 10**money_decimals`.
+
+### Every boundary, and its rule
+
+Rounding is half to even unless the row says otherwise. A value within 16 ulps
+of a tie counts as that tie (`round_scaled`), so `1.005` with a representation
+of `100.49999999999999` rounds as the decimal `100.5` would.
+
+| Boundary | What is booked | Rule |
+| --- | --- | --- |
+| Initial capital | `Money` cash | rounded to the scale, half even |
+| Entry fill | notional `price * size * multiplier` (long and short) | rounded half even; this is the position's cost basis |
+| Entry cost | the fee model's charge for the fill | rounded half even once, after the model (a rate card row's own rounding runs first, and booking rounds the result again) |
+| Add to a position | the slice's notional and fee | each rounded on its own; the cost basis is their integer sum |
+| Partial close | the closed slice's share of cost basis and entry fees | `round_half_even(booked * qty / size)`; the open remainder keeps `booked - share`, so the parts add back exactly |
+| Exit fill | notional `exit_price * size * multiplier` | rounded half even |
+| Exit cost | the fee model's charge | rounded half even |
+| Realised P&L | integer: `exit - cost` for a long, `cost - exit` for a short, less booked entry and exit fees | no rounding: a difference of booked integers |
+| Cash, cash account | long: `-cost - entry_fee`, then `+exit - exit_fee`. Short: collateral `-cost` on entry, `+(2*cost - exit) - exit_fee` on close (collateral back plus the gain) | integer sums |
+| Cash, margin account | entry debits the fee only, close adds `pnl + entry_fees` (gross P&L less the exit fee) | integer sums; the lock is not cash |
+| Settlement at expiry | the position closes as an exit fill at the settlement price: notional `settle_price * size * multiplier`, rounded half even | the price is data (declared, the underlying's, or the contract's last), never rounded; a physically settled option closes at `0` and the exercise value is what is delivered against |
+| Settlement charge | the settlement row's charge on `settle_value * multiplier * size` (closing side), else the spec's `settlement_fee * settled value` | rounded half even once; the row's own rounding runs first, as for any fee row |
+| Physical delivery | the underlying's notional `strike * units * multiplier` as an entry fill (or the exit of an opposite line), and the fill's fee | the same entry/exit rules; a delivery is not an order, so no slippage and no risk gate |
+| Split or bonus | none for the held quantity: the position's cost basis (`Money`) is untouched, size multiplies by the ratio and prices divide by it in `f64` | cost basis is invariant, so cash and realised P&L reconcile exactly across the action |
+| Cash in lieu of a fraction | the fraction closes as a trade slice at `mark / ratio`: its notional rounded half even, its cost the share `round_half_even(cost * fraction / size)`, no fee | the same partial-close rule; only when the instrument trades in whole units (`size_increment == 1` on a cash instrument) |
+| Cash dividend | `round_half_even(amount * signed units * multiplier)` | one conversion (`to_minor`) at the ex-date from the signed holding; credited as an integer on the pay date; a short's is negative |
+| Adopted position | cost basis, no fee | rounded half even; an amount that cannot be booked is an `Err` |
+| Cash lent to a kernel by a portfolio | the pool's booked balance, less other kernels' locks in margin mode | the lock is `f64`, so the lent amount is rounded half even; the movement is taken back as an integer difference, so the pool is exact |
+| `f64` views (`cash()`, `Trade.pnl`, `fees`) | none | `minor / 10^places` |
+| Equity | `cash` view plus the `f64` mark of open positions | not booked: a position still open is marked at its exact price |
+| Margin requirement and locks | none | `f64`, never rounded: it gates entries and marks maintenance, it is not a charge |
+| Statistics and indicators | none | `f64` |
+
+The invariants these give, tested with integer equality
+(`tests/accounting_money.rs`, random fill sequences with partial fills, fees,
+shorts, flips and margin accounts):
+
+- cash account: `cash = initial + sum(realised P&L) - (cost basis + entry fees
+  of the open positions)`;
+- margin account: `cash = initial + sum(realised P&L) - entry fees of the open
+  positions`;
+- each trade: `pnl = gross - entry_fees - exit_fees` on its booked integers,
+  and `Trade.pnl` and `fees` are the views of those integers;
+- once flat, `cash = initial + sum(realised P&L)`, exactly, after any number
+  of fills (a million fills in the same file);
+- across a lifecycle (`tests/lifecycle.rs`, random runs of fills, expiries,
+  settlements, physical deliveries, splits, bonuses and dividends in cash and
+  margin accounts): `balance = initial + sum(realised P&L, settlements,
+  deliveries and cash in lieu included) + sum(dividends) - open cost basis
+  and entry fees` (cash) or `- open entry fees` (margin), as integers; and
+  `tests/accounting_money.rs` holds the same for a kernel held through its
+  expiry with a settlement fee.
+
+A sized entry is checked against the booked debit: sizing fits the budget in
+`f64`, but the account is debited the notional and the fee each rounded, which
+can come to a unit more, so a cash-funded entry whose booked debit would
+exceed what is free is sized again on a budget a unit tighter (up to four
+times) and refused as `zero_size` if none fits. Cash cannot be overdrawn by
+rounding.
+
+### What booking changes in a result
+
+A booked amount is within half a minor unit of the unrounded one, so a trade's
+P&L is within about a unit of what unrounded arithmetic gives (three roundings
+for a long: cost, exit and the fees; the golden set's worst trade moved 0.9
+units). Cash and equity after many fills differ from an unrounded replay by
+the accumulated roundings, growing roughly with the square root of the number
+of fills. Position sizes move by the same order divided by price. A last
+equity sample that marks a position still open at the end of the data uses its
+exact price, so it can differ from the booked cash after the closing fill by
+up to half a unit per rounded amount (a short's cost basis enters its marked
+value twice).
+
+`docs/quantitative-correctness/` states the size of each result change in the
+CHANGELOG ("Results change"); `tests/python/golden/drift_report.py` measures
+it against the committed golden baselines.
+
+The batch simulators that are not on the kernel yet (baskets, pairs, options
+legs, spreads, ticks) still account in `f64` and set `Trade.money` to `None`.
 
 ## Price: the tick grid
 
@@ -51,16 +149,15 @@ quantizing can only reduce the amount spent. A result of zero rejects the entry
 Explicit unit counts are floored the same way and then refused, not shrunk, if
 they exceed available funds.
 
-## Money: accumulation and tolerance
+## Money: accumulation
 
-Cash is one `f64` updated by `+=`/`-=` at every fill (`open_at`, `close_at`,
-`credit_close` in `kernel.rs`). Plain summation is used on purpose: replaying
-100k round trips against an exactly rounded `math.fsum` of the trade list
-differs by about `4e-14` relative (`tests/python/test_cash_drift.py`), far
-below any displayed precision, so compensated summation is not used.
-
-Cash can end a bar a few ulps off the mathematically exact value, never
-meaningfully. Equity checks in tests use `pytest.approx`, not equality.
+Cash is one `Money` updated by integer addition at every fill (`open_at`,
+`close_at`, `reduce_at`, `add_at`, `credit_slice` in `kernel.rs`). Integer
+sums are exact, so there is no accumulation error to bound and compensated
+summation is not needed: the replay in `tests/python/test_cash_drift.py`
+agrees with the booked sum of P&L to the unit, not to a tolerance. Tests that
+compare the engine with an independent `f64` model of equity allow the booking
+grain (half a unit per open position, a short three halves) and nothing more.
 
 ## Fees, per model
 
@@ -89,7 +186,10 @@ never exceeds the budget after fees and can be one step below the optimum.
 `Indian` and `Rates` both charge through `FeeRates::charge_fill`
 (`src/execution/costs/rates.rs`). The itemised `FeeBreakdown` it returns is what
 the kernel debits (`total()`), so a trade's reported costs and its effect on
-equity are the same numbers. A row declares: brokerage (flat, percent, cap,
+equity are the same numbers. The kernel books that total to the run's scale
+and stores the booked amount as the breakdown's `exact_total`, so
+`fee_breakdown.total()` equals `Trade.fees` to the last digit; the parts stay
+as computed and can differ from their sum by up to half a minor unit. A row declares: brokerage (flat, percent, cap,
 minimum, per order or per fill), the transaction tax by side, the exchange
 transaction charge, the regulatory fee, stamp duty on the buy side, the GST
 rate and the components it is levied on, an optional investor-fund charge, and
@@ -102,17 +202,18 @@ Where money is rounded (`src/execution/costs/rounding.rs`, the only place):
 
 | Boundary | Rule |
 | --- | --- |
-| Row `rounding = "none"` (the built-in presets) | no rounding: the exact `f64` products, as the engine always charged |
+| Row `rounding = "none"` (the built-in presets) | no rounding in the row: the exact `f64` products. The kernel then books the total to the run's scale (see above), so a charge reaches cash as a whole minor unit |
 | `paise_each` | each component to the paisa, half up, once computed; GST on the rounded parts; total the rounded sum |
 | `contract_note` (the default for a rate card document) | stamp duty to a whole rupee, half up; GST on the unrounded brokerage, exchange and regulatory charges; each part to the paisa, half even; `exact_total` the rounded sum of the unrounded parts (it can differ by a paisa from the sum of the shown parts) |
-| Accumulating charges over fills and trades | not rounded: plain `f64` addition, as for cash above |
+| Accumulating charges over fills and trades | booked integers: a trade's fees are the sum of its entry and exit charges, each already a whole minor unit |
 | Margin | never rounded: it gates entries and marks maintenance, it is not a charge |
 
 Money is `f64`, so a value that is exactly half a paisa in decimal (0.025% of
 1,500.00 is 0.375) is rarely exactly half a paisa in binary. `round_places`
 treats a value within 16 ulps of a tie as that tie before applying the rule,
-instead of tipping on representation noise. When accounting moves to fixed
-point, only `rounding.rs` changes.
+instead of tipping on representation noise. Fixed-point accounting changed
+only `rounding.rs` at the boundary of a charge: `to_minor` is the same rounding
+returning an integer.
 
 Rates in a rate card document are percent text (`"0.03"`); they are read two
 places down as text (`"0.03e-2"`), so the stored fraction is the double nearest
@@ -127,9 +228,9 @@ reproduced exactly and checked fill by fill against that engine
 without a cap, a minimum, or both a flat and a percent amount; the reference refused those.
 (c) A zero-value fill is charged no brokerage only under `contract_note`, as in
 the reference; elsewhere it is charged the flat amount, as this engine always did.
-(d) Values are `f64` throughout: a result can differ from 1.x's exact decimal
-arithmetic only by a representation tie, which `round_places` resolves as the
-decimal would.
+(d) Charges are computed in `f64` and booked in minor units: a result can differ
+from the reference's exact decimal arithmetic only by a representation tie, which
+`round_places` and `to_minor` resolve as the decimal would.
 
 ## Contract multiplier
 
@@ -165,6 +266,38 @@ engine figure by figure (`tests/python/differential`). `leverage`/`by_type` keys
 are instrument classes (`CASH`, `CURRENCY_PAIR`, `CONTRACT`, `OPTION`; `EQUITY`,
 `ETF`, `FUTURE`, `PERPETUAL` and `CURRENCY` read as the first three). A class a
 model has no rule for is an error, never a zero.
+
+### Choosing the model: `BacktestConfig(margin_model=...)`
+
+Unset, the account applies the rule above, bit for bit. Set (and the account
+`margin`; a cash account with a model is refused as `invalid_margin_model`),
+every entry is funded and refused by that model through one path in the kernel
+(`EngineKernel::entry_funding`):
+
+- The requirement of one unit at the fill price is `model.required(line)`; the
+  lock is that per-unit figure times the size, so a model must be linear in the
+  quantity of a single line (every named model is).
+- Sizing by a fraction of capital divides the budget by the per-unit
+  requirement plus the fee, as for a built-in deposit.
+- **`no_margin`** requires nothing and locks nothing, so a fraction of capital
+  cannot be sized against a zero. Rule: it sizes as a fully funded account
+  would, at the lot's full notional, so a fraction of capital never buys more
+  than the same fraction in cash; the entry debits its fee only and the
+  position carries no lock and no maintenance. Explicit unit counts are limited
+  only by the size limits and the fee.
+- An infinite requirement (`cash_only` on a short) refuses the entry as
+  `insufficient_margin`; a requirement above the free capital does the same
+  (a zero-size entry, or an explicit size, which is `insufficient_capital`); a
+  model with no rule for the instrument's class, or an instrument without a
+  market definition, refuses it as `margin_unpriced`. All reach
+  `on_order_rejected` with that `reject_reason`.
+- Maintenance is half the model's requirement re-read at the mark, and nothing
+  when that requirement covers the whole notional.
+- The built-in grouping of sold option legs of one underlying and expiry does
+  not run under a chosen model: each line locks its own requirement, so a
+  `defined_risk` or `spread_credit` model prices a leg alone on entry.
+- Adopting a broker-held position needs a model that demands at least the
+  whole cost basis, for the reason leveraged adoption is refused above.
 
 ## Partial-fill completion
 

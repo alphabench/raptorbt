@@ -196,7 +196,9 @@ impl FillModel {
 
     /// Get fill price for a limit order.
     ///
-    /// Returns limit price if filled, None if not filled.
+    /// Returns the limit price if the bar traded through it, the open if the
+    /// bar opened through it (a marketable limit fills at the market, never
+    /// at its own, worse, limit), None if not filled.
     ///
     /// # Arguments
     /// * `limit_price` - Limit price
@@ -215,6 +217,17 @@ impl FillModel {
     ) -> Option<Price> {
         if !self.would_fill_limit(limit_price, bar, direction, is_entry) {
             return None;
+        }
+        // A bar that opens through the limit trades at the open: the order
+        // was marketable on arrival (or the market gapped past it), and a
+        // limit guarantees the limit or better, never worse than the market.
+        // Nothing rested at the limit, so no adverse-selection slippage.
+        let opens_through = match (direction, is_entry) {
+            (Direction::Long, true) | (Direction::Short, false) => bar.open <= limit_price,
+            (Direction::Long, false) | (Direction::Short, true) => bar.open >= limit_price,
+        };
+        if opens_through {
+            return Some(bar.open);
         }
         if self.limit_slippage == 0.0 {
             return Some(limit_price);
@@ -339,18 +352,44 @@ mod tests {
     #[test]
     fn limit_slippage_moves_against_the_trader() {
         let model = FillModel { limit_slippage: 0.01, ..FillModel::default() };
-        let bar = OhlcvBar {
+        let bar = |open: f64| OhlcvBar {
             timestamp: 0,
-            open: 100.0,
+            open,
             high: 101.0,
             low: 98.0,
             close: 100.0,
             volume: 1.0,
         };
-        // A buy pays more than its limit.
-        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Long, true), Some(101.0));
-        // A sell receives less.
-        assert_eq!(model.get_limit_fill_price(100.0, &bar, Direction::Short, true), Some(99.0));
+        // A buy resting at 100 (the bar opens above it) pays more than its limit.
+        assert_eq!(
+            model.get_limit_fill_price(100.0, &bar(100.5), Direction::Long, true),
+            Some(101.0)
+        );
+        // A sell resting at 100 (the bar opens below it) receives less.
+        assert_eq!(
+            model.get_limit_fill_price(100.0, &bar(99.5), Direction::Short, true),
+            Some(99.0)
+        );
+    }
+
+    #[test]
+    fn a_bar_opening_through_the_limit_fills_at_the_open() {
+        let model = FillModel { limit_slippage: 0.01, ..FillModel::default() };
+        let bar = OhlcvBar {
+            timestamp: 0,
+            open: 100.6,
+            high: 101.0,
+            low: 100.0,
+            close: 100.8,
+            volume: 1.0,
+        };
+        // Buy limit 200 against a market near 100.6: marketable, fills at the open.
+        assert_eq!(model.get_limit_fill_price(200.0, &bar, Direction::Long, true), Some(100.6));
+        // Sell limit 1.0: marketable, fills at the open.
+        assert_eq!(model.get_limit_fill_price(1.0, &bar, Direction::Long, false), Some(100.6));
+        assert_eq!(model.get_limit_fill_price(1.0, &bar, Direction::Short, true), Some(100.6));
+        // Cover limit 200: marketable, fills at the open.
+        assert_eq!(model.get_limit_fill_price(200.0, &bar, Direction::Short, false), Some(100.6));
     }
 
     #[test]

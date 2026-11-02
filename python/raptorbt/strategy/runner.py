@@ -28,6 +28,7 @@ from raptorbt.strategy._commands import (
 from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import StrategyContext
+from raptorbt.strategy._validate import ensure_prices_finite
 from raptorbt.strategy.streams import StreamState
 
 
@@ -143,6 +144,12 @@ def run_strategy_backtest(
             parameter="timestamps",
             value=int(timestamps[i]),
         )
+
+    ensure_prices_finite(
+        f"{symbol} bars",
+        "run_strategy_backtest",
+        {"open": open_, "high": high, "low": low, "close": close},
+    )
 
     # Everything the engine does in time runs on bar close time.
     visible = stamps.visible(symbol, timestamps)

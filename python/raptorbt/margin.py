@@ -9,8 +9,15 @@ account.
 
 ``required(spec, quantity, price)`` is the initial margin of one line;
 ``required_legs([(spec, quantity, price), ...])`` margins option legs
-together; ``describe()`` is what a result says the margin was. Instrument
-classes are ``CASH`` (``EQUITY`` and ``ETF`` read as ``CASH``),
+together; ``describe()`` is what a result says the margin was.
+
+Give one to a margin account with ``BacktestConfig(margin_model=...)`` and it
+funds and refuses every entry (``insufficient_margin``, or ``margin_unpriced``
+for an instrument it has no rule for); unset, the account applies the rule
+``from_spec`` describes. ``no_margin`` locks nothing and sizes a fraction of
+capital at the full notional.
+
+Instrument classes are ``CASH`` (``EQUITY`` and ``ETF`` read as ``CASH``),
 ``CURRENCY_PAIR``, ``CONTRACT`` (``FUTURE`` and ``PERPETUAL`` read as
 ``CONTRACT``) and ``OPTION``.
 """

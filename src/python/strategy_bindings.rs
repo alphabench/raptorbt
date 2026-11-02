@@ -41,6 +41,25 @@ pub(crate) fn parse_qty_spec(
     }
 }
 
+/// A `margin_model` on the config funds entries on a margin account. A cash
+/// account would ignore it, so the pair is refused rather than run on a rule
+/// the caller did not choose.
+pub(crate) fn check_margin_model(
+    config: &BacktestConfig,
+    mode: crate::accounts::AccountMode,
+) -> PyResult<()> {
+    if config.margin_model.is_some() && matches!(mode, crate::accounts::AccountMode::Cash) {
+        return Err(Fail::new(
+            "invalid_margin_model",
+            "config.margin_model funds entries on a margin account; pass account_type='margin' \
+             (and a leverage) or drop the model",
+        )
+        .param("margin_model")
+        .into());
+    }
+    Ok(())
+}
+
 /// Parse the `account_type` / `leverage` kwargs shared by the single-symbol
 /// and portfolio session constructors.
 pub(crate) fn parse_account_mode(
@@ -104,6 +123,32 @@ pub struct PyEngineEvent {
     /// Caller-supplied order identifier, for `order_*` events.
     #[pyo3(get)]
     pub client_order_id: Option<String>,
+    /// For `contract_settled`: `"settled"`, `"exercised"`, `"assigned"`,
+    /// `"expired"` or `"delivered"`. For `corporate_action`: `"split"`,
+    /// `"bonus"` or `"dividend"`. For `lifecycle_refused`: what was refused
+    /// (`"settlement"` or `"corporate_action"`).
+    #[pyo3(get)]
+    pub outcome: Option<String>,
+    /// For `contract_settled`: `"cash"` or `"physical"`.
+    #[pyo3(get)]
+    pub style: Option<String>,
+    /// For `contract_settled`: where the settlement price came from,
+    /// `"declared"`, `"underlying"` or `"last_price"`.
+    #[pyo3(get)]
+    pub source: Option<String>,
+    /// For `contract_settled`: the underlying units taken in (positive) or
+    /// given away (negative); `0.0` when nothing is delivered. For
+    /// `corporate_action`: the split or bonus ratio (`0.0` for a dividend).
+    #[pyo3(get)]
+    pub quantity: Option<f64>,
+    /// For `contract_settled`: the price the underlying was delivered at.
+    /// For `corporate_action`: the dividend per unit (`0.0` otherwise).
+    #[pyo3(get)]
+    pub amount: Option<f64>,
+    /// For `corporate_action`: the cash the account received (negative when
+    /// it paid, as a short pays a dividend).
+    #[pyo3(get)]
+    pub cash: Option<f64>,
 }
 
 #[pymethods]
@@ -125,6 +170,12 @@ impl From<EngineEvent> for PyEngineEvent {
             reject_reason: None,
             order_id: None,
             client_order_id: None,
+            outcome: None,
+            style: None,
+            source: None,
+            quantity: None,
+            amount: None,
+            cash: None,
         };
         match event {
             EngineEvent::Entered { idx, price, size, direction } => Self {
@@ -227,6 +278,45 @@ impl From<EngineEvent> for PyEngineEvent {
             EngineEvent::RiskHalted { idx, reason } => {
                 Self { kind: "risk_halted".to_string(), idx, reject_reason: Some(reason), ..empty }
             }
+            EngineEvent::Settled {
+                idx,
+                outcome,
+                style,
+                source,
+                price,
+                size,
+                direction,
+                deliver,
+                delivery_price,
+            } => Self {
+                kind: "contract_settled".to_string(),
+                idx,
+                price: Some(price),
+                size: Some(size),
+                direction: Some(direction as i32),
+                outcome: Some(outcome.to_string()),
+                style: Some(style.as_str().to_string()),
+                source: Some(source.as_str().to_string()),
+                quantity: Some(deliver),
+                amount: Some(delivery_price),
+                ..empty
+            },
+            EngineEvent::CorporateAction { idx, kind, ratio, amount, cash } => Self {
+                kind: "corporate_action".to_string(),
+                idx,
+                outcome: Some(kind.as_str().to_string()),
+                quantity: Some(ratio),
+                amount: Some(amount),
+                cash: Some(cash),
+                ..empty
+            },
+            EngineEvent::LifecycleRefused { idx, what, reason } => Self {
+                kind: "lifecycle_refused".to_string(),
+                idx,
+                outcome: Some(what.to_string()),
+                reject_reason: Some(reason),
+                ..empty
+            },
             EngineEvent::MarginCall { idx, equity, required } => Self {
                 kind: "margin_call".to_string(),
                 idx,
@@ -330,6 +420,7 @@ impl PyKernelSession {
             }
         };
         let account = parse_account_mode(account_type, leverage)?;
+        check_margin_model(&rust_config, account)?;
 
         let mut runner =
             SingleRunner::from_config(rust_config, symbol.to_string(), direction, inst.as_ref());
@@ -753,31 +844,32 @@ pub(crate) fn submit_twap_on(
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Parse Python order arguments and submit onto a kernel — shared by the
-/// single-instrument session and the portfolio session.
+/// The typed form of Python order arguments.
+pub(crate) struct ParsedOrder {
+    pub side: OrderSide,
+    pub qty: QtySpec,
+    pub kind: OrderKind,
+    pub tif: TimeInForce,
+}
+
+/// Parse Python order arguments. `price_increment` is the instrument's tick
+/// size (`0.0` without one), which a trailing offset in ticks needs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn submit_order_on(
-    kernel: &mut crate::portfolio::kernel::EngineKernel,
+pub(crate) fn parse_order(
+    price_increment: f64,
     side: &str,
     kind: &str,
-    submitted_idx: usize,
-    submitted_ts: i64,
-    client_id: &str,
     units: Option<f64>,
     size_frac: Option<f64>,
     limit_price: Option<f64>,
     trigger_price: Option<f64>,
     tif: &str,
     expire_ns: Option<i64>,
-    stop_price: Option<f64>,
-    target_price: Option<f64>,
     offset: Option<f64>,
     offset_kind: &str,
     limit_offset: f64,
     post_only: bool,
-    reduce_only: bool,
-    parent_id: Option<u64>,
-) -> PyResult<u64> {
+) -> PyResult<ParsedOrder> {
     let side = match side {
         "buy" => OrderSide::Buy,
         "sell" => OrderSide::Sell,
@@ -826,7 +918,7 @@ pub(crate) fn submit_order_on(
             )
         })
     };
-    let trail_offset = |kernel: &crate::portfolio::kernel::EngineKernel| -> PyResult<TrailOffset> {
+    let trail_offset = || -> PyResult<TrailOffset> {
         let raw = offset.ok_or_else(|| {
             Fail::new("missing_order_field", format!("{kind} needs offset")).param("offset")
         })?;
@@ -840,7 +932,7 @@ pub(crate) fn submit_order_on(
             "price" => Ok(TrailOffset::Price(raw)),
             "bps" => Ok(TrailOffset::Bps(raw)),
             "ticks" => {
-                let tick = kernel.price_increment();
+                let tick = price_increment;
                 if tick <= 0.0 {
                     return Err(Fail::new(
                         "incompatible_order_options",
@@ -862,7 +954,6 @@ pub(crate) fn submit_order_on(
         }
     };
 
-    let kernel_ref = &*kernel;
     let kind_parsed = match kind {
         "market" => OrderKind::Market,
         "limit" => OrderKind::Limit { price: need_limit()? },
@@ -873,11 +964,9 @@ pub(crate) fn submit_order_on(
             OrderKind::LimitIfTouched { trigger: need_trigger()?, price: need_limit()? }
         }
         "market_to_limit" => OrderKind::MarketToLimit,
-        "trailing_stop_market" => {
-            OrderKind::TrailingStopMarket { offset: trail_offset(kernel_ref)? }
-        }
+        "trailing_stop_market" => OrderKind::TrailingStopMarket { offset: trail_offset()? },
         "trailing_stop_limit" => {
-            OrderKind::TrailingStopLimit { offset: trail_offset(kernel_ref)?, limit_offset }
+            OrderKind::TrailingStopLimit { offset: trail_offset()?, limit_offset }
         }
         other => {
             return Err(Fail::new("invalid_order_kind", format!("unknown order kind {other:?}"))
@@ -921,6 +1010,49 @@ pub(crate) fn submit_order_on(
             .into());
     }
 
+    Ok(ParsedOrder { side, qty, kind: kind_parsed, tif })
+}
+
+/// Parse Python order arguments and submit onto a kernel — shared by the
+/// single-instrument session and the portfolio session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_order_on(
+    kernel: &mut crate::portfolio::kernel::EngineKernel,
+    side: &str,
+    kind: &str,
+    submitted_idx: usize,
+    submitted_ts: i64,
+    client_id: &str,
+    units: Option<f64>,
+    size_frac: Option<f64>,
+    limit_price: Option<f64>,
+    trigger_price: Option<f64>,
+    tif: &str,
+    expire_ns: Option<i64>,
+    stop_price: Option<f64>,
+    target_price: Option<f64>,
+    offset: Option<f64>,
+    offset_kind: &str,
+    limit_offset: f64,
+    post_only: bool,
+    reduce_only: bool,
+    parent_id: Option<u64>,
+) -> PyResult<u64> {
+    let ParsedOrder { side, qty, kind: kind_parsed, tif } = parse_order(
+        kernel.price_increment(),
+        side,
+        kind,
+        units,
+        size_frac,
+        limit_price,
+        trigger_price,
+        tif,
+        expire_ns,
+        offset,
+        offset_kind,
+        limit_offset,
+        post_only,
+    )?;
     Ok(kernel.submit_order_full(
         side,
         qty,

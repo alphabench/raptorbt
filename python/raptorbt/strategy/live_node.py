@@ -36,12 +36,14 @@ import numpy as np
 
 from raptorbt._raptorbt import (
     AccountResult,
+    ExecutionReport,
     BacktestConfig,
     InstrumentConfig,
     MarketData,
     PortfolioResult,
     Runtime,
 )
+from raptorbt.execution import ExecutionAdapter, PaperExecution, SimulatedExecution
 from raptorbt.errors import (
     InvalidData,
     InvalidParameter,
@@ -134,6 +136,32 @@ class LiveNode:
     adopted from the account's cash, in strategy order. ``curve_samples`` also
     bounds an account's curves.
 
+    ``execution`` says where orders go. ``None`` (the default) or
+    :class:`~raptorbt.execution.SimulatedExecution` matches them in-process,
+    as a backtest does. :class:`~raptorbt.execution.PaperExecution` sends them
+    to a simulated exchange that answers with execution reports, by the route
+    a real venue's reports take; fills are those a backtest of the same
+    stream would make. Any object with ``submit`` / ``cancel`` / ``modify``
+    (:class:`~raptorbt.execution.ExecutionAdapter`) is a venue of your own: the
+    node sends it requests and learns what became of them only from
+    :meth:`push_report`. ``venue_account`` names the venue account on every
+    request. ``protective`` says who holds the stops and targets of positions
+    (configured, attached to an order or an entry): ``"venue"`` sends them as
+    protective orders (a stop, a target, linked one-cancels-other) that the
+    venue holds, ``"local"`` has the engine watch the levels on market data
+    and send a market order when one is reached. A leg the venue says it
+    cannot hold is watched by the engine in either mode. Read the mode back
+    as :attr:`protective`; the orders carry ids starting ``prot-`` in their
+    ``tags["client_id"]``. See :mod:`raptorbt.execution` for the parity of
+    each mode with a backtest.
+
+    ``processing_latency_ns`` declares how long the engine takes to act on an
+    event after it arrives. Every event has three times (see
+    ``docs/architecture/event-semantics.md``): the exchange's, the arrival and
+    the processing time, read in hooks as ``ctx.event_ns``,
+    ``ctx.arrival_ns`` and ``ctx.processing_ns``. The push methods take
+    ``arrival_ns``; without it arrival is the event's own time.
+
     Everything else (account type, leverage, risk limits, OMS type) behaves as
     in :class:`~raptorbt.TickStrategyStream`. ATR-based stops are refused, as
     there.
@@ -159,6 +187,10 @@ class LiveNode:
         bar_ns: int | dict[str, int] | None = None,
         history: int | None = None,
         curve_samples: int | None = None,
+        execution: ExecutionAdapter | PaperExecution | SimulatedExecution | None = None,
+        venue_account: str | None = None,
+        protective: Literal["venue", "local"] = "venue",
+        processing_latency_ns: int = 0,
         _via: str | None = None,
     ):
         # ``_via`` names the wrapper (``TickStrategyStream``) that builds this
@@ -207,6 +239,16 @@ class LiveNode:
                 valid=["a positive integer", None],
             )
         primary_bars = _primary_bars(primary_bars)
+        execution_kind = _execution_kind(execution, name)
+        if isinstance(processing_latency_ns, bool) or not isinstance(processing_latency_ns, int) or processing_latency_ns < 0:
+            raise InvalidParameter(
+                f"processing_latency_ns must be a non-negative integer, got {processing_latency_ns!r}",
+                code="invalid_execution",
+                operation=name,
+                parameter="processing_latency_ns",
+                value=processing_latency_ns,
+                valid=["a non-negative integer"],
+            )
         accounts = check_accounts(accounts, name)
         strategies, names = unpack_entries(strategies, accounts, name)
         check_group_sizes(names, name)
@@ -214,6 +256,7 @@ class LiveNode:
         seeds = _seeds(initial_positions, entries)
         reject_atr_stops(config, instrument_configs, symbols)
 
+        self._protective = protective
         self._symbols = symbols
         self._index_of = {s: i for i, s in enumerate(symbols)}
         self._finished = False
@@ -246,6 +289,15 @@ class LiveNode:
         )
         self._rt = rt
         try:
+            if execution_kind is not None:
+                rt.set_execution(
+                    execution_kind,
+                    None if execution_kind == "paper" else execution,
+                    venue_account,
+                    protective,
+                )
+            if processing_latency_ns:
+                rt.set_processing_latency(processing_latency_ns)
             if curve_samples is not None:
                 rt.set_curve_window(curve_samples)
             if primary_bars is not None:
@@ -287,8 +339,10 @@ class LiveNode:
             rt.finalize()
             # Prime indicators and strategy state from the warmup history now,
             # so the node is warm before the first live event.
+            rt.set_warmup(True)
             for push in warmup:
                 rt.push_bar(*push)
+            rt.set_warmup(False)
         except BaseException:
             rt.close()
             raise
@@ -308,6 +362,8 @@ class LiveNode:
         bid_qty: float = 0.0,
         ask_qty: float = 0.0,
         oi: float = 0.0,
+        *,
+        arrival_ns: int | None = None,
     ) -> int:
         """Feed one tick row; every hook it triggers fires before this returns.
 
@@ -315,6 +371,9 @@ class LiveNode:
         ``ltq`` is the print's own size when the feed has it (else the flow
         deltas stand in); ``bid_qty``/``ask_qty`` are the displayed L1 sizes;
         ``oi`` the open interest. Returns how many events were appended (0-2).
+
+        ``arrival_ns`` is when the row reached the engine, if that differs from
+        ``timestamp`` (see the class docs).
 
         A row that yields no event still carries a timestamp: alerts and timers
         due by it fire before this returns, for each strategy that trades
@@ -338,6 +397,7 @@ class LiveNode:
             bid_qty,
             ask_qty,
             oi,
+            arrival_ns,
         )
 
     def push_bar(
@@ -349,6 +409,8 @@ class LiveNode:
         low: float,
         close: float,
         volume: float,
+        *,
+        arrival_ns: int | None = None,
     ) -> None:
         """Feed one closed bar. It executes: orders match, equity marks.
 
@@ -356,7 +418,9 @@ class LiveNode:
         """
         self._check_open()
         self._stamps.warn_missing(f"{self._name}.push_bar", stacklevel=3 + self._extra)
-        self._rt.push_bar(self._index_of[symbol], timestamp, open, high, low, close, volume)
+        self._rt.push_bar(
+            self._index_of[symbol], timestamp, open, high, low, close, volume, arrival_ns
+        )
 
     def push_depth(
         self,
@@ -364,10 +428,12 @@ class LiveNode:
         timestamp: int,
         bids: list[tuple[float, float]],
         asks: list[tuple[float, float]],
+        *,
+        arrival_ns: int | None = None,
     ) -> None:
         """Feed one depth snapshot: ``(price, size)`` lists, best first."""
         self._check_open()
-        self._rt.push_depth(self._index_of[symbol], timestamp, bids, asks)
+        self._rt.push_depth(self._index_of[symbol], timestamp, bids, asks, arrival_ns)
 
     def advance_time(self, timestamp: int) -> None:
         """Move time to ``timestamp`` with no data.
@@ -379,6 +445,42 @@ class LiveNode:
         self._check_open()
         self._rt.advance_time(timestamp)
 
+    def push_report(
+        self, client_order_id: str, report: ExecutionReport, *, arrival_ns: int
+    ) -> str:
+        """Hand the node what the venue said about an order.
+
+        ``client_order_id`` is the ``client_order_id`` of the
+        :class:`~raptorbt.execution.OrderRequest` the order was sent as.
+        ``arrival_ns`` is when the report reached you; the report's own
+        ``ts_ns`` is the venue's time, and the node's processing time is the
+        arrival plus ``processing_latency_ns``. The three are what hooks read
+        as ``ctx.event_ns``, ``ctx.arrival_ns`` and ``ctx.processing_ns``.
+
+        The report is applied now, as an event in the node's single stream:
+        in the order calls are made, between pushes of market data, never
+        from another thread. When a simulated venue answers a market event,
+        its reports come after that event's hooks and before the next event.
+        Reports may repeat, arrive late or arrive out of order; applying them
+        again, or in another order, leaves the same orders, positions and
+        cash. Returns ``"applied"``, ``"duplicate"`` (already recorded) or
+        ``"late"`` (no longer matters, or cannot matter yet).
+
+        Raises when the node has no execution adapter, when no order was sent
+        under ``client_order_id``, when the report contradicts the order, or
+        when it is a correction or bust (not supported yet).
+        """
+        self._check_open()
+        if not isinstance(report, ExecutionReport):
+            raise InvalidParameter(
+                f"report must be a raptorbt.execution.ExecutionReport, got {type(report).__name__}",
+                code="invalid_execution",
+                operation=f"{self._name}.push_report",
+                parameter="report",
+                value=type(report).__name__,
+            )
+        return self._rt.push_report(client_order_id, report, arrival_ns)
+
     # -- state ---------------------------------------------------------------
 
     @property
@@ -389,6 +491,11 @@ class LiveNode:
     def strategies(self) -> list[Strategy]:
         """The strategies, in the order given."""
         return list(self._strategies)
+
+    @property
+    def protective(self) -> str:
+        """Who holds the stops and targets of positions: ``"venue"`` or ``"local"``."""
+        return self._protective
 
     def ctx(self, strategy_index: int):
         """The context handed to strategy ``strategy_index``'s hooks."""
@@ -490,6 +597,26 @@ class LiveNode:
                 code="node_finished",
                 operation="TickStrategyStream" if self._extra else "LiveNode",
             )
+
+
+def _execution_kind(execution, name):
+    """The runtime's name for the node's execution: ``None`` for in-process,
+    ``"paper"`` or ``"adapter"``."""
+    if execution is None or isinstance(execution, SimulatedExecution):
+        return None
+    if isinstance(execution, PaperExecution):
+        return "paper"
+    if isinstance(execution, ExecutionAdapter):
+        return "adapter"
+    raise InvalidParameter(
+        "execution must be None, SimulatedExecution(), PaperExecution() or an object with "
+        f"submit, cancel and modify, got {type(execution).__name__}",
+        code="invalid_execution",
+        operation=name,
+        parameter="execution",
+        value=type(execution).__name__,
+        valid=["None", "SimulatedExecution()", "PaperExecution()", "an ExecutionAdapter"],
+    )
 
 
 def _warmup(warmup_bars, index_of, stamps):

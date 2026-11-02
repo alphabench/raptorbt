@@ -48,8 +48,22 @@ def skill(m, domain):
     return next(s for s in m if s["domain"] == domain)
 
 
+def bare_draft(tree, domain):
+    """Reduce ``domain`` to an empty draft in the copy, whatever it is in the real tree."""
+    path = tree / domain / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    end = text.index("\n---\n", 4) + 5
+    body = "\n# Skeleton\n\n" + "".join(f"## {i}. {t}\n\n" for i, t in enumerate(_check.SECTIONS, 1))
+    path.write_text(text[:end].replace("status: stable", "status: draft") + body, encoding="utf-8")
+    edit_manifest(tree, lambda m: skill(m, domain).update(status="draft"))
+
+
 def stable_with(tree, block):
-    """Make the 'results' skill stable, with one extra example appended to section 5."""
+    """Make the 'results' skill stable, with one extra example appended to section 5.
+
+    The real 'results' skill is written, so the copy is first reduced to a bare draft.
+    """
+    bare_draft(tree, "results")
     edit_manifest(tree, lambda m: skill(m, "results").update(status="stable"))
     path = tree / "results" / "SKILL.md"
     edit(path, "status: draft", "status: stable")
