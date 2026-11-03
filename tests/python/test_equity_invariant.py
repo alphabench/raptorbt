@@ -34,7 +34,8 @@ def _run(direction, account_type, fees):
         initial_capital=100_000.0, fees=fees, slippage=0.0, upon_bar_close=True
     )
     return raptorbt.run_strategy_backtest(
-        _RoundTrip(), **_bars(), direction=direction, config=cfg, account_type=account_type
+        _RoundTrip(), **_bars(), direction=direction, config=cfg, account_type=account_type,
+        bar_stamp="close",
     )
 
 

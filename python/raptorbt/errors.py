@@ -321,6 +321,10 @@ CODES: dict[str, Code] = {
     "length_mismatch": _c(
         InvalidData, "market-data", "Arrays that must share one length do not."
     ),
+    "misaligned_legs": _c(
+        InvalidData, "market-data",
+        "Legs traded bar by bar (a basket, a pair) do not share their timestamps.",
+    ),
     "decreasing_timestamps": _c(
         InvalidData, "market-data", "Timestamps go backwards; bars must be in time order."
     ),
@@ -373,6 +377,16 @@ CODES: dict[str, Code] = {
     "invalid_order_link": _c(
         InvalidOrder, "orders", "A parent or one-cancels-other link cannot be made."
     ),
+    "unknown_order": _c(
+        InvalidOrder, "orders",
+        "A cancel or modify named a client id this run never submitted. A submitted order that "
+        "has finished is a documented no-op, not this error.",
+    ),
+    "bracket_under_hedging": _c(
+        InvalidOrder, "orders",
+        "A reduce-only child order (a bracket's stop or target) was submitted under hedging, "
+        "where every order opens its own position and a reduce-only order is always refused.",
+    ),
     "invalid_order_intent": _c(
         InvalidOrder, "orders", "Intents queued on one bar are duplicated or unknown."
     ),
@@ -391,6 +405,10 @@ CODES: dict[str, Code] = {
     ),
     "invalid_direction": _c(
         InvalidParameter, "backtesting", "direction is not 1 (long) or -1 (short).", [1, -1]
+    ),
+    "invalid_combine_mode": _c(
+        InvalidParameter, "backtesting", "combine_mode is not recognised.",
+        ["any", "all", "majority", "independent", "weighted"],
     ),
     "invalid_fill_timing": _c(
         InvalidParameter, "execution", "fill_timing is not recognised.",
@@ -497,6 +515,52 @@ CODES: dict[str, Code] = {
     "invalid_sizing_input": _c(
         InvalidParameter, "risk", "A sizing input is not a positive finite number (or a fraction out of range)."
     ),
+    "invalid_order_tags": _c(
+        InvalidOrder, "orders",
+        "An order's tags are not a dict of at most 16 str pairs (keys 1-64 bytes, values up to 256), or use the reserved key 'client_id'.",
+    ),
+    "invalid_order_check": _c(
+        InvalidParameter, "live-trading", "order_check is not callable."
+    ),
+    "invalid_order_refusal": _c(
+        InvalidParameter, "live-trading",
+        "order_check returned something other than None, a code, or an object with a str code; or the code is empty, over 64 bytes, or the 1025th distinct one.",
+    ),
+    "order_check_intent": _c(
+        InvalidOrder, "live-trading",
+        "enter() or close_position() was used with an order_check installed; they carry no order for it to see.",
+    ),
+    "unknown_role_binding": _c(
+        InvalidParameter, "live-trading", "bindings names a role that no strategy declares."
+    ),
+    "no_instrument_spec": _c(
+        UnknownSymbol, "instruments", "ctx.instrument was asked for a symbol with no InstrumentSpec."
+    ),
+    "unresolved_role": _c(
+        UnknownSymbol, "instruments", "ctx.role could not resolve a requirements role at this time."
+    ),
+    "invalid_adjust": _c(
+        InvalidParameter, "market-data", "continuous_series needs adjust to be 'raw', 'back' or 'ratio'."
+    ),
+    "no_continuous_bars": _c(
+        InvalidData, "market-data", "A continuous series has no bars in a contract's window, or an older contract has none before a roll."
+    ),
+    "roll_target_not_subscribed": _c(
+        InvalidSubscription, "live-trading", "A continuous role rolled to a contract that is not a symbol of the run."
+    ),
+    "invalid_exit_rule": _c(
+        InvalidParameter, "live-trading",
+        "An exit rule is empty, has a non-positive or non-finite threshold, names no or several targets, or fired with no position.",
+    ),
+    "unknown_role": _c(
+        UnknownSymbol, "instruments", "ctx.role was asked for a role the strategy's requirements do not declare."
+    ),
+    "no_requirements": _c(
+        InvalidParameter, "instruments", "ctx.role was used by a strategy that declares no requirements."
+    ),
+    "invalid_warmup": _c(
+        InvalidParameter, "live-trading", "warmup is not 'live', 'muted' or None."
+    ),
     # Lifecycle
     "session_finished": _c(
         SessionFinished, "backtesting", "The session is finished; create a new one."
@@ -535,6 +599,74 @@ CODES: dict[str, Code] = {
         StateError, "live-trading",
         "A request may not have reached the venue; the order stays as it was until the venue reports.",
     ),
+    "journal_failed": _c(
+        StateError, "live-trading",
+        "The journal could not take a record, so the node stopped before acting on it.",
+    ),
+    "journal_evicted": _c(
+        StateError, "live-trading",
+        "A journal read asked for records a bounded memory has dropped; read them from the durable sink.",
+    ),
+    "replay_diverged": _c(
+        StateError, "live-trading",
+        "A replay produced a record that is not the one the journal holds: the node is not the one that wrote it, or a strategy is not deterministic.",
+    ),
+    "invalid_checkpoint": _c(
+        InvalidData, "live-trading",
+        "The checkpoint or journal records cannot be used to rebuild the node.",
+    ),
+    "instrument_in_use": _c(
+        StateError, "live-trading",
+        "An instrument cannot be retired while a strategy holds a position or a working order on it.",
+    ),
+    "instrument_retired": _c(
+        StateError, "live-trading",
+        "The instrument was already retired from the node.",
+    ),
+    "invalid_strategies": _c(
+        InvalidParameter, "live-trading",
+        "strategies must name existing strategies of the node, each once.",
+    ),
+    "invalid_instrument_spec": _c(
+        InvalidParameter, "live-trading",
+        "The spec given for an instrument names another symbol.",
+    ),
+    "recovering": _c(
+        StateError, "live-trading",
+        "The node was rebuilt from its journal and has not resumed: reconcile with the venue, then resume.",
+    ),
+    "fenced": _c(
+        StateError, "live-trading",
+        "A newer execution epoch owns the account; this node sends nothing more.",
+    ),
+    "fence_unsupported": _c(
+        InvalidParameter, "live-trading",
+        "epoch= was given with an adapter whose can_fence is not true, so the epoch would protect nothing.",
+    ),
+    "stale_epoch": _c(
+        StateError, "live-trading",
+        "restore() was given an epoch older than the one the journal already holds.",
+    ),
+    "adapter_namespace_missing": _c(
+        InvalidParameter, "live-trading",
+        "An execution adapter must expose a non-empty namespace that marks the orders of one node.",
+    ),
+    "adapter_namespace_mismatch": _c(
+        StateError, "live-trading",
+        "restore() was given an adapter whose namespace is not the one the journal was written for.",
+    ),
+    "roll_close_failed": _c(
+        StateError, "live-trading",
+        "The close of an auto-roll ended without filling, so the open in the new contract was not sent.",
+    ),
+    "no_reconcile": _c(
+        UnsupportedOperation, "live-trading",
+        "The adapter cannot say what the venue holds (no open_orders, positions or balances).",
+    ),
+    "correction_not_reversible": _c(
+        StateError, "live-trading",
+        "A correction or bust cannot be applied to the book as it stands: reconcile the position.",
+    ),
     "paper_unsolicited_position_change": _c(
         StateError, "live-trading",
         "The simulated venue changed a position with no order behind it.",
@@ -547,6 +679,10 @@ CODES: dict[str, Code] = {
     ),
     "run_finished": _c(
         StateError, "backtesting", "The strategy's run is finished."
+    ),
+    "node_poisoned": _c(
+        StateError, "live-trading",
+        "A call stopped part way through a booking; the node's books cannot be trusted. Rebuild it from the venue's positions.",
     ),
 }
 

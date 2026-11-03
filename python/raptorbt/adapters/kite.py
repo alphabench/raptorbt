@@ -29,6 +29,7 @@ per order with the tag ``product`` or for all with ``default_product``. A tag
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -36,7 +37,7 @@ from typing import Any
 from raptorbt.execution import OrderRequest, Unsupported
 
 from ._limits import RateLimiter, TokenBucket
-from ._rest import ist_ns, num, price, rest
+from ._rest import ist_ns, need_num, num, price, rest
 from .base import (
     CANCELLED,
     FILLED,
@@ -93,8 +94,26 @@ def verify_postback(payload: Mapping[str, Any], api_secret: str) -> bool:
     Call it on the raw body's decoded JSON before ``handle_payload``. The secret
     is used here and not kept.
     """
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return False
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("checksum"), str):
+        return False
     raw = f"{payload.get('order_id', '')}{payload.get('order_timestamp', '')}{api_secret}"
-    return hashlib.sha256(raw.encode()).hexdigest() == payload.get("checksum")
+    return hmac.compare_digest(hashlib.sha256(raw.encode()).hexdigest(), payload["checksum"])
+
+
+def postback_verifier(api_secret: str) -> Callable[[Any], bool]:
+    """A ``verifier=`` for the adapter: accepts only postbacks whose checksum verifies.
+
+    The secret lives in the returned closure and is not exposed by the adapter. Order updates
+    that arrive over the account's own websocket carry no checksum: pass ``authenticated=True``
+    to ``handle_payload`` for them (the socket was opened with the access token), or build the
+    adapter with ``trusted=True`` if every channel is host-authenticated.
+    """
+    return lambda payload: verify_postback(payload, api_secret)
 
 
 class KiteAdapter(BrokerAdapter):
@@ -104,6 +123,7 @@ class KiteAdapter(BrokerAdapter):
     products = frozenset(_PRODUCT)
     tag_max_len = 20
     tag_charset = "A-Za-z0-9"
+    currency = "INR"
 
     def __init__(
         self,
@@ -226,6 +246,7 @@ class KiteAdapter(BrokerAdapter):
     def _row(self, d: Mapping[str, Any]) -> OrderStatusUpdate | None:
         status = _STATUS.get(str(d.get("status", "")).upper())
         if status is None or not d.get("order_id"):
+            self._unmapped_status(d.get("order_id"), d.get("status"), d.get("tag") or (d.get("tags") or [None])[0])
             return None
         key = f"{d.get('exchange')}:{d.get('tradingsymbol')}"
         return OrderStatusUpdate(
@@ -237,7 +258,7 @@ class KiteAdapter(BrokerAdapter):
             order_type=_ORDER_TYPE_BACK.get(d.get("order_type")),
             product=_PRODUCT_BACK.get(d.get("product")),
             quantity=num(d.get("quantity")),
-            filled_qty=num(d.get("filled_quantity"), 0.0) or 0.0,
+            filled_qty=need_num(d, "filled_quantity", what="Kite order"),
             avg_price=price(d.get("average_price")),
             limit_price=price(d.get("price")),
             trigger_price=price(d.get("trigger_price")),
@@ -252,7 +273,7 @@ class KiteAdapter(BrokerAdapter):
     def fetch_trades(self) -> list[TradeRow]:
         rows = self._do("GET", "/trades", write=False) or []
         return [
-            TradeRow(str(d["trade_id"]), str(d["order_id"]), num(d["quantity"], 0.0) or 0.0, num(d["average_price"], 0.0) or 0.0, ist_ns(d.get("fill_timestamp")))
+            TradeRow(str(d["trade_id"]), str(d["order_id"]), need_num(d, "quantity", what="Kite trade"), need_num(d, "average_price", what="Kite trade"), ist_ns(d.get("fill_timestamp")))
             for d in rows
         ]  # fmt: skip
 
@@ -260,16 +281,17 @@ class KiteAdapter(BrokerAdapter):
         data = self._do("GET", "/portfolio/positions", write=False) or {}
         out = []
         for d in data.get("net", []):
-            qty = num(d.get("quantity"), 0.0) or 0.0
+            qty = need_num(d, "quantity", what="Kite position")
             if qty == 0:
                 continue
             key = f"{d.get('exchange')}:{d.get('tradingsymbol')}"
-            out.append(VenuePosition(self.symbol_of(key) or key, qty, num(d.get("average_price"), 0.0) or 0.0, _PRODUCT_BACK.get(d.get("product"))))
+            out.append(VenuePosition(self.symbol_of(key) or key, qty, need_num(d, "average_price", what="Kite position"), _PRODUCT_BACK.get(d.get("product"))))
         return out
 
     def fetch_balances(self) -> VenueBalances:
         data = (self._do("GET", "/user/margins", write=False) or {}).get(self._segment) or {}
-        avail = data.get("available") or {}
-        used = (data.get("utilised") or {}).get("debits")
-        a = num(avail.get("live_balance"))
-        return VenueBalances(available=a if a is not None else (num(data.get("net"), 0.0) or 0.0), used=num(used), total=num(data.get("net")))
+        avail = need_num(data.get("available") or {}, "live_balance", what=f"Kite {self._segment} margin")
+        return VenueBalances(
+            available=avail, currency=self.currency,
+            used=num((data.get("utilised") or {}).get("debits")), total=num(data.get("net")),
+        )  # fmt: skip

@@ -10,11 +10,13 @@
 use pyo3::prelude::*;
 
 pub mod accounts;
+pub mod capabilities;
 pub mod core;
 pub mod data;
 pub mod execution;
 pub mod indicators;
 pub mod instruments;
+pub mod journal;
 pub mod math;
 pub mod metrics;
 pub mod portfolio;
@@ -93,6 +95,11 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<python::runtime_bindings::PyKernelDriver>()?;
     m.add_class::<python::execution_bindings::PyOrderRequest>()?;
     m.add_class::<python::execution_bindings::PyExecutionReport>()?;
+    m.add_class::<python::journal_bindings::PyJournal>()?;
+    m.add_class::<python::journal_bindings::PyRecord>()?;
+    m.add_function(wrap_pyfunction!(python::journal_bindings::py_chain_step, m)?)?;
+    m.add_function(wrap_pyfunction!(python::journal_bindings::py_chain_start, m)?)?;
+    m.add_function(wrap_pyfunction!(python::journal_bindings::py_canonical, m)?)?;
     m.add_class::<python::strategy_bindings::PyEngineEvent>()?;
     m.add_class::<python::strategy_bindings::PyPositionSnapshot>()?;
     m.add_function(wrap_pyfunction!(python::strategy_bindings::resolve_atr_period, m)?)?;
@@ -145,19 +152,31 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::bindings::oi_position_pct, m)?)?;
     m.add_function(wrap_pyfunction!(python::bindings::tick_velocity, m)?)?;
 
-    // Register indicator functions
-    m.add_function(wrap_pyfunction!(python::bindings::sma, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::ema, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::rsi, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::macd, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::stochastic, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::atr, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::bollinger_bands, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::adx, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::vwap, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::supertrend, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::rolling_min, m)?)?;
-    m.add_function(wrap_pyfunction!(python::bindings::rolling_max, m)?)?;
+    // Register indicator functions. The names are recorded as they are
+    // registered, so `capabilities()` lists exactly these.
+    let mut indicator_functions: Vec<String> = Vec::new();
+    macro_rules! indicator {
+        ($f:path) => {{
+            let f = wrap_pyfunction!($f, m)?;
+            indicator_functions.push(f.getattr("__name__")?.extract()?);
+            m.add_function(f)?;
+        }};
+    }
+    indicator!(python::bindings::sma);
+    indicator!(python::bindings::ema);
+    indicator!(python::bindings::rsi);
+    indicator!(python::bindings::macd);
+    indicator!(python::bindings::stochastic);
+    indicator!(python::bindings::atr);
+    indicator!(python::bindings::bollinger_bands);
+    indicator!(python::bindings::adx);
+    indicator!(python::bindings::vwap);
+    indicator!(python::bindings::supertrend);
+    indicator!(python::bindings::rolling_min);
+    indicator!(python::bindings::rolling_max);
+    m.add("_INDICATOR_FUNCTIONS", indicator_functions)?;
+
+    m.add_function(wrap_pyfunction!(python::capabilities_bindings::capabilities_json, m)?)?;
 
     // Register option pricing, Greeks, implied volatility and the option chain
     python::pricing_bindings::register(m)?;

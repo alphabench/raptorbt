@@ -350,6 +350,14 @@ pub struct Order {
     /// requests. `None` for orders the in-process matcher drives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) broker: Option<Box<super::report::BrokerState>>,
+    /// The bar (or print) ordinal at which the matcher first put the order
+    /// against the market: the first one it could execute on, after a held
+    /// child is released, a closed session opens or a triggered stop-limit
+    /// starts to rest as a limit. A limit that is marketable on that bar
+    /// trades at the market price there; later it rests at its limit. See
+    /// `docs/architecture/fill-rules.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival_idx: Option<usize>,
 }
 
 /// What became of one order, once the run is over.
@@ -501,6 +509,7 @@ impl Order {
             trail_limit: None,
             filled_qty: 0.0,
             broker: None,
+            arrival_idx: None,
         }
     }
 

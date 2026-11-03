@@ -57,7 +57,13 @@ pub enum PaperError {
          or send an exit order"
     )]
     Unsolicited(String),
+    /// A fill the shadow book made could not be priced for its report.
+    #[error("the paper venue could not report a fill: {0}")]
+    Fill(String),
 }
+
+/// How many ended orders the venue keeps entries for.
+pub const RETAINED_ENDED: usize = 1024;
 
 /// See the module docs.
 pub struct PaperVenue {
@@ -68,6 +74,11 @@ pub struct PaperVenue {
     /// The quantity the strategy's book holds each order that the venue sizes
     /// at its fill.
     quantity: HashMap<String, f64>,
+    /// Orders that ended, oldest first. Their entries in the maps above are
+    /// kept for [`RETAINED_ENDED`] orders (an id sent again, or a late
+    /// request for it, still finds the order) and dropped after that, so a
+    /// long run holds a bounded number of orders.
+    ended: std::collections::VecDeque<String>,
     /// Answers to requests that have no market event of their own (a refused
     /// cancel, an acknowledged change), delivered with the next event.
     queued: Vec<Report>,
@@ -92,9 +103,30 @@ impl PaperVenue {
             placed: HashMap::new(),
             fills: HashMap::new(),
             quantity: HashMap::new(),
+            ended: std::collections::VecDeque::new(),
             queued: Vec::new(),
             now_ns: 0,
         }
+    }
+
+    /// Give strategy `strategy`'s shadow book one more instrument, as its newest local
+    /// instrument, configured as the strategy's own book configures it. The venue then steps it
+    /// and takes orders on it. Used when an instrument is added to a running node.
+    pub fn add_instrument(
+        &mut self,
+        strategy: usize,
+        symbol: String,
+        direction: crate::core::types::Direction,
+        spec: Option<crate::instruments::InstrumentSpec>,
+        config: Option<&crate::core::types::InstrumentConfig>,
+        policy: crate::portfolio::ledger::PositionPolicy,
+    ) -> Result<(), AdapterError> {
+        let shadow = self.shadow(strategy)?;
+        let local = shadow.book.add_instrument(symbol.clone(), direction, spec, config, policy);
+        shadow.book.kernel_mut(local).set_venue_managed();
+        shadow.symbols.push(symbol);
+        debug_assert_eq!(shadow.symbols.len(), local + 1);
+        Ok(())
     }
 
     /// Halt a strategy's shadow book: working orders are cancelled (the
@@ -144,6 +176,7 @@ impl PaperVenue {
         managed.take_squareoff();
         let kernel = shadow.book.kernel(entry.instrument);
         let ts = entry.timestamp();
+        let mut ended_now: Vec<String> = Vec::new();
         let mut i = 0;
         while i < events.len() {
             match &events[i] {
@@ -166,8 +199,15 @@ impl PaperVenue {
                         Some(EngineEvent::Exited { trade, .. }) => {
                             kernel.venue_fee(trade.exit_price, trade.size, trade.direction, false)
                         }
-                        _ => 0.0,
-                    };
+                        // The matcher follows every fill with its position
+                        // event; one without cannot be priced.
+                        other => {
+                            return Err(PaperError::Fill(format!(
+                                "the fill of order {order_id} is followed by {other:?}"
+                            )))
+                        }
+                    }
+                    .map_err(|e| PaperError::Fill(e.to_string()))?;
                     // An order sized by the venue at the fill: amend the
                     // strategy's quantity to what traded.
                     if let Some(held) = self.quantity.get_mut(client_id) {
@@ -201,6 +241,9 @@ impl PaperVenue {
                     // the position is closed, and cancels the surplus. A
                     // venue says so: the fill is followed by the cancel.
                     if let Some(order) = kernel.order(*order_id) {
+                        if order.status.is_terminal() {
+                            ended_now.push(client_id.clone());
+                        }
                         if let QtySpec::Units(units) = order.qty {
                             if order.status == OrderStatus::Filled
                                 && order.filled_qty + units * 1e-9 < units
@@ -216,9 +259,11 @@ impl PaperVenue {
                     i += 1;
                 }
                 EngineEvent::OrderCanceled { client_id, .. } => {
+                    ended_now.push(client_id.clone());
                     out.push((client_id.clone(), ExecutionReport::CancelAck { ts_ns: ts }));
                 }
                 EngineEvent::OrderExpired { client_id, .. } => {
+                    ended_now.push(client_id.clone());
                     out.push((client_id.clone(), ExecutionReport::Expired { ts_ns: ts }));
                 }
                 EngineEvent::OrderRejected { client_id, reason, .. } => {
@@ -226,6 +271,7 @@ impl PaperVenue {
                     // order that has already traded. An exchange does not
                     // reject an order it has partly filled: it stops working
                     // the rest, which is a cancel.
+                    ended_now.push(client_id.clone());
                     let report = if self.fills.contains_key(client_id) {
                         ExecutionReport::CancelAck { ts_ns: ts }
                     } else {
@@ -235,11 +281,16 @@ impl PaperVenue {
                 }
                 // A stop-limit arming is internal to the venue.
                 EngineEvent::OrderTriggered { .. } => {}
+                // The venue's own cut of a one-cancels-other sibling: the
+                // sibling's later reports carry the smaller quantity.
+                EngineEvent::OrderResized { .. } => {}
                 // A refused entry or a risk event with an order behind it
                 // arrives as that order's rejection; the rest is the book's
                 // own bookkeeping.
                 EngineEvent::EntryRejected { .. }
                 | EngineEvent::RiskRejected { .. }
+                | EngineEvent::FillBreach { .. }
+                | EngineEvent::FillDeferred { .. }
                 | EngineEvent::RiskHalted { .. } => {}
                 // The strategy's own book raises its margin call from the
                 // same equity; the shadow's only halts its entries.
@@ -260,7 +311,32 @@ impl PaperVenue {
             }
             i += 1;
         }
+        for id in ended_now {
+            self.retire(id);
+        }
         Ok(())
+    }
+
+    /// Note that an order ended; drop the entries of the oldest ended orders
+    /// beyond [`RETAINED_ENDED`].
+    fn retire(&mut self, client_order_id: String) {
+        if self.ended.contains(&client_order_id) {
+            return;
+        }
+        self.ended.push_back(client_order_id);
+        while self.ended.len() > RETAINED_ENDED {
+            if let Some(old) = self.ended.pop_front() {
+                self.placed.remove(&old);
+                self.fills.remove(&old);
+                self.quantity.remove(&old);
+            }
+        }
+    }
+
+    /// The entries held for orders, for tests of the bound.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.placed.len().max(self.fills.len()).max(self.quantity.len())
     }
 }
 

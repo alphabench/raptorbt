@@ -55,22 +55,24 @@ class TestPortfolioModifyOrder:
             "AAA": _bars([100.0, 100.0, 100.0]),
             "BBB": _bars([50.0, 50.0, 48.5], start_ts=5_000_000_000),
         }
-        result = portfolio_runner(S(), data, config=_zero_fee_config())
+        result = portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
 
         trades = result.result.trades()
         assert len(trades) == 1, "only the modified order should fill"
         assert trades[0].symbol == "BBB"
         assert trades[0].entry_price == pytest.approx(49.0)
 
-    def test_modify_unknown_client_id_is_a_noop(self, portfolio_runner):
+    def test_modify_unknown_client_id_is_refused(self, portfolio_runner):
         class S(Strategy):
             def on_bar(self, ctx):
                 if ctx.idx == 0:
                     self.modify_order("never-submitted", limit_price=1.0)
 
         data = {"AAA": _bars([100.0, 101.0])}
-        # Mirrors cancel: an unknown id is skipped, not an error.
-        portfolio_runner(S(), data, config=_zero_fee_config())
+        # Mirrors cancel: an id the run never submitted is a mistake, not a no-op.
+        with pytest.raises(ValueError, match="no order was submitted") as e:
+            portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
+        assert e.value.code == "unknown_order"
 
     def test_modify_rejects_units_and_size_frac_together(self, portfolio_runner):
         class S(Strategy):
@@ -88,7 +90,7 @@ class TestPortfolioModifyOrder:
 
         data = {"AAA": _bars([100.0, 100.0, 100.0])}
         with pytest.raises(ValueError, match="pass units or size_frac, not both"):
-            portfolio_runner(S(), data, config=_zero_fee_config())
+            portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
 
     def test_modify_after_fill_returns_false(self, portfolio_runner):
         class S(Strategy):
@@ -106,7 +108,7 @@ class TestPortfolioModifyOrder:
                     self.modify_order(self.oid, limit_price=95.0)
 
         data = {"AAA": _bars([100.0, 98.0, 98.0])}
-        result = portfolio_runner(S(), data, config=_zero_fee_config())
+        result = portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
         assert len(result.result.trades()) == 1
 
 
@@ -140,7 +142,7 @@ class TestPerSymbolIndicators:
             "BBB": _bars([10.0, 20.0, 30.0, 40.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         # SMA(3) of each symbol's own closes, nothing blended.
         assert strategy.seen["AAA"] == [pytest.approx(200.0), pytest.approx(300.0)]
@@ -168,7 +170,7 @@ class TestPerSymbolIndicators:
             "BBB": _bars([10.0, 20.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         assert set(strategy.fast) == {"AAA", "BBB"}
         assert strategy.values["AAA"] == pytest.approx(150.0)
@@ -191,7 +193,7 @@ class TestPerSymbolIndicators:
         }
         strategy = S()
         with pytest.warns(UserWarning, match="without symbol="):
-            portfolio_runner(strategy, data, config=_zero_fee_config())
+            portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         # Four bars across both symbols: the mean blends them.
         assert strategy.ind.value == pytest.approx(150.0)
@@ -205,7 +207,7 @@ class TestPerSymbolIndicators:
 
         data = {"AAA": _bars([100.0, 101.0])}
         with pytest.raises(ValueError, match="not in this run"):
-            portfolio_runner(S(), data, config=_zero_fee_config())
+            portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
 
     def test_indicators_initialized_spans_symbols(self, portfolio_runner):
         class S(Strategy):
@@ -227,7 +229,7 @@ class TestPerSymbolIndicators:
             "BBB": _bars([50.0, 51.0, 52.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         # False until the slowest symbol's indicator has warmed.
         assert strategy.ready_at[0] is False
@@ -253,10 +255,10 @@ class TestPerSymbolIndicators:
             "BBB": _bars([10.0, 20.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
         first = dict(strategy.last)
         # Re-running the same instance must not accumulate registrations.
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         assert len(strategy._indicators) == 2
         assert strategy.last == first
@@ -264,16 +266,17 @@ class TestPerSymbolIndicators:
 
 class TestPerSymbolCompositeBars:
     def test_composite_bars_are_built_per_symbol(self, portfolio_runner):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.bars = []
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.bars = []
 
-            def on_start(self, ctx):
-                self.h = self.subscribe_bars(2, "s")
+                def on_start(self, ctx):
+                    self.h = self.subscribe_bars(2, "s")
 
-            def on_composite_bar(self, ctx, bar):
-                self.bars.append((bar.symbol, ctx.symbol, bar.close))
+                def on_composite_bar(self, ctx, bar):
+                    self.bars.append((bar.symbol, ctx.symbol, bar.close))
 
         # 1-second bars; a 2s composite completes every two bars per symbol.
         data = {
@@ -283,7 +286,7 @@ class TestPerSymbolCompositeBars:
             ),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         assert strategy.bars, "composite bars must dispatch in portfolio runs"
         # bar.symbol and ctx.symbol agree, and closes come from that symbol.
@@ -295,19 +298,20 @@ class TestPerSymbolCompositeBars:
                 assert close < 100.0
 
     def test_composite_dispatches_before_its_own_symbols_on_bar(self, portfolio_runner):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.events = []
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.events = []
 
-            def on_start(self, ctx):
-                self.h = self.subscribe_bars(2, "s")
+                def on_start(self, ctx):
+                    self.h = self.subscribe_bars(2, "s")
 
-            def on_composite_bar(self, ctx, bar):
-                self.events.append(("composite", bar.symbol, bar.timestamp))
+                def on_composite_bar(self, ctx, bar):
+                    self.events.append(("composite", bar.symbol, bar.timestamp))
 
-            def on_bar(self, ctx):
-                self.events.append(("bar", ctx.symbol, ctx.bar.timestamp))
+                def on_bar(self, ctx):
+                    self.events.append(("bar", ctx.symbol, ctx.bar.timestamp))
 
         data = {
             "AAA": _bars([100.0, 101.0, 102.0, 103.0], step=1_000_000_000),
@@ -316,7 +320,7 @@ class TestPerSymbolCompositeBars:
             ),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         composites = [row for row in strategy.events if row[0] == "composite"]
         assert composites, "composite bars must dispatch in portfolio runs"
@@ -333,24 +337,25 @@ class TestPerSymbolCompositeBars:
             assert ts <= next_ts
 
     def test_indicator_on_a_composite_stream_per_symbol(self, portfolio_runner):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.values = {}
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.values = {}
 
-            def on_start(self, ctx):
-                self.h = self.subscribe_bars(2, "s")
-                self.trend = {
-                    s: self.register_indicator(
-                        Indicator.sma(2), stream_id=self.h, symbol=s
-                    )
-                    for s in ctx.symbols
-                }
+                def on_start(self, ctx):
+                    self.h = self.subscribe_bars(2, "s")
+                    self.trend = {
+                        s: self.register_indicator(
+                            Indicator.sma(2), stream_id=self.h, symbol=s
+                        )
+                        for s in ctx.symbols
+                    }
 
-            def on_composite_bar(self, ctx, bar):
-                value = self.trend[bar.symbol].value
-                if value is not None:
-                    self.values[bar.symbol] = value
+                def on_composite_bar(self, ctx, bar):
+                    value = self.trend[bar.symbol].value
+                    if value is not None:
+                        self.values[bar.symbol] = value
 
         # Six bars per symbol so the 2s stream completes enough composites
         # for an SMA(2) over that stream to warm up.
@@ -365,7 +370,7 @@ class TestPerSymbolCompositeBars:
             ),
         }
         strategy = S()
-        portfolio_runner(strategy, data, config=_zero_fee_config())
+        portfolio_runner(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         # Each symbol's composite-stream SMA stays in its own price range —
         # a shared indicator would blend them into the middle.
@@ -373,19 +378,20 @@ class TestPerSymbolCompositeBars:
         assert strategy.values["BBB"] < 50.0
 
     def test_order_from_on_composite_bar_routes_to_that_symbol(self, portfolio_runner):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.sent = False
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.sent = False
 
-            def on_start(self, ctx):
-                self.h = self.subscribe_bars(2, "s")
+                def on_start(self, ctx):
+                    self.h = self.subscribe_bars(2, "s")
 
-            def on_composite_bar(self, ctx, bar):
-                # Unrouted submit: must target the completing symbol.
-                if bar.symbol == "BBB" and not self.sent:
-                    self.sent = True
-                    self.submit_order(orders.Market(side="buy", units=5.0))
+                def on_composite_bar(self, ctx, bar):
+                    # Unrouted submit: must target the completing symbol.
+                    if bar.symbol == "BBB" and not self.sent:
+                        self.sent = True
+                        self.submit_order(orders.Market(side="buy", units=5.0))
 
         data = {
             "AAA": _bars([100.0, 101.0, 102.0, 103.0], step=1_000_000_000),
@@ -393,7 +399,7 @@ class TestPerSymbolCompositeBars:
                 [50.0, 51.0, 52.0, 53.0], start_ts=5_000_000_000, step=1_000_000_000
             ),
         }
-        result = portfolio_runner(S(), data, config=_zero_fee_config())
+        result = portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
 
         trades = result.result.trades()
         assert len(trades) == 1

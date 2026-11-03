@@ -113,193 +113,194 @@ def _dump(o, depth=0):
     return tuple(out)
 
 
-class Rec(Strategy):
-    """Logs every hook with what it saw; decides deterministically from it."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class Rec(Strategy):
+        """Logs every hook with what it saw; decides deterministically from it."""
 
-    def __init__(self, p):
-        super().__init__()
-        self.p = p
-        self.rec = []
-        self.last15 = {}
+        def __init__(self, p):
+            super().__init__()
+            self.p = p
+            self.rec = []
+            self.last15 = {}
 
-    # -- observation ------------------------------------------------------
-    def _ind(self):
-        return tuple(
-            (name, sym, _dump(ind.value), ind.initialized)
-            for name, group in self.inds.items()
-            for sym, ind in group.items()
-        )
-
-    def _cache(self):
-        c = self.cache
-        recs = c.orders()
-        return (
-            len(recs),
-            tuple(r.client_id for r in c.orders_open()),
-            _dump(recs[-1]) if recs else None,
-            len(c.closed_trades()),
-            repr(c.realized_pnl()),
-        )
-
-    def _ctx(self, ctx):
-        sym = ctx.symbol
-        return (
-            sym, ctx.idx, ctx.timestamp, ctx.bar_close_ts, _dump(tuple(ctx.bar)),
-            repr(ctx.equity), repr(ctx.cash), repr(ctx.free_capital),
-            _dump(ctx.position), _dump(ctx.positions()), _dump(ctx.position_for(sym)),
-            repr(ctx.net_position), ctx.is_flat,
-            _dump(ctx.open_orders()),
-        )
-
-    def _log(self, hook, ctx, *extra):
-        self.rec.append((hook, self._ctx(ctx), self._ind(), self._cache(), _dump(extra)))
-
-    # -- hooks ------------------------------------------------------------
-    def on_start(self, ctx):
-        p = self.p
-        syms = list(ctx.symbols)
-        self.rec.append(
-            ("start", tuple(syms), repr(ctx.equity), repr(ctx.cash), repr(ctx.free_capital))
-        )
-        reg = self.register_indicators
-        self.inds = {
-            "sma_f": reg(lambda: Indicator.sma(p["fast"]), syms),
-            "sma_s": reg(lambda: Indicator.sma(p["slow"]), syms),
-            "ema": reg(lambda: Indicator.ema(p["ema"]), syms),
-            "rsi": reg(lambda: Indicator.rsi(p["rsi"]), syms),
-            "atr": reg(lambda: Indicator.atr(p["atr"]), syms),
-        }
-        self.s5 = self.s15 = self.s1d = None
-        if p["sub5"]:
-            self.s5 = self.subscribe_bars(5, "m")
-            self.inds["ema5"] = reg(lambda: Indicator.ema(4), syms, stream_id=self.s5)
-        if p["sub15"]:
-            self.s15 = self.subscribe_bars(15, "m")
-            self.inds["sma15"] = reg(lambda: Indicator.sma(3), syms, stream_id=self.s15)
-        if p["sub1d"]:
-            self.s1d = self.subscribe_bars(1, "d")
-        # Anchored at the data: a timer starting at the epoch would spin
-        # through every missed interval on its first firing.
-        self.clock.set_timer(
-            "timer", p["timer_min"] * MIN_NS, start_ns=p["t0"] + p["timer_min"] * MIN_NS
-        )
-        self.clock.set_time_alert("alert", p["t0"] + p["alert_min"] * MIN_NS)
-
-    def on_stop(self, ctx):
-        self._log("stop", ctx)
-
-    def on_time_event(self, ctx, event):
-        self._log("time", ctx, tuple(event))
-
-    def on_composite_bar(self, ctx, bar):
-        if bar.stream_id == self.s15:
-            self.last15[bar.symbol] = bar.close
-        self._log("composite", ctx, bar)
-
-    def on_order_filled(self, ctx, e):
-        self._log("filled", ctx, e)
-
-    def on_order_rejected(self, ctx, e):
-        self._log("rejected", ctx, e)
-
-    def on_order_accepted(self, ctx, e):
-        self._log("accepted", ctx, e)
-
-    def on_order_triggered(self, ctx, e):
-        self._log("triggered", ctx, e)
-
-    def on_order_canceled(self, ctx, e):
-        self._log("canceled", ctx, e)
-
-    def on_order_expired(self, ctx, e):
-        self._log("expired", ctx, e)
-
-    def on_order_event(self, ctx, e):
-        self._log("order_event", ctx, e)
-
-    def on_margin_call(self, ctx, e):
-        self._log("margin_call", ctx, e)
-
-    def on_position_opened(self, ctx, e):
-        self._log("opened", ctx, e)
-
-    def on_position_closed(self, ctx, e):
-        self._log("closed", ctx, e)
-
-    def on_bar(self, ctx):
-        self._log("bar", ctx)
-        p, sym = self.p, ctx.symbol
-        fast, slow = self.inds["sma_f"][sym].value, self.inds["sma_s"][sym].value
-        rsi = self.inds["rsi"][sym].value
-        atr = self.inds["atr"][sym].value
-        side = "buy" if p["dirs"].get(sym, 1) > 0 else "sell"
-        exit_side = "sell" if side == "buy" else "buy"
-        px = ctx.bar.close
-        positions = ctx.positions()
-        working = ctx.open_orders()
-
-        # Cancel the oldest resting order now and then, by cache state.
-        open_ids = [r.client_id for r in self.cache.orders_open()]
-        if p["cancel_every"] and ctx.idx % p["cancel_every"] == 0 and working and open_ids:
-            self.cancel_order(open_ids[0])
-
-        # Exits.
-        exit_now = (
-            fast is not None and slow is not None
-            and (fast < slow if side == "buy" else fast > slow)
-        ) or (rsi is not None and rsi > p["rsi_hi"] and side == "buy")
-        if positions and exit_now:
-            if p["hedging"]:
-                self.close_position(position_id=positions[0].position_id)
-            elif p["close_kind"] == "intent":
-                self.close_position()
-            else:
-                self.submit_order(orders.Market(side=exit_side, reduce_only=True))
-            return
-
-        # Entries.
-        room = (len(positions) < 3) if p["hedging"] else (not positions)
-        throttled = len(self.cache.orders_open()) >= 2 or len(working) >= 2
-        gate = (
-            sym not in self.last15 or not p["sub15"]
-            or self.inds["sma15"][sym].value is None
-            or self.last15[sym] >= self.inds["sma15"][sym].value
-        )
-        trend = fast is None or slow is None or (fast > slow if side == "buy" else fast < slow)
-        due = ctx.idx % p["every"] == p["offset"]
-        if not (room and due and trend and gate and not throttled):
-            return
-        kind = p["entry"]
-        if kind == "mixed":
-            kind = ENTRY_KINDS[(ctx.idx // p["every"]) % 5]
-        frac = p["frac"]
-        off = p["off"] + (0.0 if atr is None else 0.1 * atr / px)
-        if kind == "intent":
-            self.enter(size_frac=frac)
-        elif kind == "market":
-            self.submit_order(orders.Market(side=side, size_frac=frac, tif="gtc"))
-        elif kind == "limit":
-            price = round(px * (1 - off if side == "buy" else 1 + off), 2)
-            self.submit_order(
-                orders.Limit(side=side, size_frac=frac, price=price, tif=p["tif"])
+        # -- observation ------------------------------------------------------
+        def _ind(self):
+            return tuple(
+                (name, sym, _dump(ind.value), ind.initialized)
+                for name, group in self.inds.items()
+                for sym, ind in group.items()
             )
-        elif kind == "stop":
-            trig = round(px * (1 + off if side == "buy" else 1 - off), 2)
-            self.submit_order(
-                orders.StopMarket(side=side, size_frac=frac, trigger=trig, tif=p["tif"])
+
+        def _cache(self):
+            c = self.cache
+            recs = c.orders()
+            return (
+                len(recs),
+                tuple(r.client_id for r in c.orders_open()),
+                _dump(recs[-1]) if recs else None,
+                len(c.closed_trades()),
+                repr(c.realized_pnl()),
             )
-        else:  # bracket
-            up, dn = round(px * (1 + 1.5 * off), 2), round(px * (1 - off), 2)
-            stop, tgt = (dn, up) if side == "buy" else (up, dn)
-            if p["hedging"]:
-                # Bracket legs are netting-only; attach levels to the position.
+
+        def _ctx(self, ctx):
+            sym = ctx.symbol
+            return (
+                sym, ctx.idx, ctx.timestamp, ctx.bar_close_ts, _dump(tuple(ctx.bar)),
+                repr(ctx.equity), repr(ctx.cash), repr(ctx.free_capital),
+                _dump(ctx.position), _dump(ctx.positions()), _dump(ctx.position_for(sym)),
+                repr(ctx.net_position), ctx.is_flat,
+                _dump(ctx.open_orders()),
+            )
+
+        def _log(self, hook, ctx, *extra):
+            self.rec.append((hook, self._ctx(ctx), self._ind(), self._cache(), _dump(extra)))
+
+        # -- hooks ------------------------------------------------------------
+        def on_start(self, ctx):
+            p = self.p
+            syms = list(ctx.symbols)
+            self.rec.append(
+                ("start", tuple(syms), repr(ctx.equity), repr(ctx.cash), repr(ctx.free_capital))
+            )
+            reg = self.register_indicators
+            self.inds = {
+                "sma_f": reg(lambda: Indicator.sma(p["fast"]), syms),
+                "sma_s": reg(lambda: Indicator.sma(p["slow"]), syms),
+                "ema": reg(lambda: Indicator.ema(p["ema"]), syms),
+                "rsi": reg(lambda: Indicator.rsi(p["rsi"]), syms),
+                "atr": reg(lambda: Indicator.atr(p["atr"]), syms),
+            }
+            self.s5 = self.s15 = self.s1d = None
+            if p["sub5"]:
+                self.s5 = self.subscribe_bars(5, "m")
+                self.inds["ema5"] = reg(lambda: Indicator.ema(4), syms, stream_id=self.s5)
+            if p["sub15"]:
+                self.s15 = self.subscribe_bars(15, "m")
+                self.inds["sma15"] = reg(lambda: Indicator.sma(3), syms, stream_id=self.s15)
+            if p["sub1d"]:
+                self.s1d = self.subscribe_bars(1, "d")
+            # Anchored at the data: a timer starting at the epoch would spin
+            # through every missed interval on its first firing.
+            self.clock.set_timer(
+                "timer", p["timer_min"] * MIN_NS, start_ns=p["t0"] + p["timer_min"] * MIN_NS
+            )
+            self.clock.set_time_alert("alert", p["t0"] + p["alert_min"] * MIN_NS)
+
+        def on_stop(self, ctx):
+            self._log("stop", ctx)
+
+        def on_timer(self, ctx, event):
+            self._log("time", ctx, tuple(event))
+
+        def on_composite_bar(self, ctx, bar):
+            if bar.stream_id == self.s15:
+                self.last15[bar.symbol] = bar.close
+            self._log("composite", ctx, bar)
+
+        def on_fill(self, ctx, e):
+            self._log("filled", ctx, e)
+
+        def on_order_rejected(self, ctx, e):
+            self._log("rejected", ctx, e)
+
+        def on_order_accepted(self, ctx, e):
+            self._log("accepted", ctx, e)
+
+        def on_order_triggered(self, ctx, e):
+            self._log("triggered", ctx, e)
+
+        def on_order_canceled(self, ctx, e):
+            self._log("canceled", ctx, e)
+
+        def on_order_expired(self, ctx, e):
+            self._log("expired", ctx, e)
+
+        def on_order_event(self, ctx, e):
+            self._log("order_event", ctx, e)
+
+        def on_margin_call(self, ctx, e):
+            self._log("margin_call", ctx, e)
+
+        def on_position_opened(self, ctx, e):
+            self._log("opened", ctx, e)
+
+        def on_position_closed(self, ctx, e):
+            self._log("closed", ctx, e)
+
+        def on_bar(self, ctx):
+            self._log("bar", ctx)
+            p, sym = self.p, ctx.symbol
+            fast, slow = self.inds["sma_f"][sym].value, self.inds["sma_s"][sym].value
+            rsi = self.inds["rsi"][sym].value
+            atr = self.inds["atr"][sym].value
+            side = "buy" if p["dirs"].get(sym, 1) > 0 else "sell"
+            exit_side = "sell" if side == "buy" else "buy"
+            px = ctx.bar.close
+            positions = ctx.positions()
+            working = ctx.open_orders()
+
+            # Cancel the oldest resting order now and then, by cache state.
+            open_ids = [r.client_id for r in self.cache.orders_open()]
+            if p["cancel_every"] and ctx.idx % p["cancel_every"] == 0 and working and open_ids:
+                self.cancel_order(open_ids[0])
+
+            # Exits.
+            exit_now = (
+                fast is not None and slow is not None
+                and (fast < slow if side == "buy" else fast > slow)
+            ) or (rsi is not None and rsi > p["rsi_hi"] and side == "buy")
+            if positions and exit_now:
+                if p["hedging"]:
+                    self.close_position(position_id=positions[0].position_id)
+                elif p["close_kind"] == "intent":
+                    self.close_position()
+                else:
+                    self.submit_order(orders.Market(side=exit_side, reduce_only=True))
+                return
+
+            # Entries.
+            room = (len(positions) < 3) if p["hedging"] else (not positions)
+            throttled = len(self.cache.orders_open()) >= 2 or len(working) >= 2
+            gate = (
+                sym not in self.last15 or not p["sub15"]
+                or self.inds["sma15"][sym].value is None
+                or self.last15[sym] >= self.inds["sma15"][sym].value
+            )
+            trend = fast is None or slow is None or (fast > slow if side == "buy" else fast < slow)
+            due = ctx.idx % p["every"] == p["offset"]
+            if not (room and due and trend and gate and not throttled):
+                return
+            kind = p["entry"]
+            if kind == "mixed":
+                kind = ENTRY_KINDS[(ctx.idx // p["every"]) % 5]
+            frac = p["frac"]
+            off = p["off"] + (0.0 if atr is None else 0.1 * atr / px)
+            if kind == "intent":
+                self.enter(size_frac=frac)
+            elif kind == "market":
+                self.submit_order(orders.Market(side=side, size_frac=frac, tif="gtc"))
+            elif kind == "limit":
+                price = round(px * (1 - off if side == "buy" else 1 + off), 2)
                 self.submit_order(
-                    orders.Market(
-                        side=side, size_frac=frac, stop_price=stop, target_price=tgt
-                    )
+                    orders.Limit(side=side, size_frac=frac, price=price, tif=p["tif"])
                 )
-            else:
-                self.submit_bracket(orders.Market(side=side, size_frac=frac), stop, tgt)
+            elif kind == "stop":
+                trig = round(px * (1 + off if side == "buy" else 1 - off), 2)
+                self.submit_order(
+                    orders.StopMarket(side=side, size_frac=frac, trigger=trig, tif=p["tif"])
+                )
+            else:  # bracket
+                up, dn = round(px * (1 + 1.5 * off), 2), round(px * (1 - off), 2)
+                stop, tgt = (dn, up) if side == "buy" else (up, dn)
+                if p["hedging"]:
+                    # Bracket legs are netting-only; attach levels to the position.
+                    self.submit_order(
+                        orders.Market(
+                            side=side, size_frac=frac, stop_price=stop, target_price=tgt
+                        )
+                    )
+                else:
+                    self.submit_bracket(orders.Market(side=side, size_frac=frac), stop, tgt)
 
 
 def _start(data):

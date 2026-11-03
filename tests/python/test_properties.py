@@ -599,58 +599,59 @@ def test_portfolio_monte_carlo_is_independent_of_thread_count(seed):
 # ---------------------------------------------------------------------------
 # 8. stamp equivalence, randomised
 # ---------------------------------------------------------------------------
-class _Rand(Strategy):
-    """Random-parameter strategy touching fills, resting orders, DAY expiry,
-    composite bars and the clock; records only close-time quantities."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _Rand(Strategy):
+        """Random-parameter strategy touching fills, resting orders, DAY expiry,
+        composite bars and the clock; records only close-time quantities."""
 
-    def __init__(self, p):
-        super().__init__()
-        self.p = p
-        self.trace = []
-        self.raw = []
+        def __init__(self, p):
+            super().__init__()
+            self.p = p
+            self.trace = []
+            self.raw = []
 
-    def on_start(self, ctx):
-        syms = list(getattr(ctx, "symbols", [None]))
-        self.fast = self.register_indicators(lambda: raptorbt.Indicator.sma(self.p["fast"]), syms)
-        self.slow = self.register_indicators(lambda: raptorbt.Indicator.sma(self.p["slow"]), syms)
-        self.comp_stream = self.subscribe_bars(self.p["comp"], "m")
-        self.last = {}
+        def on_start(self, ctx):
+            syms = list(getattr(ctx, "symbols", [None]))
+            self.fast = self.register_indicators(lambda: raptorbt.Indicator.sma(self.p["fast"]), syms)
+            self.slow = self.register_indicators(lambda: raptorbt.Indicator.sma(self.p["slow"]), syms)
+            self.comp_stream = self.subscribe_bars(self.p["comp"], "m")
+            self.last = {}
 
-    @staticmethod
-    def _sym(ctx):
-        return getattr(ctx, "symbol", None)
+        @staticmethod
+        def _sym(ctx):
+            return getattr(ctx, "symbol", None)
 
-    def on_composite_bar(self, ctx, bar):
-        self.last[bar.symbol] = bar.close
-        self.trace.append(("comp", self._sym(ctx), tuple(bar)))
+        def on_composite_bar(self, ctx, bar):
+            self.last[bar.symbol] = bar.close
+            self.trace.append(("comp", self._sym(ctx), tuple(bar)))
 
-    def on_order_filled(self, ctx, e):
-        self.trace.append(("fill", self._sym(ctx), ctx.bar_close_ts, e.kind, e.price, e.size))
+        def on_fill(self, ctx, e):
+            self.trace.append(("fill", self._sym(ctx), ctx.bar_close_ts, e.kind, e.price, e.size))
 
-    def on_order_expired(self, ctx, e):
-        self.trace.append(("expired", self._sym(ctx), ctx.bar_close_ts))
+        def on_order_expired(self, ctx, e):
+            self.trace.append(("expired", self._sym(ctx), ctx.bar_close_ts))
 
-    def on_bar(self, ctx):
-        sym, now, pos = self._sym(ctx), ctx.bar_close_ts, ctx.position
-        self.raw.append((sym, ctx.timestamp, now))
-        fast, slow = self.fast[sym].value, self.slow[sym].value
-        self.trace.append(("bar", sym, now, tuple(ctx.bar)[1:], fast, slow, ctx.equity,
-                           None if pos is None else (pos.size, pos.entry_price)))
-        minute = ((now + synthetic.IST_OFFSET_NS) // NS_MIN) % 1440
-        late = minute >= 15 * 60 + 25
-        if pos is not None and late:
-            self.close_position()
-            return
-        if ctx.idx % self.p["limit_every"] == 3 and pos is None and not late:
-            self.submit_order(orders.Limit(
-                side="buy", units=2.0, price=round(ctx.bar.close * self.p["limit_off"], 2),
-                tif=self.p["tif"]))
-        if fast is None or slow is None or late:
-            return
-        if pos is None and fast > slow:
-            self.enter(size_frac=self.p["frac"])
-        elif pos is not None and fast < slow:
-            self.close_position()
+        def on_bar(self, ctx):
+            sym, now, pos = self._sym(ctx), ctx.bar_close_ts, ctx.position
+            self.raw.append((sym, ctx.timestamp, now))
+            fast, slow = self.fast[sym].value, self.slow[sym].value
+            self.trace.append(("bar", sym, now, tuple(ctx.bar)[1:], fast, slow, ctx.equity,
+                               None if pos is None else (pos.size, pos.entry_price)))
+            minute = ((now + synthetic.IST_OFFSET_NS) // NS_MIN) % 1440
+            late = minute >= 15 * 60 + 25
+            if pos is not None and late:
+                self.close_position()
+                return
+            if ctx.idx % self.p["limit_every"] == 3 and pos is None and not late:
+                self.submit_order(orders.Limit(
+                    side="buy", units=2.0, price=round(ctx.bar.close * self.p["limit_off"], 2),
+                    tif=self.p["tif"]))
+            if fast is None or slow is None or late:
+                return
+            if pos is None and fast > slow:
+                self.enter(size_frac=self.p["frac"])
+            elif pos is not None and fast < slow:
+                self.close_position()
 
 
 def _outcome(result):

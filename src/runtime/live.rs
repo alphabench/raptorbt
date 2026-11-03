@@ -65,6 +65,10 @@ impl RingKind {
 pub struct LiveFeed {
     symbols: Vec<String>,
     capacity: usize,
+    /// Rows of an instrument added after the node was built, when it declared its own.
+    own_capacity: Vec<Option<usize>>,
+    /// Instruments retired from the node: their rings are gone and nothing may be pushed.
+    retired: Vec<bool>,
     rings: Vec<Rings>,
     /// Latest event timestamp per instrument.
     last_ts: Vec<i64>,
@@ -79,6 +83,8 @@ impl LiveFeed {
         Self {
             symbols,
             capacity: capacity.max(1),
+            own_capacity: vec![None; n],
+            retired: vec![false; n],
             rings: (0..n).map(|_| Rings::default()).collect(),
             last_ts: vec![i64::MIN; n],
             local_next: vec![0; n],
@@ -89,10 +95,58 @@ impl LiveFeed {
         self.capacity
     }
 
+    /// Rows the rings of `instrument` hold.
+    pub fn capacity_of(&self, instrument: InstrumentId) -> usize {
+        self.own_capacity[instrument.index()].unwrap_or(self.capacity)
+    }
+
+    /// Add an instrument (the next id) whose rings hold `capacity` rows, or the node's default.
+    /// Nothing is allocated until its first push.
+    pub fn add_instrument(&mut self, symbol: String, capacity: Option<usize>) {
+        self.symbols.push(symbol);
+        self.own_capacity.push(capacity.map(|c| c.max(1)));
+        self.retired.push(false);
+        self.rings.push(Rings::default());
+        self.last_ts.push(i64::MIN);
+        self.local_next.push(0);
+    }
+
+    /// Free `instrument`'s rings. Its id stays, so the other instruments keep theirs; a later
+    /// push to it is refused by [`LiveFeed::check_timestamp`].
+    pub fn retire_instrument(&mut self, instrument: InstrumentId) {
+        let i = instrument.index();
+        self.rings[i] = Rings::default();
+        self.retired[i] = true;
+    }
+
+    /// The latest event time any instrument has had, `None` before the first.
+    pub fn last_event_ns(&self) -> Option<i64> {
+        self.last_ts.iter().copied().max().filter(|&t| t != i64::MIN)
+    }
+
+    /// Bring a retired instrument back with fresh rings of `capacity` rows (or the node's
+    /// default). Its event ordinals and latest timestamp go on, so time still never decreases.
+    pub fn revive_instrument(&mut self, instrument: InstrumentId, capacity: Option<usize>) {
+        let i = instrument.index();
+        self.rings[i] = Rings::default();
+        self.retired[i] = false;
+        self.own_capacity[i] = capacity.map(|c| c.max(1)).or(self.own_capacity[i]);
+    }
+
+    pub fn is_retired(&self, instrument: InstrumentId) -> bool {
+        self.retired[instrument.index()]
+    }
+
     /// Refuse an event older than the instrument's latest one. Equal
     /// timestamps are allowed.
     pub fn check_timestamp(&self, instrument: InstrumentId, ts: i64) -> Result<()> {
         let i = instrument.index();
+        if self.retired[i] {
+            return Err(RaptorError::invalid_parameter(format!(
+                "{} was retired from the node: it takes no more data",
+                self.symbols[i]
+            )));
+        }
         if ts < self.last_ts[i] {
             return Err(RaptorError::invalid_parameter(format!(
                 "{} live feed: timestamps must not decrease, but event {} is {ts} after {}",
@@ -105,7 +159,7 @@ impl LiveFeed {
     /// Ask that the last `rows` bars and ticks of `instrument` stay readable
     /// for `owner`. Repeating the request keeps the larger number.
     pub fn keep(&mut self, owner: StrategyId, instrument: InstrumentId, rows: u64) {
-        let capacity = self.capacity;
+        let capacity = self.capacity_of(instrument);
         let r = &mut self.rings[instrument.index()];
         if let Some(k) = r.keeps.iter_mut().find(|k| k.owner == owner) {
             k.rows = k.rows.max(rows);
@@ -150,7 +204,7 @@ impl LiveFeed {
         event_ts: i64,
         bar: KernelBar,
     ) -> std::result::Result<EventRef, RingError> {
-        let capacity = self.capacity;
+        let capacity = self.capacity_of(instrument);
         let r = &mut self.rings[instrument.index()];
         Self::release(r, RingKind::Bars);
         let ring = r.bars.get_or_insert_with(|| RingColumns::new(capacity, 0));
@@ -166,7 +220,7 @@ impl LiveFeed {
         instrument: InstrumentId,
         row: TickRow,
     ) -> std::result::Result<u64, RingError> {
-        let capacity = self.capacity;
+        let capacity = self.capacity_of(instrument);
         let r = &mut self.rings[instrument.index()];
         Self::release(r, RingKind::Ticks);
         let ring = r.ticks.get_or_insert_with(|| RowRing::new(capacity, 0, TickRow::default()));
@@ -181,7 +235,7 @@ impl LiveFeed {
         instrument: InstrumentId,
         snapshot: DepthTick,
     ) -> std::result::Result<EventRef, RingError> {
-        let capacity = self.capacity;
+        let capacity = self.capacity_of(instrument);
         let ts = snapshot.timestamp;
         let r = &mut self.rings[instrument.index()];
         let ring = r
@@ -261,6 +315,8 @@ impl HeapSize for LiveFeed {
             .sum();
         rings
             + self.rings.capacity() * size_of::<Rings>()
+            + self.own_capacity.capacity() * size_of::<Option<usize>>()
+            + self.retired.capacity()
             + self.last_ts.capacity() * size_of::<i64>()
             + self.local_next.capacity() * size_of::<u64>()
     }
@@ -339,6 +395,32 @@ mod tests {
         let bars = feed.bars(id(0)).unwrap();
         assert_eq!((bars.first_row(), bars.end_row()), (96, 100));
         assert_eq!(feed.ticks(id(0)).unwrap().first_row(), 96);
+    }
+
+    #[test]
+    fn an_added_instrument_has_its_own_rows_and_a_retired_one_gives_its_memory_back() {
+        let mut feed = LiveFeed::new(vec!["A".into()], 100);
+        feed.add_instrument("B".into(), Some(4));
+        let b = id(1);
+        assert_eq!((feed.capacity_of(id(0)), feed.capacity_of(b)), (100, 4));
+        let empty = feed.heap_bytes();
+        for t in 0..50 {
+            feed.push_bar(b, t, bar(t)).unwrap();
+            feed.push_tick(b, row(t)).unwrap();
+        }
+        let held = feed.heap_bytes();
+        assert!(held > empty);
+        assert_eq!(feed.bars(b).unwrap().first_row(), 46, "only its own four rows are held");
+        // Another instrument added and retired again leaves nothing behind but its slot.
+        feed.add_instrument("C".into(), None);
+        feed.push_bar(id(2), 0, bar(0)).unwrap();
+        feed.retire_instrument(id(2));
+        feed.retire_instrument(b);
+        assert!(feed.heap_bytes() < held);
+        assert!(feed.bars(b).is_none() && feed.ticks(b).is_none());
+        let err = feed.check_timestamp(b, 100).unwrap_err().to_string();
+        assert!(err.contains("B was retired"), "{err}");
+        assert!(feed.check_timestamp(id(0), 0).is_ok(), "the others are untouched");
     }
 
     #[test]

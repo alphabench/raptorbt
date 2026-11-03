@@ -88,16 +88,12 @@ impl PortfolioBook {
 
     /// Positions open across the book's instruments.
     pub fn open_total(&self) -> usize {
-        self.kernels.iter().map(|k| k.open_count()).sum()
+        self.live_open_total()
     }
 
     /// Gross notional held at the last marks, for kernels that track it.
     pub fn exposure_total(&self) -> f64 {
-        self.kernels
-            .iter()
-            .zip(&self.last_close)
-            .map(|(k, close)| close.map(|c| k.gross_notional(c)).unwrap_or(0.0))
-            .sum()
+        self.live_marked_sum(|k, c| k.gross_notional(c))
     }
 
     /// The marks of the open positions, which the account's cash is added to
@@ -108,11 +104,7 @@ impl PortfolioBook {
 
     /// Summed maintenance requirement of the open positions.
     pub fn maintenance_total(&self) -> f64 {
-        self.kernels
-            .iter()
-            .zip(&self.last_close)
-            .map(|(k, close)| close.map(|c| k.maintenance_requirement(c)).unwrap_or(0.0))
-            .sum()
+        self.live_marked_sum(|k, c| k.maintenance_requirement(c))
     }
 
     /// Queue an event to be returned ahead of the book's next one.
@@ -127,9 +119,7 @@ impl PortfolioBook {
 
     /// Trip every kernel's margin kill-switch.
     pub fn halt_margin(&mut self) {
-        for kernel in &mut self.kernels {
-            kernel.halt_margin();
-        }
+        self.live_each_mut(|k| k.halt_margin());
     }
 
     /// Halt the strategy as an account halt does: new entries refused as
@@ -146,28 +136,24 @@ impl PortfolioBook {
     }
 
     pub fn any_day_blocked(&self) -> bool {
-        self.kernels.iter().any(|k| k.is_day_blocked())
+        self.live_any(|k| k.is_day_blocked())
     }
 
     /// Feed the account's equity to every kernel's daily-loss gate; true if
     /// any breached.
     pub fn observe_day(&mut self, day: Option<i64>, equity: f64) -> bool {
         let mut breached = false;
-        for kernel in &mut self.kernels {
-            breached |= kernel.observe_day_in(day, equity);
-        }
+        self.live_each_mut(|k| breached |= k.observe_day_in(day, equity));
         breached
     }
 
     pub fn any_drawdown_halted(&self) -> bool {
-        self.kernels.iter().any(|k| k.drawdown_halted())
+        self.live_any(|k| k.drawdown_halted())
     }
 
     /// Feed the account's equity and peak to every kernel's drawdown gate.
     pub fn observe_equity(&mut self, equity: f64, peak: f64) {
-        for kernel in &mut self.kernels {
-            kernel.observe_equity(equity, peak);
-        }
+        self.live_each_mut(|k| k.observe_equity(equity, peak));
     }
 
     /// Close everything, as a halt with `flatten` does.
@@ -275,6 +261,65 @@ impl PortfolioBook {
     /// Set one position's locked margin; returns the change.
     pub fn set_share(&mut self, kernel: usize, position_id: u64, share: f64) -> f64 {
         self.kernels[kernel].set_locked_margin(position_id, share)
+    }
+
+    /// The option lines the other instruments hold in `instrument`'s margin
+    /// group, for the kernel's entry funding. `None` when the account's model
+    /// does not group options, the instrument is not one, or nothing hedges
+    /// it.
+    pub(super) fn group_context_for(
+        &self,
+        instrument: usize,
+        now: Timestamp,
+    ) -> Option<crate::portfolio::kernel::GroupContext> {
+        let model = self.config.margin_model.as_deref().filter(|m| m.groups_options())?;
+        if matches!(self.account.mode(), crate::accounts::AccountMode::Cash) {
+            return None;
+        }
+        let (underlying, expiry) = self.kernels[instrument].option_group_key()?;
+        let across = model.groups_across_expiries();
+        let mut context =
+            crate::portfolio::kernel::GroupContext { lines: Vec::new(), locked: 0.0, now };
+        for (index, kernel) in self.kernels.iter().enumerate() {
+            if index == instrument {
+                continue;
+            }
+            let Some((other_underlying, other_expiry)) = kernel.option_group_key() else {
+                continue;
+            };
+            if other_underlying != underlying || (!across && other_expiry != expiry) {
+                continue;
+            }
+            let Some((spec, lines)) = kernel.model_option_lines() else { continue };
+            context.locked += kernel.locked_margin();
+            context.lines.extend(
+                lines.into_iter().map(|(_, quantity, price)| (spec.clone(), quantity, price)),
+            );
+        }
+        (!context.lines.is_empty()).then_some(context)
+    }
+
+    /// Whether another instrument in `instrument`'s margin group has a buying
+    /// order working: a hedge that is yet to fill. False unless the account's
+    /// model margins option lines together and the instrument is one.
+    pub(super) fn hedge_pending_for(&self, instrument: usize) -> bool {
+        let Some(model) = self.config.margin_model.as_deref().filter(|m| m.groups_options()) else {
+            return false;
+        };
+        if matches!(self.account.mode(), crate::accounts::AccountMode::Cash) {
+            return false;
+        }
+        let Some((underlying, expiry)) = self.kernels[instrument].option_group_key() else {
+            return false;
+        };
+        let across = model.groups_across_expiries();
+        self.kernels.iter().enumerate().any(|(index, kernel)| {
+            index != instrument
+                && kernel.option_group_key().is_some_and(|(other_underlying, other_expiry)| {
+                    other_underlying == underlying && (across || other_expiry == expiry)
+                })
+                && kernel.has_working_option_buy()
+        })
     }
 
     /// Number of kernels, i.e. instruments.

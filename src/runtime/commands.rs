@@ -12,6 +12,11 @@
 
 use std::collections::HashMap;
 
+/// Most tags an order may carry, and the longest key and value, in bytes.
+pub const MAX_TAGS: usize = 16;
+pub const MAX_TAG_KEY: usize = 64;
+pub const MAX_TAG_VALUE: usize = 256;
+
 /// A typed order, flattened to what the engine's submit takes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderSpec {
@@ -30,6 +35,10 @@ pub struct OrderSpec {
     pub limit_offset: f64,
     pub post_only: bool,
     pub reduce_only: bool,
+    /// Labels the strategy put on the order; they reach the venue request's
+    /// `tags` (bounded, see [`MAX_TAGS`]). The engine's own `client_id` tag
+    /// is reserved.
+    pub tags: std::collections::BTreeMap<String, String>,
 }
 
 /// An execution schedule: a TWAP releases its own slices.
@@ -42,6 +51,8 @@ pub struct TwapSpec {
     pub reduce_only: bool,
 }
 
+// Only ever held boxed (`Command::Submit`), so the larger variant costs one allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Order {
     Plain(OrderSpec),
@@ -111,6 +122,11 @@ impl Queue {
 
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
+    }
+
+    /// Put `held` ahead of whatever is queued.
+    pub fn restore_commands(&mut self, held: Vec<Command>) {
+        self.commands.splice(0..0, held);
     }
 
     /// Put `held` ahead of whatever is queued.
@@ -276,6 +292,11 @@ impl CommandState {
         !self.held.is_empty()
     }
 
+    /// Whether intents are held for the next step of local instrument `key`.
+    pub fn has_held_for(&self, key: usize) -> bool {
+        self.held.get(&key).is_some_and(|h| !h.is_empty())
+    }
+
     /// Route `commands` to their instruments through `target`. `current` is
     /// the event's instrument, `idx` its ordinal there and `ts` its time.
     pub fn apply<T: Target>(
@@ -335,6 +356,8 @@ impl CommandState {
                         // A finished schedule is gone from the engine; cancelling
                         // it does nothing, as for a filled order.
                         target.cancel_twap(instrument, algo, idx)?;
+                    } else {
+                        return Err(T::refuse(self.unknown_order("cancel", &client_id)));
                     }
                 }
                 Command::CancelAll => {
@@ -379,11 +402,32 @@ impl CommandState {
                             limit_price,
                             trigger_price,
                         )?;
+                    } else {
+                        return Err(T::refuse(self.unknown_order("modify", &client_id)));
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// The refusal for a cancel or modify naming a client id this run never
+    /// submitted (a typo, or an order from another run). An order that was
+    /// submitted and has since finished is a different case: asking for it
+    /// again is the documented no-op, as it is at a venue.
+    fn unknown_order(&self, what: &str, client_id: &str) -> CmdError {
+        let schedule = self.algos.contains_key(client_id);
+        CmdError {
+            code: "unknown_order",
+            message: if schedule {
+                format!("{what}: {} is a schedule, which can only be cancelled", py_repr(client_id))
+            } else {
+                format!("{what}: no order was submitted with client id {}", py_repr(client_id))
+            },
+            parameter: "client_id",
+            value: ErrVal::Str(client_id.to_string()),
+            valid: Some(self.order.clone()),
+        }
     }
 
     /// Fold the intents for the step of instrument `key`: those held for it
@@ -415,6 +459,11 @@ impl CommandState {
             }
         }
         Ok(folded)
+    }
+
+    /// Forget every held intent.
+    pub fn clear_held(&mut self) {
+        self.held.clear();
     }
 
     /// Keep what is queued for the next step of instrument `key`, rather than
@@ -568,6 +617,7 @@ mod tests {
             limit_offset: 0.0,
             post_only: false,
             reduce_only: false,
+            tags: Default::default(),
         }
     }
 
@@ -629,8 +679,11 @@ mod tests {
         };
         state.apply(&mut mock, vec![twap, submit("o", None, None)], 0, 0, 0).unwrap();
         let cancel = |s: &str| Command::Cancel(s.into());
-        state.apply(&mut mock, vec![cancel("o"), cancel("t"), cancel("ghost")], 0, 1, 1).unwrap();
+        state.apply(&mut mock, vec![cancel("o"), cancel("t")], 0, 1, 1).unwrap();
         assert_eq!(&mock.log[mock.log.len() - 2..], ["cancel 0 101", "cancel_twap 1 100"]);
+        // An id this run never submitted is refused, not ignored.
+        let err = state.apply(&mut mock, vec![cancel("ghost")], 0, 1, 1).unwrap_err();
+        assert_eq!(err, "cancel: no order was submitted with client id 'ghost'");
         // A schedule id is not an order id: it cannot be a parent or modified.
         let err = state.apply(&mut mock, vec![submit("c", Some("t"), None)], 0, 0, 0).unwrap_err();
         assert_eq!(err, "unknown parent order 't'");
@@ -642,7 +695,8 @@ mod tests {
             limit_price: None,
             trigger_price: None,
         };
-        state.apply(&mut mock, vec![modify], 0, 0, 0).unwrap();
+        let err = state.apply(&mut mock, vec![modify], 0, 0, 0).unwrap_err();
+        assert_eq!(err, "modify: 't' is a schedule, which can only be cancelled");
         assert_eq!(mock.log.len(), before);
     }
 

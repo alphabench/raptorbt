@@ -63,7 +63,7 @@ def _dip_then_rally(n=12):
 
 
 def test_a_long_reports_the_dip_as_mae_and_the_peak_as_mfe():
-    result = run_strategy_backtest(HoldTenBars, **_dip_then_rally())
+    result = run_strategy_backtest(HoldTenBars, **_dip_then_rally(), bar_stamp="close")
     trades = result.trades()
     assert trades, "no trades produced"
     trade = trades[0]
@@ -93,7 +93,7 @@ def test_the_excursions_bracket_the_realised_pnl():
     showed. A violation means the extremes were not tracked over the whole
     holding period -- the failure this pins.
     """
-    result = run_strategy_backtest(HoldTenBars, **_dip_then_rally())
+    result = run_strategy_backtest(HoldTenBars, **_dip_then_rally(), bar_stamp="close")
     for trade in result.trades():
         if trade.mae_pnl is None:
             continue
@@ -109,7 +109,7 @@ def test_a_flat_trade_measures_zero_rather_than_reporting_nothing():
     measurement. Only an untracked path reports None."""
     n = 12
     flat = np.full(n, 100.0)
-    result = run_strategy_backtest(HoldTenBars, **_bars(flat, flat, flat, flat))
+    result = run_strategy_backtest(HoldTenBars, **_bars(flat, flat, flat, flat), bar_stamp="close")
     trades = result.trades()
     assert trades, "no trades produced"
     trade = trades[0]

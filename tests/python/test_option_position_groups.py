@@ -79,6 +79,7 @@ def _run(portfolio_runner, capital, ce_premiums, pe_premiums):
         instruments={CE: _spec(CE, "call"), PE: _spec(PE, "put")},
         account_type="margin",
         leverage=1.0,
+        bar_stamp="close",
     )
     return result, strategy
 

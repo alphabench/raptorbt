@@ -526,3 +526,24 @@ def test_an_order_for_another_instrument_fills_on_its_next_bar():
                          BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close")[0]
     (order,) = res.result.orders()
     assert (order.symbol, order.status, order.filled_qty) == ("BBB", "filled", 2.0)
+
+
+# -- group funding at entry -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "capital"),
+    [(MarginModel.defined_risk(), 4_000.0), (MarginModel.spread_credit(15, 5), 1_000.0)],
+    ids=["defined_risk", "spread_credit"],
+)
+def test_an_iron_condor_enters_on_capital_that_only_suffices_with_the_group_credit(model, capital):
+    """A sold call is filled before its bought wing in instrument order, so it is funded by the
+    hedge already in its way: the hedge is pending, not yet held, and the sold leg waits for it."""
+    s = make(st.iron_condor(1, 2))()
+    data, inst = universe()
+    cfg = BacktestConfig(initial_capital=capital, fees=0.0, margin_model=model)
+    res = run_strategies([s], data, cfg, instruments=inst, account_type="margin", leverage=1.0,
+                         bar_stamp="close")[0]
+    rows = order_rows(res)
+    assert [r[3] for r in rows] == ["filled"] * 4, rows
+    assert s.structure_status(s.group) == "filled"

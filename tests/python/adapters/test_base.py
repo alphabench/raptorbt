@@ -277,7 +277,7 @@ def test_the_thread_executor_keeps_the_node_thread_free_and_the_order_of_request
             break
         time.sleep(0.02)
     a.close()
-    assert names == ["t-test", "t-test"] and list(venue.orders) == [a.ids.encode("s0-0"), a.ids.encode("s1-0")]
+    assert names == ["t-test", "t-test"] and [o.ref for o in venue.orders.values()] == [a.ids.encode("s0-0"), a.ids.encode("s1-0")]
 
 
 # -- state, fencing, reconcile reads --------------------------------------------------------------------------

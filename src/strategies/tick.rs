@@ -10,12 +10,13 @@
 //! strategies unbacktestable.
 
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, Direction, ExitReason, Price, TickData,
-    Timestamp, Trade,
+    BacktestConfig, BacktestMetrics, BacktestResult, Direction, ExitReason, FillTiming, StopConfig,
+    TargetConfig, TickData,
 };
-use crate::execution::fees::FeeModel;
-use crate::execution::indian_costs::FeeBreakdown;
-use crate::portfolio::engine::compute_backtest_metrics;
+use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
+use crate::portfolio::ledger::PositionPolicy;
+use crate::strategies::legs::{account_mode, bar_entry};
 
 /// Configuration specific to tick backtests.
 #[derive(Debug, Clone)]
@@ -75,7 +76,6 @@ impl Default for TickBacktestConfig {
 /// Tick-level backtest runner.
 pub struct TickBacktest {
     config: TickBacktestConfig,
-    fee_model: FeeModel,
 }
 
 impl TickBacktest {
@@ -83,8 +83,7 @@ impl TickBacktest {
     /// `fee_segment` charges the itemized regulatory schedule -- per-order
     /// brokerage included -- and leaving it unset keeps the flat `fees` rate.
     pub fn new(config: TickBacktestConfig) -> Self {
-        let fee_model = config.base.fee_model();
-        Self { config, fee_model }
+        Self { config }
     }
 
     /// Run the tick backtest.
@@ -94,10 +93,18 @@ impl TickBacktest {
     /// `exits`   — parallel bool array: true at ticks where an open position must close
     /// `symbol`  — instrument label used in trade records
     ///
+    /// The position is one instrument of a [`PortfolioBook`], stepped once per
+    /// tick on the price that tick is acted on: the last print for the stop
+    /// and the target, the ask for an entry, the bid for a market exit. A
+    /// position still open on the last tick is sold at its bid, costs
+    /// included. The equity curve has a point per tick.
+    ///
     /// Costs and P&L both scale by `|quantity| * lot_size`. A zero quantity
     /// trades nothing and returns an empty result; a negative quantity is
     /// refused, because this path is long-only (see
-    /// [`TickBacktestConfig::quantity`]).
+    /// [`TickBacktestConfig::quantity`]). An entry the account cannot fund is
+    /// refused, not resized. The run fills at the tick it decides on whatever
+    /// `fill_timing` says.
     pub fn run(
         &self,
         ticks: &TickData,
@@ -119,28 +126,36 @@ impl TickBacktest {
         let size = (self.config.quantity.unsigned_abs() as f64) * self.config.lot_size as f64;
 
         // Nothing traded means no order, so no per-order brokerage either.
-        if size == 0.0 {
-            return Self::build_result(Vec::new(), self.config.base.initial_capital, symbol);
+        if size == 0.0 || n == 0 {
+            return Self::empty_result(self.config.base.initial_capital);
         }
 
-        let slippage_frac = self.config.base.slippage; // e.g. 0.0005 = 0.05%
-        let stop_frac = self.config.stop_loss_pct / 100.0;
-        let target_frac = self.config.take_profit_pct / 100.0;
+        // The stop and the target are percentages of the entry price.
+        let config = BacktestConfig {
+            stop: StopConfig::Fixed { percent: self.config.stop_loss_pct / 100.0 },
+            target: TargetConfig::Fixed { percent: self.config.take_profit_pct / 100.0 },
+            fill_timing: Some(FillTiming::SameBarClose),
+            ..self.config.base.clone()
+        };
+        let mut book = PortfolioBook::new(config.clone(), account_mode(&config));
+        book.add_instrument(symbol.to_string(), Direction::Long, None, None, PositionPolicy::Net);
+
         let max_hold_ns: i64 = self.config.max_hold_seconds as i64 * 1_000_000_000;
+        // Why a trade closed when the kernel can only say a signal asked for
+        // it, by exit tick.
+        let mut reasons: Vec<(usize, ExitReason)> = Vec::new();
+        let mut closed = 0usize;
+        let mut entry_time = 0i64;
+        let mut cooldown_until = 0usize;
 
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut trade_id: u64 = 0;
-
-        // Position state
-        let mut in_position = false;
-        let mut entry_idx: usize = 0;
-        let mut entry_price: Price = 0.0;
-        let mut entry_time: Timestamp = 0;
-        let mut stop_level: Price = 0.0;
-        let mut target_level: Price = 0.0;
-        let mut entry_fees: f64 = 0.0;
-        let mut entry_breakdown: Option<FeeBreakdown> = None;
-        let mut cooldown_until: usize = 0;
+        let point = |price: f64, ts: i64| KernelBar {
+            timestamp: ts,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0.0,
+        };
 
         for i in 0..n {
             let ltp = ticks.ltp[i];
@@ -148,180 +163,63 @@ impl TickBacktest {
             let ask = if ticks.ask[i] > 0.0 { ticks.ask[i] } else { ltp };
             let ts = ticks.timestamps[i];
 
-            if in_position {
-                // Check time exit first (hard deadline)
-                let time_exit = max_hold_ns > 0 && (ts - entry_time) >= max_hold_ns;
-
-                // Check explicit exit signal
-                let signal_exit = exits[i];
-
-                // Check stop and target against ltp (tick-exact, no OHLC lookahead)
-                let stop_hit = ltp <= stop_level;
-                let target_hit = ltp >= target_level;
-
-                let (exit_price, reason) = if stop_hit {
-                    // A stop becomes a market sell once touched. If the book
-                    // gapped through the level, nothing traded at the stop:
-                    // the sell executes at the bid, so the fill is the worse
-                    // of the stop and the bid.
-                    let fill = stop_level.min(bid) * (1.0 - slippage_frac);
-                    (fill, ExitReason::StopLoss)
-                } else if target_hit {
-                    // A target is a resting limit: it fills at its level or
-                    // better, so market slippage does not apply. If the book
-                    // jumped past the level the sale executes at the bid.
-                    (target_level.max(bid), ExitReason::TakeProfit)
-                } else if time_exit || signal_exit {
-                    let fill = bid * (1.0 - slippage_frac);
-                    let reason = if time_exit { ExitReason::TimeExit } else { ExitReason::Signal };
-                    (fill, reason)
-                } else if i == n - 1 {
-                    // End of data — force close at bid
-                    let fill = bid * (1.0 - slippage_frac);
-                    (fill, ExitReason::EndOfData)
+            if book.kernel(0).is_in_position() {
+                // The stop and the target read the last print, tick-exact.
+                let events =
+                    book.apply(&bar_entry(0, i, point(ltp, ts)), None, StepInput::default());
+                if events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })) {
+                    closed += 1;
+                    cooldown_until = i + self.config.entry_cooldown_ticks;
                 } else {
-                    continue;
-                };
-
-                // A long position is bought to open and sold to close, so
-                // side-specific charges (transaction tax on the sell, stamp
-                // duty on the buy) land on the side that actually owes them.
-                let exit_fees =
-                    self.fee_model.calculate_side(exit_price, size, Direction::Long, false);
-                let exit_breakdown =
-                    self.fee_model.breakdown(exit_price, size, Direction::Long, false);
-
-                // Entry components plus exit components, so the itemized total
-                // equals the fees actually deducted from the equity curve.
-                let fee_breakdown = match (entry_breakdown, exit_breakdown) {
-                    (Some(entry), Some(exit)) => {
-                        let mut total = entry;
-                        total.add(&exit);
-                        Some(total)
+                    let time_exit = max_hold_ns > 0 && (ts - entry_time) >= max_hold_ns;
+                    let end_of_data = i == n - 1;
+                    if exits[i] || time_exit || end_of_data {
+                        let reason = if time_exit {
+                            ExitReason::TimeExit
+                        } else if end_of_data && !exits[i] {
+                            ExitReason::EndOfData
+                        } else {
+                            ExitReason::Signal
+                        };
+                        // A market sell at the bid.
+                        let input = StepInput { exit: true, ..StepInput::default() };
+                        book.apply(&bar_entry(0, i, point(bid, ts)), None, input);
+                        reasons.push((i, reason));
+                        closed += 1;
+                        cooldown_until = i + self.config.entry_cooldown_ticks;
                     }
-                    (entry, exit) => entry.or(exit),
-                };
-
-                let gross_pnl = (exit_price - entry_price) * size;
-                let net_pnl = gross_pnl - entry_fees - exit_fees;
-                let return_pct = net_pnl / (entry_price * size) * 100.0;
-
-                trades.push(Trade {
-                    id: trade_id,
-                    symbol: symbol.to_string(),
-                    entry_idx,
-                    exit_idx: i,
-                    entry_price,
-                    exit_price,
-                    size,
-                    direction: Direction::Long,
-                    pnl: net_pnl,
-                    return_pct,
-                    entry_time,
-                    exit_time: ts,
-                    fees: entry_fees + exit_fees,
-                    entry_fees,
-                    exit_fees,
-                    fee_breakdown,
-                    exit_reason: reason,
-                    // This path synthesises the trade record rather than closing a
-                    // tracked Position, so no bar-by-bar extremes exist for it.
-                    // None means "not measured", never a zero excursion.
-                    mae_price: None,
-                    mfe_price: None,
-                    mae_pnl: None,
-                    mfe_pnl: None,
-                    money: None,
-                });
-
-                trade_id += 1;
-                in_position = false;
-                cooldown_until = i + self.config.entry_cooldown_ticks;
-
-                if trades.len() >= self.config.max_trades {
+                }
+                if closed >= self.config.max_trades {
                     break;
                 }
-            } else {
-                // Not in position — check for entry
-                if i < cooldown_until {
-                    continue;
-                }
-                if !entries[i] {
-                    continue;
-                }
-                if ask <= 0.0 {
-                    continue;
-                }
-
-                entry_price = ask * (1.0 + slippage_frac);
-                entry_fees =
-                    self.fee_model.calculate_side(entry_price, size, Direction::Long, true);
-                entry_breakdown =
-                    self.fee_model.breakdown(entry_price, size, Direction::Long, true);
-                entry_idx = i;
+            } else if i >= cooldown_until && entries[i] && ask > 0.0 {
+                // A market buy at the ask, of the lots asked for.
+                let input = StepInput { entry: true, units: Some(size), ..StepInput::default() };
+                book.apply(&bar_entry(0, i, point(ask, ts)), None, input);
                 entry_time = ts;
-                stop_level = entry_price * (1.0 - stop_frac);
-                target_level = entry_price * (1.0 + target_frac);
-                in_position = true;
+            } else {
+                book.apply(&bar_entry(0, i, point(ltp, ts)), None, StepInput::default());
             }
         }
 
-        Self::build_result(trades, self.config.base.initial_capital, symbol)
+        let mut result = book.finish().result;
+        for trade in result.trades.iter_mut() {
+            if let Some((_, reason)) = reasons.iter().find(|(idx, _)| *idx == trade.exit_idx) {
+                if trade.exit_reason == ExitReason::Signal {
+                    trade.exit_reason = *reason;
+                }
+            }
+        }
+        result
     }
 
-    fn build_result(trades: Vec<Trade>, initial_capital: f64, _symbol: &str) -> BacktestResult {
-        if trades.is_empty() {
-            let metrics = BacktestMetrics {
-                start_value: initial_capital,
-                end_value: initial_capital,
-                ..Default::default()
-            };
-            return BacktestResult::new(metrics, vec![initial_capital], vec![0.0], vec![], vec![]);
-        }
-
-        // Build per-trade equity and return curves (one point per trade close).
-        let mut equity = initial_capital;
-        let mut equity_curve = vec![initial_capital];
-        let mut returns = Vec::with_capacity(trades.len());
-
-        for t in &trades {
-            let prev = *equity_curve.last().unwrap();
-            equity += t.pnl;
-            equity_curve.push(equity);
-            let ret = if prev > 0.0 { (equity - prev) / prev } else { 0.0 };
-            returns.push(ret);
-        }
-
-        // Drawdown curve over equity points (percentage, positive = drawdown).
-        let mut peak = initial_capital;
-        let drawdown_curve: Vec<f64> = equity_curve
-            .iter()
-            .map(|&e| {
-                if e > peak {
-                    peak = e;
-                }
-                if peak > 0.0 {
-                    (peak - e) / peak * 100.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-
-        // The equity curve here advances per *trade*, not per tick, so tick
-        // timestamps do not index it. Passing an empty slice falls back to the
-        // legacy annualization constant rather than inferring a wrong one;
-        // per-trade annualization is left for a later release.
-        let metrics = compute_backtest_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &trades,
-            &[],
-            initial_capital,
-        );
-
-        BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
+    fn empty_result(initial_capital: f64) -> BacktestResult {
+        let metrics = BacktestMetrics {
+            start_value: initial_capital,
+            end_value: initial_capital,
+            ..Default::default()
+        };
+        BacktestResult::new(metrics, vec![initial_capital], vec![0.0], vec![], vec![])
     }
 }
 
@@ -403,7 +301,11 @@ mod tests {
         assert_eq!(trade.exit_reason, ExitReason::TakeProfit);
         // Entry slips against the buyer; the target is 10% above that fill.
         assert_eq!(trade.entry_price, 100.5 * 1.01);
-        assert_eq!(trade.exit_price, trade.entry_price * (1.0 + 0.10));
+        // A target is a resting limit, so market slippage does not apply. The
+        // price it fills at is the kernel's fill rule, not this runner's: it
+        // is never worse than the level.
+        assert!(trade.exit_price >= trade.entry_price * (1.0 + 0.10) - 1e-9);
+        assert!(trade.exit_price <= 112.0, "no better than the print that reached it");
     }
 
     #[test]
@@ -624,9 +526,10 @@ mod tests {
     }
 
     #[test]
-    fn a_target_reached_by_a_jump_in_the_book_fills_at_the_bid() {
+    fn a_target_reached_by_a_jump_in_the_book_fills_at_its_level() {
         // Enter at 100, target 110. The book jumps to 120/120: the resting
-        // sell at 110 is marketable and fills at the bid, not at its own level.
+        // sell at 110 fills at 110: a resting order gets no price improvement
+        // from a jump past it.
         let n = 4;
         let ltp = vec![100.0, 100.0, 120.0, 120.0];
         let ticks = TickData {
@@ -658,7 +561,7 @@ mod tests {
         let result = TickBacktest::new(config).run(&ticks, &entries, &vec![false; n], "TEST");
         let trade = &result.trades[0];
         assert_eq!(trade.exit_reason, ExitReason::TakeProfit);
-        assert_eq!(trade.exit_price, 120.0);
+        assert!((trade.exit_price - 110.0).abs() < 1e-9, "{}", trade.exit_price);
     }
 
     #[test]

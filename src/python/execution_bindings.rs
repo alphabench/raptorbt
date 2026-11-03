@@ -339,16 +339,22 @@ impl PyAdapter {
     }
 
     fn classify(&self, py: Python<'_>, e: PyErr) -> AdapterError {
-        let classes = py
-            .import("raptorbt.execution")
-            .ok()
-            .and_then(|m| Some((m.getattr("OrderRefused").ok()?, m.getattr("Unsupported").ok()?)));
-        if let Some((refused, unsupported)) = classes {
+        let classes = py.import("raptorbt.execution").ok().and_then(|m| {
+            Some((
+                m.getattr("OrderRefused").ok()?,
+                m.getattr("Unsupported").ok()?,
+                m.getattr("Fenced").ok()?,
+            ))
+        });
+        if let Some((refused, unsupported, fenced)) = classes {
             if e.is_instance(py, &refused) {
                 return AdapterError::Refused(e.value(py).to_string());
             }
             if e.is_instance(py, &unsupported) {
                 return AdapterError::Unsupported(e.value(py).to_string());
+            }
+            if e.is_instance(py, &fenced) {
+                return AdapterError::Fenced(e.value(py).to_string());
             }
         }
         let message = e.value(py).to_string();
@@ -376,6 +382,16 @@ impl ExecutionAdapter for PyAdapter {
             kw.set_item("trigger_price", change.trigger_price)?;
             obj.call_method("modify", PyTuple::new(py, [client_order_id])?, Some(&kw))
         })
+    }
+
+    fn fence(&mut self, epoch: u64) -> Result<(), AdapterError> {
+        let has = Python::attach(|py| {
+            self.obj.bind(py).getattr_opt("fence").ok().flatten().is_some_and(|m| m.is_callable())
+        });
+        if !has {
+            return Ok(());
+        }
+        self.call(|_, obj| obj.call_method1("fence", (epoch,)))
     }
 
     fn link_oco(&mut self, client_order_ids: &[String]) -> Result<(), AdapterError> {

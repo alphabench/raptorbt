@@ -147,7 +147,7 @@ def test_refusals_are_identical_under_both_paths(act, monkeypatch):
         _with_python_path(monkeypatch, python_path)
         data = {"AAA": _bars(), "BBB": _bars()}
         try:
-            raptorbt.run_strategies([_Once(act)], data)
+            raptorbt.run_strategies([_Once(act)], data, bar_stamp="close")
         except Exception as ex:  # noqa: BLE001 - the type and message are the subject
             seen.append((type(ex).__name__, str(ex)))
         else:
@@ -189,7 +189,7 @@ def test_cache_is_identical_under_both_paths(monkeypatch):
     for python_path in (True, False):
         _with_python_path(monkeypatch, python_path)
         strategy = _Cached()
-        raptorbt.run_strategies([strategy], {"AAA": _bars(), "BBB": _bars()})
+        raptorbt.run_strategies([strategy], {"AAA": _bars(), "BBB": _bars()}, bar_stamp="close")
         reports.append(strategy.report)
     assert reports[0] == reports[1]
     assert reports[0][0] and reports[0][1]
@@ -198,32 +198,33 @@ def test_cache_is_identical_under_both_paths(monkeypatch):
 # ---------------------------------------------------------------------------
 # run_strategy_backtest
 # ---------------------------------------------------------------------------
-class _Single(Strategy):
-    """Typed orders, intents and a same-bar refusal on a single instrument."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _Single(Strategy):
+        """Typed orders, intents and a same-bar refusal on a single instrument."""
 
-    def __init__(self, clash=False):
-        super().__init__()
-        self.clash = clash
-        self.seen = []
+        def __init__(self, clash=False):
+            super().__init__()
+            self.clash = clash
+            self.seen = []
 
-    def on_bar(self, ctx):
-        i = ctx.idx
-        if i == 3:
-            self.enter(size_frac=0.5)
-        if i == 6:
-            self.submit_order(orders.Limit(side="sell", price=500.0, units=1, reduce_only=True))
-        if i == 10:
-            self.close_position()
-            if self.clash:
-                self.enter()
-        if i == 14:
-            self.submit_bracket(orders.Market(side="buy", units=2), 90.0, 120.0)
+        def on_bar(self, ctx):
+            i = ctx.idx
+            if i == 3:
+                self.enter(size_frac=0.5)
+            if i == 6:
+                self.submit_order(orders.Limit(side="sell", price=500.0, units=1, reduce_only=True))
+            if i == 10:
+                self.close_position()
+                if self.clash:
+                    self.enter()
+            if i == 14:
+                self.submit_bracket(orders.Market(side="buy", units=2), 90.0, 120.0)
 
-    def on_order_event(self, ctx, event):
-        self.seen.append((ctx.idx, event.kind, event.client_order_id, event.price))
+        def on_order_event(self, ctx, event):
+            self.seen.append((ctx.idx, event.kind, event.client_order_id, event.price))
 
-    def on_position_closed(self, ctx, event):
-        self.seen.append((ctx.idx, "closed", event.trade.pnl))
+        def on_position_closed(self, ctx, event):
+            self.seen.append((ctx.idx, "closed", event.trade.pnl))
 
 
 def _single(monkeypatch, python_path, clash):

@@ -56,7 +56,7 @@ class Idle(Strategy):
 def _run(seed=7, n=400):
     rng = np.random.default_rng(seed)
     close = 100.0 * np.exp(np.cumsum(rng.normal(0.0002, 0.012, size=n)))
-    return run_strategy_backtest(Churn, **_ohlcv(close))
+    return run_strategy_backtest(Churn, **_ohlcv(close), bar_stamp="close")
 
 
 def test_the_reported_ulcer_matches_the_reported_drawdown_curve():
@@ -113,7 +113,7 @@ def test_a_flat_curve_is_never_under_water():
     # buy-and-hold on a strictly rising line dips for one bar, because the
     # entry fee is paid before the position appreciates -- which the metric
     # correctly notices.
-    result = run_strategy_backtest(Idle, **_ohlcv(np.linspace(100.0, 160.0, 120)))
+    result = run_strategy_backtest(Idle, **_ohlcv(np.linspace(100.0, 160.0, 120)), bar_stamp="close")
     m = result.metrics
     assert m.ulcer_index == 0.0
     assert m.time_under_water_pct == 0.0

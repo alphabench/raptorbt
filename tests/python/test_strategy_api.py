@@ -4,6 +4,7 @@ Every check compares the new spelling against the old one (or against the
 rule the data must obey), so a failure names the behaviour that moved.
 """
 
+import contextlib
 import re
 import sys
 import warnings
@@ -82,49 +83,50 @@ class _BarLogic:
         self.seen.append(("timer", ctx.symbol, event.name, event.ts_fired))
 
 
-class LegacyBars(_BarLogic, Strategy):
-    def __init__(self):
-        super().__init__()
-        self._init()
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class LegacyBars(_BarLogic, Strategy):
+        def __init__(self):
+            super().__init__()
+            self._init()
 
-    def route(self, sym):
-        return {"symbol": sym}
+        def route(self, sym):
+            return {"symbol": sym}
 
-    def exit_kwargs(self, sym):
-        return {"size_frac": None, "units": 3.0}
+        def exit_kwargs(self, sym):
+            return {"size_frac": None, "units": 3.0}
 
-    def enter_order(self, ctx, sym):
-        self.submit_bracket(
-            orders.Market(side="buy", units=3.0), stop_trigger=ctx.bar.close * 0.97,
-            target_price=ctx.bar.close * 1.05, **{},
-        )
+        def enter_order(self, ctx, sym):
+            self.submit_bracket(
+                orders.Market(side="buy", units=3.0), stop_trigger=ctx.bar.close * 0.97,
+                target_price=ctx.bar.close * 1.05, **{},
+            )
 
-    def on_start(self, ctx):
-        self.subscribe_bars(5, "m")
-        self.fast = {s: self.register_indicator(Indicator.sma(3), symbol=s) for s in ctx.symbols}
-        self.comp = {
-            s: self.register_indicator(Indicator.ema(2), stream_id=0, symbol=s)
-            for s in ctx.symbols
-        }
-        self.clock.set_timer("tick", 7 * MIN_NS, start_ns=0)
+        def on_start(self, ctx):
+            self.subscribe_bars(5, "m")
+            self.fast = {s: self.register_indicator(Indicator.sma(3), symbol=s) for s in ctx.symbols}
+            self.comp = {
+                s: self.register_indicator(Indicator.ema(2), stream_id=0, symbol=s)
+                for s in ctx.symbols
+            }
+            self.clock.set_timer("tick", 7 * MIN_NS, start_ns=0)
 
-    def on_bar(self, ctx):
-        self._bar(ctx, self.fast[ctx.symbol].value)
+        def on_bar(self, ctx):
+            self._bar(ctx, self.fast[ctx.symbol].value)
 
-    def on_composite_bar(self, ctx, bar):
-        self._comp(ctx, bar, self.comp[bar.symbol].value)
+        def on_composite_bar(self, ctx, bar):
+            self._comp(ctx, bar, self.comp[bar.symbol].value)
 
-    def on_order_filled(self, ctx, event):
-        self._fill(ctx, event)
+        def on_fill(self, ctx, event):
+            self._fill(ctx, event)
 
-    def on_position_opened(self, ctx, event):
-        self._position(ctx, event)
+        def on_position_opened(self, ctx, event):
+            self._position(ctx, event)
 
-    def on_position_closed(self, ctx, event):
-        self._position(ctx, event)
+        def on_position_closed(self, ctx, event):
+            self._position(ctx, event)
 
-    def on_time_event(self, ctx, event):
-        self._timer(ctx, event)
+        def on_timer(self, ctx, event):
+            self._timer(ctx, event)
 
 
 class ApiBars(_BarLogic, Strategy):
@@ -203,14 +205,14 @@ class LegacyTicks(_TickLogic, Strategy):
         super().__init__()
         self._init()
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self.seen.append(("trade", ctx.symbol, tuple(tick), ctx.idx))
         self._drive(ctx)
 
     def on_quote(self, ctx, quote):
         self.seen.append(("quote", ctx.symbol, tuple(quote), ctx.idx))
 
-    def on_order_book(self, ctx, book):
+    def on_book(self, ctx, book):
         self.seen.append(("book", ctx.symbol, tuple(book), ctx.idx))
 
 
@@ -327,8 +329,8 @@ def _recording(names, mapping):
         def hook(self, ctx, event, _n=mapping.get(name, name)):
             self.seen.append((_n, ctx.symbol, repr(event)))
         ns[name] = hook
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+    aliases = [n for n in names if n in raptorbt.strategy.api.DEPRECATED]
+    with pytest.warns(DeprecationWarning) if aliases else contextlib.nullcontext():
         return type("R_" + "_".join(names), (Strategy,), ns)
 
 
@@ -384,28 +386,30 @@ def test_trade_quote_book_aliases_see_identical_events():
 
 
 def test_composite_bar_alias_is_on_bar_with_an_event():
-    class Old(Strategy):
-        def __init__(self):
-            super().__init__()
-            self.seen = []
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class Old(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.seen = []
 
-        def on_start(self, ctx):
-            self.subscribe_bars(5, "m")
+            def on_start(self, ctx):
+                self.subscribe_bars(5, "m")
 
-        def on_composite_bar(self, ctx, bar):
-            self.seen.append(tuple(bar))
+            def on_composite_bar(self, ctx, bar):
+                self.seen.append(tuple(bar))
 
-    class New(Strategy):
-        def __init__(self):
-            super().__init__()
-            self.seen = []
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class New(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.seen = []
 
-        def on_start(self, ctx):
-            self.subscribe_bars(5, "m")
+            def on_start(self, ctx):
+                self.subscribe_bars(5, "m")
 
-        def on_bar(self, ctx, event):
-            if event.timeframe is not None:
-                self.seen.append(tuple(event))
+            def on_composite_bar(self, ctx, event):
+                if event.timeframe is not None:
+                    self.seen.append(tuple(event))
 
     old, new = Old(), New()
     for s in (old, new):
@@ -414,19 +418,20 @@ def test_composite_bar_alias_is_on_bar_with_an_event():
 
 
 def test_legacy_on_bar_and_on_composite_bar_coexist_and_see_their_own_events():
-    class Both(Strategy):
-        def __init__(self):
-            super().__init__()
-            self.bars = self.comps = 0
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class Both(Strategy):
+            def __init__(self):
+                super().__init__()
+                self.bars = self.comps = 0
 
-        def on_start(self, ctx):
-            self.subscribe_bars(5, "m")
+            def on_start(self, ctx):
+                self.subscribe_bars(5, "m")
 
-        def on_bar(self, ctx):
-            self.bars += 1
+            def on_bar(self, ctx):
+                self.bars += 1
 
-        def on_composite_bar(self, ctx, bar):
-            self.comps += 1
+            def on_composite_bar(self, ctx, bar):
+                self.comps += 1
 
     s = Both()
     run_strategies([s], bars(), config=config(), bar_stamp="close")
@@ -472,33 +477,29 @@ def test_defining_a_name_and_its_alias_raises_at_class_creation():
         ("on_position_event", "on_position_closed"),
     ):
         with pytest.raises(TypeError, match=f"{new}.*{old}"):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                type("Bad", (Strategy,), {new: lambda s, c, e: None, old: lambda s, c, e: None})
+            type("Bad", (Strategy,), {new: lambda s, c, e: None, old: lambda s, c, e: None})
 
     with pytest.raises(TypeError, match="on_composite_bar"):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
 
-            class Bad(Strategy):
-                def on_bar(self, ctx, event):
-                    pass
+        class Bad(Strategy):
+            def on_bar(self, ctx, event):
+                pass
 
-                def on_composite_bar(self, ctx, bar):
-                    pass
+            def on_composite_bar(self, ctx, bar):
+                pass
 
     # A parent's alias and a child's new name are the same ambiguity.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with pytest.warns(DeprecationWarning, match="on_trade_tick"):
 
         class Parent(Strategy):
             def on_trade_tick(self, ctx, tick):
                 pass
 
-        with pytest.raises(TypeError):
-            class Child(Parent):
-                def on_trade(self, ctx, tick):
-                    pass
+    with pytest.raises(TypeError):
+
+        class Child(Parent):
+            def on_trade(self, ctx, tick):
+                pass
 
 
 def test_deprecated_names_warn_once_per_class():
@@ -646,13 +647,13 @@ def test_only_the_subscribed_instrument_and_type_arrive():
 
 def test_a_strategy_that_never_subscribes_keeps_receiving_everything():
     class Legacy(_Quiet):
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             self.calls["trade"] += 1
 
         def on_quote(self, ctx, quote):
             self.calls["quote"] += 1
 
-        def on_order_book(self, ctx, book):
+        def on_book(self, ctx, book):
             self.calls["book"] += 1
 
     s = Legacy()

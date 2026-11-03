@@ -730,10 +730,7 @@ fn sell_limit_closes_position_as_order_exit() {
     assert!(!kernel.is_in_position());
 }
 
-#[test]
-fn sell_limit_below_the_market_fills_at_the_open_not_its_own_price() {
-    // A resting sell at 105 meets a bar that opens at 107: the bar gapped
-    // through the limit, so the sale executes at the open.
+fn resting_sell_kernel(client: &str) -> EngineKernel {
     let mut kernel = zero_fee_kernel();
     enter(&mut kernel, 0, 100.0);
     kernel.submit_order(
@@ -743,18 +740,55 @@ fn sell_limit_below_the_market_fills_at_the_open_not_its_own_price() {
         TimeInForce::Gtc,
         0,
         0,
-        "tp-gap".into(),
+        client.into(),
         None,
         None,
     );
+    kernel
+}
+
+fn fill_price(events: &[EngineEvent]) -> f64 {
+    let fills: Vec<f64> = events
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::OrderFilled { price, .. } => Some(*price),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(fills.as_slice(), [_])
+            && events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })),
+        "expected one fill and an exit, got {events:?}"
+    );
+    fills[0]
+}
+
+#[test]
+fn a_sell_limit_that_is_marketable_when_it_arrives_fills_at_the_open() {
+    // The order meets the first bar it can trade on, and that bar opens at
+    // 107: above the limit, so the sale executes at the market.
+    let mut kernel = resting_sell_kernel("tp-marketable");
+    let events = kernel.step(1, &bar(1, 107.0), StepInput::default());
+    assert_eq!(fill_price(&events), 107.0);
+}
+
+#[test]
+fn a_resting_sell_limit_gapped_through_mid_session_fills_at_its_limit() {
+    // It rested on bar 1 (103) and bar 2 opens at 107 with no session break:
+    // no price improvement for an order that was already resting.
+    let mut kernel = resting_sell_kernel("tp-gap");
     kernel.step(1, &bar(1, 103.0), StepInput::default());
     let events = kernel.step(2, &bar(2, 107.0), StepInput::default());
-    match events.as_slice() {
-        [EngineEvent::OrderFilled { price, .. }, EngineEvent::Exited { .. }] => {
-            assert_eq!(*price, 107.0);
-        }
-        other => panic!("expected fill + exit, got {other:?}"),
-    }
+    assert_eq!(fill_price(&events), 105.0);
+}
+
+#[test]
+fn a_resting_sell_limit_gapped_through_by_a_session_open_fills_at_the_open() {
+    const DAY: i64 = 86_400_000_000_000;
+    let mut kernel = resting_sell_kernel("tp-overnight");
+    kernel.step(1, &bar(DAY / 2, 103.0), StepInput::default());
+    let events = kernel.step(2, &bar(DAY + DAY / 2, 107.0), StepInput::default());
+    assert_eq!(fill_price(&events), 107.0);
 }
 
 #[test]
@@ -831,13 +865,10 @@ fn per_contract_fees_charge_on_contracts_not_notional() {
     match events.as_slice() {
         [EngineEvent::Exited { trade, .. }] => {
             // Round trip: 2.5 per contract per side, NOT 2.5 * 50.
-            let expected = 2.0 * 2.5 * size;
-            assert!(
-                // Booked fees are whole minor units: one per side at most.
-                (trade.fees - expected).abs() <= 0.01,
-                "fees {} != {expected} (size {size})",
-                trade.fees
-            );
+            // Each side is booked to the minor unit on its own.
+            let side = kernel.ledger.book(2.5 * size);
+            let expected = kernel.money_scale().to_f64(side + side);
+            assert_eq!(trade.fees, expected, "fees (size {size})");
         }
         other => panic!("expected exit, got {other:?}"),
     }
@@ -871,12 +902,9 @@ fn percentage_fees_charge_on_notional() {
     match events.as_slice() {
         [EngineEvent::Exited { trade, .. }] => {
             // 0.1% of true notional (price * size * multiplier), each side.
-            let expected = 2.0 * 0.001 * 100.0 * size * 50.0;
-            assert!(
-                (trade.fees - expected).abs() <= 0.01,
-                "fees {} != {expected} (size {size})",
-                trade.fees
-            );
+            let side = kernel.ledger.book(0.001 * 100.0 * size * 50.0);
+            let expected = kernel.money_scale().to_f64(side + side);
+            assert_eq!(trade.fees, expected, "fees (size {size})");
         }
         other => panic!("expected exit, got {other:?}"),
     }
@@ -1622,6 +1650,72 @@ fn short_adoption_stays_refused_by_construction() {
 }
 
 #[test]
+fn a_short_adopts_on_margin_with_the_posted_margin_and_never_on_cash() {
+    let mut cash = adoption_kernel(AccountMode::Cash);
+    cash.set_cash(100_000.0);
+    let err = cash.adopt_position_with(0, 90.0, -100.0, &Adoption::default()).unwrap_err();
+    assert!(err.contains("cash account"), "{err}");
+
+    // Fully funded: the notional locks, as for a long.
+    let mut full = adoption_kernel(AccountMode::Margin { leverage: 1.0 });
+    full.set_cash(100_000.0);
+    full.adopt_position_with(0, 90.0, -100.0, &Adoption::default()).unwrap();
+    assert_eq!(full.locked_margin(), 9_000.0);
+    assert_eq!(full.cash(), 100_000.0);
+
+    // Leveraged: refused without the posted margin, locked at exactly it with.
+    let mut lev = adoption_kernel(AccountMode::Margin { leverage: 5.0 });
+    lev.set_cash(100_000.0);
+    assert!(lev.adopt_position_with(0, 90.0, -100.0, &Adoption::default()).is_err());
+    let posted = Adoption { margin_minor: Some(1_234_567), cost_minor: None };
+    lev.adopt_position_with(0, 90.0, -100.0, &posted).unwrap();
+    assert_eq!(lev.locked_margin(), 12_345.67);
+    assert_eq!(lev.cash(), 100_000.0, "a margin account debits nothing for an adopted position");
+}
+
+#[test]
+fn a_cash_basis_in_minor_units_replaces_price_times_size() {
+    let mut cash = adoption_kernel(AccountMode::Cash);
+    cash.set_cash(100_000.0);
+    let paid = Adoption { margin_minor: None, cost_minor: Some(899_950) };
+    cash.adopt_position_with(0, 90.0, 100.0, &paid).unwrap();
+    assert_eq!(cash.cash(), 100_000.0 - 8_999.50);
+
+    // The two statements belong to their own account types.
+    let mut margin = adoption_kernel(AccountMode::Margin { leverage: 1.0 });
+    margin.set_cash(100_000.0);
+    assert!(margin.adopt_position_with(0, 90.0, 100.0, &paid).is_err());
+    let mut cash = adoption_kernel(AccountMode::Cash);
+    cash.set_cash(100_000.0);
+    let posted = Adoption { margin_minor: Some(1), cost_minor: None };
+    assert!(cash.adopt_position_with(0, 90.0, 100.0, &posted).is_err());
+}
+
+#[test]
+fn a_refused_order_exists_for_one_event_and_is_counted() {
+    let mut kernel = adoption_kernel(AccountMode::Cash);
+    kernel.set_cash(100_000.0);
+    let id = kernel.submit_refused_order(
+        OrderSide::Buy,
+        QtySpec::Units(5.0),
+        OrderKind::Market,
+        TimeInForce::Gtc,
+        0,
+        10,
+        "host-1".to_string(),
+        false,
+        "lot_limit",
+    );
+    let events = std::mem::take(&mut kernel.pending_events);
+    assert!(matches!(
+        events.as_slice(),
+        [EngineEvent::OrderRejected { order_id, reason: "lot_limit", client_id, .. }]
+            if *order_id == id && client_id == "host-1"
+    ));
+    assert!(!kernel.is_in_position());
+}
+
+#[test]
 fn adoption_refuses_nan_and_infinite_inputs() {
     // The guard is written `!(price > 0.0)`, not `price <= 0.0`, precisely so
     // that NaN fails it: NaN compares false to everything, so the negated form
@@ -2121,7 +2215,7 @@ fn full_capital_entry_under_itemised_fees_never_overdraws_cash() {
             for k in 0..200 {
                 let price = 37.0 + 3.71 * k as f64;
                 let mut kernel = indian_kernel(segment, lot);
-                let before = kernel.cash();
+                let before = kernel.cash_money();
                 let events = kernel.step(
                     0,
                     &bar(0, price),
@@ -2131,22 +2225,25 @@ fn full_capital_entry_under_itemised_fees_never_overdraws_cash() {
                     continue; // too small for one lot: rejected, nothing debited
                 };
                 let snapshot = kernel.position_snapshot().unwrap();
-                let charged = before - kernel.cash() - snapshot.entry_price * size;
-                let expected = kernel.fee_model.calculate_side(
+                // The cash taken is the notional and the fee, each booked to the
+                // minor unit.
+                let fee = kernel.fee_model.calculate_side(
                     snapshot.entry_price,
                     *size,
                     Direction::Long,
                     true,
                 );
+                let expected =
+                    kernel.ledger.notional(snapshot.entry_price, *size) + kernel.ledger.book(fee);
                 assert!(
                     kernel.cash() >= 0.0,
                     "{segment} lot {lot:?} price {price}: cash {} after entry",
                     kernel.cash()
                 );
-                assert!(
-                    // The notional and the fee are each booked to the paisa.
-                    (charged - expected).abs() <= 0.01 + 1e-9 * before,
-                    "{segment} price {price}: charged {charged} vs fee {expected}"
+                assert_eq!(
+                    before - kernel.cash_money(),
+                    expected,
+                    "{segment} lot {lot:?} price {price}"
                 );
             }
         }

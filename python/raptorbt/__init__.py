@@ -144,6 +144,7 @@ from raptorbt.strategy import (
 from raptorbt import errors
 from raptorbt import report, research, sampling
 from raptorbt.report import full_report
+from raptorbt.capabilities import capabilities
 from raptorbt.errors import (
     RaptorBTError,
     InvalidParameter,
@@ -174,6 +175,7 @@ __all__ = [
     # Research statistics and the full report
     "research",
     "report",
+    "capabilities",
     "full_report",
     # Structured errors
     "errors",

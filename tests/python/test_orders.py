@@ -70,7 +70,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0, 101.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_filled"]
         # Both events land on the submission bar.
         assert all(idx == 1 for _, idx, _ in strategy.events)
@@ -90,7 +90,7 @@ class TestOrderFlow:
             lows=[99.0, 98.5, 98.0, 96.5],
         )
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_filled"]
         fill_kind, fill_idx, _ = strategy.events[-1]
         assert fill_idx == 3
@@ -110,13 +110,14 @@ class TestOrderFlow:
 
         stops = []
 
-        class Reader(S):
-            def on_position_opened(self, ctx, event):
-                stops.append(ctx.position.stop_price)
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class Reader(S):
+                def on_position_opened(self, ctx, event):
+                    stops.append(ctx.position.stop_price)
 
         data = _bars([100.0, 101.0, 103.0, 103.0], highs=[100.5, 101.5, 103.5, 103.5])
         strategy = Reader()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_filled"]
         assert strategy.events[-1][1] == 2  # fills on the breakout bar
         assert stops == [99.0]
@@ -133,7 +134,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0, 96.0])  # would fill on bar 2
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_canceled"]
         assert len(result.trades()) == 0
 
@@ -149,7 +150,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0, 97.5], opens=[100.0, 100.0, 99.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds()[-1] == "order_filled"
         assert result.trades()[0].entry_price == pytest.approx(98.0)
 
@@ -163,7 +164,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0, 89.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_canceled"]
         assert len(result.trades()) == 0
 
@@ -179,7 +180,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0, 100.0, 100.0])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_expired"]
         assert strategy.events[-1][1] == 2
 
@@ -196,7 +197,7 @@ class TestOrderFlow:
             opens=[100.0, 102.0, 104.0],
         )
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert "order_filled" in strategy.kinds()
         trade = result.trades()[0]
         assert trade.exit_price == pytest.approx(105.0)
@@ -219,7 +220,7 @@ class TestOrderFlow:
             lows=[99.5, 101.8, 100.8, 100.5],
         )
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_triggered", "order_filled"]
         assert strategy.events[1][1] == 1  # triggered on bar 1
         assert strategy.events[2][1] == 2  # limit filled on bar 2
@@ -238,7 +239,7 @@ class TestOrderFlow:
 
         data = _bars([100.0, 100.0])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.a == "O-0"
         assert strategy.b == "O-1"
         assert [c for _, _, c in strategy.events if c] == ["O-0", "O-1"]
@@ -254,8 +255,8 @@ class TestOrderFlow:
                     self.close_position()
 
         data = _bars([100.0, 101.0, 102.0, 103.0, 104.0])
-        r1 = run_strategy_backtest(Sma, **data)
-        r2 = run_strategy_backtest(Sma, **data)
+        r1 = run_strategy_backtest(Sma, **data, bar_stamp="close")
+        r2 = run_strategy_backtest(Sma, **data, bar_stamp="close")
         assert np.array_equal(r1.equity_curve(), r2.equity_curve())
         assert len(r1.trades()) == 1
 
@@ -276,35 +277,36 @@ class TestFillReportedOnce:
     """
 
     def test_a_bracket_target_fill_is_reported_once_and_precedes_the_close(self):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.fills = []
-                self.stream = []
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.fills = []
+                    self.stream = []
 
-            def on_bar(self, ctx):
-                if ctx.idx == 1:
-                    self.submit_bracket(
-                        orders.Market(side="buy", units=10),
-                        stop_trigger=90.0,
-                        target_price=104.0,
-                    )
+                def on_bar(self, ctx):
+                    if ctx.idx == 1:
+                        self.submit_bracket(
+                            orders.Market(side="buy", units=10),
+                            stop_trigger=90.0,
+                            target_price=104.0,
+                        )
 
-            def on_order_filled(self, ctx, event):
-                self.fills.append((ctx.idx, event.client_order_id))
-                self.stream.append(("fill", ctx.idx))
+                def on_fill(self, ctx, event):
+                    self.fills.append((ctx.idx, event.client_order_id))
+                    self.stream.append(("fill", ctx.idx))
 
-            def on_order_canceled(self, ctx, event):
-                self.stream.append(("cancel", ctx.idx))
+                def on_order_canceled(self, ctx, event):
+                    self.stream.append(("cancel", ctx.idx))
 
-            def on_position_closed(self, ctx, event):
-                self.stream.append(("closed", ctx.idx))
+                def on_position_closed(self, ctx, event):
+                    self.stream.append(("closed", ctx.idx))
 
         # Bar 1 fills the entry at 100; bar 3 trades through 104, so the
         # target fills and the stop sibling is canceled in the same step.
         data = _bars([100.0, 100.0, 101.0, 105.0, 105.0], lows=[99.0] * 5, highs=[101.0, 101.0, 102.0, 106.0, 106.0])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert len(strategy.fills) == 2, strategy.fills
         # The close rides directly behind its fill; the sibling's cancel comes after.
         exit_bar = strategy.fills[1][0]

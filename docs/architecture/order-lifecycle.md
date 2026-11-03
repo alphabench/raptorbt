@@ -61,13 +61,13 @@ facts imply.
 | report | effect |
 |---|---|
 | `Accepted` | records the venue order id; a different id later is an error |
-| `Rejected` | `Rejected`; an error if anything has filled |
-| `Fill` | adds an execution, keyed by `exec_id`; implies acceptance; an error if the order would be over-filled |
-| `CancelAck` | `Canceled` (also for a cancel the venue started itself) |
+| `Rejected` | `Rejected`; an error if any fill was ever reported for the order, busted or not |
+| `Fill` | adds an execution, keyed by `exec_id`; implies acceptance; an error if the order would be over-filled, or if `exec_id` was already reported with a different quantity, price or fee (`ConflictingDuplicate`: the id is the idempotency key, so a repeat must be identical) |
+| `CancelAck` | `Canceled` (also for a cancel the venue started itself); `Late` once the order expired |
 | `CancelRejected` | clears the pending cancel |
-| `ReplaceAck` | applies the new total quantity, limit and trigger; an error if the new quantity is below what has filled, or a price does not exist for the order kind |
+| `ReplaceAck` | applies the new total quantity, limit and trigger to a pending replace, also when the order has since filled, been cancelled or expired; an error if the new quantity is below what has filled, or a price does not exist for the order kind |
 | `ReplaceRejected` | clears the pending replace |
-| `Expired` | `Expired` |
+| `Expired` | `Expired` (outranks a cancel) |
 | `Correction` | restates one execution's quantity and price; the latest `ts_ns` wins |
 | `Bust` | removes one execution |
 
@@ -98,6 +98,20 @@ point result is bit-identical. Two consequences follow:
   (`PartiallyFilled` or `Accepted`), unless a cancel or expiry was already
   acknowledged, in which case it ends as that.
 
+The rule for each pair that can disagree:
+
+| facts | the order ends as |
+|---|---|
+| `CancelAck` and `Expired` | `Expired`, whichever arrives first (a cancel already reported is superseded) |
+| `Rejected` and `CancelAck` / `Expired` | `Rejected`, whichever arrives first |
+| `Rejected` and a `Fill` (even one busted) | an error on whichever of the two arrives second |
+| `ReplaceAck` and a `Fill`, `CancelAck` or `Expired` | the replaced terms apply in every order; the status is derived from them |
+| `Correction` and `Bust` of one execution | the bust; the latest correction by `ts_ns` otherwise |
+
+The pending flags (`request_cancel`, `request_replace`) are local requests
+and are not cleared by a rejection or expiry, so they cannot make a later
+acknowledgement behave differently from an earlier one.
+
 Limits of the guarantee: it covers reports that agree with each other. A
 fill after a reject is an error, not a reordering. An over-fill is refused,
 never clamped, so a venue that restates an execution (bust then re-fill)
@@ -114,3 +128,35 @@ leg that traded. It is never raised. A sibling sized by capital fraction or
 whole position is left alone, since it resolves when it fills. When a leg
 fills completely, the working siblings are cancelled, as before. The rule
 runs only with `partial_fills` on, since without it no leg fills in part.
+
+Each cut is an `order_resized` event (`size` the units the sibling offers now,
+`previous_size` what it offered), delivered to `on_order_event` alone, in every
+runner, right after the fill that caused it. A live node with a journal writes an
+`order_resized` record for it (`from`, `to`), so a change to a working order is never
+silent. An execution adapter's own venue cuts its own siblings: the node hears of
+that through the reports the venue sends.
+
+## Asking for an order that is not there
+
+A strategy cancels or modifies an order by client id. Two cases differ.
+
+- **A client id the run never submitted** (a typo, or an order from another
+  run) is a mistake, and is refused with `unknown_order`, naming the id and
+  the ids the run did submit. Modifying a `Twap` schedule is refused the
+  same way: a schedule can only be cancelled.
+- **An order that was submitted and has since finished** (filled, cancelled,
+  expired or rejected) is a race the strategy cannot always win. Asking for
+  it again changes nothing and raises nothing. This is the same answer a
+  venue run gives: a repeated or late request is a no-op there, and a venue
+  that refuses a cancel answers with a `CancelRejected` report that returns
+  the order to its working state.
+
+## Orders that wait for a hedge
+
+A sold option that its account refuses for want of capital or margin, while
+another option in its margin group has a buying order working, stays
+working instead of being rejected. Instruments are stepped in a fixed order,
+so the sold leg's event can come before the event that fills its hedge; the
+leg is funded, with the group's credit, at its next event once the hedge is
+held. If the hedge never fills, the sold leg is refused when it is next
+stepped without a pending hedge, as before.

@@ -8,50 +8,6 @@ use super::*;
 use crate::core::types::{BacktestConfig, CompiledSignals, Direction, ExitReason, OhlcvData};
 
 // ---------------------------------------------------------------------------
-// Helper unit tests (moved from options.rs unchanged)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_strike_selection_atm() {
-    let config = OptionsConfig {
-        strike_interval: 50.0,
-        strike_selection: StrikeSelection::Atm,
-        ..Default::default()
-    };
-    let backtest = OptionsBacktest::new(config);
-
-    // Spot at 17834, ATM should be 17850
-    let strike = backtest.select_strike(17834.0);
-    assert!((strike - 17850.0).abs() < 1e-10);
-}
-
-#[test]
-fn test_strike_selection_otm() {
-    let config = OptionsConfig {
-        strike_interval: 50.0,
-        strike_selection: StrikeSelection::Otm(2),
-        option_type: OptionType::Call,
-        ..Default::default()
-    };
-    let backtest = OptionsBacktest::new(config);
-
-    // Spot at 17834, ATM=17850, OTM 2 strikes = 17950
-    let strike = backtest.select_strike(17834.0);
-    assert!((strike - 17950.0).abs() < 1e-10);
-}
-
-#[test]
-fn test_position_sizing_percent() {
-    let config =
-        OptionsConfig { size_type: SizeType::Percent(0.5), lot_size: 50, ..Default::default() };
-    let backtest = OptionsBacktest::new(config);
-
-    // 50% of 100000 = 50000, option at 100 * lot 50 = 5000 per contract
-    let contracts = backtest.calculate_contracts(100.0, 100_000.0);
-    assert_eq!(contracts, 10);
-}
-
-// ---------------------------------------------------------------------------
 // Costs and accounting
 //
 // Six defects lived here, and no test in this file ever called `run()` -- the
@@ -219,7 +175,7 @@ fn an_itemized_segment_reports_its_components() {
         (breakdown.total() - trade.fees).abs() < 1e-9,
         "the itemized total is the money actually charged"
     );
-    assert_eq!(trade.fees, trade.entry_fees + trade.exit_fees);
+    assert!((trade.fees - (trade.entry_fees + trade.exit_fees)).abs() < 1e-9);
     assert!(trade.fees > 40.0, "real costs dwarf the 10.00 flat rate here: {}", trade.fees);
 }
 
@@ -242,15 +198,15 @@ fn the_itemized_schedule_puts_each_charge_on_the_side_that_owes_it() {
 }
 
 #[test]
-fn an_end_of_data_close_is_paid_for_out_of_the_equity_curve() {
-    // The end-of-data close computed fees and pushed a trade but never touched
-    // cash, and it runs after the loop had already written the last equity
-    // point from the position marked to market. The exit charge appeared in
-    // the trade list and nowhere else.
+fn an_end_of_data_mark_costs_nothing_and_the_curve_agrees() {
+    // A position still open when the data ends is marked at the last premium,
+    // as in every other runner: nothing is sold, so no exit order is charged.
+    // The curve, the trade and the reported end value must still agree.
     let result = costed_run(100.0, 0.001, None, 50, true);
 
     let trade = &result.trades[0];
     assert_eq!(trade.exit_reason, ExitReason::EndOfData);
+    assert_eq!(trade.exit_fees, 0.0, "an end-of-data mark is not a trade-out");
 
     let start = result.equity_curve[0];
     let end = *result.equity_curve.last().unwrap();
@@ -262,15 +218,12 @@ fn an_end_of_data_close_is_paid_for_out_of_the_equity_curve() {
     );
     assert!(
         (result.metrics.end_value - end).abs() < 1e-9,
-        "the reported end value is the corrected curve, not the marked one"
+        "the reported end value is the curve's last point"
     );
 }
 
 #[test]
-fn the_two_exit_paths_charge_the_same_costs() {
-    // A signal exit and an end-of-data exit at the same premium are the same
-    // round trip and must cost the same. Cross-checks the end-of-data path
-    // against the one that was already crediting cash.
+fn a_signal_exit_pays_the_exit_side_an_end_of_data_mark_does_not() {
     let signal = costed_run(100.0, 0.001, Some("NFO-OPT"), 50, false);
     let end_of_data = costed_run(100.0, 0.001, Some("NFO-OPT"), 50, true);
 
@@ -279,7 +232,7 @@ fn the_two_exit_paths_charge_the_same_costs() {
 
     assert_eq!(a.exit_reason, ExitReason::Signal);
     assert_eq!(b.exit_reason, ExitReason::EndOfData);
-    assert!((a.fees - b.fees).abs() < 1e-9, "same round trip, same cost: {} vs {}", a.fees, b.fees);
-    assert!((a.entry_fees - b.entry_fees).abs() < 1e-9);
-    assert!((a.exit_fees - b.exit_fees).abs() < 1e-9);
+    assert!((a.entry_fees - b.entry_fees).abs() < 1e-9, "same entry, same cost");
+    assert!(a.exit_fees > 0.0);
+    assert_eq!(b.exit_fees, 0.0);
 }

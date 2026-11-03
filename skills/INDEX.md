@@ -42,19 +42,19 @@ Load when:
 
 ## Strategy
 
-Strategy creation, hooks and callback semantics.
+Writing a class-based strategy: the Strategy class, its lifecycle hooks, StrategyConfig parameters, the requirements manifest, the context and state, and running one or many strategies over the same data.
 
 Name: `raptorbt-strategy`  
 Path: [strategy/SKILL.md](strategy/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core
 
 Load when:
 
-- Writing a class-based strategy.
-- Choosing hooks (on_start, on_bar, on_stop, order and position events).
-- Running one strategy or many over the same data.
+- Writing a class-based strategy or choosing its hooks (on_init, on_start, on_bar, on_fill, on_stop).
+- Giving a strategy parameters (StrategyConfig, param bounds) or declaring what data it needs (requirements).
+- Running one strategy or many strategies over the same data.
 
 ## Instruments
 
@@ -143,79 +143,84 @@ Load when:
 
 ## Orders
 
-Order construction, stops, targets and lifecycle.
+Order construction and lifecycle: the typed order kinds, sizing forms, time in force, brackets, OCO links, modify and cancel, option structures, and the reasons an order is refused.
 
 Name: `raptorbt-orders`  
 Path: [orders/SKILL.md](orders/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-instruments
 
 Load when:
 
-- Submitting or managing orders.
-- Implementing stop-losses, targets or brackets.
+- Submitting or managing orders: limit, stop, stop-limit, trailing, bracket, OCO, modify, cancel.
+- Implementing a stop-loss, target or time in force (day, gtd, ioc, fok).
+- Explaining why an order was rejected, or placing a multi-leg option structure.
 
 ## Execution
 
-Matching, fill timing, slippage and fee models.
+Where a strategy's orders go: the ExecutionAdapter protocol, requests and execution reports, the simulated and paper venues, how a venue's fills are booked as facts, the host's order check and order tags, and what differs between paper and the in-process matcher.
 
 Name: `raptorbt-execution`  
 Path: [execution/SKILL.md](execution/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-orders
 
 Load when:
 
-- Choosing fill timing, slippage or partial-fill behaviour.
-- Setting fees or a custom rate card.
+- Connecting a strategy to a venue: writing an ExecutionAdapter, or turning a venue's messages into execution reports.
+- Understanding what a fill, cancel or replace report does to the book, including fills that breach a limit or arrive out of order.
+- Validating on PaperExecution before real money, or explaining why paper and a backtest differ.
+- Installing the host's order check or attaching tags to orders.
 
 ## Portfolio
 
-Positions, capital, accounts and portfolio construction math.
+The account a strategy trades against: positions, cash, equity and free capital, netting and hedging, margin accounts, shared account groups, booked fixed-point money, and portfolio construction math.
 
 Name: `raptorbt-portfolio`  
 Path: [portfolio/SKILL.md](portfolio/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-instruments
 
 Load when:
 
-- Running several instruments against one capital pool.
-- Using account groups, optimizers, factor panels or rebalancing.
+- Reading positions, cash, equity or free capital; netting versus hedging; margin versus cash accounts.
+- Running several strategies on one shared account (AccountSpec) or several instruments against one capital pool.
+- Booked money (exact minor units), or turning forecasts into target weights (optimizer, factor panels, rebalancing).
 
 ## Risk
 
-Risk limits, margin models and safety controls.
+Risk limits, kill switches, margin models and position sizing helpers: what refuses an order, what halts a strategy, and how many lots to trade.
 
 Name: `raptorbt-risk`  
 Path: [risk/SKILL.md](risk/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-portfolio
 
 Load when:
 
-- Capping order size, exposure, positions or daily loss.
-- Modelling margin.
-- Estimating covariance or risk contributions.
+- Capping order size, position, exposure, open positions, daily loss or drawdown; adding a kill switch.
+- Sizing a position in lots from capital, risk, volatility or margin.
+- Modelling margin, or measuring covariance and risk contributions.
 
 ## Backtesting
 
-Historical simulation runners.
+Historical simulation: choosing a runner, configuring fills, fees, slippage and latency, expiry and corporate actions in a backtest, and keeping a run deterministic.
 
 Name: `raptorbt-backtesting`  
 Path: [backtesting/SKILL.md](backtesting/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core, raptorbt-instruments
 
 Load when:
 
-- Running a historical simulation from arrays.
-- Choosing between single, basket, pairs, spread, options and multi runners.
+- Running a historical simulation and choosing between single, basket, multi, pairs, options and spread runners.
+- Setting fees, exchange charges (fee_segment, RateCard), slippage, fill timing, latency or stochastic fills.
+- Expiry, settlement and corporate actions (splits, dividends) in a backtest; making a run deterministic.
 
 ## Optimization
 
@@ -235,18 +240,21 @@ Load when:
 
 ## Live trading
 
-Live runtime and broker-facing integration.
+Running strategies on a pushed feed with LiveNode: arrival times, warm-up, adopted positions and corporate actions, the journal, checkpoint, restore, reconciliation and fencing, broker adapters and their conformance kit, percent and group exits, continuous futures, and the instruments a context answers for.
 
 Name: `raptorbt-live-trading`  
 Path: [live-trading/SKILL.md](live-trading/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
-Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data, raptorbt-risk
+Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data, raptorbt-risk, raptorbt-execution
 
 Load when:
 
-- Driving a strategy from a live feed.
-- Preparing paper or live operation.
+- Driving a strategy from a live feed with LiveNode, on paper or against a broker.
+- Warming up, adopting positions an account already holds (signed seeds with posted margin) or declaring corporate actions on a node.
+- Making a process survive a crash: the journal, checkpoint, restore, reconcile, resume, resend and fencing.
+- Connecting Kite, Upstox or Dhan through raptorbt.adapters, or testing an adapter with the conformance kit.
+- Percent and group exits, continuous futures and rolls, ctx.instrument, ctx.option_chain and ctx.role on a node.
 
 ## Results
 
@@ -266,33 +274,39 @@ Load when:
 
 ## Deployment
 
-Runtime configuration, versioning and deployment checks.
+What a host must provide and decide to run a validated strategy for real: admitting a strategy from its requirements manifest, resolving its roles into symbols, building the node with bindings, a venue adapter, a journal and an epoch, supervising it, recovering it, and what to verify before real money.
 
 Name: `raptorbt-deployment`  
 Path: [deployment/SKILL.md](deployment/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
-Depends on: raptorbt-core, raptorbt-live-trading, raptorbt-risk
+Depends on: raptorbt-core, raptorbt-strategy, raptorbt-live-trading, raptorbt-execution, raptorbt-risk
 
 Load when:
 
-- Moving a validated strategy to a runtime.
-- Pinning versions and checking compatibility.
+- Moving a validated strategy toward paper or real money, or running strategies other people wrote.
+- Admitting a strategy from its requirements manifest: check_requirements, params_schema, requirements_hash, resolve and role bindings.
+- Deciding what a worker must hold: instruments, bindings, journal and fsync, epoch and fencing, warm-up history, health and heartbeat.
+- Writing the recovery runbook, or the checklist of what to verify before live trading with real money.
+- Pinning versions and the once-a-day release check.
 
 ## Troubleshooting
 
-Structured errors, common failures and debugging.
+Structured errors by symptom: how to read a RaptorBT error, the codes a run, an order, a live node, a recovery and an adapter raise or report, how to read a journal, the mistakes that recur across skills, and the engine gaps known today.
 
 Name: `raptorbt-troubleshooting`  
 Path: [troubleshooting/SKILL.md](troubleshooting/SKILL.md)  
-Status: draft  
+Status: stable  
 API version: 2.x  
 Depends on: raptorbt-core
 
 Load when:
 
-- A call raised a RaptorBT error.
-- Results look wrong or a run was refused.
+- A call raised a RaptorBT error: read code, parameter, valid and skill, then find the code by symptom.
+- An order was rejected, a run was refused, or results look wrong.
+- A live node raised fenced, recovering, replay_diverged, node_poisoned, venue_unavailable or journal_failed, or an adapter reported unconfirmed or session_expired.
+- Reading a journal to reconstruct what happened to an order.
+- Checking the known engine gaps before relying on a behaviour.
 
 <!-- registry:end -->
 

@@ -352,7 +352,7 @@ class Counter(Strategy):
     def on_bar(self, ctx):
         self.seen.append(("bar", ctx.symbol, ctx.bar_close_ts, ctx.idx))
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self.seen.append(("trade", ctx.symbol, tick.timestamp, ctx.idx))
         self.sizes.append(len(ctx.series()["timestamps"]))
 
@@ -402,7 +402,7 @@ class BookReader(Strategy):
         super().__init__()
         self.seen = []
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         book = ctx.book
         self.seen.append((
             tuple(tick), ctx.tick is tick, ctx.quote, ctx.best_bid, ctx.best_ask, ctx.last_price,

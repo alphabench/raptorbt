@@ -253,6 +253,7 @@ impl AggregatorHubBuilder {
         }
 
         Ok(AggregatorHub {
+            by_key: self.by_key,
             keys: self.keys,
             builders: self.builders,
             inst_offsets,
@@ -271,6 +272,9 @@ impl AggregatorHubBuilder {
 
 /// The shared aggregators of a run.
 pub struct AggregatorHub {
+    /// Kept after the build so an instrument added to a running node can share an aggregator
+    /// with a key that already exists.
+    by_key: HashMap<AggKey, AggId>,
     keys: Vec<AggKey>,
     builders: Vec<Box<dyn BarBuilder + Send + Sync>>,
     /// Aggregations per instrument, ascending `AggId`.
@@ -290,7 +294,174 @@ pub struct AggregatorHub {
     primary: Vec<Option<Box<dyn BarBuilder + Send + Sync>>>,
 }
 
+/// What a retired instrument's aggregator is replaced with, so its state is freed.
+#[derive(Debug)]
+struct Retired;
+
+impl BarBuilder for Retired {
+    fn push(&mut self, _rec: &SourceRecord) -> Option<OhlcvBar> {
+        None
+    }
+
+    fn flush(&mut self) -> Option<OhlcvBar> {
+        None
+    }
+}
+
 impl AggregatorHub {
+    /// Make room for one more instrument (the next id), with no aggregations. Its primary bars
+    /// are cut as `primary` says, if given.
+    pub fn add_instrument(&mut self, primary: Option<(BarSpec, i64)>) -> Result<()> {
+        let end = *self.inst_offsets.last().unwrap_or(&0);
+        if self.inst_offsets.is_empty() {
+            self.inst_offsets.push(0);
+        }
+        self.inst_offsets.push(end);
+        let builder = match primary {
+            Some((spec, tz)) => Some(
+                builder_for_with(spec, tz, BuilderParams { brick_size: 0.0 })
+                    .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?,
+            ),
+            None => None,
+        };
+        self.primary.push(builder);
+        Ok(())
+    }
+
+    /// Subscribe `strategy` to `key` after the build. Only the newest instrument may gain
+    /// aggregations (the index keeps each instrument's aggregations in `AggId` order, so a new
+    /// aggregator must belong to the last instrument); the stream is appended to the strategy's
+    /// own list. Returns what [`AggregatorHubBuilder::register_with_session`] returns.
+    pub fn subscribe(
+        &mut self,
+        strategy: StrategyId,
+        key: AggKey,
+        session: Option<&SessionSchedule>,
+    ) -> Result<(AggId, u16)> {
+        let session = session.filter(|_| follows_calendar(key.spec.unit));
+        let key = match session {
+            Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..key },
+            None => key,
+        };
+        let instruments = self.inst_offsets.len().saturating_sub(1);
+        if key.instrument.index() + 1 != instruments {
+            return Err(RaptorError::invalid_parameter(
+                "a running node can subscribe only its newest instrument to a new aggregation",
+            ));
+        }
+        let agg = match self.by_key.get(&key) {
+            Some(&agg) => agg,
+            None => {
+                let builder =
+                    builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
+                        .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;
+                let agg = AggId::new(
+                    u32::try_from(self.keys.len())
+                        .map_err(|_| RaptorError::invalid_parameter("too many aggregations"))?,
+                );
+                self.by_key.insert(key, agg);
+                self.keys.push(key);
+                self.builders.push(builder);
+                self.spans.push((0, 0));
+                // The newest instrument's aggregations are the tail of `inst_aggs`.
+                self.inst_aggs.push(agg);
+                *self.inst_offsets.last_mut().expect("an instrument exists") += 1;
+                agg
+            }
+        };
+        let s = strategy.index();
+        if self.strat_offsets.is_empty() {
+            self.strat_offsets.push(0);
+        }
+        while self.strat_offsets.len() <= s + 1 {
+            let end = *self.strat_offsets.last().expect("non-empty");
+            self.strat_offsets.push(end);
+        }
+        let at = self.strat_offsets[s + 1] as usize;
+        let local = u16::try_from(at - self.strat_offsets[s] as usize).map_err(|_| {
+            RaptorError::invalid_parameter("a strategy may hold at most 65536 subscriptions")
+        })?;
+        self.strat_subs.insert(at, agg);
+        for o in &mut self.strat_offsets[s + 1..] {
+            *o += 1;
+        }
+        let mut rows: Vec<(AggId, StrategyId, u16)> = Vec::with_capacity(self.strat_subs.len());
+        let mut agg_subs = AggSubscriptionsBuilder::new(self.keys.len());
+        for st in 0..self.strat_offsets.len() - 1 {
+            let (lo, hi) = (self.strat_offsets[st] as usize, self.strat_offsets[st + 1] as usize);
+            for (l, &a) in self.strat_subs[lo..hi].iter().enumerate() {
+                rows.push((a, StrategyId::new(st as u32), l as u16));
+            }
+        }
+        for (a, st, l) in rows {
+            agg_subs.push(a, st, l)?;
+        }
+        self.agg_subs = agg_subs.build()?;
+        Ok((agg, local))
+    }
+
+    /// Stop feeding `instrument`'s aggregators and free their state. The ids stay (they are
+    /// never reused), so every strategy's stream numbering is unchanged.
+    pub fn retire_instrument(&mut self, instrument: InstrumentId) -> Result<()> {
+        let i = instrument.index();
+        let (Some(&lo), Some(&hi)) = (self.inst_offsets.get(i), self.inst_offsets.get(i + 1))
+        else {
+            return Ok(());
+        };
+        let freed = hi - lo;
+        for k in lo..hi {
+            let a = self.inst_aggs[k as usize].index();
+            self.builders[a] = Box::new(Retired);
+        }
+        self.inst_aggs.drain(lo as usize..hi as usize);
+        for o in &mut self.inst_offsets[i + 1..] {
+            *o -= freed;
+        }
+        if let Some(slot) = self.primary.get_mut(i) {
+            *slot = None;
+        }
+        Ok(())
+    }
+
+    /// Bring a retired instrument's aggregators back with fresh builders (the ids and every
+    /// strategy's stream numbering are the ones they had), and its primary bars if `primary` says.
+    pub fn revive_instrument(
+        &mut self,
+        instrument: InstrumentId,
+        primary: Option<(BarSpec, i64)>,
+        session: Option<&SessionSchedule>,
+    ) -> Result<()> {
+        let i = instrument.index();
+        let Some(&lo) = self.inst_offsets.get(i) else {
+            return Err(RaptorError::invalid_parameter("unknown instrument"));
+        };
+        if self.inst_offsets[i + 1] != lo {
+            return Err(RaptorError::invalid_parameter("the instrument's aggregators are live"));
+        }
+        let mine: Vec<usize> =
+            (0..self.keys.len()).filter(|&a| self.keys[a].instrument == instrument).collect();
+        for &a in &mine {
+            let key = self.keys[a];
+            let session = session.filter(|_| follows_calendar(key.spec.unit));
+            self.builders[a] =
+                builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
+                    .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;
+            self.spans[a] = (0, 0);
+        }
+        let ids: Vec<AggId> = mine.iter().map(|&a| AggId::new(a as u32)).collect();
+        self.inst_aggs.splice(lo as usize..lo as usize, ids.iter().copied());
+        for o in &mut self.inst_offsets[i + 1..] {
+            *o += ids.len() as u32;
+        }
+        if let (Some((spec, tz)), Some(slot)) = (primary, self.primary.get_mut(i)) {
+            *slot = Some(
+                builder_for_with(spec, tz, BuilderParams { brick_size: 0.0 })
+                    .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?,
+            );
+        }
+        Ok(())
+    }
+
     /// Feed one primary bar of `instrument`.
     pub fn on_bar(&mut self, instrument: InstrumentId, bar: &KernelBar) -> &[(AggId, OhlcvBar)] {
         let rec = SourceRecord {
@@ -450,6 +621,7 @@ impl HeapSize for AggregatorHub {
     fn heap_bytes(&self) -> usize {
         use std::mem::size_of;
         self.keys.capacity() * size_of::<AggKey>()
+            + self.by_key.capacity() * (size_of::<AggKey>() + size_of::<AggId>())
             + self.builders.capacity() * size_of::<Box<dyn BarBuilder + Send + Sync>>()
             + self.inst_offsets.capacity() * size_of::<u32>()
             + self.inst_aggs.capacity() * size_of::<AggId>()

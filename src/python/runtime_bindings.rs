@@ -36,6 +36,7 @@ use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
 use crate::portfolio::session::ScheduleData;
 use crate::runtime::commands::{
     CmdError, Command, CommandState, ErrVal, Intent, Order, OrderSpec, Queue, Target, TwapSpec,
+    MAX_TAGS, MAX_TAG_KEY, MAX_TAG_VALUE,
 };
 use crate::runtime::groups::GroupSpec;
 use crate::runtime::store::{BarColumns, DepthColumns, TickColumns, TickSlices};
@@ -48,6 +49,10 @@ use crate::runtime::{
 
 mod venue;
 
+use crate::journal::{
+    kind as jk, source as jsrc, Control, Journal, JournalingAdapter, Value as JV,
+};
+
 use self::venue::VenueRoute;
 use super::account_bindings::{convert_group, PyAccountResult};
 use super::bindings::{PyBacktestConfig, PyInstrumentConfig, PyPortfolioResult, PyTrade};
@@ -55,12 +60,13 @@ use super::errors::{Fail, Val};
 use super::execution_bindings::{report_ts, PyAdapter, PyExecutionReport};
 use super::indicator_bindings::PyIndicator;
 use super::instrument_bindings::PyInstrumentSpec;
+use super::journal_bindings::{journal_err, PyJournal};
 use super::session_bindings::{
     convert_outcome, parse_instrument_args, working_order_rows, WorkingOrderRow,
 };
 use super::strategy_bindings::{
-    atr_period, convert_snapshot, parse_account_mode, parse_qty_spec, submit_order_on,
-    submit_twap_on, PyEngineEvent, PyKernelSession, PyPositionSnapshot,
+    atr_period, convert_snapshot, parse_account_mode, parse_qty_spec, submit_order_checked,
+    submit_order_on, submit_twap_on, PyEngineEvent, PyKernelSession, PyPositionSnapshot,
 };
 
 /// Events between interpreter signal checks.
@@ -100,12 +106,74 @@ fn finished() -> PyErr {
     Fail::new("run_finished", "this strategy's run is finished").into()
 }
 
+/// Call `method` on the context host attached to a context
+/// (`ctx._raptorbt_host`), with the context and `arg`.
+fn ctx_host<'py, A: IntoPyObject<'py>>(
+    slf: &Bound<'py, PyRuntimeContext>,
+    method: &str,
+    arg: A,
+) -> PyResult<Py<PyAny>> {
+    let host = slf
+        .as_any()
+        .getattr_opt("_raptorbt_host")?
+        .ok_or_else(|| PyAttributeError::new_err("this context has no instrument host"))?;
+    Ok(host.call_method1(method, (slf, arg))?.unbind())
+}
+
+fn bad_refusal(verdict: &Bound<'_, PyAny>) -> PyErr {
+    Fail::new(
+        "invalid_order_refusal",
+        "order_check must return None to accept an order, or a refusal code (a str, or an \
+         object with a str `code`)",
+    )
+    .param("order_check")
+    .value(verdict.get_type().to_string())
+    .into()
+}
+
 fn busy(message: &str) -> PyErr {
     Fail::new("runtime_busy", message).into()
 }
 
+fn poisoned() -> PyErr {
+    Fail::new(
+        "node_poisoned",
+        "a call stopped part way through a booking, so this node's books cannot be trusted; \
+         discard it and rebuild it from the venue's positions",
+    )
+    .into()
+}
+
 fn not_ready(message: &str) -> PyErr {
     Fail::new("runtime_not_ready", message).into()
+}
+
+/// The loop state held for one push. If the push unwinds, the node is marked
+/// poisoned: a panic can leave cash and positions half moved.
+struct LiveGuard<'a> {
+    state: std::cell::RefMut<'a, Option<LoopState>>,
+    poisoned: &'a Cell<bool>,
+}
+
+impl Drop for LiveGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.poisoned.set(true);
+        }
+    }
+}
+
+impl std::ops::Deref for LiveGuard<'_> {
+    type Target = Option<LoopState>;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for LiveGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
 }
 
 enum Inner {
@@ -159,6 +227,9 @@ enum Route {
 }
 
 /// Everything the loop needs about one strategy.
+/// A strategy and the commands and intents it queued before the run began.
+type BootQueued = (Rc<Strat>, Vec<Command>, Vec<Intent>);
+
 struct Strat {
     sid: StrategyId,
     strategy: Py<PyAny>,
@@ -166,14 +237,31 @@ struct Strat {
     mask: u32,
     queue: Py<PyCommandQueue>,
     route: Route,
-    clocks: Vec<ClockSlot>,
     active_clock: Cell<usize>,
-    /// Per local instrument: indicators fed by its primary bars, and the
-    /// reveal for the linked ones.
+    /// What grows with the instruments; one borrow per delivery.
+    tables: RefCell<StratTables>,
+    /// What a node needs to give this strategy an instrument added after it started: the
+    /// subscriptions it declared `(step, unit, brick)`, a pristine clock to copy per instrument,
+    /// and the private indicators every instrument feeds.
+    late: Late,
+}
+
+/// A strategy's per-instrument state. It grows when an instrument is added to a running node
+/// (a node holds the live-loop guard then, so no event holds a borrow).
+struct StratTables {
+    clocks: Vec<ClockSlot>,
+    /// Per local instrument: indicators fed by its primary bars, and the reveal for the linked ones.
     primary_private: Vec<Vec<Py<PyAny>>>,
     primary_reveal: Vec<Option<Reveal>>,
     /// By local stream id.
     streams: Vec<StreamInfo>,
+}
+
+struct Late {
+    subscriptions: Vec<(u32, String, f64)>,
+    clock: Py<PyAny>,
+    /// `(subscription it follows or None for the primary bars, the indicator)`.
+    indicators: Vec<(Option<usize>, Py<PyAny>)>,
 }
 
 struct StreamPlan {
@@ -201,6 +289,9 @@ struct Plan {
     queue: Py<PyCommandQueue>,
     clocks: Vec<ClockSlot>,
     subs: usize,
+    subscriptions: Vec<(u32, String, f64)>,
+    /// A pristine copy of the strategy's clock schedule, for instruments added later.
+    clock: Py<PyAny>,
     /// By local stream id.
     streams: Vec<StreamPlan>,
     /// `[local instrument][subscription]` -> local stream id.
@@ -212,19 +303,43 @@ struct Plan {
 /// cut at.
 type SeriesCache = (u64, u64, Py<PyDict>);
 
+/// A per-instrument table that is read on every event and changes only when an instrument is
+/// added to or retired from a running node. Changing it takes the node's [`LiveGuard`] (no push
+/// is running); a read is a shared borrow.
+struct Table<T>(RefCell<Vec<T>>);
+
+impl<T> Table<T> {
+    fn new(items: Vec<T>) -> Self {
+        Self(RefCell::new(items))
+    }
+
+    #[inline(always)]
+    fn get(&self) -> std::cell::Ref<'_, [T]> {
+        std::cell::Ref::map(self.0.borrow(), Vec::as_slice)
+    }
+
+    fn push(&self, _quiet: &LiveGuard<'_>, item: T) {
+        self.0.borrow_mut().push(item);
+    }
+
+    fn set(&self, _quiet: &LiveGuard<'_>, at: usize, item: T) {
+        self.0.borrow_mut()[at] = item;
+    }
+}
+
 struct Shared {
     inner: RefCell<Inner>,
     /// Interned symbols by instrument id.
-    symbols: Vec<Py<PyString>>,
-    sym_ids: HashMap<String, InstrumentId>,
+    symbols: Table<Py<PyString>>,
+    sym_ids: RefCell<HashMap<String, InstrumentId>>,
     store: Arc<MarketStore>,
     /// Per instrument, whether it has ticks or depth.
-    has_ticks: Vec<bool>,
+    has_ticks: Table<bool>,
     /// Per instrument, the caller's bar arrays (`None` without bars).
-    arrays: Vec<Option<Py<PyDict>>>,
+    arrays: RefCell<Vec<Option<Py<PyDict>>>>,
     /// Per instrument, the caller's tick arrays (`None` without ticks).
-    tick_arrays: Vec<Option<Py<PyDict>>>,
-    offsets: Vec<i64>,
+    tick_arrays: RefCell<Vec<Option<Py<PyDict>>>>,
+    offsets: Table<i64>,
     /// Truncated series dicts by instrument, valid for one watermark.
     series: RefCell<Vec<Option<SeriesCache>>>,
     /// Rows each live ring holds; `None` for a batch run over a store.
@@ -257,9 +372,183 @@ struct Shared {
     times: Cell<Option<Times>>,
     /// Declared processing latency of a live node (ns).
     processing_latency_ns: Cell<i64>,
+    /// A push stopped on a panic (a booked amount that could not be
+    /// represented) with the books half moved. The node refuses every call
+    /// from then on: its state cannot be trusted.
+    poisoned: Cell<bool>,
     /// The bars being pushed are history, replayed to prime the strategies.
     warmup: Cell<bool>,
+    /// The journal of a live node, when it keeps one (see `crate::journal`).
+    journal: RefCell<Option<Rc<RefCell<Journal>>>>,
+    /// `journal` is set: one flag read per event, no borrow.
+    journal_on: Cell<bool>,
+    /// What the journal's adapter wrapper shares with this runtime.
+    control: Rc<Control>,
+    /// Warmup is muted: the strategies' hooks run and their state updates,
+    /// but the orders and intents they queue are discarded.
+    warmup_muted: Cell<bool>,
+    /// The host's pre-submit order check and the class of the order it is
+    /// shown, once given.
+    order_check: RefCell<Option<(Py<PyAny>, Py<PyAny>)>>,
+    /// What the strategies queued in `on_start`, set aside while muted
+    /// warm-up history runs (it would discard them) and given back after.
+    boot_queue: RefCell<Vec<BootQueued>>,
+    /// Strategies halted by hand (`ctx.halt`, `LiveNode.halt`, `halt_account`): their
+    /// latch is already on the record, so it is not recorded again as the engine's.
+    manual_halts: RefCell<std::collections::HashSet<usize>>,
+    /// The run's `oms_type`, for the books of instruments added later.
+    oms_type: String,
+    /// The primary bar spec every tick instrument is cut into, if one was set.
+    primary: Cell<Option<crate::data::BarSpec>>,
+    /// The longest lookback of any indicator: a ring of an instrument added later holds at
+    /// least this many rows.
+    lookback: Cell<usize>,
+    /// Instruments retired from the node, by id.
+    retired: Table<bool>,
+    /// The node's own execution adapter, to tell about instruments added and retired.
+    adapter_obj: RefCell<Option<Py<PyAny>>>,
 }
+
+impl Shared {
+    /// The interned symbol text of an instrument id, bound to `py`.
+    #[inline]
+    fn symbol<'py>(&self, py: Python<'py>, id: usize) -> Bound<'py, PyString> {
+        self.symbols.get()[id].bind(py).clone()
+    }
+
+    fn symbol_text(&self, id: usize) -> String {
+        self.symbols.get()[id].to_string()
+    }
+
+    fn offset_of(&self, id: usize) -> i64 {
+        self.offsets.get()[id]
+    }
+
+    fn jcount(&self) -> u64 {
+        if !self.journal_on.get() {
+            return 0;
+        }
+        self.journal.borrow().as_ref().map_or(0, |j| j.borrow().count())
+    }
+
+    /// Write one record, built only when a journal is kept. The record is
+    /// written before the engine acts on what it describes.
+    fn jlog(
+        &self,
+        kind: &str,
+        event_ns: i64,
+        arrival_ns: i64,
+        source: &str,
+        client_order_id: Option<&str>,
+        payload: impl FnOnce() -> JV,
+    ) -> PyResult<()> {
+        if !self.journal_on.get() {
+            return Ok(());
+        }
+        self.control.now.set((event_ns, arrival_ns));
+        let journal = self.journal.borrow().clone().expect("journal_on implies a journal");
+        let appended = journal.borrow_mut().append(
+            kind,
+            event_ns,
+            arrival_ns,
+            source,
+            client_order_id,
+            payload(),
+        );
+        appended.map(|_| ()).map_err(journal_err)
+    }
+
+    /// A record about something that happened inside the current event: it
+    /// carries that event's times.
+    fn jlog_now(
+        &self,
+        kind: &str,
+        source: &str,
+        client_order_id: Option<&str>,
+        payload: impl FnOnce() -> JV,
+    ) -> PyResult<()> {
+        let (ev, arr) = self.control.now.get();
+        self.jlog(kind, ev, arr, source, client_order_id, payload)
+    }
+
+    /// Whether the strategy's book has latched a halt (margin call, drawdown
+    /// limit, halt by hand). Read only when a journal is kept.
+    fn halted(&self, sid: StrategyId) -> bool {
+        self.journal_on.get() && self.with_book(sid, |b, _| Ok(b.is_halted())).unwrap_or(false)
+    }
+
+    /// The engine latched a halt of its own (the drawdown limit, a margin
+    /// call) while applying an event: it is on the record before the strategy
+    /// hears of it and before anything reaches a venue. `before` is
+    /// [`Shared::halted`] ahead of the apply.
+    fn journal_halt_edge(
+        &self,
+        sid: StrategyId,
+        before: bool,
+        events: &[EngineEvent],
+    ) -> PyResult<()> {
+        if before || !self.halted(sid) || self.manual_halts.borrow().contains(&sid.index()) {
+            return Ok(());
+        }
+        let margin = events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. }));
+        self.jlog_now(jk::HALT, jsrc::ENGINE, None, || {
+            JV::map([
+                ("strategy", JV::Int(sid.index() as i64)),
+                ("reason", JV::str(if margin { "margin_call" } else { "drawdown" })),
+                ("flatten", JV::Bool(false)),
+            ])
+        })
+    }
+
+    /// While a replay rebuilds the node, the failure of a push is the failure
+    /// the original run recorded, not the one the replay raised (the adapter
+    /// was not called: it answered with what the journal holds, so the
+    /// exception differs). The payload the journal holds for the next record,
+    /// when that record is of `kind`.
+    fn recorded(&self, kind: &str) -> Option<JV> {
+        let journal = self.journal.borrow().clone()?;
+        let j = journal.borrow();
+        if !j.is_replaying() {
+            return None;
+        }
+        let next = j.peek_expected()?;
+        (next.record.kind == kind).then(|| next.record.payload.clone())
+    }
+
+    /// A push failed after it was journaled: say so, so a replay expects the
+    /// same failure.
+    fn jnote<T>(&self, py: Python<'_>, op: &str, before: u64, result: &PyResult<T>) {
+        if !self.journal_on.get() {
+            return;
+        }
+        let Err(err) = result else { return };
+        let Some(journal) = self.journal.borrow().clone() else { return };
+        if journal.borrow().count() <= before {
+            return;
+        }
+        let value = err.value(py);
+        let code =
+            value.getattr("code").ok().and_then(|c| c.extract::<String>().ok()).unwrap_or_else(
+                || err.get_type(py).name().map(|n| n.to_string()).unwrap_or_default(),
+            );
+        let message = value.to_string();
+        let (ev, arr) = self.control.now.get();
+        let mut note = JV::map([
+            ("op", JV::str(op)),
+            ("code", JV::str(code)),
+            ("message", JV::str(message.lines().next().unwrap_or(""))),
+        ]);
+        if let Some(recorded) = self.recorded(jk::ERROR) {
+            note = recorded;
+        }
+        let mut j = journal.borrow_mut();
+        // A journal that cannot take the note is already broken.
+        let _ = j.append(jk::ERROR, ev, arr, jsrc::ENGINE, None, note);
+    }
+}
+
+/// `(client_order_id, strategy, symbol, side, quantity, filled_qty, status)`.
+type VenueOrderRow = (String, usize, String, &'static str, f64, f64, String);
 
 /// The venue a node was told to use.
 struct ExecChoice {
@@ -283,11 +572,86 @@ struct Times {
 }
 
 impl Shared {
+    /// Ask the host's order check about an order about to be submitted.
+    /// `None` accepts it; `Some(code)` refuses it with the host's code.
+    fn refusal_for(
+        &self,
+        sid: StrategyId,
+        local: usize,
+        spec: &OrderSpec,
+        client_id: &str,
+        ts: i64,
+    ) -> PyResult<Option<&'static str>> {
+        let Some((check, proposal)) = self
+            .order_check
+            .borrow()
+            .as_ref()
+            .map(|(c, p)| Python::attach(|py| (c.clone_ref(py), p.clone_ref(py))))
+        else {
+            return Ok(None);
+        };
+        Python::attach(|py| {
+            let global = self.global_of(sid, local)?;
+            let tags = PyDict::new(py);
+            for (k, v) in &spec.tags {
+                tags.set_item(k, v)?;
+            }
+            let kw = PyDict::new(py);
+            kw.set_item("symbol", self.symbol(py, global.index()))?;
+            kw.set_item("strategy_index", sid.index())?;
+            kw.set_item("client_id", client_id)?;
+            kw.set_item("side", &spec.side)?;
+            kw.set_item("kind", &spec.kind)?;
+            kw.set_item("units", spec.units)?;
+            kw.set_item("size_frac", spec.size_frac)?;
+            kw.set_item("limit_price", spec.limit_price)?;
+            kw.set_item("trigger_price", spec.trigger_price)?;
+            kw.set_item("tif", &spec.tif)?;
+            kw.set_item("reduce_only", spec.reduce_only)?;
+            kw.set_item("post_only", spec.post_only)?;
+            kw.set_item("tags", tags)?;
+            kw.set_item("ts_ns", ts)?;
+            let order = proposal.bind(py).call((), Some(&kw))?;
+            let ctx = {
+                let strats = self.strats.borrow();
+                let st = strats.iter().find(|s| s.sid == sid).ok_or_else(finished)?;
+                st.ctx.clone_ref(py)
+            };
+            let verdict = check.bind(py).call1((order, ctx))?;
+            if verdict.is_none() {
+                return Ok(None);
+            }
+            let code: String = if let Ok(code) = verdict.extract::<String>() {
+                code
+            } else if let Some(code) = verdict.getattr_opt("code")? {
+                code.extract::<String>().map_err(|_| bad_refusal(&verdict))?
+            } else {
+                return Err(bad_refusal(&verdict));
+            };
+            let code = crate::portfolio::intern_host_code(&code).map_err(|msg| {
+                PyErr::from(Fail::new("invalid_order_refusal", msg).param("order_check"))
+            })?;
+            // The refusal is a fact of the run: it is journaled like any other
+            // refusal the engine makes, with the order it was about.
+            self.jlog_now(jk::REFUSAL, jsrc::ENGINE, Some(client_id), || {
+                JV::map([
+                    ("strategy", JV::Int(sid.index() as i64)),
+                    ("code", JV::str(code)),
+                    ("message", JV::str("order_check")),
+                ])
+            })?;
+            Ok(Some(code))
+        })
+    }
+
     fn with_book<R>(
         &self,
         sid: StrategyId,
         f: impl FnOnce(&PortfolioBook, Option<usize>) -> PyResult<R>,
     ) -> PyResult<R> {
+        if self.poisoned.get() {
+            return Err(poisoned());
+        }
         let inner = self.inner.try_borrow().map_err(|_| busy("the runtime is busy"))?;
         match &*inner {
             Inner::Building(b) => f(b.book(sid), None),
@@ -304,6 +668,9 @@ impl Shared {
         sid: StrategyId,
         f: impl FnOnce(&mut PortfolioBook, Option<usize>) -> PyResult<R>,
     ) -> PyResult<R> {
+        if self.poisoned.get() {
+            return Err(poisoned());
+        }
         let mut inner = self.inner.try_borrow_mut().map_err(|_| busy("the runtime is busy"))?;
         match &mut *inner {
             Inner::Building(b) => f(b.book_mut(sid), None),
@@ -385,19 +752,23 @@ impl Shared {
             return self.live_series_of(py, global);
         }
         let g = global.index();
-        let (full, n, keys): (&Bound<'_, PyDict>, u64, Vec<Bound<'_, PyAny>>) =
-            match (&self.arrays[g], &self.tick_arrays[g]) {
+        let (full, n, keys): (Bound<'_, PyDict>, u64, Vec<Bound<'_, PyAny>>) = {
+            let arrays = self.arrays.borrow();
+            let tick_arrays = self.tick_arrays.borrow();
+            match (&arrays[g], &tick_arrays[g]) {
                 (Some(bars), _) => (
-                    bars.bind(py),
+                    bars.bind(py).clone(),
                     self.watermark(global),
                     SERIES_KEYS.iter().map(|k| PyString::new(py, k).into_any()).collect(),
                 ),
                 (None, Some(ticks)) => {
-                    let d = ticks.bind(py);
-                    (d, self.tick_watermark(global), d.keys().iter().collect())
+                    let d = ticks.bind(py).clone();
+                    let keys = d.keys().iter().collect();
+                    (d, self.tick_watermark(global), keys)
                 }
-                (None, None) => return Err(PyKeyError::new_err(self.symbols[g].to_string())),
-            };
+                (None, None) => return Err(PyKeyError::new_err(self.symbol_text(g))),
+            }
+        };
         let mut cache = self.series.borrow_mut();
         let slot = &mut cache[g];
         if let Some((_, w, dict)) = slot {
@@ -505,6 +876,14 @@ const TICK_COLUMNS: [TickColumn; 9] = [
 // Context
 // ---------------------------------------------------------------------------
 
+/// The latest prices a context shows for one local instrument.
+#[derive(Default)]
+struct Px {
+    bid: Cell<Option<f64>>,
+    ask: Cell<Option<f64>>,
+    last: Cell<Option<f64>>,
+}
+
 /// The `PortfolioContext` surface over one strategy's book in the runtime.
 #[pyclass(name = "RuntimeContext", dict, unsendable)]
 pub struct PyRuntimeContext {
@@ -519,9 +898,7 @@ pub struct PyRuntimeContext {
     tick: RefCell<Option<Py<PyAny>>>,
     quote: RefCell<Option<Py<PyAny>>>,
     /// Per local instrument.
-    best_bid: Vec<Cell<Option<f64>>>,
-    best_ask: Vec<Cell<Option<f64>>>,
-    last_price: Vec<Cell<Option<f64>>>,
+    prices: Table<Px>,
     /// Per local instrument, the last book: its depth row and, once built,
     /// the Python object. Strategies without `on_order_book` never pay for
     /// the object unless they read `ctx.book`.
@@ -542,7 +919,7 @@ fn book_object(
     let levels = |levels: &[BookLevel]| PyTuple::new(py, levels.iter().map(|l| (l.price, l.size)));
     let bids = levels(&tick.bids[..tick.bid_len as usize])?;
     let asks = levels(&tick.asks[..tick.ask_len as usize])?;
-    let symbol = sh.symbols[instrument.index()].bind(py);
+    let symbol = sh.symbol(py, instrument.index());
     Ok(sh.classes.book.bind(py).call1((tick.timestamp, bids, asks, symbol))?.unbind())
 }
 
@@ -565,6 +942,7 @@ impl PyRuntimeContext {
             Some(name) => self
                 .shared
                 .sym_ids
+                .borrow()
                 .get(name)
                 .and_then(|&g| self.shared.local_of(self.sid, g))
                 .ok_or_else(|| PyKeyError::new_err(name.to_string())),
@@ -580,11 +958,36 @@ impl PyRuntimeContext {
 
 #[pymethods]
 impl PyRuntimeContext {
+    /// The spec of a symbol, of a role bound to one, or of the symbol being
+    /// handled; answered by the run's context host (see `ctx_host`).
+    #[pyo3(signature = (key=None))]
+    fn instrument(slf: &Bound<'_, Self>, key: Option<&str>) -> PyResult<Py<PyAny>> {
+        ctx_host(slf, "instrument", key)
+    }
+
+    /// An `OptionChain` of the option contracts listed and unexpired now.
+    #[pyo3(signature = (underlying=None))]
+    fn option_chain(slf: &Bound<'_, Self>, underlying: Option<&str>) -> PyResult<Py<PyAny>> {
+        ctx_host(slf, "option_chain", underlying)
+    }
+
+    /// The symbol (or tuple of symbols) a requirements role means now.
+    fn role(slf: &Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
+        ctx_host(slf, "role", name)
+    }
+
+    /// Whether the event being handled is history replayed to prime the
+    /// strategy (see `LiveNode`'s `warmup`), not the live feed.
+    #[getter]
+    fn is_warmup(&self) -> bool {
+        self.shared.warmup.get()
+    }
+
     /// The symbol whose bar is being processed.
     #[getter]
     fn symbol(&self, py: Python<'_>) -> PyResult<Py<PyString>> {
         let g = self.shared.global_of(self.sid, self.local.get())?;
-        Ok(self.shared.symbols[g.index()].clone_ref(py))
+        Ok(self.shared.symbols.get()[g.index()].clone_ref(py))
     }
 
     /// Bar ordinal within the current symbol.
@@ -677,19 +1080,19 @@ impl PyRuntimeContext {
     /// Last observed bid for the current symbol.
     #[getter]
     fn best_bid(&self) -> Option<f64> {
-        self.best_bid[self.local.get()].get()
+        self.prices.get()[self.local.get()].bid.get()
     }
 
     /// Last observed ask for the current symbol.
     #[getter]
     fn best_ask(&self) -> Option<f64> {
-        self.best_ask[self.local.get()].get()
+        self.prices.get()[self.local.get()].ask.get()
     }
 
     /// Last trade price (or bar close) for the current symbol.
     #[getter]
     fn last_price(&self) -> Option<f64> {
-        self.last_price[self.local.get()].get()
+        self.prices.get()[self.local.get()].last.get()
     }
 
     #[getter]
@@ -712,6 +1115,15 @@ impl PyRuntimeContext {
     /// closed at the last seen prices when the next event is applied.
     #[pyo3(signature = (reason="manual", flatten=false))]
     fn halt(&self, reason: &str, flatten: bool) -> PyResult<()> {
+        let source = jsrc::STRATEGY;
+        self.shared.manual_halts.borrow_mut().insert(self.sid.index());
+        self.shared.jlog_now(jk::HALT, source, None, || {
+            JV::map([
+                ("strategy", JV::Int(self.sid.index() as i64)),
+                ("reason", JV::str(reason)),
+                ("flatten", JV::Bool(flatten)),
+            ])
+        })?;
         if self.shared.venue_on.get() {
             let venue = self.shared.venue.borrow().clone();
             if let Some(venue) = venue {
@@ -733,9 +1145,12 @@ impl PyRuntimeContext {
     #[getter]
     fn symbols<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut out = Vec::new();
+        let retired = self.shared.retired.get();
         for local in 0..self.shared.locals(self.sid) {
             let g = self.shared.global_of(self.sid, local)?;
-            out.push(self.shared.symbols[g.index()].bind(py).clone());
+            if !retired[g.index()] {
+                out.push(self.shared.symbol(py, g.index()));
+            }
         }
         PyList::new(py, out)
     }
@@ -842,7 +1257,7 @@ impl PyRuntimeContext {
     ) -> PyResult<Bound<'py, PyList>> {
         let local = self.index_of(symbol)?;
         let g = self.shared.global_of(self.sid, local)?;
-        let name = self.shared.symbols[g.index()].bind(py).clone();
+        let name = self.shared.symbol(py, g.index()).clone();
         let rows: Vec<WorkingOrderRow> =
             self.shared.with_book(self.sid, |b, _| Ok(working_order_rows(b.kernel(local))))?;
         let kw = PyDict::new(py);
@@ -1098,6 +1513,15 @@ impl PyStrategyView {
     /// Halt the strategy; see `RuntimeContext.halt`.
     #[pyo3(signature = (reason="manual", flatten=false))]
     fn halt(&self, reason: &str, flatten: bool) -> PyResult<()> {
+        let source = jsrc::HOST;
+        self.shared.manual_halts.borrow_mut().insert(self.sid.index());
+        self.shared.jlog_now(jk::HALT, source, None, || {
+            JV::map([
+                ("strategy", JV::Int(self.sid.index() as i64)),
+                ("reason", JV::str(reason)),
+                ("flatten", JV::Bool(flatten)),
+            ])
+        })?;
         if self.shared.venue_on.get() {
             let venue = self.shared.venue.borrow().clone();
             if let Some(venue) = venue {
@@ -1152,7 +1576,49 @@ fn order_spec(order: &Bound<'_, PyAny>) -> PyResult<OrderSpec> {
         limit_offset: order_attr(order, "limit_offset")?.unwrap_or(0.0),
         post_only: order_attr(order, "post_only")?.unwrap_or(false),
         reduce_only: order.getattr("reduce_only")?.extract()?,
+        tags: order_tags(order)?,
     })
+}
+
+/// The order's `tags`: at most [`MAX_TAGS`] string pairs of bounded size. The
+/// engine's own `client_id` tag is reserved.
+fn order_tags(order: &Bound<'_, PyAny>) -> PyResult<std::collections::BTreeMap<String, String>> {
+    let bad = |msg: String, value: String| -> PyErr {
+        Fail::new("invalid_order_tags", msg).param("tags").value(value).into()
+    };
+    let Some(raw) = order.getattr_opt("tags")? else { return Ok(Default::default()) };
+    if raw.is_none() {
+        return Ok(Default::default());
+    }
+    let dict = raw.cast::<PyDict>().map_err(|_| {
+        bad("order tags must be a dict of str to str".to_string(), raw.get_type().to_string())
+    })?;
+    if dict.len() > MAX_TAGS {
+        return Err(bad(
+            format!("an order carries at most {MAX_TAGS} tags"),
+            dict.len().to_string(),
+        ));
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for (k, v) in dict.iter() {
+        let (Ok(k), Ok(v)) = (k.extract::<String>(), v.extract::<String>()) else {
+            return Err(bad("order tag keys and values must be str".to_string(), String::new()));
+        };
+        if k.is_empty() || k.len() > MAX_TAG_KEY || v.len() > MAX_TAG_VALUE {
+            return Err(bad(
+                format!("an order tag key is 1..={MAX_TAG_KEY} bytes and a value at most {MAX_TAG_VALUE}"),
+                k,
+            ));
+        }
+        if k == "client_id" {
+            return Err(bad(
+                "the tag 'client_id' is reserved for the order's own id".to_string(),
+                k,
+            ));
+        }
+        out.insert(k, v);
+    }
+    Ok(out)
 }
 
 fn twap_spec(order: &Bound<'_, PyAny>) -> PyResult<TwapSpec> {
@@ -1725,22 +2191,28 @@ impl PyRuntime {
 
         let shared = Shared {
             inner: RefCell::new(Inner::Building(Box::new(builder))),
-            symbols: symbols.iter().map(|s| PyString::intern(py, s).unbind()).collect(),
-            sym_ids,
+            symbols: Table::new(symbols.iter().map(|s| PyString::intern(py, s).unbind()).collect()),
+            sym_ids: RefCell::new(sym_ids),
             store: market.store.clone(),
             // A live node takes ticks, depth and bars on any symbol, and
             // runs every symbol as a tick session.
-            has_ticks: (0..n)
-                .map(|i| {
-                    let id = InstrumentId::new(i as u32);
-                    market.live.is_some()
-                        || market.store.ticks(id).is_some()
-                        || market.store.depth(id).is_some()
-                })
-                .collect(),
-            arrays: market.arrays.iter().map(|a| a.as_ref().map(|a| a.clone_ref(py))).collect(),
-            tick_arrays: market.ticks.iter().map(|a| a.as_ref().map(|a| a.clone_ref(py))).collect(),
-            offsets: market.offsets.clone(),
+            has_ticks: Table::new(
+                (0..n)
+                    .map(|i| {
+                        let id = InstrumentId::new(i as u32);
+                        market.live.is_some()
+                            || market.store.ticks(id).is_some()
+                            || market.store.depth(id).is_some()
+                    })
+                    .collect(),
+            ),
+            arrays: RefCell::new(
+                market.arrays.iter().map(|a| a.as_ref().map(|a| a.clone_ref(py))).collect(),
+            ),
+            tick_arrays: RefCell::new(
+                market.ticks.iter().map(|a| a.as_ref().map(|a| a.clone_ref(py))).collect(),
+            ),
+            offsets: Table::new(market.offsets.clone()),
             series: RefCell::new((0..n).map(|_| None).collect()),
             live_history: market.live,
             feed: RefCell::new(None),
@@ -1767,7 +2239,20 @@ impl PyRuntime {
             exec_choice: RefCell::new(None),
             times: Cell::new(None),
             processing_latency_ns: Cell::new(0),
+            poisoned: Cell::new(false),
             warmup: Cell::new(false),
+            journal: RefCell::new(None),
+            journal_on: Cell::new(false),
+            control: Rc::new(Control::default()),
+            warmup_muted: Cell::new(false),
+            order_check: RefCell::new(None),
+            boot_queue: RefCell::new(Vec::new()),
+            manual_halts: RefCell::new(Default::default()),
+            oms_type: oms_type.to_string(),
+            primary: Cell::new(None),
+            lookback: Cell::new(0),
+            retired: Table::new(vec![false; n]),
+            adapter_obj: RefCell::new(None),
         };
         Ok(Self { shared: Rc::new(shared), live_state: RefCell::new(None) })
     }
@@ -1784,7 +2269,12 @@ impl PyRuntime {
         let ids = symbols
             .iter()
             .map(|s| {
-                self.shared.sym_ids.get(s).copied().ok_or_else(|| PyKeyError::new_err(s.clone()))
+                self.shared
+                    .sym_ids
+                    .borrow()
+                    .get(s)
+                    .copied()
+                    .ok_or_else(|| PyKeyError::new_err(s.clone()))
             })
             .collect::<PyResult<Vec<_>>>()?;
         let sid = match &mut *self.shared.inner.borrow_mut() {
@@ -1806,9 +2296,7 @@ impl PyRuntime {
                 close_ts: Cell::new(None),
                 tick: RefCell::new(None),
                 quote: RefCell::new(None),
-                best_bid: (0..ids.len()).map(|_| Cell::new(None)).collect(),
-                best_ask: (0..ids.len()).map(|_| Cell::new(None)).collect(),
-                last_price: (0..ids.len()).map(|_| Cell::new(None)).collect(),
+                prices: Table::new((0..ids.len()).map(|_| Px::default()).collect()),
                 books: RefCell::new((0..ids.len()).map(|_| None).collect()),
             },
         )?;
@@ -1880,6 +2368,8 @@ impl PyRuntime {
             )
             .into());
         }
+        let all: Vec<usize> = self.shared.strats.borrow().iter().map(|st| st.sid.index()).collect();
+        self.shared.manual_halts.borrow_mut().extend(all);
         match &mut *self.shared.inner.borrow_mut() {
             Inner::Running(core) => core.halt_group(account, reason, flatten).map_err(runtime_err),
             _ => Err(not_ready("finalize() before halting an account")),
@@ -1922,6 +2412,10 @@ impl PyRuntime {
             return Err(PyValueError::new_err("one clock per symbol is required"));
         }
         let clock_cls = py.import("raptorbt.strategy.clock")?.getattr("Clock")?;
+        let pristine = match clocks.first() {
+            Some(first) => first.bind(py).call_method0("clone_schedule")?.unbind(),
+            None => return Err(PyValueError::new_err("one clock per symbol is required")),
+        };
         let mut clock_slots = Vec::with_capacity(locals);
         for clock in clocks {
             let b = clock.bind(py);
@@ -1973,8 +2467,12 @@ impl PyRuntime {
                     None
                 }
                 Some(name) => {
-                    let found =
-                        self.shared.sym_ids.get(name).and_then(|&g| self.shared.local_of(sid, g));
+                    let found = self
+                        .shared
+                        .sym_ids
+                        .borrow()
+                        .get(name)
+                        .and_then(|&g| self.shared.local_of(sid, g));
                     match found {
                         Some(l) => Some(l),
                         None => {
@@ -1982,7 +2480,7 @@ impl PyRuntime {
                                 .map(|l| {
                                     self.shared
                                         .global_of(sid, l)
-                                        .map(|g| self.shared.symbols[g.index()].to_string())
+                                        .map(|g| self.shared.symbol_text(g.index()))
                                 })
                                 .collect::<PyResult<Vec<_>>>()?
                                 .join(", ");
@@ -1997,7 +2495,7 @@ impl PyRuntime {
                             .op("register_indicator")
                             .param("symbol")
                             .value(name.as_str())
-                            .valid(self.shared.symbols.iter().map(|s| s.to_string()))
+                            .valid(self.shared.symbols.get().iter().map(|s| s.to_string()))
                             .into());
                         }
                     }
@@ -2017,6 +2515,8 @@ impl PyRuntime {
             queue: strategy_queue,
             clocks: clock_slots,
             subs: subscriptions.len(),
+            subscriptions: subscriptions.clone(),
+            clock: pristine,
             streams,
             stream_of,
             inds,
@@ -2032,7 +2532,8 @@ impl PyRuntime {
         let Inner::Building(builder) = &mut *inner else {
             return Err(not_ready("primary bars are set before the run starts"));
         };
-        for (i, &has) in self.shared.has_ticks.iter().enumerate() {
+        self.shared.primary.set(Some(spec));
+        for (i, &has) in self.shared.has_ticks.get().iter().enumerate() {
             if has {
                 builder
                     .set_primary_bars(InstrumentId::new(i as u32), spec, self.shared.tz_offset_ns)
@@ -2057,8 +2558,11 @@ impl PyRuntime {
     ) -> PyResult<()> {
         let (actions, policy) =
             super::lifecycle_bindings::extract_actions(Some(actions), Some(policy))?;
-        if let Some(a) = actions.iter().find(|a| !self.shared.sym_ids.contains_key(&a.instrument)) {
-            let mut valid: Vec<&String> = self.shared.sym_ids.keys().collect();
+        if let Some(a) =
+            actions.iter().find(|a| !self.shared.sym_ids.borrow().contains_key(&a.instrument))
+        {
+            let ids = self.shared.sym_ids.borrow();
+            let mut valid: Vec<&String> = ids.keys().collect();
             valid.sort();
             return Err(Fail::new(
                 "unknown_symbol",
@@ -2091,15 +2595,16 @@ impl PyRuntime {
         // A live node's rings hold at least what its indicators read.
         let live_rows = match self.shared.live_history {
             Some(history) => {
-                let mut rows = history;
+                let mut lookback = 0;
                 for plan in &plans {
                     for ind in &plan.inds {
                         if let Ok(obj) = ind.obj.bind(py).cast::<PyIndicator>() {
-                            rows = rows.max(obj.borrow().spec().lookback());
+                            lookback = lookback.max(obj.borrow().spec().lookback());
                         }
                     }
                 }
-                Some(rows)
+                self.shared.lookback.set(lookback);
+                Some(history.max(lookback))
             }
             None => None,
         };
@@ -2114,6 +2619,7 @@ impl PyRuntime {
 
         // (plan, indicator) -> reader slot, for the ones that get linked.
         let mut linked: HashMap<(usize, usize), SlotId> = HashMap::new();
+
         if self.shared.share {
             for (pi, plan) in plans.iter().enumerate() {
                 for (ii, ind) in plan.inds.iter().enumerate() {
@@ -2133,6 +2639,10 @@ impl PyRuntime {
                             let g = builder.instrument_of(plan.sid, local).ok_or_else(finished)?;
                             (IndInput::Primary(g), None)
                         }
+                        // Fed by every instrument of the strategy. A live node's set
+                        // grows, and the bank's input set is frozen: the indicator
+                        // stays private and follows the instruments (see `Late`).
+                        (None, None) if self.shared.live_history.is_some() => continue,
                         (None, None) => {
                             let all: Vec<InstrumentId> = (0..builder_locals(&builder, plan.sid))
                                 .filter_map(|l| builder.instrument_of(plan.sid, l))
@@ -2186,19 +2696,40 @@ impl PyRuntime {
                     .param("execution")
                     .into());
                 }
+                *self.shared.adapter_obj.borrow_mut() = choice
+                    .adapter
+                    .as_ref()
+                    .filter(|_| choice.kind == "adapter")
+                    .map(|o| o.clone_ref(py));
                 builder.manage_books_by_venue();
                 builder.check_venue_safe().map_err(|e| {
                     PyErr::from(Fail::new("invalid_execution", e.to_string()).param("execution"))
                 })?;
                 let raised = Rc::new(RefCell::new(None));
-                let adapter: Box<dyn crate::execution::adapter::ExecutionAdapter> =
-                    match (choice.kind.as_str(), choice.adapter) {
-                        ("paper", _) => Box::new(crate::execution::adapter::PaperVenue::new(
-                            builder.shadow_books().map_err(runtime_err)?,
-                        )),
-                        (_, Some(obj)) => Box::new(PyAdapter::new(obj, raised.clone())),
-                        _ => unreachable!("set_execution checks the adapter"),
-                    };
+                let adapter: Box<dyn crate::execution::adapter::ExecutionAdapter> = match (
+                    choice.kind.as_str(),
+                    choice.adapter.as_ref().map(|o| o.clone_ref(py)),
+                ) {
+                    ("paper", _) => Box::new(crate::execution::adapter::PaperVenue::new(
+                        builder.shadow_books().map_err(runtime_err)?,
+                    )),
+                    (_, Some(obj)) => Box::new(PyAdapter::new(obj, raised.clone())),
+                    _ => unreachable!("set_execution checks the adapter"),
+                };
+                // A node with an adapter of its own, a journal or an execution
+                // epoch sends every request through the journal's wrapper, which
+                // tracks the requests whose outcome is unknown whether or not
+                // there is a journal; a paper node with neither is not wrapped.
+                let journal = self.shared.journal.borrow().clone();
+                let adapter: Box<dyn crate::execution::adapter::ExecutionAdapter> = if journal
+                    .is_some()
+                    || self.shared.control.epoch.get().is_some()
+                    || choice.kind == "adapter"
+                {
+                    Box::new(JournalingAdapter::new(adapter, journal, self.shared.control.clone()))
+                } else {
+                    adapter
+                };
                 Some(Rc::new(VenueRoute::new(
                     adapter,
                     choice.account_id,
@@ -2243,6 +2774,21 @@ impl PyRuntime {
                     }
                 }
             }
+            let late = Late {
+                subscriptions: plan.subscriptions.clone(),
+                clock: plan.clock.clone_ref(py),
+                indicators: plan
+                    .inds
+                    .iter()
+                    .enumerate()
+                    .filter(|&(ii, ind)| {
+                        !linked.contains_key(&(pi, ii))
+                            && ind.local.is_none()
+                            && ind.stream_id.is_none_or(|sub| sub < plan.subs)
+                    })
+                    .map(|(_, ind)| (ind.stream_id, ind.obj.clone_ref(py)))
+                    .collect(),
+            };
             let route = match plan.commands {
                 Some(path) => {
                     let held = path.bind(py).getattr("_held")?.cast_into::<PyDict>()?.unbind();
@@ -2263,7 +2809,7 @@ impl PyRuntime {
                 .map(|(i, (sp, private))| -> PyResult<StreamInfo> {
                     let g = core.instrument_of(plan.sid, sp.local).ok_or_else(finished)?;
                     let kwargs = PyDict::new(py);
-                    kwargs.set_item("symbol", self.shared.symbols[g.index()].bind(py))?;
+                    kwargs.set_item("symbol", self.shared.symbol(py, g.index()))?;
                     Ok(StreamInfo {
                         sub: sp.sub,
                         step: sp.step,
@@ -2281,11 +2827,14 @@ impl PyRuntime {
                 mask: plan.mask,
                 queue: plan.queue,
                 route,
-                clocks: plan.clocks,
                 active_clock: Cell::new(usize::MAX),
-                primary_private,
-                primary_reveal,
-                streams: stream_infos,
+                tables: RefCell::new(StratTables {
+                    clocks: plan.clocks,
+                    primary_private,
+                    primary_reveal,
+                    streams: stream_infos,
+                }),
+                late,
             }));
         }
         *self.shared.strats.borrow_mut() = strats;
@@ -2293,8 +2842,10 @@ impl PyRuntime {
         *self.shared.venue.borrow_mut() = route;
         *self.shared.inner.borrow_mut() = Inner::Running(Box::new(core));
         if let Some(rows) = live_rows {
-            let mut feed =
-                LiveFeed::new(self.shared.symbols.iter().map(|s| s.to_string()).collect(), rows);
+            let mut feed = LiveFeed::new(
+                self.shared.symbols.get().iter().map(|s| s.to_string()).collect(),
+                rows,
+            );
             for (owner, instrument, keep) in self.shared.pending_keeps.take() {
                 feed.keep(owner, instrument, keep);
             }
@@ -2365,10 +2916,201 @@ impl PyRuntime {
         Ok(())
     }
 
+    /// Keep a journal of this node, and/or give it an execution epoch. Call
+    /// before `finalize()`.
+    #[pyo3(signature = (journal=None, epoch=None))]
+    fn set_journal(
+        &self,
+        journal: Option<PyRef<'_, PyJournal>>,
+        epoch: Option<u64>,
+    ) -> PyResult<()> {
+        if !matches!(&*self.shared.inner.borrow(), Inner::Building(_)) {
+            return Err(not_ready("set_journal() before finalize()"));
+        }
+        if let Some(j) = journal {
+            *self.shared.journal.borrow_mut() = Some(j.inner.clone());
+            self.shared.journal_on.set(true);
+        }
+        self.shared.control.epoch.set(epoch);
+        Ok(())
+    }
+
+    /// Take a new execution epoch after the journal was replayed. The venue
+    /// learns of it at the next `heartbeat()` or request.
+    fn set_epoch(&self, epoch: u64) {
+        self.shared.control.epoch.set(Some(epoch));
+    }
+
+    /// While set, requests are not sent to a real venue: the node is being
+    /// rebuilt from its journal (see `raptorbt.journal`).
+    fn set_replay(&self, replay: bool) {
+        self.shared.control.suppress.set(replay);
+    }
+
+    /// The event time and arrival time of the latest input the node took.
+    fn clock(&self) -> (i64, i64) {
+        self.shared.control.now.get()
+    }
+
+    /// The latest event time the node's instruments have reached (`0` before the first): the
+    /// node's clock, kept with or without a journal.
+    fn last_event_ns(&self) -> i64 {
+        let fed = self.shared.feed.borrow().as_ref().and_then(LiveFeed::last_event_ns);
+        fed.unwrap_or(0).max(self.shared.control.now.get().0)
+    }
+
+    /// The venue lists an order as open, so its request arrived.
+    fn confirm(&self, client_order_id: &str) {
+        self.shared.control.unconfirmed.borrow_mut().remove(client_order_id);
+    }
+
+    /// Client order ids whose request may or may not have reached the venue.
+    fn unconfirmed(&self) -> Vec<String> {
+        self.shared.control.unconfirmed.borrow().iter().cloned().collect()
+    }
+
+    /// Adapter calls a replay answered "unavailable" for, since last asked.
+    fn take_replay_errors(&self) -> u32 {
+        self.shared.control.replay_errors.replace(0)
+    }
+
+    /// Check the execution epoch with the venue now; raises `fenced` when a
+    /// newer epoch owns the account.
+    fn heartbeat(&self) -> PyResult<()> {
+        match self.shared.venue.borrow().clone() {
+            Some(venue) => venue.heartbeat(),
+            None => Ok(()),
+        }
+    }
+
+    /// Send an order again under its first request (same client order id). For
+    /// an order a reconciliation found missing at the venue.
+    fn resend(&self, client_order_id: &str) -> PyResult<()> {
+        let venue = self.shared.venue.borrow().clone().ok_or_else(|| {
+            PyErr::from(Fail::new("invalid_execution", "this node has no venue to resend to"))
+        })?;
+        self.shared.jlog_now(jk::ANNOTATION, jsrc::HOST, Some(client_order_id), || {
+            JV::map([("what", JV::str("resend"))])
+        })?;
+        venue.resend(client_order_id)
+    }
+
+    /// Register the orders a venue makes on its own, with the ids it was told
+    /// (see `ExitRuleRequest.exit_client_ids`), so their reports are booked.
+    /// `orders` are `(client_order_id, symbol_index, side, quantity)` of strategy
+    /// `strategy`.
+    fn register_venue_orders(
+        &self,
+        strategy: usize,
+        orders: Vec<(String, usize, String, f64)>,
+    ) -> PyResult<()> {
+        let sh = &*self.shared;
+        let venue = sh.venue.borrow().clone().ok_or_else(|| {
+            PyErr::from(Fail::new(
+                "invalid_execution",
+                "this node has no venue to register orders at",
+            ))
+        })?;
+        let sid = sh
+            .strats
+            .borrow()
+            .iter()
+            .find(|s| s.sid.index() == strategy)
+            .map(|s| s.sid)
+            .ok_or_else(|| PyKeyError::new_err(strategy))?;
+        let ts = sh.control.now.get().0;
+        for (id, symbol, side, quantity) in orders {
+            let global = InstrumentId::new(symbol as u32);
+            let local = sh.local_of(sid, global).ok_or_else(|| {
+                PyErr::from(Fail::new(
+                    "unknown_symbol",
+                    "the strategy does not trade the symbol of an order the venue holds",
+                ))
+            })?;
+            let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(global)))?;
+            let side = match side.as_str() {
+                "buy" => crate::execution::orders::OrderSide::Buy,
+                "sell" => crate::execution::orders::OrderSide::Sell,
+                other => {
+                    return Err(Fail::new(
+                        "invalid_execution",
+                        format!("side {other:?} is not buy or sell"),
+                    )
+                    .into())
+                }
+            };
+            venue.register_external(sh, sid, local, &id, side, quantity, idx, ts)?;
+        }
+        Ok(())
+    }
+
+    /// Every order sent to the venue: `(client_order_id, strategy, symbol, side,
+    /// quantity, filled_qty, status)`.
+    fn venue_orders(&self) -> PyResult<Vec<VenueOrderRow>> {
+        let sh = &*self.shared;
+        let Some(venue) = sh.venue.borrow().clone() else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for (id, sid, local, order_id, request) in venue.sent() {
+            let state = sh.with_book(StrategyId::new(sid as u32), |b, _| {
+                Ok(b.kernel(local).order(order_id).map(|o| (o.status, o.filled_qty)))
+            })?;
+            let Some((status, filled)) = state else { continue };
+            out.push((
+                id,
+                sid,
+                request.symbol.clone(),
+                request.side.as_str(),
+                request.quantity,
+                filled,
+                format!("{status:?}").to_lowercase(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// A newer execution epoch owns the account.
+    #[getter]
+    fn fenced(&self) -> bool {
+        self.shared.control.fenced.get()
+    }
+
     /// Mark the pushes that follow as history replayed to prime the
     /// strategies. A real venue is never sent an order made on history.
-    fn set_warmup(&self, warmup: bool) {
+    #[pyo3(signature = (warmup, muted=false))]
+    fn set_warmup(&self, warmup: bool, muted: bool) {
         self.shared.warmup.set(warmup);
+        self.shared.warmup_muted.set(warmup && muted);
+    }
+
+    /// Set aside what every strategy has queued so far (its `on_start`), so
+    /// muted warm-up history, which discards queued work, does not take an
+    /// order the strategy made at start. `release_boot` queues it again.
+    fn hold_boot(&self, py: Python<'_>) {
+        let strats: Vec<Rc<Strat>> = self.shared.strats.borrow().clone();
+        let mut boot = self.shared.boot_queue.borrow_mut();
+        for st in strats {
+            let (commands, intents) = {
+                let mut q = st.queue.bind(py).borrow_mut();
+                (q.queue.take_commands(), q.queue.take_intents())
+            };
+            boot.push((st, commands, intents));
+        }
+    }
+
+    /// Queue again what `hold_boot` set aside, ahead of anything queued since.
+    fn release_boot(&self, py: Python<'_>) {
+        for (st, commands, intents) in self.shared.boot_queue.borrow_mut().drain(..) {
+            let mut q = st.queue.bind(py).borrow_mut();
+            q.queue.restore_commands(commands);
+            q.queue.restore_intents(intents);
+        }
+    }
+
+    /// Install the host's pre-submit order check: `check(order, ctx)` is
+    /// called with an `OrderProposal` (built by `proposal`) for every typed
+    /// order a strategy submits, before the engine or a venue sees it.
+    fn set_order_check(&self, check: Py<PyAny>, proposal: Py<PyAny>) {
+        *self.shared.order_check.borrow_mut() = Some((check, proposal));
     }
 
     /// Declare how long the engine takes to act on an event after it
@@ -2380,7 +3122,9 @@ impl PyRuntime {
     /// Hand the node what the venue said about an order. The report is
     /// applied at once, in the order pushes arrive, like market data;
     /// `client_order_id` is the id the order was sent under (the request's
-    /// `client_order_id`). Returns `"applied"`, `"duplicate"` or `"late"`.
+    /// `client_order_id`). Returns `"applied"`, `"duplicate"`, `"late"` (nothing
+    /// it says can matter) or `"unbooked"` (an execution on an order the node
+    /// no longer holds: journaled, not booked, reconcile the position).
     fn push_report(
         &self,
         py: Python<'_>,
@@ -2388,54 +3132,112 @@ impl PyRuntime {
         report: PyRef<'_, PyExecutionReport>,
         arrival_ns: i64,
     ) -> PyResult<&'static str> {
-        let sh = &*self.shared;
-        let _guard = self.live_loop()?;
-        self.settle_push();
-        let venue = sh.venue.borrow().clone().ok_or_else(|| {
-            PyErr::from(Fail::new(
-                "invalid_execution",
-                "this node sends its orders in-process; there is no venue to report",
-            ))
-        })?;
-        let (sid, local) = venue.lookup(client_order_id).ok_or_else(|| {
-            PyErr::from(
-                Fail::new(
-                    "unknown_client_order_id",
-                    format!("no order was sent under {client_order_id:?}"),
-                )
-                .param("client_order_id")
-                .value(client_order_id),
-            )
-        })?;
-        let st = sh
-            .strats
-            .borrow()
-            .iter()
-            .find(|s| s.sid.index() == sid)
-            .cloned()
-            .expect("an order's strategy is registered");
-        let g = sh.global_of(st.sid, local)?;
-        let report = &report.0;
-        let ts = report_ts(report);
-        let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(g)))?;
-        sh.times.set(Some(Times {
-            event: ts,
-            arrival: arrival_ns,
-            processing: arrival_ns.saturating_add(sh.processing_latency_ns.get()),
-        }));
-        let outcome = venue.deliver(py, sh, &st, client_order_id, report, idx, ts);
-        let settled = outcome.and_then(|outcome| {
-            if has_commands(py, &st) || has_intents(py, &st) {
-                settle(py, sh, &st, g, local, idx, ts)?;
+        let before = self.shared.jcount();
+        let result = (|| -> PyResult<&'static str> {
+            let sh = &*self.shared;
+            let _guard = self.live_loop()?;
+            self.settle_push();
+            let venue = sh.venue.borrow().clone().ok_or_else(|| {
+                PyErr::from(Fail::new(
+                    "invalid_execution",
+                    "this node sends its orders in-process; there is no venue to report",
+                ))
+            })?;
+            let report = &report.0;
+            let ts = report_ts(report);
+            // Every inbound report is written down before anything is decided
+            // about it, so a report that is dropped, refused or unknown is
+            // still on the record.
+            sh.jlog(jk::REPORT, ts, arrival_ns, jsrc::VENUE, Some(client_order_id), || {
+                report_value(report)
+            })?;
+            if venue.is_dropped(client_order_id) {
+                // The order ended long ago and its entries are gone. What the
+                // venue says about it can no longer change the order or the
+                // book; an execution (a fill, a correction, a bust) is money,
+                // so it is put on the record as one the book did not take.
+                return Ok(match report {
+                    crate::execution::orders::ExecutionReport::Fill { .. }
+                    | crate::execution::orders::ExecutionReport::Correction { .. }
+                    | crate::execution::orders::ExecutionReport::Bust { .. } => {
+                        sh.jlog_now(
+                            jk::UNBOOKED_FILL,
+                            jsrc::ENGINE,
+                            Some(client_order_id),
+                            || {
+                                let mut v = report_value(report);
+                                if let JV::Map(m) = &mut v {
+                                    m.insert("reason".to_string(), JV::str("order_evicted"));
+                                }
+                                v
+                            },
+                        )?;
+                        "unbooked"
+                    }
+                    _ => "late",
+                });
             }
-            Ok(outcome)
-        });
-        sh.times.set(None);
-        Ok(match settled? {
-            crate::execution::orders::ReportOutcome::Applied => "applied",
-            crate::execution::orders::ReportOutcome::Duplicate => "duplicate",
-            crate::execution::orders::ReportOutcome::Late => "late",
-        })
+            let (sid, local) = venue.lookup(client_order_id).ok_or_else(|| {
+                PyErr::from(
+                    Fail::new(
+                        "unknown_client_order_id",
+                        format!("no order was sent under {client_order_id:?}"),
+                    )
+                    .param("client_order_id")
+                    .value(client_order_id),
+                )
+            })?;
+            let st = sh
+                .strats
+                .borrow()
+                .iter()
+                .find(|s| s.sid.index() == sid)
+                .cloned()
+                .expect("an order's strategy is registered");
+            let g = sh.global_of(st.sid, local)?;
+            // The venue spoke about the order: its request did arrive.
+            sh.control.unconfirmed.borrow_mut().remove(client_order_id);
+            let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(g)))?;
+            sh.times.set(Some(Times {
+                event: ts,
+                arrival: arrival_ns,
+                processing: arrival_ns.saturating_add(sh.processing_latency_ns.get()),
+            }));
+            let outcome = venue.deliver(py, sh, &st, client_order_id, report, idx, ts);
+            let settled = outcome.and_then(|outcome| {
+                if has_commands(py, &st) || has_intents(py, &st) {
+                    settle(py, sh, &st, g, local, idx, ts)?;
+                }
+                Ok(outcome)
+            });
+            sh.times.set(None);
+            if let (Ok(outcome), true) = (
+                &settled,
+                matches!(
+                    report,
+                    crate::execution::orders::ExecutionReport::Correction { .. }
+                        | crate::execution::orders::ExecutionReport::Bust { .. }
+                ),
+            ) {
+                // The book took an execution back (and, for a correction, booked
+                // it again as restated). Say so, with what the order now counts.
+                let outcome = format!("{outcome:?}").to_lowercase();
+                sh.jlog_now(jk::RESTATEMENT, jsrc::ENGINE, Some(client_order_id), || {
+                    let mut v = report_value(report);
+                    if let JV::Map(m) = &mut v {
+                        m.insert("outcome".to_string(), JV::str(outcome));
+                    }
+                    v
+                })?;
+            }
+            Ok(match settled? {
+                crate::execution::orders::ReportOutcome::Applied => "applied",
+                crate::execution::orders::ReportOutcome::Duplicate => "duplicate",
+                crate::execution::orders::ReportOutcome::Late => "late",
+            })
+        })();
+        self.shared.jnote(py, "report", before, &result);
+        result
     }
 
     /// Run the whole tape.
@@ -2479,6 +3281,8 @@ impl PyRuntime {
 
     /// Adopt a position the account already holds, on a strategy's local
     /// instrument, before the first event.
+    #[pyo3(signature = (sid, local, timestamp_ns, price, quantity, margin_minor=None, cost_minor=None))]
+    #[allow(clippy::too_many_arguments)]
     fn adopt_position(
         &self,
         sid: usize,
@@ -2486,11 +3290,36 @@ impl PyRuntime {
         timestamp_ns: i64,
         price: f64,
         quantity: f64,
+        margin_minor: Option<i128>,
+        cost_minor: Option<i128>,
     ) -> PyResult<u64> {
         let sid = StrategyId::new(sid as u32);
+        // An adopted position is the account's, not the engine's own doing:
+        // it is on the record before the book takes it.
+        let (ev, arr) = self.shared.control.now.get();
+        self.shared.jlog(jk::ADOPTION, ev, arr, jsrc::HOST, None, || {
+            let minor = |m: Option<i128>| match m {
+                None => JV::Null,
+                Some(m) => i64::try_from(m).map_or_else(|_| JV::str(m.to_string()), JV::Int),
+            };
+            JV::map([
+                ("strategy", JV::Int(sid.index() as i64)),
+                ("local", JV::Int(local as i64)),
+                ("ts_ns", JV::Int(timestamp_ns)),
+                ("price", JV::Float(price)),
+                ("quantity", JV::Float(quantity)),
+                ("margin_minor", minor(margin_minor)),
+                ("cost_minor", minor(cost_minor)),
+            ])
+        })?;
+        let extras = crate::portfolio::Adoption { margin_minor, cost_minor };
         let adopted = match &mut *self.shared.inner.borrow_mut() {
-            Inner::Building(b) => b.adopt_position(sid, local, timestamp_ns, price, quantity),
-            Inner::Running(c) => c.adopt_position(sid, local, timestamp_ns, price, quantity),
+            Inner::Building(b) => {
+                b.adopt_position_with(sid, local, timestamp_ns, price, quantity, extras)
+            }
+            Inner::Running(c) => {
+                c.adopt_position_with(sid, local, timestamp_ns, price, quantity, extras)
+            }
             Inner::Gone => return Err(finished()),
         };
         adopted.map_err(PyValueError::new_err)
@@ -2519,62 +3348,81 @@ impl PyRuntime {
         oi: f64,
         arrival_ns: Option<i64>,
     ) -> PyResult<usize> {
-        let sh = &*self.shared;
-        let mut guard = self.live_loop()?;
-        let g = self.instrument(instrument)?;
-        let ts = timestamp;
-        self.stamp(ts, arrival_ns);
-        with_feed(sh, |feed| feed.check_timestamp(g, ts).map_err(runtime_err))?;
-        let trade = ltp > 0.0;
-        let quote = bid > 0.0 && ask > 0.0;
-        if !trade && !quote {
-            // A row the book refuses still proves the market reached its
-            // instant: what is due on this symbol's clock fires now.
-            drop(guard);
-            self.mark_time(py, g, ts)?;
-            return Ok(0);
-        }
-        let row = TickRow {
-            timestamp: ts,
-            ltp,
-            bid,
-            ask,
-            buy_qty_delta,
-            sell_qty_delta,
-            ltq,
-            bid_qty,
-            ask_qty,
-            oi,
-        };
-        let row = store_row(sh, g, RingKind::Ticks, |feed| feed.push_tick(g, row))?;
-        let mut appended = 0;
-        if trade {
-            // The exchange's last traded quantity when supplied, else the
-            // flow-delta proxy: the rule `tick_data_to_events` applies.
-            let size = if ltq > 0.0 { ltq } else { buy_qty_delta.abs() + sell_qty_delta.abs() };
-            let payload = Pushed::Trade(TradeTick {
+        let before = self.shared.jcount();
+        let result = (|| -> PyResult<usize> {
+            let sh = &*self.shared;
+            let mut guard = self.live_loop()?;
+            let g = self.instrument(instrument)?;
+            let ts = timestamp;
+            self.stamp(ts, arrival_ns);
+            with_feed(sh, |feed| feed.check_timestamp(g, ts).map_err(runtime_err))?;
+            sh.jlog(jk::TICK, ts, arrival_ns.unwrap_or(ts), jsrc::FEED, None, || {
+                JV::map([
+                    ("symbol", JV::str(sh.symbol_text(g.index()))),
+                    ("ltp", JV::Float(ltp)),
+                    ("bid", JV::Float(bid)),
+                    ("ask", JV::Float(ask)),
+                    ("buy_qty_delta", JV::Float(buy_qty_delta)),
+                    ("sell_qty_delta", JV::Float(sell_qty_delta)),
+                    ("ltq", JV::Float(ltq)),
+                    ("bid_qty", JV::Float(bid_qty)),
+                    ("ask_qty", JV::Float(ask_qty)),
+                    ("oi", JV::Float(oi)),
+                ])
+            })?;
+            let trade = ltp > 0.0;
+            let quote = bid > 0.0 && ask > 0.0;
+            if !trade && !quote {
+                // A row the book refuses still proves the market reached its
+                // instant: what is due on this symbol's clock fires now.
+                drop(guard);
+                self.mark_time(py, g, ts)?;
+                return Ok(0);
+            }
+            let row = TickRow {
                 timestamp: ts,
-                price: ltp,
-                size,
-                signed_size: buy_qty_delta.abs() - sell_qty_delta.abs(),
-                oi,
-            });
-            self.deliver(py, &mut guard, g, EventKind::Trade, ts, row, payload)?;
-            appended += 1;
-        }
-        if quote {
-            let payload = Pushed::Quote(QuoteTick {
-                timestamp: ts,
+                ltp,
                 bid,
                 ask,
-                bid_size: TickData::displayed(bid_qty),
-                ask_size: TickData::displayed(ask_qty),
-            });
-            self.deliver(py, &mut guard, g, EventKind::Quote, ts, row, payload)?;
-            appended += 1;
-        }
-        self.settle_push();
-        Ok(appended)
+                buy_qty_delta,
+                sell_qty_delta,
+                ltq,
+                bid_qty,
+                ask_qty,
+                oi,
+            };
+            let row = store_row(sh, g, RingKind::Ticks, |feed| feed.push_tick(g, row))?;
+            let mut appended = 0;
+            if trade {
+                // The exchange's last traded quantity when supplied, else the
+                // flow-delta proxy: the rule `tick_data_to_events` applies.
+                let size = if ltq > 0.0 { ltq } else { buy_qty_delta.abs() + sell_qty_delta.abs() };
+                let payload = Pushed::Trade(TradeTick {
+                    timestamp: ts,
+                    price: ltp,
+                    size,
+                    signed_size: buy_qty_delta.abs() - sell_qty_delta.abs(),
+                    oi,
+                });
+                self.deliver(py, &mut guard, g, EventKind::Trade, ts, row, payload)?;
+                appended += 1;
+            }
+            if quote {
+                let payload = Pushed::Quote(QuoteTick {
+                    timestamp: ts,
+                    bid,
+                    ask,
+                    bid_size: TickData::displayed(bid_qty),
+                    ask_size: TickData::displayed(ask_qty),
+                });
+                self.deliver(py, &mut guard, g, EventKind::Quote, ts, row, payload)?;
+                appended += 1;
+            }
+            self.settle_push();
+            Ok(appended)
+        })();
+        self.shared.jnote(py, "tick", before, &result);
+        result
     }
 
     /// Feed one closed bar to a live node; `timestamp` is as the caller
@@ -2593,18 +3441,36 @@ impl PyRuntime {
         volume: f64,
         arrival_ns: Option<i64>,
     ) -> PyResult<()> {
-        let sh = &*self.shared;
-        let mut guard = self.live_loop()?;
-        let g = self.instrument(instrument)?;
-        let close_ts = timestamp + sh.offsets[g.index()];
-        self.stamp(close_ts, arrival_ns);
-        with_feed(sh, |feed| feed.check_timestamp(g, close_ts).map_err(runtime_err))?;
-        let stamped = KernelBar { timestamp, open, high, low, close, volume };
-        let event = store_row(sh, g, RingKind::Bars, |feed| feed.push_bar(g, close_ts, stamped))?;
-        let bar = KernelBar { timestamp: close_ts, ..stamped };
-        self.deliver_event(py, &mut guard, event, Pushed::Bar(bar))?;
-        self.settle_push();
-        Ok(())
+        let before = self.shared.jcount();
+        let result = (|| -> PyResult<()> {
+            let sh = &*self.shared;
+            let mut guard = self.live_loop()?;
+            let g = self.instrument(instrument)?;
+            let close_ts = timestamp + sh.offset_of(g.index());
+            self.stamp(close_ts, arrival_ns);
+            with_feed(sh, |feed| feed.check_timestamp(g, close_ts).map_err(runtime_err))?;
+            sh.jlog(jk::BAR, close_ts, arrival_ns.unwrap_or(close_ts), jsrc::FEED, None, || {
+                JV::map([
+                    ("symbol", JV::str(sh.symbol_text(g.index()))),
+                    ("timestamp", JV::Int(timestamp)),
+                    ("open", JV::Float(open)),
+                    ("high", JV::Float(high)),
+                    ("low", JV::Float(low)),
+                    ("close", JV::Float(close)),
+                    ("volume", JV::Float(volume)),
+                    ("warmup", JV::Bool(sh.warmup.get())),
+                ])
+            })?;
+            let stamped = KernelBar { timestamp, open, high, low, close, volume };
+            let event =
+                store_row(sh, g, RingKind::Bars, |feed| feed.push_bar(g, close_ts, stamped))?;
+            let bar = KernelBar { timestamp: close_ts, ..stamped };
+            self.deliver_event(py, &mut guard, event, Pushed::Bar(bar))?;
+            self.settle_push();
+            Ok(())
+        })();
+        self.shared.jnote(py, "bar", before, &result);
+        result
     }
 
     /// Feed one depth snapshot to a live node: `(price, size)` lists, best
@@ -2619,43 +3485,78 @@ impl PyRuntime {
         asks: Vec<(f64, f64)>,
         arrival_ns: Option<i64>,
     ) -> PyResult<()> {
-        let sh = &*self.shared;
-        let mut guard = self.live_loop()?;
-        let g = self.instrument(instrument)?;
-        self.stamp(timestamp, arrival_ns);
-        with_feed(sh, |feed| feed.check_timestamp(g, timestamp).map_err(runtime_err))?;
-        let levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
-            levels
-                .iter()
-                .filter(|(price, _)| *price > 0.0)
-                .map(|&(price, size)| BookLevel { price, size })
-                .collect()
-        };
-        let snapshot = DepthTick::from_levels(timestamp, &levels(&bids), &levels(&asks));
-        let event = store_row(sh, g, RingKind::Depth, |feed| feed.push_depth(g, snapshot))?;
-        self.deliver_event(py, &mut guard, event, Pushed::Depth(snapshot))?;
-        self.settle_push();
-        Ok(())
+        let before = self.shared.jcount();
+        let result = (|| -> PyResult<()> {
+            let sh = &*self.shared;
+            let mut guard = self.live_loop()?;
+            let g = self.instrument(instrument)?;
+            self.stamp(timestamp, arrival_ns);
+            with_feed(sh, |feed| feed.check_timestamp(g, timestamp).map_err(runtime_err))?;
+            sh.jlog(
+                jk::DEPTH,
+                timestamp,
+                arrival_ns.unwrap_or(timestamp),
+                jsrc::FEED,
+                None,
+                || {
+                    let side = |levels: &[(f64, f64)]| {
+                        JV::List(
+                            levels
+                                .iter()
+                                .map(|&(p, q)| JV::List(vec![JV::Float(p), JV::Float(q)]))
+                                .collect(),
+                        )
+                    };
+                    JV::map([
+                        ("symbol", JV::str(sh.symbol_text(g.index()))),
+                        ("bids", side(&bids)),
+                        ("asks", side(&asks)),
+                    ])
+                },
+            )?;
+            let levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
+                levels
+                    .iter()
+                    .filter(|(price, _)| *price > 0.0)
+                    .map(|&(price, size)| BookLevel { price, size })
+                    .collect()
+            };
+            let snapshot = DepthTick::from_levels(timestamp, &levels(&bids), &levels(&asks));
+            let event = store_row(sh, g, RingKind::Depth, |feed| feed.push_depth(g, snapshot))?;
+            self.deliver_event(py, &mut guard, event, Pushed::Depth(snapshot))?;
+            self.settle_push();
+            Ok(())
+        })();
+        self.shared.jnote(py, "depth", before, &result);
+        result
     }
 
     /// Move every strategy's clocks to `timestamp`, symbol by symbol, firing
     /// the alerts and timers that are due. No data is involved.
     fn advance_time(&self, py: Python<'_>, timestamp: i64) -> PyResult<()> {
-        let sh = &*self.shared;
-        let _guard = self.live_loop()?;
-        self.settle_push();
-        let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
-        for st in &strats {
-            let locals = match &*sh.inner.borrow() {
-                Inner::Running(c) => c.instruments_of(st.sid),
-                _ => return Err(finished()),
-            };
-            for local in 0..locals {
-                let g = sh.global_of(st.sid, local)?;
-                time_only(py, sh, st, g, timestamp)?;
+        let before = self.shared.jcount();
+        let result = (|| -> PyResult<()> {
+            let sh = &*self.shared;
+            let _guard = self.live_loop()?;
+            self.settle_push();
+            sh.jlog(jk::TIME, timestamp, timestamp, jsrc::FEED, None, || {
+                JV::map([("timestamp", JV::Int(timestamp))])
+            })?;
+            let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
+            for st in &strats {
+                let locals = match &*sh.inner.borrow() {
+                    Inner::Running(c) => c.instruments_of(st.sid),
+                    _ => return Err(finished()),
+                };
+                for local in 0..locals {
+                    let g = sh.global_of(st.sid, local)?;
+                    time_only(py, sh, st, g, timestamp)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.shared.jnote(py, "time", before, &result);
+        result
     }
 
     /// The result of a strategy's run: liquidates its book.
@@ -2684,6 +3585,37 @@ impl PyRuntime {
 
     /// Heap bytes by category; see `MemoryReport`. Python objects are not
     /// counted.
+    /// Add an instrument to a running live node; see `LiveNode.add_instrument`. `strategies` are
+    /// strategy ids in ascending order; `history` sizes the instrument's rings (raised to the
+    /// longest indicator lookback); `offset` moves a pushed bar's stamp to its close. Returns the
+    /// instrument's index, which is what the push methods take.
+    #[pyo3(signature = (symbol, spec, direction, strategies, history=None, offset=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_instrument(
+        &self,
+        py: Python<'_>,
+        symbol: String,
+        spec: Option<PyRef<'_, PyInstrumentSpec>>,
+        direction: i32,
+        strategies: Vec<usize>,
+        history: Option<usize>,
+        offset: i64,
+    ) -> PyResult<usize> {
+        let before = self.shared.jcount();
+        let result =
+            self.add_instrument_now(py, symbol, spec, direction, strategies, history, offset);
+        self.shared.jnote(py, "instrument_add", before, &result);
+        result
+    }
+
+    /// Retire an instrument of a running live node; see `LiveNode.retire_instrument`.
+    fn retire_instrument(&self, py: Python<'_>, symbol: &str) -> PyResult<()> {
+        let before = self.shared.jcount();
+        let result = self.retire_instrument_now(py, symbol);
+        self.shared.jnote(py, "instrument_retire", before, &result);
+        result
+    }
+
     fn memory_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let inner = self.shared.inner.borrow();
         let Inner::Running(core) = &*inner else {
@@ -2719,7 +3651,10 @@ impl PyRuntime {
 impl PyRuntime {
     /// The loop state of a live node, borrowed for one push. A push from
     /// inside a hook would need it again, and is refused.
-    fn live_loop(&self) -> PyResult<std::cell::RefMut<'_, Option<LoopState>>> {
+    fn live_loop(&self) -> PyResult<LiveGuard<'_>> {
+        if self.shared.poisoned.get() {
+            return Err(poisoned());
+        }
         if self.shared.live_history.is_none() {
             return Err(PyRuntimeError::new_err("this runtime is not a live node"));
         }
@@ -2730,11 +3665,309 @@ impl PyRuntime {
         if guard.is_none() {
             return Err(not_ready("finalize() before pushing"));
         }
-        Ok(guard)
+        Ok(LiveGuard { state: guard, poisoned: &self.shared.poisoned })
+    }
+
+    /// Call the optional capability `method` of the node's own execution adapter, if it has it.
+    fn tell_adapter(&self, py: Python<'_>, method: &str, args: Bound<'_, PyTuple>) -> PyResult<()> {
+        if let Some(adapter) = self.shared.adapter_obj.borrow().as_ref() {
+            if let Some(m) = adapter.bind(py).getattr_opt(method)?.filter(|m| m.is_callable()) {
+                m.call1(args)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_instrument_now(
+        &self,
+        py: Python<'_>,
+        symbol: String,
+        spec: Option<PyRef<'_, PyInstrumentSpec>>,
+        direction: i32,
+        strategies: Vec<usize>,
+        history: Option<usize>,
+        offset: i64,
+    ) -> PyResult<usize> {
+        let sh = &*self.shared;
+        let mut guard = self.live_loop()?;
+        let known = sh.sym_ids.borrow().get(&symbol).copied();
+        let revive = known.filter(|g| sh.retired.get()[g.index()]);
+        if symbol.is_empty() || (known.is_some() && revive.is_none()) {
+            return Err(Fail::new(
+                "duplicate_symbols",
+                format!("{symbol:?} is empty or already an instrument of this node"),
+            )
+            .param("symbol")
+            .value(symbol.as_str())
+            .into());
+        }
+        if history == Some(0) {
+            return Err(Fail::new("invalid_history", "history must be a positive number of rows")
+                .param("history")
+                .value(0_i64)
+                .into());
+        }
+        let spec_py = spec.as_ref().map(|s| Py::new(py, PyInstrumentSpec::clone(s))).transpose()?;
+        let (direction, policy, spec) =
+            parse_instrument_args(direction, spec.as_deref(), &sh.oms_type)?;
+        let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
+        if strategies.is_empty() || strategies.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(Fail::new(
+                "invalid_strategies",
+                "strategies must name at least one strategy, each once, in ascending order",
+            )
+            .param("strategies")
+            .into());
+        }
+        let mut chosen: Vec<Rc<Strat>> = Vec::with_capacity(strategies.len());
+        for &k in &strategies {
+            let Some(st) = strats.get(k) else {
+                return Err(Fail::new(
+                    "invalid_strategies",
+                    format!("strategy {k} does not exist; the node has {}", strats.len()),
+                )
+                .param("strategies")
+                .value(k as i64)
+                .into());
+            };
+            chosen.push(st.clone());
+        }
+        let sids: Vec<StrategyId> = chosen.iter().map(|s| s.sid).collect();
+        if let Some(g) = revive {
+            let holders = match &*sh.inner.borrow() {
+                Inner::Running(core) => core.holders(g),
+                _ => return Err(finished()),
+            };
+            if let Some(bad) = sids.iter().find(|s| !holders.contains(s)) {
+                return Err(Fail::new(
+                    "invalid_strategies",
+                    format!(
+                        "strategy {} never held {symbol:?}; a retired symbol comes back only for \
+                         strategies that had it",
+                        bad.index()
+                    ),
+                )
+                .param("strategies")
+                .value(bad.index() as i64)
+                .into());
+            }
+        }
+
+        // The record is written before the engine acts on it.
+        let ts = sh.control.now.get().0;
+        let spec_json = match &spec {
+            Some(s) => Some(serde_json::to_string(s).map_err(|e| {
+                Fail::new("invalid_parameter", e.to_string()).param("spec").value("spec")
+            })?),
+            None => None,
+        };
+        sh.jlog(jk::INSTRUMENT_ADD, ts, ts, jsrc::HOST, None, || {
+            JV::map([
+                ("symbol", JV::str(symbol.as_str())),
+                ("spec", JV::opt_str(spec_json.as_deref())),
+                ("direction", JV::Int(direction as i8 as i64)),
+                ("strategies", JV::List(strategies.iter().map(|&k| JV::Int(k as i64)).collect())),
+                ("history", history.map_or(JV::Null, |h| JV::Int(h as i64))),
+                ("offset", JV::Int(offset)),
+                ("revive", JV::Bool(revive.is_some())),
+            ])
+        })?;
+        // The venue learns the contract before any order for it can reach it. A refusal leaves
+        // the engine as it was.
+        self.tell_adapter(py, "add_instrument", (symbol.as_str(), spec_py).into_pyobject(py)?)?;
+
+        let primary = sh.primary.get().map(|bars| (bars, sh.tz_offset_ns));
+        let capacity = history.map(|h| h.max(sh.lookback.get()));
+        let session = spec.as_ref().and_then(|s| s.session.clone());
+        let mut mask = 0u32;
+        for st in &chosen {
+            mask |= st.mask;
+        }
+        if let Some(g) = revive {
+            match &mut *sh.inner.borrow_mut() {
+                Inner::Running(core) => core
+                    .revive_instrument(g, &sids, primary, session.as_ref())
+                    .map_err(runtime_err)?,
+                _ => return Err(finished()),
+            }
+            with_feed(sh, |feed| {
+                feed.revive_instrument(g, capacity);
+                Ok(())
+            })?;
+            sh.retired.set(&guard, g.index(), false);
+            guard.as_mut().expect("checked by live_loop").wanted[g.index()] = mask;
+            return Ok(g.index());
+        }
+
+        let params =
+            InstrumentParams { direction, spec: spec.clone(), config: None, atr_period: 0 };
+        let g = match &mut *sh.inner.borrow_mut() {
+            Inner::Running(core) => core
+                .add_instrument(&symbol, &params, &sids, primary, sh.venue_on.get())
+                .map_err(runtime_err)?,
+            _ => return Err(finished()),
+        };
+        let gi = g.index();
+        debug_assert_eq!(gi, sh.symbols.get().len());
+        sh.symbols.push(&guard, PyString::intern(py, &symbol).unbind());
+        sh.sym_ids.borrow_mut().insert(symbol.clone(), g);
+        sh.has_ticks.push(&guard, true);
+        sh.arrays.borrow_mut().push(None);
+        sh.tick_arrays.borrow_mut().push(None);
+        sh.offsets.push(&guard, offset);
+        sh.series.borrow_mut().push(None);
+        sh.retired.push(&guard, false);
+        with_feed(sh, |feed| {
+            feed.add_instrument(symbol.clone(), capacity);
+            Ok(())
+        })?;
+        let symbol_obj = sh.symbol(py, gi);
+        let clock_cls = py.import("raptorbt.strategy.clock")?.getattr("Clock")?;
+        for st in &chosen {
+            st.ctx.bind(py).borrow().prices.push(&guard, Px::default());
+            st.ctx.bind(py).borrow().books.borrow_mut().push(None);
+            let clock = st.late.clock.bind(py).call_method0("clone_schedule")?;
+            let mut t = st.tables.borrow_mut();
+            t.clocks.push(ClockSlot {
+                alerts: clock.getattr("_alerts")?.cast_into::<PyDict>()?.unbind(),
+                timers: clock.getattr("_timers")?.cast_into::<PyDict>()?.unbind(),
+                plain: clock.get_type().is(&clock_cls),
+                clock: clock.unbind(),
+            });
+            t.primary_private.push(
+                st.late
+                    .indicators
+                    .iter()
+                    .filter(|(sub, _)| sub.is_none())
+                    .map(|(_, obj)| obj.clone_ref(py))
+                    .collect(),
+            );
+            t.primary_reveal.push(None);
+            for (sub, (step, unit, brick)) in st.late.subscriptions.iter().enumerate() {
+                let key =
+                    AggKey::new(g, parse_spec(*step, unit)?, *brick, sh.tz_offset_ns, sh.stamp)
+                        .map_err(runtime_err)?;
+                let (_, stream) = match &mut *sh.inner.borrow_mut() {
+                    Inner::Running(core) => core
+                        .subscribe_aggregation(st.sid, key, session.as_ref())
+                        .map_err(runtime_err)?,
+                    _ => return Err(finished()),
+                };
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("symbol", &symbol_obj)?;
+                debug_assert_eq!(stream as usize, t.streams.len());
+                t.streams.push(StreamInfo {
+                    sub,
+                    step: *step,
+                    unit: PyString::new(py, unit).unbind(),
+                    kwargs: kwargs.unbind(),
+                    private: st
+                        .late
+                        .indicators
+                        .iter()
+                        .filter(|(s, _)| *s == Some(sub))
+                        .map(|(_, obj)| obj.clone_ref(py))
+                        .collect(),
+                    reveal: None,
+                });
+            }
+        }
+        guard.as_mut().expect("checked by live_loop").wanted.push(mask);
+        if let Some(route) = sh.venue.borrow().clone() {
+            for sid in &sids {
+                route.add_instrument(sid.index(), &symbol, direction, spec.as_ref(), policy)?;
+            }
+        }
+        Ok(gi)
+    }
+
+    fn retire_instrument_now(&self, py: Python<'_>, symbol: &str) -> PyResult<()> {
+        let sh = &*self.shared;
+        let mut guard = self.live_loop()?;
+        let Some(g) = sh.sym_ids.borrow().get(symbol).copied() else {
+            return Err(Fail::new(
+                "unknown_symbol",
+                format!("{symbol:?} is not an instrument of this node"),
+            )
+            .param("symbol")
+            .value(symbol)
+            .valid(sh.symbols.get().iter().map(|s| s.to_string()))
+            .into());
+        };
+        if sh.retired.get()[g.index()] {
+            return Err(Fail::new("instrument_retired", format!("{symbol:?} is already retired"))
+                .param("symbol")
+                .value(symbol)
+                .into());
+        }
+        let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
+        let mut holding = Vec::new();
+        let subscribers = match &*sh.inner.borrow() {
+            Inner::Running(core) => {
+                for (sid, positions, orders) in core.instrument_in_use(g) {
+                    holding.push(format!(
+                        "strategy {}: {positions} open positions, {orders} working orders",
+                        sid.index()
+                    ));
+                }
+                core.subscribers(g).to_vec()
+            }
+            _ => return Err(finished()),
+        };
+        let venue = sh.venue.borrow().clone();
+        for &sid in &subscribers {
+            let local = match &*sh.inner.borrow() {
+                Inner::Running(core) => core.local_of(sid, g).expect("subscribed"),
+                _ => return Err(finished()),
+            };
+            let st = &strats[sid.index()];
+            if venue.as_ref().is_some_and(|v| v.watches(sid.index(), local)) {
+                holding.push(format!(
+                    "strategy {}: a protective level the engine watches",
+                    sid.index()
+                ));
+            }
+            if let Route::Native(state) = &st.route {
+                if state.borrow().has_held_for(local) {
+                    holding
+                        .push(format!("strategy {}: intents held for its next step", sid.index()));
+                }
+            }
+        }
+        if !holding.is_empty() {
+            return Err(Fail::new(
+                "instrument_in_use",
+                format!(
+                    "{symbol:?} cannot be retired while it is in use ({}); close the positions and \
+                     cancel the orders first",
+                    holding.join("; ")
+                ),
+            )
+            .param("symbol")
+            .value(symbol)
+            .into());
+        }
+        let ts = sh.control.now.get().0;
+        sh.jlog(jk::INSTRUMENT_RETIRE, ts, ts, jsrc::HOST, None, || {
+            JV::map([("symbol", JV::str(symbol))])
+        })?;
+        self.tell_adapter(py, "retire_instrument", (symbol,).into_pyobject(py)?)?;
+        if let Inner::Running(core) = &mut *sh.inner.borrow_mut() {
+            core.retire_instrument(g).map_err(runtime_err)?;
+        }
+        with_feed(sh, |feed| {
+            feed.retire_instrument(g);
+            Ok(())
+        })?;
+        sh.series.borrow_mut()[g.index()] = None;
+        sh.retired.set(&guard, g.index(), true);
+        guard.as_mut().expect("checked by live_loop").wanted[g.index()] = 0;
+        Ok(())
     }
 
     fn instrument(&self, index: usize) -> PyResult<InstrumentId> {
-        if index >= self.shared.symbols.len() {
+        if index >= self.shared.symbols.get().len() {
             return Err(PyKeyError::new_err(index));
         }
         Ok(InstrumentId::new(index as u32))
@@ -2745,7 +3978,7 @@ impl PyRuntime {
     fn deliver(
         &self,
         py: Python<'_>,
-        guard: &mut std::cell::RefMut<'_, Option<LoopState>>,
+        guard: &mut LiveGuard<'_>,
         g: InstrumentId,
         kind: EventKind,
         ts: i64,
@@ -2759,7 +3992,7 @@ impl PyRuntime {
     fn deliver_event(
         &self,
         py: Python<'_>,
-        guard: &mut std::cell::RefMut<'_, Option<LoopState>>,
+        guard: &mut LiveGuard<'_>,
         event: EventRef,
         payload: Pushed,
     ) -> PyResult<()> {
@@ -2857,7 +4090,7 @@ impl LoopState {
         let Inner::Running(core) = &*inner else { return Err(finished()) };
         let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
         let mut by_sid: Vec<Option<Rc<Strat>>> = vec![None; strats.len()];
-        let mut wanted = vec![0u32; sh.symbols.len()];
+        let mut wanted = vec![0u32; sh.symbols.get().len()];
         for s in &strats {
             by_sid[s.sid.index()] = Some(s.clone());
             for local in 0..core.instruments_of(s.sid) {
@@ -2895,10 +4128,13 @@ fn dispatch(
     let mask = wanted[event.instrument.index()];
     // One Python int per event, not per strategy.
     let ts_obj = event.ts.into_pyobject(py)?;
-    let ev = Ev { event, ts_obj: &ts_obj };
+    let symbols = sh.symbols.get();
+    let symbol = symbols[event.instrument.index()].bind(py);
+    let with_ticks = sh.has_ticks.get()[event.instrument.index()];
+    let ev = Ev { event, ts_obj: &ts_obj, symbol, with_ticks };
     match cur.data {
         ScheduleData::Bar(bar) => {
-            let offset = sh.offsets[event.instrument.index()];
+            let offset = sh.offset_of(event.instrument.index());
             let bar_obj = sh.classes.bar.bind(py).call1((
                 bar.timestamp - offset,
                 bar.open,
@@ -2913,7 +4149,6 @@ fn dispatch(
             }
         }
         ScheduleData::Trade(t) => {
-            let symbol = sh.symbols[event.instrument.index()].bind(py);
             let tick = (mask & HOOK_TRADE != 0)
                 .then(|| {
                     sh.classes.trade.bind(py).call1((t.timestamp, t.price, t.size, symbol, t.oi))
@@ -2945,7 +4180,6 @@ fn dispatch(
             }
         }
         ScheduleData::Quote(q) => {
-            let symbol = sh.symbols[event.instrument.index()].bind(py);
             let quote = (mask & HOOK_QUOTE != 0)
                 .then(|| {
                     sh.classes.quote.bind(py).call1((
@@ -2999,7 +4233,8 @@ fn time_only(
     let ctx = st.ctx.bind(py);
     ctx.borrow().local.set(local);
     let strategy = st.strategy.bind(py);
-    let cs = &st.clocks[local];
+    let tables = st.tables.borrow();
+    let cs = &tables.clocks[local];
     let clock = cs.clock.bind(py);
     if st.active_clock.get() != local {
         strategy.setattr(intern!(py, "clock"), clock)?;
@@ -3025,6 +4260,9 @@ struct Scratch {
 struct Ev<'a, 'py> {
     event: &'a EventRef,
     ts_obj: &'a Bound<'py, PyInt>,
+    /// The event's symbol and whether its instrument takes ticks, read once per event.
+    symbol: &'a Bound<'py, PyString>,
+    with_ticks: bool,
 }
 
 fn has_commands(py: Python<'_>, st: &Strat) -> bool {
@@ -3056,6 +4294,7 @@ fn enter(
     py: Python<'_>,
     sh: &Shared,
     st: &Strat,
+    t: &StratTables,
     ev: &Ev<'_, '_>,
     bar: Option<(&Bound<'_, PyAny>, i64)>,
 ) -> PyResult<(usize, bool)> {
@@ -3081,10 +4320,9 @@ fn enter(
         _ => return Err(finished()),
     };
     if !lifecycle.is_empty() {
-        let symbol = sh.symbols[ev.event.instrument.index()].bind(py);
-        deliver(py, sh, st, lifecycle, symbol)?;
+        deliver(py, sh, st, lifecycle, ev.symbol)?;
     }
-    let cs = &st.clocks[local];
+    let cs = &t.clocks[local];
     let clock = cs.clock.bind(py);
     if st.active_clock.get() != local {
         strategy.setattr(intern!(py, "clock"), clock)?;
@@ -3113,6 +4351,7 @@ fn composites(
     py: Python<'_>,
     sh: &Shared,
     st: &Strat,
+    t: &StratTables,
     bank: &IndicatorBank,
     scratch: &mut Scratch,
 ) -> PyResult<()> {
@@ -3122,12 +4361,13 @@ fn composites(
     }
     let strategy = st.strategy.bind(py);
     let ctx = st.ctx.bind(py);
+    let streams = &t.streams;
     let mut last: Option<u16> = None;
     let mut emission = 0u32;
     for &(stream, ref b) in &scratch.deliveries {
         emission = if last == Some(stream) { emission + 1 } else { 1 };
         last = Some(stream);
-        let info = &st.streams[stream as usize];
+        let info = &streams[stream as usize];
         if let Some(handle) = info.reveal {
             bank.reveal(handle, emission);
         }
@@ -3160,14 +4400,15 @@ fn composites(
 fn primary_bar(
     py: Python<'_>,
     st: &Strat,
+    t: &StratTables,
     bank: &IndicatorBank,
     local: usize,
     ohlc: (f64, f64, f64, f64),
 ) -> PyResult<()> {
-    if let Some(handle) = st.primary_reveal[local] {
+    if let Some(handle) = t.primary_reveal[local] {
         bank.reveal(handle, 1);
     }
-    for ind in &st.primary_private[local] {
+    for ind in &t.primary_private[local] {
         ind.bind(py).call_method1(intern!(py, "update_bar"), ohlc)?;
     }
     if st.mask & HOOK_BAR != 0 {
@@ -3206,8 +4447,18 @@ fn route_commands(
         }
         Route::Native(state) => {
             let commands = st.queue.bind(py).borrow_mut().queue.take_commands();
+            sh.jlog_now(jk::COMMAND, jsrc::STRATEGY, None, || commands_value(st.sid, &commands))?;
             let mut target = RuntimeTarget { sh, sid: st.sid, idx, ts };
-            state.borrow_mut().apply(&mut target, commands, current, idx, ts)?;
+            let applied = state.borrow_mut().apply(&mut target, commands, current, idx, ts);
+            if let Err(e) = &applied {
+                // The failure being reported matters more than a journal that
+                // cannot take its note: that surfaces on the next append.
+                let recorded = sh.recorded(jk::REFUSAL);
+                let _ = sh.jlog_now(jk::REFUSAL, jsrc::ENGINE, None, || {
+                    recorded.unwrap_or_else(|| refusal_value(py, st.sid, e))
+                });
+            }
+            applied?;
         }
     }
     Ok(())
@@ -3225,9 +4476,13 @@ fn settle(
     local_idx: usize,
     ts: i64,
 ) -> PyResult<()> {
+    if sh.warmup_muted.get() {
+        discard_queued(py, st);
+        return Ok(());
+    }
     match &st.route {
         Route::Python { path, .. } => {
-            let symbol = sh.symbols[global.index()].bind(py);
+            let symbol = sh.symbol(py, global.index());
             path.bind(py).call_method1(intern!(py, "settle"), (local, symbol, local_idx, ts))?;
         }
         Route::Native(state) => {
@@ -3240,6 +4495,35 @@ fn settle(
         }
     }
     Ok(())
+}
+
+/// With a host order check installed, `enter()` / `close_position()` intents
+/// are refused: they carry no order to show the check.
+fn refuse_intents(sh: &Shared, input: &StepInput) -> PyResult<()> {
+    if (input.entry || input.exit) && sh.order_check.borrow().is_some() {
+        return Err(Fail::new(
+            "order_check_intent",
+            "enter() and close_position() carry no order for the host's order_check to see: \
+             submit typed orders (submit_order) when an order_check is installed",
+        )
+        .param("order_check")
+        .into());
+    }
+    Ok(())
+}
+
+/// Drop everything the strategy queued, held intents included: muted warmup
+/// lets the strategy run but never lets it trade.
+fn discard_queued(py: Python<'_>, st: &Strat) {
+    {
+        let mut q = st.queue.bind(py).borrow_mut();
+        drop(q.queue.take_commands());
+        drop(q.queue.take_intents());
+    }
+    match &st.route {
+        Route::Python { held, .. } => held.bind(py).clear(),
+        Route::Native(state) => state.borrow_mut().clear_held(),
+    }
 }
 
 /// The exception for a refusal the command router made.
@@ -3300,6 +4584,7 @@ impl Target for RuntimeTarget<'_> {
             Some(name) => self
                 .sh
                 .sym_ids
+                .borrow()
                 .get(name)
                 .and_then(|&g| self.sh.local_of(self.sid, g))
                 .ok_or_else(|| PyKeyError::new_err(name.to_string())),
@@ -3318,9 +4603,10 @@ impl Target for RuntimeTarget<'_> {
         if let Some(venue) = self.venue() {
             return venue.submit(self.sh, self.sid, instrument, spec, idx, ts, client_id, parent);
         }
+        let refusal = self.sh.refusal_for(self.sid, instrument, spec, client_id, ts)?;
         self.sh.with_book_mut(self.sid, |book, current| {
             let idx = book.submission_idx(instrument, idx, current);
-            submit_order_on(
+            submit_order_checked(
                 book.kernel_mut(instrument),
                 &spec.side,
                 &spec.kind,
@@ -3341,6 +4627,7 @@ impl Target for RuntimeTarget<'_> {
                 spec.post_only,
                 spec.reduce_only,
                 parent,
+                refusal,
             )
         })
     }
@@ -3481,6 +4768,7 @@ fn fold_step(
                 size_mult: get("size_mult")?.extract()?,
                 stop_price_override: get("stop_price")?.extract()?,
                 target_price_override: get("target_price")?.extract()?,
+                ..StepInput::default()
             })
         }
         Route::Native(state) => {
@@ -3495,6 +4783,7 @@ fn fold_step(
                 size_mult: folded.size_mult,
                 stop_price_override: folded.stop_price,
                 target_price_override: folded.target_price,
+                ..StepInput::default()
             })
         }
     }
@@ -3716,6 +5005,7 @@ impl PyKernelDriver {
             size_mult: folded.size_mult,
             stop_price_override: folded.stop_price,
             target_price_override: folded.target_price,
+            ..StepInput::default()
         };
         let bar = KernelBar { timestamp: ts, open, high, low, close, volume };
         let events = self.session.bind(py).borrow_mut().runner_mut()?.step(idx, &bar, input);
@@ -3744,6 +5034,7 @@ enum Tag {
     Triggered,
     Filled,
     Canceled,
+    Resized,
     Expired,
     Rejected,
     Contract,
@@ -3758,12 +5049,15 @@ fn tag_of(event: &EngineEvent) -> Tag {
         EngineEvent::AlgoStarted { .. } => Tag::AlgoStarted,
         EngineEvent::AlgoCompleted { .. } => Tag::AlgoCompleted,
         EngineEvent::MarginCall { .. } => Tag::MarginCall,
-        EngineEvent::RiskRejected { .. } => Tag::RiskRejected,
+        EngineEvent::RiskRejected { .. }
+        | EngineEvent::FillBreach { .. }
+        | EngineEvent::FillDeferred { .. } => Tag::RiskRejected,
         EngineEvent::RiskHalted { .. } => Tag::RiskHalted,
         EngineEvent::OrderAccepted { .. } => Tag::Accepted,
         EngineEvent::OrderTriggered { .. } => Tag::Triggered,
         EngineEvent::OrderFilled { .. } => Tag::Filled,
         EngineEvent::OrderCanceled { .. } => Tag::Canceled,
+        EngineEvent::OrderResized { .. } => Tag::Resized,
         EngineEvent::OrderExpired { .. } => Tag::Expired,
         EngineEvent::OrderRejected { .. } => Tag::Rejected,
         EngineEvent::Settled { .. } => Tag::Contract,
@@ -3789,6 +5083,7 @@ fn hooks_of(tag: Tag, preceded: bool) -> u32 {
         Tag::Triggered => HOOK_ORDER_TRIGGERED | HOOK_ORDER_EVENT,
         Tag::Filled => HOOK_ORDER_FILLED | HOOK_ORDER_EVENT,
         Tag::Canceled => HOOK_ORDER_CANCELED | HOOK_ORDER_EVENT,
+        Tag::Resized => HOOK_ORDER_EVENT,
         Tag::Expired => HOOK_ORDER_EXPIRED | HOOK_ORDER_EVENT,
         Tag::Rejected => HOOK_ORDER_REJECTED | HOOK_ORDER_EVENT,
         Tag::Contract => HOOK_CONTRACT_EVENT,
@@ -3951,6 +5246,8 @@ fn dispatch_events(
             Tag::RiskRejected | Tag::RiskHalted => {
                 call(HOOK_RISK_EVENT, intern!(py, "on_risk_event"))?;
             }
+            // A resize reaches `on_order_event` alone and leaves `preceded` as it was.
+            Tag::Resized => call(HOOK_ORDER_EVENT, intern!(py, "on_order_event"))?,
             // Lifecycle events reach their own hook and leave `preceded` as it was.
             Tag::Contract => call(HOOK_CONTRACT_EVENT, intern!(py, "on_contract_event"))?,
             Tag::Corporate => call(HOOK_CORPORATE_ACTION, intern!(py, "on_corporate_action"))?,
@@ -3972,6 +5269,164 @@ fn dispatch_events(
     Ok(())
 }
 
+fn exit_reason_name(reason: crate::core::types::ExitReason) -> &'static str {
+    use crate::core::types::ExitReason as R;
+    match reason {
+        R::Signal => "signal",
+        R::StopLoss => "stop_loss",
+        R::TakeProfit => "take_profit",
+        R::TrailingStop => "trailing_stop",
+        R::EndOfData => "end_of_data",
+        R::Order => "order",
+        R::Settlement => "settlement",
+        R::Delivery => "delivery",
+        R::CorporateAction => "corporate_action",
+        R::Liquidation => "liquidation",
+        R::TimeExit => "time_exit",
+        R::Squareoff => "squareoff",
+    }
+}
+
+/// Put on the record what the engine did to orders, positions or cash on
+/// its own, before the strategy hears of it: a cut to a working order, a
+/// position closed by an engine rule (stop, target, trail, liquidation,
+/// time exit, square-off), an order or entry the book refused, a contract settled, a corporate action applied
+/// or refused. What an order or the market did is already on the record as
+/// the input that caused it; these have no order of their own.
+fn journal_engine_events(
+    sh: &Shared,
+    st: &Strat,
+    events: &[EngineEvent],
+    from_report: bool,
+) -> PyResult<()> {
+    use crate::core::types::ExitReason as R;
+    if !sh.journal_on.get() {
+        return Ok(());
+    }
+    let sid = JV::Int(st.sid.index() as i64);
+    for event in events {
+        match event {
+            EngineEvent::OrderResized { order_id, client_id, from, to, .. } => {
+                sh.jlog_now(jk::ORDER_RESIZED, jsrc::ENGINE, Some(client_id), || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("order_id", JV::Int(*order_id as i64)),
+                        ("from", JV::Float(*from)),
+                        ("to", JV::Float(*to)),
+                    ])
+                })?;
+            }
+            EngineEvent::Exited { trade, .. }
+                if !matches!(
+                    trade.exit_reason,
+                    R::Signal | R::Order | R::EndOfData | R::Settlement | R::CorporateAction
+                ) =>
+            {
+                sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("reason", JV::str(exit_reason_name(trade.exit_reason))),
+                        ("price", JV::Float(trade.exit_price)),
+                        ("size", JV::Float(trade.size)),
+                        ("direction", JV::Int(trade.direction as i64)),
+                    ])
+                })?;
+            }
+            EngineEvent::RiskHalted { reason, .. } if reason == "daily_loss" => {
+                sh.jlog_now(jk::HALT, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("reason", JV::str("daily_loss")),
+                        ("flatten", JV::Bool(false)),
+                    ])
+                })?;
+            }
+            EngineEvent::FillBreach { order_id, client_id, reason, .. } => {
+                sh.jlog_now(jk::REJECTION, jsrc::ENGINE, Some(client_id), || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("event", JV::str("fill_breach")),
+                        ("order_id", JV::Int(*order_id as i64)),
+                        ("reason", JV::str(*reason)),
+                    ])
+                })?;
+            }
+            // A venue's own refusal is the `report` record, with its reason.
+            EngineEvent::OrderRejected { .. } | EngineEvent::EntryRejected { .. }
+                if from_report => {}
+            EngineEvent::OrderRejected { order_id, client_id, reason, .. } => {
+                sh.jlog_now(jk::REJECTION, jsrc::ENGINE, Some(client_id), || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("event", JV::str("order_rejected")),
+                        ("order_id", JV::Int(*order_id as i64)),
+                        ("reason", JV::str(*reason)),
+                    ])
+                })?;
+            }
+            EngineEvent::EntryRejected { reason, .. } => {
+                sh.jlog_now(jk::REJECTION, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("event", JV::str("entry_rejected")),
+                        ("reason", JV::str(reason.as_str())),
+                    ])
+                })?;
+            }
+            EngineEvent::Settled {
+                outcome,
+                style,
+                source,
+                price,
+                size,
+                direction,
+                deliver,
+                delivery_price,
+                ..
+            } => {
+                sh.jlog_now(jk::LIFECYCLE, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("what", JV::str("settlement")),
+                        ("outcome", JV::str(*outcome)),
+                        ("style", JV::str(style.as_str())),
+                        ("source", JV::str(source.as_str())),
+                        ("price", JV::Float(*price)),
+                        ("size", JV::Float(*size)),
+                        ("direction", JV::Int(*direction as i64)),
+                        ("deliver", JV::Float(*deliver)),
+                        ("delivery_price", JV::Float(*delivery_price)),
+                    ])
+                })?;
+            }
+            EngineEvent::CorporateAction { kind, ratio, amount, cash, .. } => {
+                sh.jlog_now(jk::LIFECYCLE, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("what", JV::str("corporate_action")),
+                        ("outcome", JV::str(kind.as_str())),
+                        ("ratio", JV::Float(*ratio)),
+                        ("amount", JV::Float(*amount)),
+                        ("cash", JV::Float(*cash)),
+                    ])
+                })?;
+            }
+            EngineEvent::LifecycleRefused { what, reason, .. } => {
+                sh.jlog_now(jk::LIFECYCLE, jsrc::ENGINE, None, || {
+                    JV::map([
+                        ("strategy", sid.clone()),
+                        ("what", JV::str(*what)),
+                        ("outcome", JV::str("refused")),
+                        ("reason", JV::str(reason)),
+                    ])
+                })?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Route engine events to the strategy's hooks, natively or through the
 /// Python command path.
 fn deliver(
@@ -3981,6 +5436,7 @@ fn deliver(
     events: Vec<EngineEvent>,
     symbol: &Bound<'_, PyString>,
 ) -> PyResult<()> {
+    journal_engine_events(sh, st, &events, false)?;
     let strategy = st.strategy.bind(py);
     let ctx = st.ctx.bind(py);
     if matches!(st.route, Route::Native(_)) {
@@ -4017,7 +5473,10 @@ fn step(
     let sid = st.sid;
     let local_idx = ev.event.local_idx as usize;
     let ts = ev.event.ts;
-    let symbol = sh.symbols[ev.event.instrument.index()].bind(py);
+    let symbol = ev.symbol;
+    if sh.warmup_muted.get() {
+        discard_queued(py, st);
+    }
 
     // 4. Commands, only when work is queued; then the step. Sent to a venue,
     // the entry and close intents go first: in-process they fill ahead of
@@ -4029,6 +5488,7 @@ fn step(
             _ => return Err(finished()),
         };
         let input = fold_step(py, st, symbol, local, local_idx, atr)?;
+        refuse_intents(sh, &input)?;
         let venue = sh.venue.borrow().clone();
         if let Some(venue) = venue {
             venue.intents(sh, st, local, &input, local_idx, ts)?;
@@ -4053,14 +5513,18 @@ fn step(
     // A venue holds the positions: its intents became orders above, and the
     // book steps with none.
     let input = if venue_intents.is_none() && fold && (has_intents(py, st) || any_held) {
-        fold_step(py, st, symbol, local, local_idx, atr)?
+        let input = fold_step(py, st, symbol, local, local_idx, atr)?;
+        refuse_intents(sh, &input)?;
+        input
     } else {
         StepInput { atr, ..StepInput::default() }
     };
+    let halted_before = sh.halted(sid);
     let events = match &mut *sh.inner.borrow_mut() {
         Inner::Running(c) => c.apply(sid, input).map_err(runtime_err)?,
         _ => return Err(finished()),
     };
+    sh.journal_halt_edge(sid, halted_before, &events)?;
 
     // 5. Engine events to hooks; 6. work those hooks queued.
     let mut dispatched = !events.is_empty();
@@ -4094,19 +5558,20 @@ fn process_bar(
     bar_obj: &Bound<'_, PyAny>,
     scratch: &mut Scratch,
 ) -> PyResult<()> {
-    let with_ticks = sh.has_ticks[ev.event.instrument.index()];
+    let t = st.tables.borrow();
+    let with_ticks = ev.with_ticks;
     let first = (!with_ticks).then_some((bar_obj, bar.timestamp));
-    let (local, _) = enter(py, sh, st, ev, first)?;
+    let (local, _) = enter(py, sh, st, &t, ev, first)?;
     {
         let ctx = st.ctx.bind(py).borrow();
         if with_ticks {
             *ctx.bar.borrow_mut() = Some(bar_obj.clone().unbind());
             ctx.close_ts.set(Some(bar.timestamp));
         }
-        ctx.last_price[local].set(Some(bar.close));
+        ctx.prices.get()[local].last.set(Some(bar.close));
     }
-    composites(py, sh, st, bank, scratch)?;
-    primary_bar(py, st, bank, local, (bar.open, bar.high, bar.low, bar.close))?;
+    composites(py, sh, st, &t, bank, scratch)?;
+    primary_bar(py, st, &t, bank, local, (bar.open, bar.high, bar.low, bar.close))?;
     step(py, sh, st, ev, local, true, true)
 }
 
@@ -4124,7 +5589,8 @@ fn process_trade(
     tick: Option<&Bound<'_, PyAny>>,
     scratch: &mut Scratch,
 ) -> PyResult<()> {
-    let (local, _) = enter(py, sh, st, ev, None)?;
+    let t = st.tables.borrow();
+    let (local, _) = enter(py, sh, st, &t, ev, None)?;
     let ctx = st.ctx.bind(py);
     if let Some((bar, bar_obj)) = primary {
         {
@@ -4132,11 +5598,11 @@ fn process_trade(
             *c.bar.borrow_mut() = Some(bar_obj.clone().unbind());
             c.close_ts.set(Some(bar.timestamp));
         }
-        primary_bar(py, st, bank, local, (bar.open, bar.high, bar.low, bar.close))?;
+        primary_bar(py, st, &t, bank, local, (bar.open, bar.high, bar.low, bar.close))?;
         drain_commands(py, sh, st, local, ev)?;
     }
-    composites(py, sh, st, bank, scratch)?;
-    ctx.borrow().last_price[local].set(Some(trade.price));
+    composites(py, sh, st, &t, bank, scratch)?;
+    ctx.borrow().prices.get()[local].last.set(Some(trade.price));
     if st.mask & HOOK_TRADE != 0 {
         let tick = tick.expect("built for a strategy that overrides on_trade_tick");
         *ctx.borrow().tick.borrow_mut() = Some(tick.clone().unbind());
@@ -4157,12 +5623,14 @@ fn process_quote(
     quote: &crate::data::events::QuoteTick,
     obj: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
-    let (local, timed) = enter(py, sh, st, ev, None)?;
+    let t = st.tables.borrow();
+    let (local, timed) = enter(py, sh, st, &t, ev, None)?;
     let ctx = st.ctx.bind(py);
     {
         let c = ctx.borrow();
-        c.best_bid[local].set(Some(quote.bid));
-        c.best_ask[local].set(Some(quote.ask));
+        let prices = c.prices.get();
+        prices[local].bid.set(Some(quote.bid));
+        prices[local].ask.set(Some(quote.ask));
     }
     if st.mask & HOOK_QUOTE != 0 {
         let obj = obj.expect("built for a strategy that overrides on_quote");
@@ -4183,15 +5651,16 @@ fn process_book(
     tick: &crate::data::book::DepthTick,
     obj: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
-    let (local, timed) = enter(py, sh, st, ev, None)?;
+    let t = st.tables.borrow();
+    let (local, timed) = enter(py, sh, st, &t, ev, None)?;
     let ctx = st.ctx.bind(py);
     {
         let c = ctx.borrow();
         if tick.bid_len > 0 {
-            c.best_bid[local].set(Some(tick.bids[0].price));
+            c.prices.get()[local].bid.set(Some(tick.bids[0].price));
         }
         if tick.ask_len > 0 {
-            c.best_ask[local].set(Some(tick.asks[0].price));
+            c.prices.get()[local].ask.set(Some(tick.asks[0].price));
         }
         c.books.borrow_mut()[local] = Some((ev.event.row, obj.map(|o| o.clone().unbind())));
     }
@@ -4200,4 +5669,154 @@ fn process_book(
         st.strategy.bind(py).call_method1(intern!(py, "on_order_book"), (ctx, obj))?;
     }
     step(py, sh, st, ev, local, false, timed || st.mask & HOOK_BOOK != 0)
+}
+
+// -- what the journal writes about commands and reports --------------------
+
+/// An execution report as the journal states it. Every report carries the
+/// venue's own time; the fields are those of the report's constructor.
+pub(crate) fn report_value(report: &crate::execution::orders::ExecutionReport) -> JV {
+    use crate::execution::orders::ExecutionReport as R;
+    let (name, mut fields): (&str, Vec<(&str, JV)>) = match report {
+        R::Accepted { venue_order_id, ts_ns } => (
+            "accepted",
+            vec![("venue_order_id", JV::str(venue_order_id)), ("ts_ns", JV::Int(*ts_ns))],
+        ),
+        R::Rejected { reason, ts_ns } => {
+            ("rejected", vec![("reason", JV::str(reason)), ("ts_ns", JV::Int(*ts_ns))])
+        }
+        R::Fill { exec_id, qty, price, fee, ts_ns } => (
+            "fill",
+            vec![
+                ("exec_id", JV::str(exec_id)),
+                ("qty", JV::Float(*qty)),
+                ("price", JV::Float(*price)),
+                ("fee", JV::Float(*fee)),
+                ("ts_ns", JV::Int(*ts_ns)),
+            ],
+        ),
+        R::CancelAck { ts_ns } => ("cancel_ack", vec![("ts_ns", JV::Int(*ts_ns))]),
+        R::CancelRejected { reason, ts_ns } => {
+            ("cancel_rejected", vec![("reason", JV::str(reason)), ("ts_ns", JV::Int(*ts_ns))])
+        }
+        R::ReplaceAck { new_qty, new_limit, new_trigger, ts_ns } => (
+            "replace_ack",
+            vec![
+                ("new_qty", JV::opt_float(*new_qty)),
+                ("new_limit", JV::opt_float(*new_limit)),
+                ("new_trigger", JV::opt_float(*new_trigger)),
+                ("ts_ns", JV::Int(*ts_ns)),
+            ],
+        ),
+        R::ReplaceRejected { reason, ts_ns } => {
+            ("replace_rejected", vec![("reason", JV::str(reason)), ("ts_ns", JV::Int(*ts_ns))])
+        }
+        R::Expired { ts_ns } => ("expired", vec![("ts_ns", JV::Int(*ts_ns))]),
+        R::Correction { exec_id, qty, price, ts_ns } => (
+            "correction",
+            vec![
+                ("exec_id", JV::str(exec_id)),
+                ("qty", JV::Float(*qty)),
+                ("price", JV::Float(*price)),
+                ("ts_ns", JV::Int(*ts_ns)),
+            ],
+        ),
+        R::Bust { exec_id, ts_ns } => {
+            ("bust", vec![("exec_id", JV::str(exec_id)), ("ts_ns", JV::Int(*ts_ns))])
+        }
+    };
+    fields.push(("report", JV::str(name)));
+    JV::Map(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+fn order_value(order: &crate::runtime::commands::Order) -> JV {
+    use crate::runtime::commands::Order as O;
+    match order {
+        O::Plain(o) => JV::map([
+            ("type", JV::str("order")),
+            ("side", JV::str(&o.side)),
+            ("kind", JV::str(&o.kind)),
+            ("units", JV::opt_float(o.units)),
+            ("size_frac", JV::opt_float(o.size_frac)),
+            ("limit_price", JV::opt_float(o.limit_price)),
+            ("trigger_price", JV::opt_float(o.trigger_price)),
+            ("tif", JV::str(&o.tif)),
+            ("expire_ns", o.expire_ns.map_or(JV::Null, JV::Int)),
+            ("stop_price", JV::opt_float(o.stop_price)),
+            ("target_price", JV::opt_float(o.target_price)),
+            ("offset", JV::opt_float(o.offset)),
+            ("offset_kind", JV::str(&o.offset_kind)),
+            ("limit_offset", JV::Float(o.limit_offset)),
+            ("post_only", JV::Bool(o.post_only)),
+            ("reduce_only", JV::Bool(o.reduce_only)),
+            ("tags", JV::Map(o.tags.iter().map(|(k, v)| (k.clone(), JV::str(v))).collect())),
+        ]),
+        O::Twap(t) => JV::map([
+            ("type", JV::str("twap")),
+            ("units", JV::Float(t.units)),
+            ("side", JV::str(&t.side)),
+            ("slices", JV::Int(i64::from(t.slices))),
+            ("interval_ns", JV::Int(t.interval_ns)),
+            ("reduce_only", JV::Bool(t.reduce_only)),
+        ]),
+    }
+}
+
+/// The batch of commands a strategy queued, as the journal states it.
+pub(crate) fn commands_value(
+    sid: StrategyId,
+    commands: &[crate::runtime::commands::Command],
+) -> JV {
+    use crate::runtime::commands::Command as C;
+    let one = |c: &C| match c {
+        C::Submit { client_id, order, parent, symbol } => JV::map([
+            ("command", JV::str("submit")),
+            ("client_id", JV::str(client_id)),
+            ("order", order_value(order)),
+            ("parent", JV::opt_str(parent.as_deref())),
+            ("symbol", JV::opt_str(symbol.as_deref())),
+        ]),
+        C::Cancel(id) => JV::map([("command", JV::str("cancel")), ("client_id", JV::str(id))]),
+        C::CancelAll => JV::map([("command", JV::str("cancel_all"))]),
+        C::LinkOco(ids) => JV::map([
+            ("command", JV::str("link_oco")),
+            ("client_ids", JV::List(ids.iter().map(JV::str).collect())),
+        ]),
+        C::Close { position_id, symbol } => JV::map([
+            ("command", JV::str("close")),
+            ("position_id", JV::Int(*position_id as i64)),
+            ("symbol", JV::opt_str(symbol.as_deref())),
+        ]),
+        C::CloseAllFor(symbol) => {
+            JV::map([("command", JV::str("close_all_for")), ("symbol", JV::str(symbol))])
+        }
+        C::Modify { client_id, units, size_frac, limit_price, trigger_price } => JV::map([
+            ("command", JV::str("modify")),
+            ("client_id", JV::str(client_id)),
+            ("units", JV::opt_float(*units)),
+            ("size_frac", JV::opt_float(*size_frac)),
+            ("limit_price", JV::opt_float(*limit_price)),
+            ("trigger_price", JV::opt_float(*trigger_price)),
+        ]),
+    };
+    JV::map([
+        ("strategy", JV::Int(sid.index() as i64)),
+        ("commands", JV::List(commands.iter().map(one).collect())),
+    ])
+}
+
+/// A refusal of a command batch: the code the engine gave.
+fn refusal_value(py: Python<'_>, sid: StrategyId, err: &PyErr) -> JV {
+    let value = err.value(py);
+    let code = value
+        .getattr("code")
+        .ok()
+        .and_then(|c| c.extract::<String>().ok())
+        .unwrap_or_else(|| err.get_type(py).name().map(|n| n.to_string()).unwrap_or_default());
+    let message = value.to_string();
+    JV::map([
+        ("strategy", JV::Int(sid.index() as i64)),
+        ("code", JV::str(code)),
+        ("message", JV::str(message.lines().next().unwrap_or(""))),
+    ])
 }

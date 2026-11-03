@@ -115,7 +115,7 @@ def _model(d):
     if kind == "leverage":
         return M.leverage(d["factors"])
     if kind == "percent_of_notional":
-        return M.percent_of_notional(d["pct"])
+        return M.fraction_of_notional(d["pct"] / 100)
     if kind == "option_simple":
         return M.option_simple(d["seller_pct"])
     if kind == "table":
@@ -165,7 +165,7 @@ def test_single_line_margin_matches():
 
 def test_by_product_split_matches():
     model = r.MarginModel.by_product(
-        r.MarginModel.percent_of_notional(20), r.MarginModel.cash_only()
+        r.MarginModel.fraction_of_notional(0.2), r.MarginModel.cash_only()
     )
     cols = MARGIN["split_columns"]
     for case in MARGIN["split_cases"]:

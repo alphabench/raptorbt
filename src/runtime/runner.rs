@@ -47,6 +47,7 @@ use crate::data::events::DepthRef;
 use crate::data::BarSpec;
 use crate::instruments::InstrumentSpec;
 use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::Adoption;
 use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{ScheduleData, ScheduleEntry, SessionOutcome};
@@ -109,7 +110,7 @@ pub struct RuntimeBuilder {
     group_of: Vec<Option<u32>>,
     /// Positions adopted so far, `(strategy, instrument, timestamp, price,
     /// size)`, so a shadow book can be seeded with the same ones.
-    adopted: Vec<(StrategyId, usize, crate::core::types::Timestamp, f64, f64)>,
+    adopted: Vec<(StrategyId, usize, crate::core::types::Timestamp, f64, f64, Adoption)>,
 }
 
 impl RuntimeBuilder {
@@ -292,10 +293,24 @@ impl RuntimeBuilder {
         price: f64,
         size: f64,
     ) -> std::result::Result<u64, String> {
+        self.adopt_position_with(strategy, instrument, timestamp, price, size, Adoption::default())
+    }
+
+    /// [`RuntimeBuilder::adopt_position`] with a signed size and stated
+    /// margin or cost; see [`PortfolioBook::adopt_position_with`].
+    pub fn adopt_position_with(
+        &mut self,
+        strategy: StrategyId,
+        instrument: usize,
+        timestamp: crate::core::types::Timestamp,
+        price: f64,
+        size: f64,
+        extras: Adoption,
+    ) -> std::result::Result<u64, String> {
         let id = adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
-            book.adopt_position(instrument, timestamp, price, size)
+            book.adopt_position_with(instrument, timestamp, price, size, &extras)
         })?;
-        self.adopted.push((strategy, instrument, timestamp, price, size));
+        self.adopted.push((strategy, instrument, timestamp, price, size, extras));
         Ok(id)
     }
 
@@ -359,9 +374,9 @@ impl RuntimeBuilder {
                 );
                 symbols.push(symbol);
             }
-            for &(strategy, instrument, ts, price, size) in &self.adopted {
+            for &(strategy, instrument, ts, price, size, extras) in &self.adopted {
                 if strategy == sid {
-                    book.adopt_position(instrument, ts, price, size)
+                    book.adopt_position_with(instrument, ts, price, size, &extras)
                         .map_err(RaptorError::invalid_parameter)?;
                 }
             }
@@ -431,6 +446,7 @@ impl RuntimeBuilder {
         let instruments = self.store.len();
         Ok(RuntimeCore {
             store: self.store,
+            policy: self.policy,
             hub,
             bank,
             index,
@@ -578,6 +594,8 @@ impl MemoryReport {
 /// The shared data layer and every strategy's book.
 pub struct RuntimeCore {
     store: Arc<MarketStore>,
+    /// How a book treats positions on an instrument added to the running core.
+    policy: PositionPolicy,
     hub: AggregatorHub,
     bank: Arc<IndicatorBank>,
     index: SubscriptionIndex,
@@ -783,6 +801,169 @@ impl RuntimeCore {
         }
     }
 
+    /// Add an instrument to the running core, as the last (highest) id, and subscribe the
+    /// `strategies` to it. Each strategy's book gets it as its newest local instrument, so no
+    /// existing local index, order id or event ordinal moves. `primary` cuts the instrument's
+    /// primary bars from trade prints, as at build. `venue_managed` is what
+    /// [`RuntimeBuilder::manage_books_by_venue`] did for the instruments of a node whose orders
+    /// go to a venue.
+    ///
+    /// Nothing is registered when an argument is refused.
+    pub fn add_instrument(
+        &mut self,
+        symbol: &str,
+        params: &InstrumentParams,
+        strategies: &[StrategyId],
+        primary: Option<(BarSpec, i64)>,
+        venue_managed: bool,
+    ) -> Result<InstrumentId> {
+        if self.store.symbols().get(symbol).is_some() {
+            return Err(RaptorError::invalid_parameter(format!(
+                "{symbol} is already an instrument of this run"
+            )));
+        }
+        if strategies.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(RaptorError::invalid_parameter(
+                "an instrument's strategies must be unique and in registration order",
+            ));
+        }
+        for sid in strategies {
+            if self.books.get(sid.index()).is_none_or(Option::is_none) {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "strategy {} is unknown or finished",
+                    sid.index()
+                )));
+            }
+        }
+        if params.atr_period > 0 {
+            return Err(RaptorError::invalid_parameter(
+                "ATR-based stop/target on an instrument added to a running node: tick events \
+                 carry no bar series to compute ATR from",
+            ));
+        }
+        let mut store = (*self.store).clone();
+        let id = store.add_instrument(symbol)?;
+        debug_assert_eq!(id.index(), self.watermark.len());
+        self.hub.add_instrument(primary)?;
+        self.index.set_subscribers(id, strategies)?;
+        self.store = Arc::new(store);
+        self.watermark.push(0);
+        self.tick_watermark.push(0);
+        // Re-lay the strategies' contiguous slices: each strategy that takes the instrument
+        // gets it after its own, which keeps its ids ascending.
+        let mut insts = Vec::with_capacity(self.strat_insts.len() + strategies.len());
+        let mut atr = Vec::with_capacity(insts.capacity());
+        for (k, slot) in self.slots.iter_mut().enumerate() {
+            let range = slot.inst_start as usize..(slot.inst_start + slot.inst_len) as usize;
+            slot.inst_start = insts.len() as u32;
+            insts.extend_from_slice(&self.strat_insts[range.clone()]);
+            atr.extend(self.strat_atr[range].iter().cloned());
+            if strategies.contains(&StrategyId::new(k as u32)) {
+                insts.push(id);
+                atr.push(None);
+                slot.inst_len += 1;
+                let book = self.books[k].as_mut().expect("checked above");
+                book.add_instrument(
+                    symbol.to_string(),
+                    params.direction,
+                    params.spec.clone(),
+                    params.config.as_ref(),
+                    self.policy,
+                );
+                if venue_managed {
+                    book.kernel_mut(slot.inst_len as usize - 1).set_venue_managed();
+                }
+            }
+        }
+        self.strat_insts = insts;
+        self.strat_atr = atr;
+        Ok(id)
+    }
+
+    /// Subscribe `strategy` to an aggregation of the newest instrument; see
+    /// [`AggregatorHub::subscribe`].
+    pub fn subscribe_aggregation(
+        &mut self,
+        strategy: StrategyId,
+        key: AggKey,
+        session: Option<&crate::core::session_schedule::SessionSchedule>,
+    ) -> Result<(AggId, u16)> {
+        self.hub.subscribe(strategy, key, session)
+    }
+
+    /// What keeps `instrument` in use: per subscribed strategy, `(strategy, open positions,
+    /// working orders)` for those that hold any. Empty means it can be retired.
+    pub fn instrument_in_use(&self, instrument: InstrumentId) -> Vec<(StrategyId, usize, usize)> {
+        self.index
+            .subscribers(instrument)
+            .iter()
+            .filter_map(|&sid| {
+                let local = self.local_of(sid, instrument)?;
+                let kernel = self.books.get(sid.index())?.as_ref()?.kernel(local);
+                let (positions, orders) = (kernel.open_count(), kernel.open_orders().len());
+                (positions + orders > 0).then_some((sid, positions, orders))
+            })
+            .collect()
+    }
+
+    /// Stop the core feeding `instrument`: no strategy is subscribed to it any more and its
+    /// aggregators are freed. Its id, and each book's kernel for it (which holds its trades and
+    /// order history for the results), stay. The caller has checked
+    /// [`RuntimeCore::instrument_in_use`].
+    pub fn retire_instrument(&mut self, instrument: InstrumentId) -> Result<()> {
+        let holders = self.holders(instrument);
+        self.index.set_subscribers(instrument, &[])?;
+        self.hub.retire_instrument(instrument)?;
+        for sid in holders {
+            let local = self.local_of(sid, instrument).expect("a holder");
+            if let Some(book) = self.books[sid.index()].as_mut() {
+                book.retire_kernel(local).map_err(RaptorError::invalid_parameter)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The strategies that have a book entry for `instrument`, retired or not.
+    pub fn holders(&self, instrument: InstrumentId) -> Vec<StrategyId> {
+        (0..self.slots.len())
+            .map(|k| StrategyId::new(k as u32))
+            .filter(|&sid| self.local_of(sid, instrument).is_some())
+            .collect()
+    }
+
+    /// Bring a retired instrument back for `strategies` (a subset of its holders): the same id,
+    /// the same books' kernels (flat, as they were retired), fresh aggregators. The caller builds
+    /// fresh rings.
+    pub fn revive_instrument(
+        &mut self,
+        instrument: InstrumentId,
+        strategies: &[StrategyId],
+        primary: Option<(BarSpec, i64)>,
+        session: Option<&crate::core::session_schedule::SessionSchedule>,
+    ) -> Result<()> {
+        let holders = self.holders(instrument);
+        if strategies.is_empty()
+            || strategies.windows(2).any(|w| w[0] >= w[1])
+            || strategies.iter().any(|s| !holders.contains(s))
+        {
+            return Err(RaptorError::invalid_parameter(
+                "a revived instrument's strategies must be some of those that held it, each once",
+            ));
+        }
+        if !self.index.subscribers(instrument).is_empty() {
+            return Err(RaptorError::invalid_parameter("the instrument is not retired"));
+        }
+        self.hub.revive_instrument(instrument, primary, session)?;
+        self.index.set_subscribers(instrument, strategies)?;
+        for &sid in strategies {
+            let local = self.local_of(sid, instrument).expect("a holder");
+            if let Some(book) = self.books[sid.index()].as_mut() {
+                book.revive_kernel(local);
+            }
+        }
+        Ok(())
+    }
+
     /// The strategy's book, or `None` once it has been finished.
     pub fn book(&self, strategy: StrategyId) -> Option<&PortfolioBook> {
         self.books.get(strategy.index())?.as_ref()
@@ -878,11 +1059,25 @@ impl RuntimeCore {
         price: f64,
         size: f64,
     ) -> std::result::Result<u64, String> {
+        self.adopt_position_with(strategy, instrument, timestamp, price, size, Adoption::default())
+    }
+
+    /// Adopt a position with a signed size and stated margin or cost; see
+    /// [`RuntimeBuilder::adopt_position_with`].
+    pub fn adopt_position_with(
+        &mut self,
+        strategy: StrategyId,
+        instrument: usize,
+        timestamp: crate::core::types::Timestamp,
+        price: f64,
+        size: f64,
+        extras: Adoption,
+    ) -> std::result::Result<u64, String> {
         if self.books.get(strategy.index()).is_none_or(|b| b.is_none()) {
             return Err("strategy already finished".to_string());
         }
         adopt(&mut self.groups, &self.group_of, &mut self.books, strategy, |book| {
-            book.adopt_position(instrument, timestamp, price, size)
+            book.adopt_position_with(instrument, timestamp, price, size, &extras)
         })
     }
 

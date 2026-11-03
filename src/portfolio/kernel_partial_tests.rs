@@ -302,13 +302,25 @@ fn a_partly_filled_oco_leg_shrinks_its_sibling_to_what_is_left() {
         None,
     );
     kernel.link_oco(&[target, stop]);
-    kernel.step_trade(2, &print(2, 110.0, 40.0), StepInput::default());
+    let events = kernel.step_trade(2, &print(2, 110.0, 40.0), StepInput::default());
     assert_eq!(kernel.order(target).unwrap().status, OrderStatus::PartiallyFilled);
+    // The cut is reported, once, with what the order offered before and after.
+    let cuts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            EngineEvent::OrderResized { order_id, client_id, from, to, .. } => {
+                Some((*order_id, client_id.clone(), *from, *to))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cuts, vec![(stop, "sl".to_string(), 100.0, 60.0)], "{events:?}");
     // 60 are left to sell: the stop may not offer more.
     assert_eq!(kernel.order(stop).unwrap().qty, QtySpec::Units(60.0));
     assert_eq!(kernel.order(stop).unwrap().status, OrderStatus::Accepted);
     // Completing the target cancels the stop as before.
-    kernel.step_trade(3, &print(3, 110.0, 60.0), StepInput::default());
+    let events = kernel.step_trade(3, &print(3, 110.0, 60.0), StepInput::default());
     assert_eq!(kernel.order(target).unwrap().status, OrderStatus::Filled);
     assert_eq!(kernel.order(stop).unwrap().status, OrderStatus::Canceled);
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderResized { .. })), "{events:?}");
 }

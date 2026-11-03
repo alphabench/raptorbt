@@ -1,14 +1,18 @@
 //! Options strategy backtest implementation.
 //!
-//! Supports dynamic strike selection and options-specific position sizing.
+//! One option, traded from a premium series with the sizing options use. The
+//! premium series is a one-instrument book, so the position follows the
+//! kernel's fill, fee, margin and risk rules; lots are the instrument's lot
+//! size.
 
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, Direction, ExitReason,
-    OhlcvData, Trade,
+    BacktestConfig, BacktestResult, CompiledSignals, InstrumentConfig, OhlcvData,
 };
-use crate::execution::indian_costs::FeeBreakdown;
-use crate::execution::FeeModel;
-use crate::metrics::streaming::StreamingMetrics;
+use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::{KernelBar, StepInput};
+use crate::portfolio::ledger::PositionPolicy;
+use crate::signals::processor::SignalProcessor;
+use crate::strategies::legs::{account_mode, bar_entry};
 
 /// Options position type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,67 +94,18 @@ impl Default for OptionsConfig {
 pub struct OptionsBacktest {
     /// Configuration.
     config: OptionsConfig,
-    /// Fee model.
-    fee_model: FeeModel,
 }
 
 impl OptionsBacktest {
     /// Create a new options backtest.
     pub fn new(config: OptionsConfig) -> Self {
-        Self { fee_model: config.base.fee_model(), config }
-    }
-
-    /// Contracts traded, from a lot count.
-    ///
-    /// [`Self::calculate_contracts`] returns **lots**, not contracts -- it
-    /// divides by `option_price * lot_size`. Every P&L, cash and equity line
-    /// multiplies back up by `lot_size`; the fee path did not, so it charged a
-    /// 50-lot position as if it were a single contract.
-    fn contracts_traded(&self, lots: usize) -> f64 {
-        lots as f64 * self.config.lot_size as f64
-    }
-
-    /// Costs for one side of a trade, and the itemized components to report.
-    ///
-    /// The single place this path prices an order. `is_entry` decides which way
-    /// the trade points, so side-specific charges (transaction tax on the sell,
-    /// stamp duty on the buy) land on the side that actually owes them --
-    /// [`FeeModel::calculate`] cannot do this, because it assumes every call is
-    /// an entry.
-    fn charge(
-        &self,
-        price: f64,
-        lots: usize,
-        direction: Direction,
-        is_entry: bool,
-    ) -> (f64, Option<FeeBreakdown>) {
-        let size = self.contracts_traded(lots);
-        (
-            self.fee_model.calculate_side(price, size, direction, is_entry),
-            self.fee_model.breakdown(price, size, direction, is_entry),
-        )
-    }
-
-    /// Entry components plus exit components, so the itemized total equals the
-    /// costs actually deducted from the equity curve.
-    fn merge_breakdowns(
-        entry: Option<FeeBreakdown>,
-        exit: Option<FeeBreakdown>,
-    ) -> Option<FeeBreakdown> {
-        match (entry, exit) {
-            (Some(entry), Some(exit)) => {
-                let mut total = entry;
-                total.add(&exit);
-                Some(total)
-            }
-            (entry, exit) => entry.or(exit),
-        }
+        Self { config }
     }
 
     /// Run options backtest.
     ///
     /// # Arguments
-    /// * `spot_ohlcv` - Spot/underlying OHLCV data
+    /// * `spot_ohlcv` - Spot/underlying OHLCV data (its timestamps date the bars)
     /// * `option_prices` - Option premium prices (parallel array)
     /// * `signals` - Trading signals
     ///
@@ -175,6 +130,10 @@ impl OptionsBacktest {
     /// opens are ignored outside `NextBarOpen`, where fills coincide with
     /// the decision bar's value by design.
     ///
+    /// The position is long or short as `signals.direction` says, and a short
+    /// one gains when the premium falls. The strike is the premium series'
+    /// own: nothing here derives a price from the underlying.
+    ///
     /// [`FillTiming::NextBarOpen`]: crate::core::types::FillTiming::NextBarOpen
     pub fn run_with_opens(
         &self,
@@ -190,390 +149,61 @@ impl OptionsBacktest {
             assert_eq!(n, opens.len(), "option_open_prices must match the premium series");
         }
 
-        // Clean signals
-        let processor = crate::signals::processor::SignalProcessor::new();
-        let (entries, exits) = processor.clean_signals(&signals.entries, &signals.exits);
-
-        // Execution timing. The premium series carries one value per bar —
-        // there is no open to fill at — so under NextBarOpen a bar-i
-        // decision executes at bar i+1's premium: the cleaned stream shifts
-        // one bar forward (a last-bar decision never trades) and the loop's
-        // ordinary fill price becomes the bar after the decision. Strike
-        // selection is decision-time information and reads the decision
-        // bar's spot. SameBarClose is the historical behavior,
-        // byte-identical; SameBarOpenLookahead has no distinct history in
-        // this runner and behaves the same.
+        let (entries, exits) =
+            SignalProcessor::new().clean_signals(&signals.entries, &signals.exits);
         let next_open =
             self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
-        let (entries, exits) = if next_open {
-            let shift = crate::signals::processor::shift_signals;
-            (shift(&entries, 1), shift(&exits, 1))
-        } else {
-            (entries, exits)
-        };
 
-        // Initialize state
-        let mut cash = self.config.base.initial_capital;
-        let mut position: Option<OptionsPosition> = None;
-        let mut equity_curve = vec![cash; n];
-        let mut drawdown_curve = vec![0.0; n];
-        let mut returns = vec![0.0; n];
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut peak_equity = cash;
-        let mut trade_counter = 0u64;
-
-        // Main simulation loop
-        for i in 0..n {
-            let spot_price = spot_ohlcv.close[i];
-            let option_price = option_prices[i];
-            // Signal fills pay the fill bar's open premium when the caller
-            // supplied one; equity keeps marking at the bar's settled value.
-            let fill_premium = match (next_open, option_open_prices) {
-                (true, Some(opens)) => opens[i],
-                _ => option_price,
-            };
-
-            // Check for exit
-            if exits[i] {
-                if let Some(pos) = position.take() {
-                    let exit_price = fill_premium;
-                    let (exit_fees, exit_breakdown) =
-                        self.charge(exit_price, pos.contracts, signals.direction, false);
-                    let entry_fees = pos.entry_fees;
-                    let fees = entry_fees + exit_fees;
-                    let fee_breakdown = Self::merge_breakdowns(pos.entry_breakdown, exit_breakdown);
-
-                    // Both halves are subtracted: the entry charge left cash
-                    // when the position opened, so a P&L net of the exit alone
-                    // would report more profit than the account ever saw.
-                    let pnl = self.calculate_pnl(&pos, exit_price) - fees;
-                    let cost_basis = pos.entry_price * self.contracts_traded(pos.contracts);
-                    let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
-
-                    // Entry costs already left `cash` at open, so only the exit
-                    // side is charged here.
-                    cash += exit_price * self.contracts_traded(pos.contracts) - exit_fees;
-
-                    trades.push(Trade {
-                        id: trade_counter,
-                        symbol: signals.symbol.clone(),
-                        entry_idx: pos.entry_idx,
-                        exit_idx: i,
-                        entry_price: pos.entry_price,
-                        exit_price,
-                        size: self.contracts_traded(pos.contracts),
-                        direction: signals.direction,
-                        pnl,
-                        return_pct,
-                        entry_time: spot_ohlcv.timestamps[pos.entry_idx],
-                        exit_time: spot_ohlcv.timestamps[i],
-                        fees,
-                        entry_fees,
-                        exit_fees,
-                        fee_breakdown,
-                        exit_reason: ExitReason::Signal,
-                        // This path synthesises the trade record rather than closing a
-                        // tracked Position, so no bar-by-bar extremes exist for it.
-                        // None means "not measured", never a zero excursion.
-                        mae_price: None,
-                        mfe_price: None,
-                        mae_pnl: None,
-                        mfe_pnl: None,
-                        money: None,
-                    });
-
-                    trade_counter += 1;
-                }
-            }
-
-            // Check for entry
-            if entries[i] && position.is_none() {
-                // The strike was chosen when the decision was made; under
-                // NextBarOpen that is the previous bar's spot (a shifted
-                // entry never fires at i == 0). Contract count sizes at the
-                // premium the fill actually pays.
-                let decision_spot = if next_open { spot_ohlcv.close[i - 1] } else { spot_price };
-                let strike = self.select_strike(decision_spot);
-                let contracts = self.calculate_contracts(fill_premium, cash);
-
-                if contracts > 0 {
-                    let entry_cost = fill_premium * self.contracts_traded(contracts);
-                    let (entry_fees, entry_breakdown) =
-                        self.charge(fill_premium, contracts, signals.direction, true);
-
-                    cash -= entry_cost + entry_fees;
-
-                    position = Some(OptionsPosition {
-                        entry_idx: i,
-                        entry_price: fill_premium,
-                        strike,
-                        contracts,
-                        option_type: self.config.option_type,
-                        entry_fees,
-                        entry_breakdown,
-                    });
-                }
-            }
-
-            // Update equity
-            let position_value = if let Some(ref pos) = position {
-                option_price * self.contracts_traded(pos.contracts)
-            } else {
-                0.0
-            };
-            let equity = cash + position_value;
-            equity_curve[i] = equity;
-
-            // Update drawdown
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            drawdown_curve[i] = (peak_equity - equity) / peak_equity * 100.0;
-
-            // Calculate return
-            if i > 0 {
-                returns[i] = (equity - equity_curve[i - 1]) / equity_curve[i - 1];
-            }
-        }
-
-        // Close any remaining position
-        if let Some(pos) = position.take() {
-            let last_idx = n - 1;
-            let exit_price = option_prices[last_idx];
-            let (exit_fees, exit_breakdown) =
-                self.charge(exit_price, pos.contracts, signals.direction, false);
-            let entry_fees = pos.entry_fees;
-            let fees = entry_fees + exit_fees;
-            let fee_breakdown = Self::merge_breakdowns(pos.entry_breakdown, exit_breakdown);
-
-            let pnl = self.calculate_pnl(&pos, exit_price) - fees;
-            let cost_basis = pos.entry_price * self.contracts_traded(pos.contracts);
-            let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
-
-            trades.push(Trade {
-                id: trade_counter,
-                symbol: signals.symbol.clone(),
-                entry_idx: pos.entry_idx,
-                exit_idx: last_idx,
-                entry_price: pos.entry_price,
-                exit_price,
-                size: self.contracts_traded(pos.contracts),
-                direction: signals.direction,
-                pnl,
-                return_pct,
-                entry_time: spot_ohlcv.timestamps[pos.entry_idx],
-                exit_time: spot_ohlcv.timestamps[last_idx],
-                fees,
-                entry_fees,
-                exit_fees,
-                fee_breakdown,
-                exit_reason: ExitReason::EndOfData,
-                // This path synthesises the trade record rather than closing a
-                // tracked Position, so no bar-by-bar extremes exist for it.
-                // None means "not measured", never a zero excursion.
-                mae_price: None,
-                mfe_price: None,
-                mae_pnl: None,
-                mfe_pnl: None,
-                money: None,
-            });
-
-            // Closing out is a real trade, so it is paid for out of the curve.
-            // The loop already wrote `last_idx` from the position marked to
-            // market, which charges nothing to close it -- so without this the
-            // exit cost appeared in the trade list and nowhere else, and the
-            // reported end value was one exit charge too high.
-            cash += exit_price * self.contracts_traded(pos.contracts) - exit_fees;
-            equity_curve[last_idx] = cash;
-
-            if cash > peak_equity {
-                peak_equity = cash;
-            }
-            drawdown_curve[last_idx] = (peak_equity - cash) / peak_equity * 100.0;
-            if last_idx > 0 {
-                returns[last_idx] =
-                    (cash - equity_curve[last_idx - 1]) / equity_curve[last_idx - 1];
-            }
-        }
-
-        // Calculate metrics
-        let metrics = self.calculate_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &spot_ohlcv.timestamps[..],
-            &trades,
+        let lot = self.config.lot_size as f64;
+        let mut book =
+            PortfolioBook::new(self.config.base.clone(), account_mode(&self.config.base));
+        let leg_config = InstrumentConfig { lot_size: Some(lot), ..Default::default() };
+        book.add_instrument(
+            signals.symbol.clone(),
+            signals.direction,
+            None,
+            Some(&leg_config),
+            PositionPolicy::Net,
         );
 
-        BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
-    }
-
-    /// Select strike price based on configuration.
-    fn select_strike(&self, spot_price: f64) -> f64 {
-        let interval = self.config.strike_interval;
-        let atm_strike = (spot_price / interval).round() * interval;
-
-        match self.config.strike_selection {
-            StrikeSelection::Atm => atm_strike,
-            StrikeSelection::Itm(n) => match self.config.option_type {
-                OptionType::Call => atm_strike - (n as f64 * interval),
-                OptionType::Put => atm_strike + (n as f64 * interval),
-            },
-            StrikeSelection::Otm(n) => match self.config.option_type {
-                OptionType::Call => atm_strike + (n as f64 * interval),
-                OptionType::Put => atm_strike - (n as f64 * interval),
-            },
-            StrikeSelection::PercentOffset(pct) => {
-                let offset = spot_price * pct;
-                match self.config.option_type {
-                    OptionType::Call => atm_strike + offset,
-                    OptionType::Put => atm_strike - offset,
+        for i in 0..n {
+            let premium = option_prices[i];
+            // The premium series has one value per bar: a fill at the bar's
+            // open prices at the caller's open premium when there is one.
+            let open = match (next_open, option_open_prices) {
+                (true, Some(opens)) => opens[i],
+                _ => premium,
+            };
+            let bar = KernelBar {
+                timestamp: spot_ohlcv.timestamps[i],
+                open,
+                high: premium.max(open),
+                low: premium.min(open),
+                close: premium,
+                volume: spot_ohlcv.volume[i],
+            };
+            let mut input = StepInput { entry: entries[i], exit: exits[i], ..StepInput::default() };
+            if entries[i] {
+                match self.config.size_type {
+                    SizeType::Contracts(lots) => input.units = Some(lots as f64 * lot),
+                    SizeType::Percent(fraction) | SizeType::RiskPercent(fraction) => {
+                        input.size_mult = Some(fraction)
+                    }
+                    SizeType::Notional(value) => {
+                        let free = book.free_capital();
+                        if free > 0.0 {
+                            input.size_mult = Some(value / free);
+                        } else {
+                            input.entry = false;
+                        }
+                    }
                 }
             }
-            StrikeSelection::Delta(_) => atm_strike, // Simplified - would need options chain
-        }
-    }
-
-    /// Calculate number of contracts based on size type.
-    fn calculate_contracts(&self, option_price: f64, available_capital: f64) -> usize {
-        if option_price <= 0.0 {
-            return 0;
+            book.apply(&bar_entry(0, i, bar), None, input);
         }
 
-        let contract_cost = option_price * self.config.lot_size as f64;
-
-        match self.config.size_type {
-            SizeType::Contracts(n) => n,
-            SizeType::Percent(pct) => {
-                let allocation = available_capital * pct;
-                (allocation / contract_cost) as usize
-            }
-            SizeType::Notional(value) => (value / contract_cost) as usize,
-            SizeType::RiskPercent(pct) => {
-                // Max loss is the premium paid
-                let risk_amount = available_capital * pct;
-                (risk_amount / contract_cost) as usize
-            }
-        }
+        book.finish().result
     }
-
-    /// Calculate P&L for a position.
-    fn calculate_pnl(&self, position: &OptionsPosition, current_price: f64) -> f64 {
-        let multiplier = self.config.lot_size as f64;
-        (current_price - position.entry_price) * position.contracts as f64 * multiplier
-    }
-
-    /// Calculate metrics.
-    fn calculate_metrics(
-        &self,
-        equity_curve: &[f64],
-        drawdown_curve: &[f64],
-        returns: &[f64],
-        timestamps: &[i64],
-        trades: &[Trade],
-    ) -> BacktestMetrics {
-        let start_value = self.config.base.initial_capital;
-        let end_value = *equity_curve.last().unwrap_or(&start_value);
-
-        let total_return_pct = (end_value - start_value) / start_value * 100.0;
-        let max_drawdown_pct = drawdown_curve.iter().fold(0.0f64, |a, &b| a.max(b));
-
-        let total_trades = trades.len();
-        let winning_trades = trades.iter().filter(|t| t.pnl > 0.0).count();
-        let losing_trades = trades.iter().filter(|t| t.pnl < 0.0).count();
-
-        let win_rate_pct = if total_trades > 0 {
-            winning_trades as f64 / total_trades as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
-        let profit_factor = if gross_loss > 0.0 {
-            gross_profit / gross_loss
-        } else if gross_profit > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        // Sharpe/Sortino from per-bar returns, matching run_single_backtest.
-        //
-        // Through 0.4.1 this path annualized per-*trade* returns at a hardcoded
-        // 252, which assumes one trade per trading day and inflates the ratio by
-        // roughly sqrt(n_bars / n_trades). legacy_annualization restores that
-        // basis as well as the constant, so old results stay reproducible.
-        let (sharpe_ratio, sortino_ratio) = if self.config.base.legacy_annualization {
-            let mut streaming = StreamingMetrics::new();
-            for trade in trades {
-                streaming.update(trade.return_pct / 100.0);
-            }
-            (
-                streaming.sharpe_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
-                streaming.sortino_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
-            )
-        } else {
-            let periods_per_year =
-                crate::metrics::annualization::resolve_periods_per_year_with_session(
-                    self.config.base.periods_per_year,
-                    timestamps,
-                    self.config.base.session_spec(),
-                    crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES,
-                );
-            let (sharpe, sortino, _omega) = crate::portfolio::engine::risk_metrics(
-                returns,
-                periods_per_year,
-                self.config.base.risk_free_rate,
-            );
-            (sharpe, sortino)
-        };
-
-        BacktestMetrics {
-            total_return_pct,
-            sharpe_ratio,
-            sortino_ratio,
-            calmar_ratio: crate::metrics::drawdown::calmar_ratio(
-                total_return_pct,
-                max_drawdown_pct,
-            ),
-            max_drawdown_pct,
-            win_rate_pct,
-            profit_factor,
-            total_trades,
-            winning_trades,
-            losing_trades,
-            start_value,
-            end_value,
-            // Summed from the trade list, as the portfolio engine does. This
-            // path builds its own metrics rather than finalizing a
-            // `StreamingMetrics`, so leaving the field to `Default` reported
-            // zero costs however much a run actually charged.
-            total_fees_paid: trades.iter().map(|t| t.fees).sum(),
-            ..Default::default()
-        }
-    }
-}
-
-/// Internal options position state.
-#[derive(Debug, Clone)]
-struct OptionsPosition {
-    entry_idx: usize,
-    entry_price: f64,
-    #[allow(dead_code)]
-    strike: f64,
-    contracts: usize,
-    #[allow(dead_code)]
-    option_type: OptionType,
-    /// Costs charged when this position was opened.
-    ///
-    /// Retained rather than recomputed at exit: the entry is charged against
-    /// the entry premium, and re-deriving it from the exit premium would both
-    /// bill a different amount and leave the trade record disagreeing with the
-    /// cash that actually left the account.
-    entry_fees: f64,
-    /// Itemized entry costs, when an itemized fee model is configured.
-    entry_breakdown: Option<FeeBreakdown>,
 }
 
 #[cfg(test)]

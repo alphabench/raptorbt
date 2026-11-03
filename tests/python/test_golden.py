@@ -67,7 +67,7 @@ def test_single_path_matches_golden(variant):
 
 def test_class_path_matches_golden():
     ts, o, h, l, c, v, _, _ = thaw_inputs(INPUTS["shared"])
-    result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
+    result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v, bar_stamp="close")
     assert_digest_equal(
         result_digest(result), FIXTURES["class/sma_cross"], "class/sma_cross"
     )

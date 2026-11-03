@@ -86,6 +86,16 @@ enum EntryFunding {
     Unmargined,
 }
 
+/// The option lines other instruments hold in one instrument's margin group:
+/// each as its instrument, signed quantity and price, with the margin they
+/// lock together and the time the model prices them at.
+#[derive(Debug, Clone)]
+pub(crate) struct GroupContext {
+    pub lines: Vec<(InstrumentSpec, f64, f64)>,
+    pub locked: f64,
+    pub now: Timestamp,
+}
+
 /// An option instrument and its open positions as `(id, signed quantity,
 /// entry price)`.
 pub type ModelOptionLines<'a> = (&'a InstrumentSpec, Vec<(u64, f64, f64)>);
@@ -144,6 +154,11 @@ pub enum EngineEvent {
     OrderFilled { idx: usize, order_id: u64, client_id: String, price: Price, size: f64 },
     /// An order was canceled (explicitly, or by IOC/FOK exhaustion).
     OrderCanceled { idx: usize, order_id: u64, client_id: String },
+    /// A working order's quantity was cut by the engine: a sibling of a
+    /// one-cancels-other group whose partner filled part of the shared
+    /// quantity may not offer more than what is left. `from` and `to` are
+    /// units.
+    OrderResized { idx: usize, order_id: u64, client_id: String, from: f64, to: f64 },
     /// An order's time-in-force lapsed.
     OrderExpired { idx: usize, order_id: u64, client_id: String },
     /// An order was refused: position state or sizing made it unfillable.
@@ -162,6 +177,25 @@ pub enum EngineEvent {
     /// `killed`). Follows the `EntryRejected` / `OrderRejected` event that
     /// reports the same refusal, which keeps firing as before.
     RiskRejected { idx: usize, reason: &'static str, order_id: Option<u64>, client_id: String },
+    /// A venue fill was booked although it went past one of the book's
+    /// limits (`order_size`, `max_position`, `max_exposure`,
+    /// `insufficient_capital`, `position_open`, `reduce_only`): the venue
+    /// executed it, so the position follows the venue and this reports the
+    /// breach.
+    FillBreach { idx: usize, reason: &'static str, order_id: u64, client_id: String },
+    /// A venue fill the order took but the book cannot book yet (a
+    /// reduce-only fill that arrived before the fill that opens its
+    /// position). It is kept and booked as soon as the book can; until then
+    /// the book and the venue disagree about the position.
+    FillDeferred {
+        idx: usize,
+        order_id: u64,
+        exec_id: String,
+        client_id: String,
+        price: Price,
+        size: f64,
+        reason: String,
+    },
     /// A risk limit stopped trading: the day's loss limit was reached
     /// (`reason` is `"daily_loss"`) or the strategy was halted (`reason` is
     /// the halt reason, `"manual"` by default).
@@ -222,6 +256,11 @@ pub struct StepInput {
     pub atr: f64,
     /// Optional position-size multiplier from `CompiledSignals::position_sizes`.
     pub size_mult: Option<f64>,
+    /// Explicit unit count for an entry opened on this bar, instead of a
+    /// fraction of free capital. Lot and size-increment rounding still apply,
+    /// and an entry that the account cannot fund is refused rather than
+    /// resized. Takes precedence over `size_mult`.
+    pub units: Option<f64>,
     /// Explicit stop price for an entry opened on this bar.
     ///
     /// Takes precedence over the configured stop model. Ignored when no entry
@@ -261,6 +300,7 @@ struct DeferredIntent {
 #[derive(Debug, Clone, Copy)]
 struct DeferredEntry {
     size_mult: Option<f64>,
+    units: Option<f64>,
     atr: f64,
     stop_price_override: Option<Price>,
     target_price_override: Option<Price>,
@@ -350,6 +390,20 @@ pub struct EngineKernel {
     /// execution schedules and the session square-off do not act in-process
     /// but leave requests for the runtime to send (see `kernel_venue.rs`).
     pub(crate) venue_managed: bool,
+    /// What each execution booked on a venue-driven order did to the ledger,
+    /// the cash and the margin: what a correction or bust takes back.
+    pub(crate) venue_bookings: crate::portfolio::kernel_venue::VenueBookings,
+    /// A venue fill is being booked: it is a fact, so its price is booked as
+    /// reported (no slippage, no tick snap), its size is not quantised, and
+    /// the book's limits and funding checks record a breach instead of
+    /// refusing it. Set only for the span of `book_venue_fill`.
+    pub(crate) booking_fact: bool,
+    /// Limits a booked venue fill went past, drained into events by the
+    /// booking that raised them.
+    pub(crate) fact_breaches: Vec<&'static str>,
+    /// Venue fills the order took but the book could not yet book, oldest
+    /// first; see `kernel_venue.rs`.
+    pub(crate) unbooked_fills: Vec<crate::portfolio::kernel_venue::UnbookedFill>,
     /// Protective levels of the positions opened since the runtime last asked.
     pub(crate) protect_outbox: Vec<ProtectRequest>,
     /// Schedule slices released since the runtime last asked.
@@ -381,6 +435,16 @@ pub struct EngineKernel {
     /// Per-instrument capital cap and lot rounding, if any.
     alloted_capital: Option<f64>,
     lot_size: Option<f64>,
+    /// The option lines the account's other instruments hold in this
+    /// instrument's margin group, handed over by the book before each step.
+    /// `None` unless the account's model groups option lines and there are
+    /// some.
+    group_context: Option<GroupContext>,
+    /// Whether another instrument in this instrument's margin group has a
+    /// buying order working that is yet to fill, handed over by the book
+    /// before each step. A sold leg refused for want of funding then waits
+    /// for that hedge instead of being rejected.
+    pub(crate) hedge_pending: bool,
     /// Market definition: quantization, contract multiplier, expiry.
     ///
     /// `None` reproduces pre-spec behavior exactly (multiplier 1.0, no
@@ -419,6 +483,16 @@ pub struct EngineKernel {
     pub(crate) stepping_trade: bool,
     /// Square-off bookkeeping for an instrument with a trading calendar.
     pub(crate) session_state: SessionState,
+}
+
+/// What a caller states about a position it adopts that the engine cannot
+/// derive. Amounts are minor units of the account's money scale.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Adoption {
+    /// Margin the account has posted for this position (margin accounts).
+    pub margin_minor: Option<i128>,
+    /// Cash paid for this position (cash accounts), in place of price times size.
+    pub cost_minor: Option<i128>,
 }
 
 impl EngineKernel {
@@ -468,6 +542,10 @@ impl EngineKernel {
             direction,
             last_atr: 0.0,
             venue_managed: false,
+            venue_bookings: Default::default(),
+            booking_fact: false,
+            fact_breaches: Vec::new(),
+            unbooked_fills: Vec::new(),
             protect_outbox: Vec::new(),
             slice_outbox: Vec::new(),
             squareoff_outbox: false,
@@ -483,6 +561,8 @@ impl EngineKernel {
             effective_target,
             alloted_capital: inst_config.and_then(|ic| ic.alloted_capital),
             lot_size: inst_config.and_then(|ic| ic.lot_size),
+            group_context: None,
+            hedge_pending: false,
             spec: None,
             orders: OrderEngine::with_tz_offset(tz_offset_ns).with_latency(order_latency_ns),
             pending_events: Vec::new(),
@@ -800,74 +880,149 @@ impl EngineKernel {
         price: Price,
         size: f64,
     ) -> Result<u64, String> {
+        // The long-only form: a short is a different statement, made with
+        // `adopt_position_with`.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(size > 0.0) {
+            return Err(format!(
+                "adopt_position needs positive price and size (got size {size} @ {price})"
+            ));
+        }
+        self.adopt_position_with(timestamp, price, size, &Adoption::default())
+    }
+
+    /// [`EngineKernel::adopt_position`] for a position that may be short and
+    /// for books whose posted margin the caller states.
+    ///
+    /// `signed_size` is positive for a long and negative for a short. A short
+    /// needs a margin account: a cash account cannot hold one.
+    ///
+    /// On a margin account the margin already posted against a position is a
+    /// fact of the account, not a function of quantity and average price. The
+    /// caller gives it as [`Adoption::margin_minor`] (the amount the account
+    /// has locked for this position, in minor units of the account's money
+    /// scale) and the position is adopted with exactly that locked, whatever
+    /// the leverage, margin model or instrument (options included). Without
+    /// it the old rule holds: only a fully funded account (or a model that
+    /// demands the whole cost basis) is adopted, locking the notional, and
+    /// anything else is refused rather than guessed. Cash accounts adopt a long
+    /// only, debiting its cost basis: the exact amount paid in minor units
+    /// when [`Adoption::cost_minor`] gives it, else price times size.
+    ///
+    /// Nothing else changes with the sign: no order, fill, fee, trade record
+    /// or `Entered` event. The position's entry is `price`, so a short's
+    /// unrealized profit is what the market has fallen since.
+    pub fn adopt_position_with(
+        &mut self,
+        timestamp: Timestamp,
+        price: Price,
+        signed_size: f64,
+        extras: &Adoption,
+    ) -> Result<u64, String> {
         // `!(x > 0.0)` rather than `x <= 0.0`, deliberately: the negated form
         // is also false for NaN, so NaN is refused here. Clippy's
         // `neg_cmp_op_on_partial_ord` suggestion would let a NaN price through
         // and adopt a position priced at NaN, which then poisons cash, equity
         // and every drawdown figure downstream.
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
-        if !(price > 0.0) || !(size > 0.0) {
+        if !(price > 0.0) || !(signed_size.abs() > 0.0) || !signed_size.is_finite() {
             return Err(format!(
-                "adopt_position needs positive price and size (got size {size} @ {price})"
+                "adopt_position needs positive price and a non-zero size (got size {signed_size} @ {price})"
             ));
         }
-        // A leveraged book is still refused: the margin a broker has already
-        // posted against a position it holds cannot be derived from quantity
-        // and average price, and inventing a figure would misstate free
-        // capital — the number that gates every later entry. Fully funded
-        // (rate >= 1.0) is the one case where it IS derivable, because the
-        // whole notional is locked and the posted margin is the cost basis.
+        let direction = if signed_size > 0.0 { Direction::Long } else { Direction::Short };
+        let size = signed_size.abs();
+        let on_margin = matches!(self.account, AccountMode::Margin { .. });
+        if direction == Direction::Short && !on_margin {
+            return Err("adopt_position cannot seed a short on a cash account".to_string());
+        }
+        if extras.margin_minor.is_some() && !on_margin {
+            return Err("a posted margin applies to margin accounts only".to_string());
+        }
+        if extras.cost_minor.is_some() && on_margin {
+            return Err(
+                "a cost basis applies to cash accounts: a margin account debits nothing for a \
+                 position it adopts"
+                    .to_string(),
+            );
+        }
+        if extras.margin_minor.is_some_and(|m| m < 0) || extras.cost_minor.is_some_and(|c| c < 0) {
+            return Err("a posted margin or cost basis cannot be negative".to_string());
+        }
+        // A leveraged book is still refused without the posted margin: the
+        // margin a broker has already posted against a position it holds
+        // cannot be derived from quantity and average price, and inventing a
+        // figure would misstate free capital, the number that gates every
+        // later entry. Fully funded (rate >= 1.0) is the one case where it IS
+        // derivable, because the whole notional is locked and the posted
+        // margin is the cost basis.
         let mut margin_rate = self.margin_rate();
-        if let Some(model) = self.chosen_margin_model() {
-            // A chosen model must demand the whole cost basis, for the same
-            // reason: a smaller posted margin is not derivable.
-            use crate::accounts::LineView;
-            let required = self
-                .spec
-                .as_ref()
-                .ok_or_else(|| {
-                    "adopt_position needs an instrument for the margin model".to_string()
-                })
-                .and_then(|spec| {
-                    model.required(&LineView::new(spec, size, price)).map_err(|e| e.to_string())
-                })?;
-            if required < price * size * self.multiplier() {
-                return Err(format!(
-                    "adopt_position requires a cash or fully funded account (the margin model \
-                     requires {required} against a cost basis of {}); posted margin on a \
-                     broker-held position is not derivable under leverage",
-                    price * size * self.multiplier()
-                ));
+        if extras.margin_minor.is_none() {
+            if let Some(model) = self.chosen_margin_model() {
+                // A chosen model must demand the whole cost basis, for the
+                // same reason: a smaller posted margin is not derivable.
+                use crate::accounts::LineView;
+                let required = self
+                    .spec
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "adopt_position needs an instrument for the margin model".to_string()
+                    })
+                    .and_then(|spec| {
+                        model
+                            .required(&LineView::new(
+                                spec,
+                                if direction == Direction::Long { size } else { -size },
+                                price,
+                            ))
+                            .map_err(|e| e.to_string())
+                    })?;
+                if required < price * size * self.multiplier() {
+                    return Err(format!(
+                        "adopt_position requires a cash or fully funded account, or the posted \
+                         margin (the margin model requires {required} against a cost basis of \
+                         {}); posted margin on a broker-held position is not derivable under \
+                         leverage",
+                        price * size * self.multiplier()
+                    ));
+                }
+                margin_rate = Some(1.0);
             }
-            margin_rate = Some(1.0);
-        }
-        if let Some(rate) = margin_rate {
-            if rate < 1.0 {
-                return Err(format!(
-                    "adopt_position requires a cash or fully funded account \
-                     (initial margin rate {rate} < 1.0); posted margin on a \
-                     broker-held position is not derivable under leverage"
-                ));
+            if let Some(rate) = margin_rate {
+                if rate < 1.0 {
+                    return Err(format!(
+                        "adopt_position requires a cash or fully funded account, or the posted \
+                         margin (initial margin rate {rate} < 1.0); posted margin on a \
+                         broker-held position is not derivable under leverage"
+                    ));
+                }
             }
         }
-        let cost = self
-            .ledger
-            .try_notional(price, size)
-            .map_err(|e| format!("adopt_position cannot book size {size} @ {price}: {e}"))?;
+        let cost = match extras.cost_minor {
+            Some(minor) => Money::from_minor(minor),
+            None => self
+                .ledger
+                .try_notional(price, size)
+                .map_err(|e| format!("adopt_position cannot book size {size} @ {price}: {e}"))?,
+        };
         let id = self
             .ledger
-            .open_position(0, timestamp, price, size, Direction::Long, None, None, 0.0, None)
+            .open_position(0, timestamp, price, size, direction, None, None, 0.0, None)
             .ok_or_else(|| "ledger refused adoption: a position is already open".to_string())?;
         // Fund it the way the mode funds an ordinary open (see `open_at`):
-        // cash mode debits the balance, margin mode locks the notional and
-        // leaves the balance alone. Getting this wrong is not cosmetic —
+        // cash mode debits the balance, margin mode locks the margin and
+        // leaves the balance alone. Getting this wrong is not cosmetic:
         // margin equity is `balance + unrealized`, with no position-value
         // term, so a cash-style debit here would never be offset and would
         // understate equity by the cost basis for the whole run. No fee term
         // in either arm: an adoption is not a trade and charges nothing.
-        match margin_rate {
-            None => self.move_cash(-cost),
-            Some(rate) => self.margin.lock(id, price * size * self.multiplier() * rate),
+        match (extras.margin_minor, margin_rate) {
+            (Some(minor), _) => {
+                let posted = self.ledger.money_scale().to_f64(Money::from_minor(minor));
+                self.margin.lock(id, posted);
+            }
+            (None, None) => self.move_cash(-cost),
+            (None, Some(rate)) => self.margin.lock(id, price * size * self.multiplier() * rate),
         }
         Ok(id)
     }
@@ -1597,6 +1752,7 @@ impl EngineKernel {
                                         entry: true,
                                         atr: entry.atr,
                                         size_mult: entry.size_mult,
+                                        units: entry.units,
                                         stop_price_override: entry.stop_price_override,
                                         target_price_override: entry.target_price_override,
                                         ..StepInput::default()
@@ -1719,6 +1875,7 @@ impl EngineKernel {
             // against the state that bar actually sees.
             self.deferred.get_or_insert_with(DeferredIntent::default).entry = Some(DeferredEntry {
                 size_mult: input.size_mult,
+                units: input.units,
                 atr: input.atr,
                 stop_price_override: input.stop_price_override,
                 target_price_override: input.target_price_override,
@@ -1862,6 +2019,10 @@ impl EngineKernel {
 
         let direction = managed.position.direction;
         let ohlcv_bar = bar.to_ohlcv_bar();
+        // A target is a resting limit: it fills at its level, except across a
+        // session open that gaps past it (a print has no range to gap).
+        let session_gap =
+            !self.stepping_trade && self.orders.opens_session(bar.timestamp.saturating_sub(1));
 
         let stop_hit = managed.is_stop_hit(bar.low, bar.high);
         let target_hit = managed.is_target_hit(bar.low, bar.high);
@@ -1886,7 +2047,7 @@ impl EngineKernel {
             exit_reason = Some(ExitReason::TakeProfit);
             exit_price = self
                 .fill_model
-                .get_limit_fill_price(target_price, &ohlcv_bar, direction, false)
+                .get_limit_fill_price(target_price, &ohlcv_bar, direction, false, session_gap)
                 .unwrap_or(target_price);
         }
 
@@ -1909,7 +2070,7 @@ impl EngineKernel {
             exit_reason = Some(ExitReason::TakeProfit);
             exit_price = self
                 .fill_model
-                .get_limit_fill_price(target_price, &ohlcv_bar, direction, false)
+                .get_limit_fill_price(target_price, &ohlcv_bar, direction, false, session_gap)
                 .unwrap_or(target_price);
         }
 
@@ -2033,6 +2194,10 @@ impl EngineKernel {
         limit_priced: bool,
         bar: &KernelBar,
     ) -> Price {
+        // A venue's price is booked as it reported it.
+        if self.booking_fact {
+            return raw;
+        }
         let price = if limit_priced {
             raw
         } else {
@@ -2242,7 +2407,7 @@ impl EngineKernel {
             self.direction,
             entry_price,
             input.size_mult,
-            None,
+            input.units,
             input.atr,
             input.stop_price_override,
             input.target_price_override,
@@ -2284,6 +2449,93 @@ impl EngineKernel {
         .as_str())
     }
 
+    /// Hand the kernel the option lines the account's other instruments hold
+    /// in its margin group (see [`GroupContext`]), or clear them.
+    pub(crate) fn set_group_context(&mut self, context: Option<GroupContext>) {
+        self.group_context = context;
+    }
+
+    /// Say whether a hedge in this instrument's margin group is still to
+    /// fill; see `hedge_pending`.
+    pub(crate) fn set_hedge_pending(&mut self, pending: bool) {
+        self.hedge_pending = pending;
+    }
+
+    /// Whether this is an option with a buying order working that would open
+    /// a position: the hedge a sold leg of its margin group is waiting for.
+    pub(crate) fn has_working_option_buy(&self) -> bool {
+        self.option_group_key().is_some()
+            && self
+                .orders
+                .working()
+                .any(|o| !o.reduce_only && o.side == crate::execution::orders::OrderSide::Buy)
+    }
+
+    /// What this entry adds to the margin its group locks, given the hedging
+    /// legs already open.
+    ///
+    /// A sold option is funded alone at its fill by its own deposit, and a
+    /// model that cannot price a naked sold leg refuses it. When the
+    /// account's model margins option lines together and the legs that hedge
+    /// it are open, the group needs less: the entry adds the group's
+    /// requirement with it, less what the group already locks. `None` when
+    /// there is nothing to lean on, so a leg never borrows against a hedge
+    /// that is not there.
+    fn grouped_deposit(&self, price: Price, direction: Direction, size: f64) -> Option<f64> {
+        use crate::accounts::LineView;
+        let (Some(context), Some(model), Some(spec)) =
+            (&self.group_context, self.grouping_margin_model(), &self.spec)
+        else {
+            return None;
+        };
+        let sign = if direction == Direction::Long { 1.0 } else { -1.0 };
+        let mut views: Vec<LineView<'_>> = context
+            .lines
+            .iter()
+            .map(|(spec, quantity, price)| LineView::new(spec, *quantity, *price))
+            .collect();
+        if let Some((own_spec, lines)) = self.model_option_lines() {
+            views.extend(
+                lines.iter().map(|(_, quantity, price)| LineView::new(own_spec, *quantity, *price)),
+            );
+        }
+        views.push(LineView::new(spec, sign * size, price));
+        let required = model.group_required(&views, context.now).ok()?;
+        let locked = context.locked + self.locked_margin();
+        Some((required - locked).max(0.0))
+    }
+
+    /// What opening `units` on `bar` would take out of free capital, as
+    /// `(funding, costs)`: the funding is the full notional in a cash account
+    /// and the deposit in a margin one, the costs are the entry charges, both
+    /// as `open_at` would take them. `None` when the funding itself is refused.
+    ///
+    /// Nothing is opened or booked. A caller that opens several legs as one
+    /// structure sums this over them to know whether the whole fits before it
+    /// opens the first.
+    pub(crate) fn entry_outlay(&self, bar: &KernelBar, units: f64) -> Option<(f64, f64)> {
+        let direction = self.direction;
+        let entry_price = self.fill_price_for(bar, direction, true);
+        let adjusted_price = self.executed_price(entry_price, direction, true, false, bar);
+        let contract_value = adjusted_price * self.multiplier();
+        let funding = self.entry_funding(direction, adjusted_price).ok()?;
+        let size = self.quantize_units(units);
+        if size <= 0.0 {
+            return None;
+        }
+        let fees = self.fee_model.breakdown(contract_value, size, direction, true).map_or_else(
+            || self.fee_model.calculate(contract_value, size, direction),
+            |breakdown| breakdown.total(),
+        );
+        let funded = match funding {
+            None => contract_value * size,
+            Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
+            Some(EntryFunding::Deposit { per_contract }) => per_contract * size,
+            Some(EntryFunding::Unmargined) => 0.0,
+        };
+        Some((funded, fees))
+    }
+
     /// Apply an open at a determined raw price: slippage, sizing, fees,
     /// position open, cash debit. Shared by the signal path
     /// ([`Self::try_enter`]) and order-driven opens, so both produce
@@ -2318,9 +2570,17 @@ impl EngineKernel {
         let contract_value = adjusted_price * self.multiplier();
         let funding = match self.entry_funding(direction, adjusted_price) {
             Ok(funding) => funding,
+            // A sold leg the model cannot price alone may be carried by the
+            // hedge that is already open: priced with its group below.
+            Err(RejectReason::InsufficientMargin)
+                if explicit_units.is_some() && self.group_context.is_some() =>
+            {
+                Some(EntryFunding::Deposit { per_contract: f64::INFINITY })
+            }
             Err(reason) => return Some(EngineEvent::EntryRejected { idx, reason }),
         };
         let size = match explicit_units {
+            Some(units) if self.booking_fact => units,
             Some(units) => self.quantize_units(units),
             None => {
                 let budget = size_mult.map_or(available, |mult| mult * available);
@@ -2360,8 +2620,29 @@ impl EngineKernel {
         }
 
         if let Err(reason) = self.check_size_limits(bar, direction, size, contract_value, true) {
-            return self.refuse(idx, reason);
+            if !self.booking_fact {
+                return self.refuse(idx, reason);
+            }
+            self.fact_breaches.push(reason.as_str());
         }
+
+        let funding = match (funding, explicit_units) {
+            (Some(EntryFunding::Deposit { per_contract }), Some(_)) => {
+                match self.grouped_deposit(adjusted_price, direction, size) {
+                    Some(grouped) => Some(EntryFunding::Deposit {
+                        per_contract: (per_contract * size).min(grouped) / size,
+                    }),
+                    None if per_contract.is_infinite() => {
+                        return Some(EngineEvent::EntryRejected {
+                            idx,
+                            reason: RejectReason::InsufficientMargin,
+                        })
+                    }
+                    None => funding,
+                }
+            }
+            _ => funding,
+        };
 
         // Same per-contract price convention as the exit path: notional
         // scaling rides on the price, contract count stays raw.
@@ -2380,10 +2661,13 @@ impl EngineKernel {
             Some(EntryFunding::Unmargined) => 0.0,
         };
         if explicit_units.is_some() && funding_cost + entry_fees > available {
-            return Some(EngineEvent::EntryRejected {
-                idx,
-                reason: RejectReason::InsufficientCapital,
-            });
+            if !self.booking_fact {
+                return Some(EngineEvent::EntryRejected {
+                    idx,
+                    reason: RejectReason::InsufficientCapital,
+                });
+            }
+            self.fact_breaches.push(RejectReason::InsufficientCapital.as_str());
         }
         let (config_stop, config_target) = self.stop_and_target(adjusted_price, direction, atr);
         // Derived protective prices land on the instrument's tick grid,
@@ -2517,12 +2801,13 @@ impl EngineKernel {
         let direction = self.ledger.get(position_id)?.position.direction;
         let price = self.executed_price(entry_price, direction, true, limit_priced, bar);
         let size = match self.lot_size {
+            _ if self.booking_fact => units,
             Some(lot) if lot > 0.0 => (units / lot).floor() * lot,
             _ => units,
         };
         let size = match &self.spec {
-            Some(spec) => spec.quantize_size(size),
-            None => size,
+            Some(spec) if !self.booking_fact => spec.quantize_size(size),
+            _ => size,
         };
         if size <= 0.0 {
             return None;
@@ -2530,9 +2815,12 @@ impl EngineKernel {
         let contract_value = price * self.multiplier();
         // The order was checked whole when its first slice opened; the
         // position and exposure caps still bind each added slice.
-        if self.check_size_limits(bar, direction, size, contract_value, false).is_err() {
-            self.risk.record_rejection();
-            return None;
+        if let Err(reason) = self.check_size_limits(bar, direction, size, contract_value, false) {
+            if !self.booking_fact {
+                self.risk.record_rejection();
+                return None;
+            }
+            self.fact_breaches.push(reason.as_str());
         }
         let entry_fees = self.booked_fee(
             match self.fee_model.breakdown(contract_value, size, direction, true) {
@@ -2550,7 +2838,10 @@ impl EngineKernel {
         let free = self.free_capital();
         let available = self.alloted_capital.map(|cap| cap.min(free)).unwrap_or(free);
         if funding_cost + entry_fees > available {
-            return None;
+            if !self.booking_fact {
+                return None;
+            }
+            self.fact_breaches.push(RejectReason::InsufficientCapital.as_str());
         }
         // Both levels derived from the entry: shift with the average.
         // Either level explicit: leave both, as the caller fixed them.
@@ -2710,3 +3001,7 @@ pub use lifecycle::SplitOutcome;
 #[cfg(test)]
 #[path = "kernel_partial_tests.rs"]
 mod partial_tests;
+
+#[cfg(test)]
+#[path = "kernel_venue_tests.rs"]
+mod venue_tests;

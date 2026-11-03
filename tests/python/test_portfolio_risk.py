@@ -64,7 +64,8 @@ class TestPortfolioMaxPositions:
     def test_max_positions_is_portfolio_wide(self, portfolio_runner):
         strategy = _EnterEverything()
         result = portfolio_runner(
-            strategy, _three_symbols(), config=_config(max_positions=2)
+            strategy, _three_symbols(), config=_config(max_positions=2),
+            bar_stamp="close",
         )
 
         assert (
@@ -77,7 +78,7 @@ class TestPortfolioMaxPositions:
 
     def test_unconstrained_allows_every_symbol(self, portfolio_runner):
         strategy = _EnterEverything()
-        result = portfolio_runner(strategy, _three_symbols(), config=_config())
+        result = portfolio_runner(strategy, _three_symbols(), config=_config(), bar_stamp="close")
 
         assert strategy.max_concurrent == 3, "all three symbols should hold at once"
         assert result.rejected_entries == 0
@@ -85,7 +86,8 @@ class TestPortfolioMaxPositions:
     def test_on_order_rejected_reports_max_positions(self, portfolio_runner):
         strategy = _EnterEverything()
         portfolio_runner(
-            strategy, _three_symbols(), config=_config(max_positions=1)
+            strategy, _three_symbols(), config=_config(max_positions=1),
+            bar_stamp="close",
         )
 
         # Signal-path rejections surface the Debug form of the reason;
@@ -97,9 +99,9 @@ class TestPortfolioMaxPositions:
 
     def test_tighter_limit_opens_fewer_positions(self, portfolio_runner):
         loose = _EnterEverything()
-        portfolio_runner(loose, _three_symbols(), config=_config(max_positions=3))
+        portfolio_runner(loose, _three_symbols(), config=_config(max_positions=3), bar_stamp="close")
         tight = _EnterEverything()
-        portfolio_runner(tight, _three_symbols(), config=_config(max_positions=1))
+        portfolio_runner(tight, _three_symbols(), config=_config(max_positions=1), bar_stamp="close")
 
         assert tight.max_concurrent < loose.max_concurrent
 
@@ -127,7 +129,8 @@ class TestPortfolioDrawdownHalt:
         }
         strategy = S()
         result = portfolio_runner(
-            strategy, data, config=_config(max_drawdown_pct=15.0)
+            strategy, data, config=_config(max_drawdown_pct=15.0),
+            bar_stamp="close",
         )
 
         assert result.halted is True
@@ -145,7 +148,8 @@ class TestPortfolioDrawdownHalt:
     def test_no_halt_on_a_clean_run(self, portfolio_runner):
         strategy = _EnterEverything()
         result = portfolio_runner(
-            strategy, _three_symbols(), config=_config(max_drawdown_pct=50.0)
+            strategy, _three_symbols(), config=_config(max_drawdown_pct=50.0),
+            bar_stamp="close",
         )
 
         assert result.halted is False
@@ -157,11 +161,13 @@ def test_session_and_array_paths_agree_on_max_positions(portfolio_runner):
 
     strategy = _EnterEverything()
     constrained = portfolio_runner(
-        strategy, _three_symbols(), config=_config(max_positions=1)
+        strategy, _three_symbols(), config=_config(max_positions=1),
+        bar_stamp="close",
     )
     unconstrained_strategy = _EnterEverything()
     unconstrained = portfolio_runner(
-        unconstrained_strategy, _three_symbols(), config=_config()
+        unconstrained_strategy, _three_symbols(), config=_config(),
+        bar_stamp="close",
     )
 
     assert constrained.rejected_entries > 0

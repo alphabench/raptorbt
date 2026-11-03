@@ -82,10 +82,39 @@ impl PyMarginModel {
         Ok(Self { inner: MarginModel::Leverage(map) })
     }
 
-    /// A percentage of the notional.
+    /// A percentage of the notional. Deprecated: every other rate in the
+    /// library is a fraction; use `fraction_of_notional(pct / 100)`.
     #[staticmethod]
-    fn percent_of_notional(pct: f64) -> PyResult<Self> {
+    fn percent_of_notional(py: Python<'_>, pct: f64) -> PyResult<Self> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+            c"MarginModel.percent_of_notional takes a percent while every other rate takes a \
+              fraction; use MarginModel.fraction_of_notional(pct / 100) (20 percent is 0.2)",
+            2,
+        )?;
         Ok(Self { inner: MarginModel::PercentOfNotional(positive("pct", pct)?) })
+    }
+
+    /// A fraction of the notional: `0.2` is 20 percent. A value above 1 is
+    /// refused as ambiguous (it is almost always a percent).
+    #[staticmethod]
+    fn fraction_of_notional(fraction: f64) -> PyResult<Self> {
+        let fraction = positive("fraction", fraction)?;
+        if fraction > 1.0 {
+            return Err(Fail::new(
+                "invalid_margin_model",
+                format!(
+                    "fraction must be at most 1 (0.2 is 20 percent), got {fraction}; \
+                     a percent such as 20 is not a fraction"
+                ),
+            )
+            .op(OP)
+            .param("fraction")
+            .value(fraction)
+            .into());
+        }
+        Ok(Self { inner: MarginModel::PercentOfNotional(fraction * 100.0) })
     }
 
     /// A buyer pays the premium; a seller posts `seller_pct` percent of the

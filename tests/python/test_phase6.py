@@ -111,7 +111,7 @@ class TestPortfolioSession:
             "BBB": _bars([50.0, 50.5, 51.0, 51.5], start_ts=5_000_000_000),
         }
         strategy = S()
-        result = run_portfolio_strategy(strategy, data, config=_zero_fee_config())
+        result = run_portfolio_strategy(strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         # Both instruments held positions simultaneously from one pool.
         assert len(strategy.snapshots) == 2
@@ -146,7 +146,7 @@ class TestPortfolioSession:
             "BBB": _bars([50.0, 51.0, 52.0], start_ts=5_000_000_000),
         }
         strategy = S()
-        run_portfolio_strategy(strategy, data, config=_zero_fee_config())
+        run_portfolio_strategy(strategy, data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.rejects == [("BBB", "zero_size")]
 
     def test_typed_orders_route_by_symbol(self):
@@ -163,7 +163,7 @@ class TestPortfolioSession:
                         symbol="BBB",
                     )
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 self.fills.append((ctx.symbol, event.price))
 
         data = {
@@ -173,7 +173,7 @@ class TestPortfolioSession:
             ),  # dips through 49 on its bar 2
         }
         strategy = S()
-        result = run_portfolio_strategy(strategy, data, config=_zero_fee_config())
+        result = run_portfolio_strategy(strategy, data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.fills, "expected the BBB limit to fill"
         symbol, price = strategy.fills[0]
         assert symbol == "BBB"
@@ -196,7 +196,7 @@ class TestPortfolioSession:
             "AAA": _bars([100.0, 101.0, 102.0, 103.0]),
             "BBB": _bars([50.0, 51.0, 52.0, 53.0], start_ts=5_000_000_000),
         }
-        result = run_portfolio_strategy(S, data, config=_zero_fee_config())
+        result = run_portfolio_strategy(S, data, config=_zero_fee_config(), bar_stamp="close")
         summary = {s.symbol: s for s in result.per_instrument}
         assert summary["AAA"].trades == 1
         trades = result.result.trades()
@@ -216,8 +216,8 @@ class TestPortfolioSession:
             "AAA": _bars([100.0, 101.0, 99.0, 102.0, 103.0]),
             "BBB": _bars([50.0, 49.0, 51.0, 52.0, 50.0], start_ts=5_000_000_000),
         }
-        r1 = run_portfolio_strategy(S, data, config=_zero_fee_config())
-        r2 = run_portfolio_strategy(S, data, config=_zero_fee_config())
+        r1 = run_portfolio_strategy(S, data, config=_zero_fee_config(), bar_stamp="close")
+        r2 = run_portfolio_strategy(S, data, config=_zero_fee_config(), bar_stamp="close")
         assert np.array_equal(r1.result.equity_curve(), r2.result.equity_curve())
 
     def test_golden_gate_still_exact(self):
@@ -231,5 +231,5 @@ class TestPortfolioSession:
 
         fixtures = json.loads((here / "golden" / "fixtures.json").read_text())
         ts, o, h, l, c, v, _, _ = thaw_inputs(fixtures["inputs"]["shared"])
-        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
+        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v, bar_stamp="close")
         assert result_digest(result) == fixtures["class/sma_cross"]

@@ -6,6 +6,7 @@ use crate::indicators::streaming::{StreamingIndicator, StreamingSma};
 use crate::portfolio::session::{EventSession, ScheduleData};
 use crate::runtime::indicators::{IndInput, IndSpec};
 use crate::runtime::store::BarColumns;
+use crate::runtime::LiveFeed;
 
 const INSTRUMENTS: usize = 5;
 
@@ -747,4 +748,177 @@ fn prints_that_complete_a_primary_bar_feed_the_bank() {
     assert!(completed > 20 && checked == completed);
     // One bank update per completed primary bar, nothing for the other events.
     assert_eq!(core.bank().updates(), completed as u64);
+}
+
+// -- an instrument added to a running core ------------------------------------------------
+
+/// A core over `n` instruments that hold no data, fed by pushes like a live node's.
+fn live_core(n: usize, subsets: &[Vec<u32>]) -> (RuntimeCore, Vec<StrategyId>, LiveFeed) {
+    let mut store = MarketStore::new();
+    for i in 0..n {
+        store.add_instrument(&format!("L{i}")).unwrap();
+    }
+    let params = vec![InstrumentParams::default(); n];
+    let mut b =
+        RuntimeBuilder::new(store, params, config(), AccountMode::Cash, PositionPolicy::Net)
+            .unwrap();
+    let sids = subsets.iter().map(|s| b.add_strategy(&ids(s)).unwrap()).collect();
+    let feed = LiveFeed::new((0..n).map(|i| format!("L{i}")).collect(), 64);
+    (b.build().unwrap(), sids, feed)
+}
+
+/// Push one bar of `g` at `ts` and let every subscriber apply `intent`.
+fn push_bar(
+    core: &mut RuntimeCore,
+    feed: &mut LiveFeed,
+    traces: &mut [Trace],
+    g: u32,
+    ts: i64,
+    px: f64,
+) {
+    let id = InstrumentId::new(g);
+    let bar = KernelBar {
+        timestamp: ts,
+        open: px,
+        high: px + 1.0,
+        low: px - 1.0,
+        close: px,
+        volume: 10.0,
+    };
+    let event = feed.push_bar(id, ts, bar).unwrap();
+    core.advance_pushed(event, Pushed::Bar(bar)).unwrap();
+    for sid in core.subscribers(id).to_vec() {
+        let local = core.local_of(sid, id).unwrap();
+        traces[sid.index()].push((local, event.local_idx as usize));
+        core.apply(sid, intent(sid.raw(), local, event.local_idx as usize)).unwrap();
+    }
+    core.clear_current();
+}
+
+fn tape() -> Vec<(u32, i64, f64)> {
+    let mut rng = Lcg(77);
+    (0..240)
+        .map(|k| {
+            let g = (k % 3) as u32;
+            (g, 10 * (k / 3) as i64, 100.0 + 5.0 * g as f64 + rng.unit() * 6.0)
+        })
+        .collect()
+}
+
+#[test]
+fn an_added_instrument_is_traded_as_if_it_had_been_there_from_the_start() {
+    let tape = tape();
+    let subsets = vec![vec![0, 1, 2], vec![0], vec![1, 2]];
+    // The twin: three instruments from the start. Instrument 2 has no event before the cut.
+    let cut = 10 * 20;
+    let (mut twin, sids, mut twin_feed) = live_core(3, &subsets);
+    let mut want_traces = vec![Vec::new(); sids.len()];
+    for &(g, ts, px) in tape.iter().filter(|e| e.0 != 2 || e.1 >= cut) {
+        push_bar(&mut twin, &mut twin_feed, &mut want_traces, g, ts, px);
+    }
+    // The subject: two instruments, the third added at the cut to the strategies that trade it.
+    let (mut core, sids, mut feed) = live_core(2, &[vec![0, 1], vec![0], vec![1]]);
+    let mut traces = vec![Vec::new(); sids.len()];
+    let mut added = false;
+    for &(g, ts, px) in tape.iter().filter(|e| e.0 != 2 || e.1 >= cut) {
+        if g == 2 && !added {
+            let id = core
+                .add_instrument(
+                    "L2",
+                    &InstrumentParams::default(),
+                    &[sids[0], sids[2]],
+                    None,
+                    false,
+                )
+                .unwrap();
+            feed.add_instrument("L2".into(), Some(8));
+            assert_eq!(id, InstrumentId::new(2));
+            assert_eq!(core.instruments_of(sids[0]), 3);
+            assert_eq!(core.instruments_of(sids[1]), 1);
+            assert_eq!(core.instruments_of(sids[2]), 2);
+            assert_eq!(feed.capacity_of(id), 8);
+            added = true;
+        }
+        push_bar(&mut core, &mut feed, &mut traces, g, ts, px);
+    }
+    assert!(added);
+    let mut any_trades = false;
+    for (k, sid) in sids.iter().enumerate() {
+        assert_eq!(traces[k], want_traces[k], "strategy {k}: events seen");
+        let got = digest(core.finish(*sid).unwrap(), traces[k].clone());
+        let want = digest(twin.finish(*sid).unwrap(), want_traces[k].clone());
+        assert_same(&got, &want, &format!("strategy {k}"));
+        any_trades |= got.trades != "[]";
+    }
+    assert!(any_trades, "the scenario must trade");
+}
+
+#[test]
+fn an_instrument_in_use_is_not_retired_and_a_retired_one_is_not_fed() {
+    let (mut core, sids, mut feed) = live_core(2, &[vec![0, 1]]);
+    let mut traces = vec![Vec::new()];
+    let id = core.add_instrument("L2", &InstrumentParams::default(), &sids, None, false).unwrap();
+    feed.add_instrument("L2".into(), None);
+    let book = core.book_mut(sids[0]).unwrap();
+    let order = book.kernel_mut(2).submit_order_full(
+        crate::execution::orders::OrderSide::Buy,
+        crate::execution::orders::QtySpec::Units(1.0),
+        crate::execution::orders::OrderKind::Limit { price: 1.0 },
+        crate::execution::orders::TimeInForce::Gtc,
+        0,
+        0,
+        "w".into(),
+        None,
+        None,
+        false,
+        false,
+        None,
+    );
+    assert_eq!(core.instrument_in_use(id), vec![(sids[0], 0, 1)]);
+    assert!(core.book_mut(sids[0]).unwrap().kernel_mut(2).cancel_order(0, order));
+    assert!(core.instrument_in_use(id).is_empty());
+    core.retire_instrument(id).unwrap();
+    assert!(core.subscribers(id).is_empty());
+    // Events on the others still run, with the retired instrument's slot in every book.
+    push_bar(&mut core, &mut feed, &mut traces, 0, 10, 100.0);
+    assert_eq!(core.instruments_of(sids[0]), 3);
+}
+
+#[test]
+fn a_retired_instrument_that_comes_back_is_traded_as_if_it_had_never_left() {
+    let tape = tape();
+    let subsets = vec![vec![0, 1, 2], vec![1, 2]];
+    let cut = 10 * 20;
+    let events: Vec<_> = tape.iter().filter(|e| e.0 != 2 || e.1 >= cut).collect();
+    let (mut twin, sids, mut twin_feed) = live_core(3, &subsets);
+    let mut want_traces = vec![Vec::new(); sids.len()];
+    for &&(g, ts, px) in &events {
+        push_bar(&mut twin, &mut twin_feed, &mut want_traces, g, ts, px);
+    }
+    let (mut core, sids, mut feed) = live_core(3, &subsets);
+    let g2 = InstrumentId::new(2);
+    core.retire_instrument(g2).unwrap();
+    feed.retire_instrument(g2);
+    assert!(core.subscribers(g2).is_empty());
+    let mut traces = vec![Vec::new(); sids.len()];
+    let mut back = false;
+    for &&(g, ts, px) in &events {
+        if g == 2 && !back {
+            core.revive_instrument(g2, &sids, None, None).unwrap();
+            feed.revive_instrument(g2, None);
+            back = true;
+        }
+        push_bar(&mut core, &mut feed, &mut traces, g, ts, px);
+    }
+    assert!(back);
+    for (k, sid) in sids.iter().enumerate() {
+        assert_eq!(traces[k], want_traces[k], "strategy {k}: events seen");
+        let got = digest(core.finish(*sid).unwrap(), traces[k].clone());
+        let want = digest(twin.finish(*sid).unwrap(), want_traces[k].clone());
+        assert_same(&got, &want, &format!("strategy {k}"));
+    }
+    assert!(
+        core.revive_instrument(g2, &[], None, None).is_err(),
+        "a live instrument is not revived"
+    );
 }

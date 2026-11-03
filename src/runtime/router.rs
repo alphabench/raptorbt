@@ -50,6 +50,40 @@ impl SubscriptionIndex {
         self.offsets.len().saturating_sub(1)
     }
 
+    /// Replace the subscribers of `instrument` (ascending, unique), growing the index by one
+    /// instrument when `instrument` is the next id. The slices of the other instruments are
+    /// kept as they are; the cost is one pass over the index, paid when a node's instrument set
+    /// changes, never per event.
+    pub fn set_subscribers(
+        &mut self,
+        instrument: InstrumentId,
+        strategies: &[StrategyId],
+    ) -> Result<()> {
+        let i = instrument.index();
+        let known = self.instruments();
+        if i > known {
+            return Err(RaptorError::invalid_parameter(format!(
+                "instrument id {} is beyond the next id {known}",
+                instrument.raw()
+            )));
+        }
+        if self.offsets.is_empty() {
+            self.offsets.push(0);
+        }
+        if i == known {
+            let end = *self.offsets.last().expect("offsets start with 0");
+            self.offsets.push(end);
+        }
+        let (lo, hi) = (self.offsets[i] as usize, self.offsets[i + 1] as usize);
+        let added = strategies.len() as i64 - (hi - lo) as i64;
+        self.members.splice(lo..hi, strategies.iter().copied());
+        for o in &mut self.offsets[i + 1..] {
+            *o = u32::try_from(i64::from(*o) + added)
+                .map_err(|_| RaptorError::invalid_parameter("subscription index overflows u32"))?;
+        }
+        Ok(())
+    }
+
     /// Total (instrument, strategy) pairs after dedup.
     pub fn len(&self) -> usize {
         self.members.len()
@@ -186,6 +220,26 @@ mod tests {
 
     fn strat(i: u32) -> StrategyId {
         StrategyId::new(i)
+    }
+
+    #[test]
+    fn subscribers_can_be_replaced_and_an_instrument_appended() {
+        let mut b = SubscriptionIndexBuilder::new(3);
+        b.register(strat(0), &[inst(0), inst(1), inst(2)]).unwrap();
+        b.register(strat(1), &[inst(1)]).unwrap();
+        let mut idx = b.build().unwrap();
+        idx.set_subscribers(inst(3), &[strat(1), strat(2)]).unwrap();
+        assert_eq!(idx.instruments(), 4);
+        assert_eq!(idx.subscribers(inst(3)), &[strat(1), strat(2)]);
+        idx.set_subscribers(inst(1), &[]).unwrap();
+        assert_eq!(idx.subscribers(inst(0)), &[strat(0)]);
+        assert!(idx.subscribers(inst(1)).is_empty());
+        assert_eq!(idx.subscribers(inst(2)), &[strat(0)]);
+        assert_eq!(idx.subscribers(inst(3)), &[strat(1), strat(2)]);
+        idx.set_subscribers(inst(1), &[strat(0), strat(1)]).unwrap();
+        assert_eq!(idx.subscribers(inst(1)), &[strat(0), strat(1)]);
+        assert_eq!(idx.subscribers(inst(3)), &[strat(1), strat(2)]);
+        assert!(idx.set_subscribers(inst(9), &[]).is_err(), "ids are dense");
     }
 
     #[test]

@@ -59,8 +59,8 @@ def test_the_seconds_figure_tracks_the_spacing_and_the_bar_count_does_not():
     """The same trades, one second apart and one day apart."""
     close = _close_series()
 
-    per_second = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS))
-    per_day = run_strategy_backtest(HoldFourBars, **_ohlcv(close, DAY_NS))
+    per_second = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS), bar_stamp="close")
+    per_day = run_strategy_backtest(HoldFourBars, **_ohlcv(close, DAY_NS), bar_stamp="close")
 
     assert per_second.trades(), "no trades produced"
 
@@ -87,7 +87,7 @@ def test_the_seconds_figure_tracks_the_spacing_and_the_bar_count_does_not():
 
 def test_drawdown_duration_is_reported_in_seconds_too():
     close = _close_series()
-    result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS))
+    result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS), bar_stamp="close")
 
     bars = result.metrics.max_drawdown_duration
     secs = result.metrics.max_drawdown_duration_secs
@@ -101,7 +101,7 @@ def test_drawdown_duration_is_reported_in_seconds_too():
 def test_exposure_never_exceeds_the_time_available():
     close = _close_series()
     for step in (SEC_NS, DAY_NS):
-        result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, step))
+        result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, step), bar_stamp="close")
         assert 0.0 <= result.metrics.exposure_pct <= 100.0, (
             f"exposure {result.metrics.exposure_pct} is outside 0-100%"
         )
@@ -109,7 +109,7 @@ def test_exposure_never_exceeds_the_time_available():
 
 def test_the_metrics_dict_carries_the_seconds_figure():
     close = _close_series()
-    result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS))
+    result = run_strategy_backtest(HoldFourBars, **_ohlcv(close, SEC_NS), bar_stamp="close")
     as_dict = result.metrics.to_dict()
 
     assert "Max Drawdown Duration" in as_dict
@@ -151,7 +151,7 @@ def test_a_tick_run_reports_a_real_holding_duration():
     }
 
     class EnterOnceHoldToEnd(Strategy):
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             if not ctx.position and tick.price > 0:
                 self.enter(size_frac=0.2)
 

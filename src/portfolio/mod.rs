@@ -9,7 +9,7 @@ pub mod factor_panel;
 pub mod kernel;
 mod kernel_orders;
 mod kernel_session;
-mod kernel_venue;
+pub(crate) mod kernel_venue;
 pub mod ledger;
 pub mod monte_carlo;
 pub mod optimize;
@@ -29,7 +29,8 @@ pub use errors::PortfolioMathError;
 pub use factor_panel::{
     composite_scores, momentum_panel, rank_ic, rank_panel, winsorize_panel, zscore_panel, RankIc,
 };
-pub use kernel::{EngineEvent, EngineKernel, KernelBar, PositionSnapshot, StepInput};
+pub use kernel::{Adoption, EngineEvent, EngineKernel, KernelBar, PositionSnapshot, StepInput};
+pub(crate) use kernel_venue::intern_host_code;
 pub use kernel_venue::VenueError;
 pub use ledger::{ManagedPosition, PositionLedger, PositionPolicy};
 pub use monte_carlo::{simulate_portfolio_forward, MonteCarloConfig, MonteCarloResult};

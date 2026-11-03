@@ -7,6 +7,8 @@ MIN = 60_000_000_000
 
 
 class _Rec:
+    namespace = "T1"
+
     def __init__(self):
         self.requests = []
 
@@ -24,9 +26,9 @@ _cache: dict = {}
 
 
 def request(side="buy", quantity=10.0, price=99.0, order_type="limit", tif="gtc", post_only=False,
-            reduce_only=False, symbol="A", trigger=95.0, strategy=0):  # fmt: skip
+            reduce_only=False, symbol="A", trigger=95.0, strategy=0, capital=1e6):  # fmt: skip
     """The request the engine sends for one order. ``strategy=k`` gives the id ``s{k}-0``."""
-    key = (side, quantity, price, order_type, tif, post_only, reduce_only, symbol, trigger, strategy)
+    key = (side, quantity, price, order_type, tif, post_only, reduce_only, symbol, trigger, strategy, capital)
     if key in _cache:
         return _cache[key]
     rec = _Rec()
@@ -52,7 +54,7 @@ def request(side="buy", quantity=10.0, price=99.0, order_type="limit", tif="gtc"
                 self.submit_order(order, symbol=symbol)
 
     strategies = [S(i == strategy) for i in range(strategy + 1)]
-    node = LiveNode(strategies, ["A", "B"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close", execution=rec)
+    node = LiveNode(strategies, ["A", "B"], BacktestConfig(initial_capital=capital, fees=0.0), bar_stamp="close", execution=rec)
     for i in range(2):
         for sym in ("A", "B"):
             node.push_bar(sym, (i + 1) * MIN, 100.0, 101.0, 99.0, 100.5, 1000.0)

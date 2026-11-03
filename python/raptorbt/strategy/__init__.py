@@ -10,6 +10,9 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 """
 
 from raptorbt.strategy.accounts import AccountSpec
+from raptorbt.strategy.continuous import RollEvent, RollEvents, continuous_series
+from raptorbt.strategy.exits import ExitEvents, ExitHandle, ExitRule
+from raptorbt.strategy.order_check import OrderProposal, OrderRefusal
 from raptorbt.strategy.api import BarHistory, Timeframe
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.tick_runner import run_tick_strategy
@@ -35,6 +38,7 @@ from raptorbt.strategy.requirements import (
     Future,
     Holding,
     Instrument,
+    InstrumentPlan,
     Issue,
     Legs,
     ParamSchema,
@@ -48,6 +52,7 @@ from raptorbt.strategy.requirements import (
     check_requirements,
     param,
     params_schema,
+    plan_instruments,
     requirements_hash,
     resolve,
 )
@@ -62,6 +67,7 @@ __all__ = [
     "Future",
     "Holding",
     "Instrument",
+    "InstrumentPlan",
     "Issue",
     "Legs",
     "ParamSchema",
@@ -75,9 +81,18 @@ __all__ = [
     "check_requirements",
     "param",
     "params_schema",
+    "plan_instruments",
     "requirements_hash",
     "resolve",
     "AccountSpec",
+    "ExitEvents",
+    "ExitHandle",
+    "ExitRule",
+    "OrderProposal",
+    "OrderRefusal",
+    "RollEvent",
+    "RollEvents",
+    "continuous_series",
     "Bar",
     "BarHistory",
     "ClosePosition",

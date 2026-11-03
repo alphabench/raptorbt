@@ -80,6 +80,7 @@ def _run(capital, spec, direction=-1):
         instruments={SYM: spec},
         account_type="margin",
         leverage=1.0,
+        bar_stamp="close",
     )
     return result, strategy
 

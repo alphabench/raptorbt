@@ -1305,6 +1305,25 @@ pub fn run_basket_backtest<'py>(
             Ok((ohlcv, signals))
         })
         .collect::<PyResult<_>>()?;
+    // The legs trade one account on one clock: index i is the same instant
+    // for every instrument.
+    if let Some((first, _)) = rust_instruments.first() {
+        for (ohlcv, signals) in rust_instruments.iter().skip(1) {
+            if ohlcv.timestamps != first.timestamps {
+                return Err(Fail::new(
+                    "misaligned_legs",
+                    format!(
+                        "{} does not share the first instrument's timestamps; a basket \
+                         trades its instruments bar by bar, so every one must have the \
+                         same bars",
+                        signals.symbol
+                    ),
+                )
+                .param("instruments")
+                .into());
+            }
+        }
+    }
 
     let mode = match sync_mode {
         "any" => SyncMode::Any,
@@ -1566,6 +1585,14 @@ pub fn run_options_backtest<'py>(
 
     let opt_prices = numpy_to_vec_f64(option_prices);
     let opt_opens = option_open_prices.map(numpy_to_vec_f64);
+    crate::data::ensure_series_finite(&format!("{symbol} premiums"), "premium", &opt_prices)?;
+    if let Some(opens) = &opt_opens {
+        crate::data::ensure_series_finite(
+            &format!("{symbol} open premiums"),
+            "premium_open",
+            opens,
+        )?;
+    }
     if let Some(ref opens) = opt_opens {
         if opens.len() != opt_prices.len() {
             return Err(Fail::new(
@@ -1740,6 +1767,17 @@ pub fn run_pairs_backtest<'py>(
     )?;
     crate::data::ensure_prices_finite(&format!("{symbol} leg 1 bars"), &leg1_ohlcv)?;
     crate::data::ensure_prices_finite(&format!("{symbol} leg 2 bars"), &leg2_ohlcv)?;
+    if leg1_ohlcv.timestamps != leg2_ohlcv.timestamps {
+        return Err(Fail::new(
+            "misaligned_legs",
+            format!(
+                "{symbol}: the two legs have different timestamps; a pair trades both legs \
+                 bar by bar, so they must share their bars"
+            ),
+        )
+        .param("leg2_timestamps")
+        .into());
+    }
 
     let backtest = PairsBacktest::new(pairs_config);
     let result = backtest.run(&leg1_ohlcv, &leg2_ohlcv, &signals);
@@ -1777,6 +1815,7 @@ pub fn run_spread_backtest<'py>(
     let premiums: Vec<Vec<f64>> = legs_premiums.into_iter().map(numpy_to_vec_f64).collect();
     let open_premiums: Option<Vec<Vec<f64>>> =
         legs_open_premiums.map(|legs| legs.into_iter().map(numpy_to_vec_f64).collect());
+    ensure_spread_premiums_finite(spread_type, &premiums, open_premiums.as_deref())?;
     if let Some(ref opens) = open_premiums {
         let shape_matches = opens.len() == premiums.len()
             && opens.iter().zip(premiums.iter()).all(|(o, p)| o.len() == p.len());
@@ -1862,6 +1901,26 @@ pub fn run_spread_backtest<'py>(
     );
 
     Ok(convert_result(result))
+}
+
+/// Refuse a spread whose premium series hold a NaN or an infinity, naming
+/// the leg and the first offending bar.
+fn ensure_spread_premiums_finite(
+    label: &str,
+    premiums: &[Vec<f64>],
+    opens: Option<&[Vec<f64>]>,
+) -> PyResult<()> {
+    for (k, leg) in premiums.iter().enumerate() {
+        crate::data::ensure_series_finite(&format!("{label} leg {k} premiums"), "premium", leg)?;
+    }
+    for (k, leg) in opens.into_iter().flatten().enumerate() {
+        crate::data::ensure_series_finite(
+            &format!("{label} leg {k} open premiums"),
+            "premium_open",
+            leg,
+        )?;
+    }
+    Ok(())
 }
 
 /// A single spread backtest item for batch execution.
@@ -2009,6 +2068,13 @@ pub fn batch_spread_backtest(
             })
         })
         .collect::<PyResult<_>>()?;
+    for item in &prepared {
+        ensure_spread_premiums_finite(
+            &item.strategy_id,
+            &item.premiums,
+            item.open_premiums.as_deref(),
+        )?;
+    }
 
     // Release GIL and run all backtests in parallel via Rayon
     let results: Vec<(String, crate::core::types::BacktestResult)> = py.detach(|| {
@@ -2261,7 +2327,21 @@ pub fn run_multi_backtest<'py>(
         "majority" => CombineMode::Majority,
         "independent" => CombineMode::Independent,
         "weighted" => CombineMode::Weighted,
-        _ => CombineMode::Any,
+        "any" => CombineMode::Any,
+        other => {
+            return Err(Fail::new(
+                "invalid_combine_mode",
+                format!(
+                    "combine_mode must be one of 'any', 'all', 'majority', 'independent', \
+                     'weighted', got {other:?}"
+                ),
+            )
+            .op("run_multi_backtest")
+            .param("combine_mode")
+            .value(other)
+            .valid(["any", "all", "majority", "independent", "weighted"])
+            .into());
+        }
     };
 
     let multi_config = MultiStrategyConfig {
@@ -2352,11 +2432,15 @@ pub fn run_tick_backtest<'py>(
     let timestamps = numpy_to_vec_i64(timestamps);
     crate::data::ensure_time_sorted(&format!("{symbol} ticks"), timestamps.iter().copied())?;
     let n_ticks = timestamps.len();
+    let (ltp, bid, ask) = (numpy_to_vec_f64(ltp), numpy_to_vec_f64(bid), numpy_to_vec_f64(ask));
+    for (column, values) in [("ltp", &ltp), ("bid", &bid), ("ask", &ask)] {
+        crate::data::ensure_series_finite(&format!("{symbol} ticks"), column, values)?;
+    }
     let tick_data = crate::core::types::TickData {
         timestamps,
-        ltp: numpy_to_vec_f64(ltp),
-        bid: numpy_to_vec_f64(bid),
-        ask: numpy_to_vec_f64(ask),
+        ltp,
+        bid,
+        ask,
         buy_qty_delta: numpy_to_vec_f64(buy_qty_delta),
         sell_qty_delta: numpy_to_vec_f64(sell_qty_delta),
         oi: numpy_to_vec_f64(oi),

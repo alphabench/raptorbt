@@ -152,9 +152,9 @@ def _closer(mode):
 def _nbo_exit(runner, mode):
     cfg = _cfg(fill_timing="next_bar_open")
     if runner == "single":
-        r = raptorbt.run_strategy_backtest(_closer(mode), **_nbo_data(), config=cfg)
+        r = raptorbt.run_strategy_backtest(_closer(mode), **_nbo_data(), config=cfg, bar_stamp="close")
         return r.trades()
-    r = raptorbt.run_portfolio_strategy(_closer(mode), {"A": _nbo_data()}, config=cfg)
+    r = raptorbt.run_portfolio_strategy(_closer(mode), {"A": _nbo_data()}, config=cfg, bar_stamp="close")
     return r.result.trades()
 
 
@@ -188,7 +188,7 @@ class _TwapProbe(Strategy):
         if ctx.idx == 0:
             self.submit_order(orders.Twap(side="buy", units=30.0, slices=3, every=1))
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         self.fills.append((event.idx, event.size))
 
     def on_algo_started(self, ctx, event):
@@ -201,7 +201,7 @@ def test_control_single_runner_slices_twap():
     d = {"timestamps": np.arange(n, dtype=np.int64), "open": p, "high": p,
          "low": p, "close": p, "volume": np.ones(n)}
     s = _TwapProbe()
-    raptorbt.run_strategy_backtest(s, **d, config=_cfg(), oms_type="hedging")
+    raptorbt.run_strategy_backtest(s, **d, config=_cfg(), oms_type="hedging", bar_stamp="close")
     assert s.fills == [(0, 10.0), (1, 10.0), (2, 10.0)]
 
 
@@ -212,7 +212,7 @@ def test_portfolio_runner_slices_twap(portfolio_runner):
     d = {"timestamps": np.arange(n, dtype=np.int64), "open": p, "high": p,
          "low": p, "close": p, "volume": np.ones(n)}
     s = _TwapProbe()
-    portfolio_runner(s, {"A": d}, config=_cfg(), oms_type="hedging")
+    portfolio_runner(s, {"A": d}, config=_cfg(), oms_type="hedging", bar_stamp="close")
     assert s.fills == [(0, 10.0), (1, 10.0), (2, 10.0)]
     assert len(s.started) == 1
 
@@ -225,11 +225,11 @@ def test_tick_runner_slices_twap():
             self.started = 0
             self.completed = 0
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             if not self.started:
                 self.submit_order(orders.Twap(side="buy", units=30.0, slices=3, every=1))
 
-        def on_order_filled(self, ctx, event):
+        def on_fill(self, ctx, event):
             self.fills.append(event.size)
 
         def on_algo_started(self, ctx, event):
@@ -263,49 +263,53 @@ def test_submit_order_from_hook_routes_to_hook_symbol():
     # A's first order fills at A@0; on_position_opened(A) submits a second
     # buy with no symbol. Correct: it belongs to A. Observed: order_accepted /
     # order_filled arrive with ctx.symbol == "B" and B ends with a trade.
-    class S(Strategy):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.evs = []
-            self.fired = False
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.evs = []
+                self.fired = False
 
-        def on_bar(self, ctx):
-            if ctx.symbol == "A" and ctx.idx == 0:
-                self.submit_order(orders.Market(side="buy", units=1.0))
+            def on_bar(self, ctx):
+                if ctx.symbol == "A" and ctx.idx == 0:
+                    self.submit_order(orders.Market(side="buy", units=1.0))
 
-        def on_position_opened(self, ctx, event):
-            if ctx.symbol == "A" and not self.fired:
-                self.fired = True
-                self.submit_order(orders.Market(side="buy", units=3.0))
+            def on_position_opened(self, ctx, event):
+                if ctx.symbol == "A" and not self.fired:
+                    self.fired = True
+                    self.submit_order(orders.Market(side="buy", units=3.0))
 
-        def on_order_event(self, ctx, event):
-            self.evs.append((ctx.symbol, event.kind))
+            def on_order_event(self, ctx, event):
+                self.evs.append((ctx.symbol, event.kind))
 
     s = S()
     r = raptorbt.run_portfolio_strategy(
-        s, _two_symbol_bars(), config=_cfg(), oms_type="hedging"
+        s, _two_symbol_bars(), config=_cfg(), oms_type="hedging",
+        bar_stamp="close",
     )
     assert {sym for sym, _ in s.evs} == {"A"}, s.evs
     assert {i.symbol: i.trades for i in r.per_instrument}["B"] == 0
 
 
 def test_enter_from_hook_does_not_open_other_symbol():
-    class S(Strategy):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.fired = False
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.fired = False
 
-        def on_bar(self, ctx):
-            if ctx.symbol == "A" and ctx.idx == 0:
-                self.enter(size_frac=0.5)
+            def on_bar(self, ctx):
+                if ctx.symbol == "A" and ctx.idx == 0:
+                    self.enter(size_frac=0.5)
 
-        def on_position_opened(self, ctx, event):
-            if ctx.symbol == "A" and not self.fired:
-                self.fired = True
-                self.enter(size_frac=0.25)  # A already holds a position
+            def on_position_opened(self, ctx, event):
+                if ctx.symbol == "A" and not self.fired:
+                    self.fired = True
+                    self.enter(size_frac=0.25)  # A already holds a position
 
     r = raptorbt.run_portfolio_strategy(
-        S(), _two_symbol_bars(), config=_cfg(), oms_type="hedging"
+        S(), _two_symbol_bars(), config=_cfg(), oms_type="hedging",
+        bar_stamp="close",
     )
     # Observed: B opens a position from A's hook intent.
     assert {i.symbol: i.trades for i in r.per_instrument}["B"] == 0
@@ -390,14 +394,14 @@ class _EnterAt5(Strategy):
 
 
 def test_control_single_runner_honours_atr_stop():
-    r = raptorbt.run_strategy_backtest(_EnterAt5(), **_atr_data(), config=_atr_cfg())
+    r = raptorbt.run_strategy_backtest(_EnterAt5(), **_atr_data(), config=_atr_cfg(), bar_stamp="close")
     assert r.trades()[0].exit_price == pytest.approx(96.0)
 
 
 def test_portfolio_runner_honours_atr_stop():
     # Expected exit at the 96.0 stop (as in the single-runner control).
     # Observed: 100.0, the end-of-data close; the stop never existed.
-    r = raptorbt.run_portfolio_strategy(_EnterAt5(), {"A": _atr_data()}, config=_atr_cfg())
+    r = raptorbt.run_portfolio_strategy(_EnterAt5(), {"A": _atr_data()}, config=_atr_cfg(), bar_stamp="close")
     assert r.result.trades()[0].exit_price == pytest.approx(96.0)
 
 
@@ -414,7 +418,7 @@ def test_limit_buy_never_fills_above_its_limit():
                 self.submit_order(orders.Limit(side="buy", price=97.0, units=10.0))
 
     d = _bars([100.0, 100.0, 100.0, 98.0], lows=[99.0, 99.0, 99.0, 96.5])
-    r = raptorbt.run_strategy_backtest(S(), **d, config=_cfg(slippage=0.01))
+    r = raptorbt.run_strategy_backtest(S(), **d, config=_cfg(slippage=0.01), bar_stamp="close")
     assert r.trades()[0].entry_price <= 97.0 + 1e-9
 
 
@@ -430,7 +434,7 @@ def test_target_exit_never_fills_below_target():
                 self.enter()
 
     d = _bars([100.0] * 4, highs=[101.0, 101.0, 107.0, 101.0])
-    r = raptorbt.run_strategy_backtest(S(), **d, config=cfg)
+    r = raptorbt.run_strategy_backtest(S(), **d, config=cfg, bar_stamp="close")
     assert r.trades()[0].entry_price == pytest.approx(101.0)
     assert r.trades()[0].exit_price >= 106.05 - 1e-9
 
@@ -483,7 +487,7 @@ def _identical_instruments(k):
                 # each symbol gets exactly 1/k of the capital.
                 self.enter(size_frac=1.0 / (k - int(ctx.symbol[1:])))
 
-    return raptorbt.run_portfolio_strategy(S(), data, config=_cfg())
+    return raptorbt.run_portfolio_strategy(S(), data, config=_cfg(), bar_stamp="close")
 
 
 def test_equity_samples_once_per_timestamp():
@@ -537,7 +541,7 @@ def test_unsorted_timestamps_are_refused(entry):
             "close": p, "volume": np.full(n, 1e3)}
     with pytest.raises(ValueError):
         if entry == "portfolio_strategy":
-            raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg())
+            raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg(), bar_stamp="close")
         elif entry == "tick_strategy":
             raptorbt.run_tick_strategy(
                 Strategy(), {"A": {"timestamps": ts, "ltp": p}}, config=_cfg()
@@ -546,6 +550,7 @@ def test_unsorted_timestamps_are_refused(entry):
             raptorbt.run_strategy_backtest(
                 Strategy(), ts, bars["open"], bars["high"], bars["low"],
                 bars["close"], bars["volume"], config=_cfg(),
+                bar_stamp="close",
             )
         else:
             flags = np.zeros(n, dtype=bool)
@@ -561,7 +566,7 @@ def test_unsorted_error_names_stream_index_and_pair():
     bars = {"timestamps": ts, "open": p, "high": p + 1, "low": p - 1,
             "close": p, "volume": np.full(4, 1e3)}
     with pytest.raises(ValueError, match=r"A bars.*index 2 is 1 after 2"):
-        raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg())
+        raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg(), bar_stamp="close")
 
 
 def test_equal_timestamps_are_accepted():
@@ -569,7 +574,7 @@ def test_equal_timestamps_are_accepted():
     ts = np.array([0, 1, 1, 2], dtype=np.int64)
     bars = {"timestamps": ts, "open": p, "high": p + 1, "low": p - 1,
             "close": p, "volume": np.full(4, 1e3)}
-    raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg())
+    raptorbt.run_portfolio_strategy(Strategy(), {"A": bars}, config=_cfg(), bar_stamp="close")
 
 
 def test_live_push_refuses_a_decreasing_timestamp():
@@ -601,20 +606,22 @@ def test_daily_composite_bar_aligns_to_session_tz():
     ]
     assert direct == [(19, 19.0)]  # premise: the primitive honours the offset
 
-    class S(Strategy):
-        def __init__(self, config=None):
-            super().__init__(config)
-            self.got = []
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class S(Strategy):
+            def __init__(self, config=None):
+                super().__init__(config)
+                self.got = []
 
-        def on_start(self, ctx):
-            self.subscribe_bars(1, "d")
+            def on_start(self, ctx):
+                self.subscribe_bars(1, "d")
 
-        def on_composite_bar(self, ctx, bar):
-            self.got.append((ctx.idx, bar.volume))
+            def on_composite_bar(self, ctx, bar):
+                self.got.append((ctx.idx, bar.volume))
 
     s = S()
     raptorbt.run_strategy_backtest(
-        s, **d, config=_cfg(session_tz_offset_ns=raptorbt.IST_OFFSET_NS)
+        s, **d, config=_cfg(session_tz_offset_ns=raptorbt.IST_OFFSET_NS),
+        bar_stamp="close",
     )
     assert s.got[0] == (19, 19.0), s.got
 
@@ -688,7 +695,7 @@ def test_portfolio_run_reports_its_orders():
                 self.submit_order(orders.Market(side="buy", units=10))
                 self.done = True
 
-    res = raptorbt.run_portfolio_strategy(OneOrder(), {"A": data, "B": data}).result
+    res = raptorbt.run_portfolio_strategy(OneOrder(), {"A": data, "B": data}, bar_stamp="close").result
     assert len(res.trades()) == 1  # premise: the order was placed and filled
     assert len(res.orders()) == 1
 
@@ -719,7 +726,7 @@ def test_tick_primary_daily_bar_aligns_to_session_tz():
         def on_bar(self, ctx):
             self.at.append(ctx.idx)
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             self.last = ctx.idx
 
     s = S()
@@ -740,7 +747,7 @@ def test_tick_run_reports_its_orders():
     class OneOrder(Strategy):
         done = False
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             if not self.done:
                 self.submit_order(orders.Market(side="buy", units=10))
                 self.done = True

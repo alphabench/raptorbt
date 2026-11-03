@@ -148,6 +148,41 @@ impl EngineKernel {
         )
     }
 
+    /// Record an order the host refused before it was submitted: it exists
+    /// for one event, `Rejected` with the host's `reason`, and is counted and
+    /// delivered like any other rejection. It never works and never matches.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_refused_order(
+        &mut self,
+        side: OrderSide,
+        qty: QtySpec,
+        kind: OrderKind,
+        tif: TimeInForce,
+        submitted_idx: usize,
+        submitted_ts: i64,
+        client_id: String,
+        reduce_only: bool,
+        reason: &'static str,
+    ) -> u64 {
+        let mut order = Order::plain(side, qty, kind, tif);
+        order.client_id = client_id.clone();
+        order.submitted_idx = submitted_idx;
+        order.submitted_ts = submitted_ts;
+        order.reduce_only = reduce_only;
+        let id = self.orders.submit(order);
+        if let Some(order) = self.orders.get_mut(id) {
+            let _ = order.transition(OrderStatus::Rejected);
+        }
+        self.risk.record_rejection();
+        self.pending_events.push(EngineEvent::OrderRejected {
+            idx: submitted_idx,
+            order_id: id,
+            client_id,
+            reason,
+        });
+        id
+    }
+
     /// [`EngineKernel::submit_order`] with flags and one-triggers-other
     /// linkage. `parent_id` holds the order (unmatched, no expiry clock)
     /// until the parent fills; a dead parent cancels it.
@@ -238,6 +273,11 @@ impl EngineKernel {
                 order.oco_group = Some(group);
             }
         }
+    }
+
+    /// Whether positions are independent (hedging) rather than netted.
+    pub fn is_hedging(&self) -> bool {
+        self.ledger.policy() == PositionPolicy::Independent
     }
 
     /// Cancel a working order. Returns `false` for unknown/finished ids.
@@ -423,15 +463,13 @@ impl EngineKernel {
                 }
             }
         }
-        // The queue grants the limit price, or the print when the print
-        // traded through the limit: the better of the two for the trader.
-        let granted = |price: Price| match side {
-            OrderSide::Buy => price.min(bar.close),
-            OrderSide::Sell => price.max(bar.close),
-        };
+        // The queue grants the limit price: the order rested, and volume
+        // traded ahead of it is the evidence it held that price. A print that
+        // went further through the limit is no price improvement for a
+        // resting order.
         let matched_price = match (queue_granted, kind) {
-            (true, OrderKind::Limit { price }) => granted(price),
-            (true, OrderKind::StopLimit { price, .. }) => granted(price),
+            (true, OrderKind::Limit { price }) => price,
+            (true, OrderKind::StopLimit { price, .. }) => price,
             _ => matched_price,
         };
         let matched_price = if !is_limit_fill
@@ -720,6 +758,17 @@ impl EngineKernel {
                     let entered = EngineEvent::Entered { idx, price, size, direction };
                     self.record_fill(idx, id, &client_id, price, size, requested, entered, events);
                 }
+                Some(EngineEvent::EntryRejected {
+                    reason: RejectReason::InsufficientCapital | RejectReason::InsufficientMargin,
+                    ..
+                }) if self.hedge_pending && open_direction == Direction::Short => {
+                    // A sold option whose margin group has a buying order still
+                    // to fill: instrument order puts this leg's event before its
+                    // hedge's, so the hedge cannot yet fund it. The order stays
+                    // working and is funded when the hedge is held, one event
+                    // later, instead of being refused for a credit it is about
+                    // to have.
+                }
                 Some(EngineEvent::EntryRejected { reason, .. }) => {
                     // `open_at` already reported this; sizing arithmetic is
                     // not a constraint refusal, and the signal path does not
@@ -857,7 +906,7 @@ impl EngineKernel {
         } else if ioc_remainder {
             self.cancel_remainder(idx, id, events);
         } else {
-            self.shrink_oco_siblings(id, requested);
+            self.shrink_oco_siblings(idx, id, requested, events);
         }
     }
 
@@ -869,15 +918,23 @@ impl EngineKernel {
     /// filled plus the quantity remaining on `id`; it is never raised. A
     /// sibling sized by capital fraction or whole position resolves at its
     /// own fill and is left alone. The full fill of any leg still cancels
-    /// the rest (`after_fill`).
-    fn shrink_oco_siblings(&mut self, id: u64, requested: f64) {
+    /// the rest (`after_fill`). Each cut is reported as an
+    /// [`EngineEvent::OrderResized`], so a change to a working order is
+    /// never silent.
+    fn shrink_oco_siblings(
+        &mut self,
+        idx: usize,
+        id: u64,
+        requested: f64,
+        events: &mut Vec<EngineEvent>,
+    ) {
         let Some((group, filled)) =
             self.orders.get(id).and_then(|o| Some((o.oco_group?, o.filled_qty)))
         else {
             return;
         };
         let remaining = (requested - filled).max(0.0);
-        for sibling in self.orders.all_mut() {
+        for sibling in self.orders.live_mut() {
             if sibling.oco_group != Some(group) || sibling.id == id || sibling.status.is_terminal()
             {
                 continue;
@@ -886,6 +943,13 @@ impl EngineKernel {
                 let cap = sibling.filled_qty + remaining;
                 if q > cap {
                     sibling.qty = QtySpec::Units(cap);
+                    events.push(EngineEvent::OrderResized {
+                        idx,
+                        order_id: sibling.id,
+                        client_id: sibling.client_id.clone(),
+                        from: q,
+                        to: cap,
+                    });
                 }
             }
         }
@@ -907,8 +971,7 @@ impl EngineKernel {
     fn after_fill(&mut self, idx: usize, filled_id: u64, events: &mut Vec<EngineEvent>) {
         let children: Vec<(u64, String)> = self
             .orders
-            .all()
-            .iter()
+            .working()
             .filter(|o| o.parent_id == Some(filled_id) && o.status == OrderStatus::Submitted)
             .map(|o| (o.id, o.client_id.clone()))
             .collect();
@@ -923,8 +986,7 @@ impl EngineKernel {
         if let Some(group) = group {
             let siblings: Vec<(u64, String)> = self
                 .orders
-                .all()
-                .iter()
+                .working()
                 .filter(|o| {
                     o.oco_group == Some(group) && o.id != filled_id && !o.status.is_terminal()
                 })

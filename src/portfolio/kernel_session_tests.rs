@@ -399,3 +399,37 @@ fn an_instrument_without_a_schedule_steps_exactly_as_before() {
     };
     assert_eq!(run(true), run(false));
 }
+
+#[test]
+fn a_configured_squareoff_time_closes_once_a_day_and_blocks_reentry_without_a_calendar() {
+    let config = BacktestConfig {
+        fees: 0.0,
+        squareoff_time_minutes: Some(15 * 60 + 25),
+        session_tz_offset_ns: IST,
+        ..BacktestConfig::default()
+    };
+    let fee_model = config.fee_model();
+    let mut k = EngineKernel::new(
+        config,
+        fee_model,
+        SlippageModel::None,
+        FillPrice::Close,
+        "X".to_string(),
+        Direction::Long,
+        None,
+    );
+    k.step(0, &bar(ist(0, 10, 0), 99.0, 100.0), entry());
+    assert!(k.is_in_position());
+    // Before the cutoff nothing happens; the first event at or after it closes the position.
+    assert!(k.step(1, &bar(ist(0, 15, 24), 99.0, 100.0), StepInput::default()).is_empty());
+    let events = k.step(2, &bar(ist(0, 15, 25), 99.0, 100.0), StepInput::default());
+    assert!(
+        matches!(events.as_slice(), [EngineEvent::Exited { trade, .. }] if trade.exit_reason == ExitReason::Squareoff),
+        "{events:?}"
+    );
+    // The rest of that day refuses entries; the next day trades again.
+    let blocked = k.step(3, &bar(ist(0, 15, 28), 99.0, 100.0), entry());
+    assert_eq!(rejection_of(&blocked), Some("squareoff"));
+    let next_day = k.step(4, &bar(ist(1, 10, 0), 99.0, 100.0), entry());
+    assert!(matches!(next_day.as_slice(), [EngineEvent::Entered { .. }]));
+}

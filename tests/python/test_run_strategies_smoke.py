@@ -36,71 +36,72 @@ def make_data(seed=0, n=400):
     return data
 
 
-class Recorder(Strategy):
-    """Exercises indicators, composites, timers, typed orders and intents."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class Recorder(Strategy):
+        """Exercises indicators, composites, timers, typed orders and intents."""
 
-    def __init__(self, fast=5, slow=12, step=4, **kw):
-        super().__init__(**kw)
-        self.fast_n, self.slow_n, self.step = fast, slow, step
-        self.rec = []
+        def __init__(self, fast=5, slow=12, step=4, **kw):
+            super().__init__(**kw)
+            self.fast_n, self.slow_n, self.step = fast, slow, step
+            self.rec = []
 
-    def on_start(self, ctx):
-        self.fast = {
-            s: self.register_indicator(Indicator.sma(self.fast_n), symbol=s) for s in ctx.symbols
-        }
-        self.rsi = {
-            s: self.register_indicator(Indicator.rsi(self.slow_n), symbol=s) for s in ctx.symbols
-        }
-        self.sid = self.subscribe_bars(self.step, "m")
-        self.comp = {
-            s: self.register_indicator(Indicator.ema(3), stream_id=self.sid, symbol=s)
-            for s in ctx.symbols
-        }
-        self.clock.set_timer("t", 30 * MIN, start_ns=T0)
-        self.rec.append(("start", tuple(ctx.symbols), ctx.equity, ctx.cash))
+        def on_start(self, ctx):
+            self.fast = {
+                s: self.register_indicator(Indicator.sma(self.fast_n), symbol=s) for s in ctx.symbols
+            }
+            self.rsi = {
+                s: self.register_indicator(Indicator.rsi(self.slow_n), symbol=s) for s in ctx.symbols
+            }
+            self.sid = self.subscribe_bars(self.step, "m")
+            self.comp = {
+                s: self.register_indicator(Indicator.ema(3), stream_id=self.sid, symbol=s)
+                for s in ctx.symbols
+            }
+            self.clock.set_timer("t", 30 * MIN, start_ns=T0)
+            self.rec.append(("start", tuple(ctx.symbols), ctx.equity, ctx.cash))
 
-    def seen(self, ctx):
-        s = ctx.symbol
-        return (
-            self.fast[s].value,
-            self.rsi[s].initialized,
-            self.comp[s].value,
-            ctx.equity,
-            ctx.cash,
-            ctx.free_capital,
-            ctx.net_position,
-            ctx.is_flat,
-        )
+        def seen(self, ctx):
+            s = ctx.symbol
+            return (
+                self.fast[s].value,
+                self.rsi[s].initialized,
+                self.comp[s].value,
+                ctx.equity,
+                ctx.cash,
+                ctx.free_capital,
+                ctx.net_position,
+                ctx.is_flat,
+            )
 
-    def on_time_event(self, ctx, event):
-        self.rec.append(("time", ctx.symbol, ctx.idx, ctx.timestamp, event, self.seen(ctx)))
+        def on_timer(self, ctx, event):
+            self.rec.append(("time", ctx.symbol, ctx.idx, ctx.timestamp, event, self.seen(ctx)))
 
-    def on_composite_bar(self, ctx, bar):
-        self.rec.append(("comp", ctx.symbol, ctx.idx, bar, self.seen(ctx)))
+        def on_composite_bar(self, ctx, bar):
+            self.rec.append(("comp", ctx.symbol, ctx.idx, bar, self.seen(ctx)))
 
-    def on_bar(self, ctx):
-        self.rec.append(("bar", ctx.symbol, ctx.idx, ctx.bar, ctx.bar_close_ts, self.seen(ctx)))
-        v = self.fast[ctx.symbol].value
-        if v is None:
-            return
-        i = ctx.idx
-        if ctx.is_flat and ctx.bar.close > v and i % 3 == 0:
-            self.enter(size_frac=0.3)
-        elif not ctx.is_flat and ctx.bar.close < v:
-            self.close_position()
-        elif i % 17 == 0:
-            self.submit_order(Limit(side="buy", price=ctx.bar.close * 0.99, units=1.0))
-        elif i % 19 == 0:
-            self.cancel_all_orders()
+        def on_bar(self, ctx):
+            self.rec.append(("bar", ctx.symbol, ctx.idx, ctx.bar, ctx.bar_close_ts, self.seen(ctx)))
+            v = self.fast[ctx.symbol].value
+            if v is None:
+                return
+            i = ctx.idx
+            if ctx.is_flat and ctx.bar.close > v and i % 3 == 0:
+                self.enter(size_frac=0.3)
+            elif not ctx.is_flat and ctx.bar.close < v:
+                self.close_position()
+            elif i % 17 == 0:
+                self.submit_order(Limit(side="buy", price=ctx.bar.close * 0.99, units=1.0))
+            elif i % 19 == 0:
+                self.cancel_all_orders()
 
-    def on_order_event(self, ctx, event):
-        self.rec.append(("order", ctx.symbol, event.kind, event.price, event.size))
+        def on_order_event(self, ctx, event):
+            self.rec.append(("order", ctx.symbol, event.kind, event.price, event.size))
 
-    def on_position_closed(self, ctx, event):
-        self.rec.append(("closed", ctx.symbol, event.trade.pnl))
+        def on_position_closed(self, ctx, event):
+            self.rec.append(("closed", ctx.symbol, event.trade.pnl))
 
-    def on_stop(self, ctx):
-        self.rec.append(("stop", ctx.equity))
+        def on_stop(self, ctx):
+            self.rec.append(("stop", ctx.equity))
 
 
 def fields(obj):
@@ -332,72 +333,73 @@ def test_exports():
     assert again is run_strategies
 
 
-class Chaos(Strategy):
-    """Decisions are a hash of what the strategy observes, so two runs that
-    present the same observations take the same actions."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class Chaos(Strategy):
+        """Decisions are a hash of what the strategy observes, so two runs that
+        present the same observations take the same actions."""
 
-    UNITS = [(3, "m"), (5, "m"), (2, "tick"), (400, "volume"), (1, "renko"), (1, "h")]
+        UNITS = [(3, "m"), (5, "m"), (2, "tick"), (400, "volume"), (1, "renko"), (1, "h")]
 
-    def __init__(self, seed):
-        super().__init__()
-        self.seed = seed
-        self.rec = []
+        def __init__(self, seed):
+            super().__init__()
+            self.seed = seed
+            self.rec = []
 
-    def _h(self, *parts):
-        return hash((self.seed, *parts)) & 0xFFFFFF
+        def _h(self, *parts):
+            return hash((self.seed, *parts)) & 0xFFFFFF
 
-    def on_start(self, ctx):
-        r = np.random.default_rng(self.seed)
-        self.streams = []
-        for _ in range(int(r.integers(0, 3))):
-            step, unit = self.UNITS[int(r.integers(len(self.UNITS)))]
-            brick = 1.5 if unit == "renko" else 0.0
-            self.streams.append(self.subscribe_bars(step, unit, brick_size=brick))
-        make = [Indicator.sma, Indicator.ema, Indicator.rsi, Indicator.atr, Indicator.stddev]
-        self.inds = []
-        for s in ctx.symbols:
+        def on_start(self, ctx):
+            r = np.random.default_rng(self.seed)
+            self.streams = []
             for _ in range(int(r.integers(0, 3))):
-                ind = make[int(r.integers(len(make)))](int(r.integers(2, 9)))
-                stream = None
-                if self.streams and r.random() < 0.5:
-                    stream = self.streams[int(r.integers(len(self.streams)))]
-                self.inds.append(self.register_indicator(ind, stream_id=stream, symbol=s))
-        if r.random() < 0.5:
-            self.clock.set_timer("tick", int(r.integers(2, 9)) * MIN, start_ns=T0)
+                step, unit = self.UNITS[int(r.integers(len(self.UNITS)))]
+                brick = 1.5 if unit == "renko" else 0.0
+                self.streams.append(self.subscribe_bars(step, unit, brick_size=brick))
+            make = [Indicator.sma, Indicator.ema, Indicator.rsi, Indicator.atr, Indicator.stddev]
+            self.inds = []
+            for s in ctx.symbols:
+                for _ in range(int(r.integers(0, 3))):
+                    ind = make[int(r.integers(len(make)))](int(r.integers(2, 9)))
+                    stream = None
+                    if self.streams and r.random() < 0.5:
+                        stream = self.streams[int(r.integers(len(self.streams)))]
+                    self.inds.append(self.register_indicator(ind, stream_id=stream, symbol=s))
+            if r.random() < 0.5:
+                self.clock.set_timer("tick", int(r.integers(2, 9)) * MIN, start_ns=T0)
 
-    def obs(self, ctx):
-        return (ctx.symbol, ctx.idx, tuple(i.value for i in self.inds), ctx.equity, ctx.free_capital)
+        def obs(self, ctx):
+            return (ctx.symbol, ctx.idx, tuple(i.value for i in self.inds), ctx.equity, ctx.free_capital)
 
-    def on_time_event(self, ctx, event):
-        self.rec.append(("time", self.obs(ctx), event))
+        def on_timer(self, ctx, event):
+            self.rec.append(("time", self.obs(ctx), event))
 
-    def on_composite_bar(self, ctx, bar):
-        self.rec.append(("comp", self.obs(ctx), bar))
-        if self._h(ctx.symbol, bar.timestamp) % 11 == 0 and ctx.is_flat:
-            self.enter_short(size_frac=0.2)
+        def on_composite_bar(self, ctx, bar):
+            self.rec.append(("comp", self.obs(ctx), bar))
+            if self._h(ctx.symbol, bar.timestamp) % 11 == 0 and ctx.is_flat:
+                self.enter_short(size_frac=0.2)
 
-    def on_bar(self, ctx):
-        h = self._h(ctx.symbol, ctx.idx, ctx.bar.close)
-        self.rec.append(("bar", self.obs(ctx), ctx.bar))
-        c = ctx.bar.close
-        if h % 13 == 0 and ctx.is_flat:
-            self.enter(size_frac=0.25)
-        elif h % 13 == 1 and not ctx.is_flat:
-            self.close_position()
-        elif h % 13 == 2:
-            self.submit_order(Limit(side="buy", price=c * 0.995, units=1.0))
-        elif h % 13 == 3:
-            self.cancel_all_orders()
-        elif h % 13 == 4 and ctx.is_flat:
-            self.enter_long(size_frac=0.1, stop_price=c * 0.97, target_price=c * 1.04)
-        if h % 29 == 0 and self.streams:
-            self.rec.append(("orders", [o.client_id for o in ctx.open_orders()]))
+        def on_bar(self, ctx):
+            h = self._h(ctx.symbol, ctx.idx, ctx.bar.close)
+            self.rec.append(("bar", self.obs(ctx), ctx.bar))
+            c = ctx.bar.close
+            if h % 13 == 0 and ctx.is_flat:
+                self.enter(size_frac=0.25)
+            elif h % 13 == 1 and not ctx.is_flat:
+                self.close_position()
+            elif h % 13 == 2:
+                self.submit_order(Limit(side="buy", price=c * 0.995, units=1.0))
+            elif h % 13 == 3:
+                self.cancel_all_orders()
+            elif h % 13 == 4 and ctx.is_flat:
+                self.enter_long(size_frac=0.1, stop_price=c * 0.97, target_price=c * 1.04)
+            if h % 29 == 0 and self.streams:
+                self.rec.append(("orders", [o.client_id for o in ctx.open_orders()]))
 
-    def on_order_event(self, ctx, event):
-        self.rec.append(("ev", ctx.symbol, event.kind, event.price, event.size, event.reject_reason))
+        def on_order_event(self, ctx, event):
+            self.rec.append(("ev", ctx.symbol, event.kind, event.price, event.size, event.reject_reason))
 
-    def on_margin_call(self, ctx, event):
-        self.rec.append(("margin", ctx.symbol, event.price, event.size))
+        def on_margin_call(self, ctx, event):
+            self.rec.append(("margin", ctx.symbol, event.price, event.size))
 
 
 @pytest.mark.parametrize("case", range(24))

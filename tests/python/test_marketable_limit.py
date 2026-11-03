@@ -1,4 +1,7 @@
-"""A limit order that is marketable fills at the market, never at its own limit."""
+"""A limit order that is marketable when it arrives fills at the market, never
+at its own limit. One that was already resting fills at its limit, and gets no
+price improvement from a bar that opens past it, unless that bar opens a new
+session (an overnight gap fills at the open)."""
 
 import numpy as np
 import pytest
@@ -29,7 +32,7 @@ def _run(order, data, timing="next_bar_open"):
             if ctx.idx == 0:
                 self.submit_order(order)
 
-    return run_strategy_backtest(S(), **data, config=_config(timing)).trades()
+    return run_strategy_backtest(S(), **data, config=_config(timing), bar_stamp="close").trades()
 
 
 @pytest.mark.parametrize("timing", ["next_bar_open", "same_bar_close"])
@@ -67,12 +70,27 @@ def test_resting_limit_touched_inside_the_bar_fills_at_the_limit():
     assert trades[0].entry_price == pytest.approx(97.0)
 
 
-def test_resting_limit_gapped_through_fills_at_the_open():
+def test_resting_limit_gapped_through_mid_session_fills_at_its_limit():
+    # The order rests on bar 1 and bar 2 opens at 95, below the 97 limit, in
+    # the same session: the sale of that gap is not the resting order's gain.
     data = _bars(
         [100.0, 100.0, 95.0, 95.0],
         [101.0, 101.0, 96.0, 96.0],
         [99.5, 99.5, 94.0, 94.0],
         [100.0, 100.0, 95.0, 95.0],
     )
+    trades = _run(orders.Limit(side="buy", price=97.0, units=10.0), data)
+    assert trades[0].entry_price == pytest.approx(97.0)
+
+
+def test_resting_limit_gapped_through_by_a_session_open_fills_at_the_open():
+    day = 86_400 * 10**9
+    data = _bars(
+        [100.0, 100.0, 95.0, 95.0],
+        [101.0, 101.0, 96.0, 96.0],
+        [99.5, 99.5, 94.0, 94.0],
+        [100.0, 100.0, 95.0, 95.0],
+    )
+    data["timestamps"] = np.array([day // 2, day // 2 + 60 * 10**9, day + day // 2, day + day // 2 + 60 * 10**9], dtype=np.int64)
     trades = _run(orders.Limit(side="buy", price=97.0, units=10.0), data)
     assert trades[0].entry_price == pytest.approx(95.0)

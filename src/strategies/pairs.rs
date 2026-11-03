@@ -1,13 +1,15 @@
 //! Pairs trading strategy backtest implementation.
 //!
-//! Supports long/short legs with hedge ratios.
+//! Supports long/short legs with hedge ratios. The two legs are instruments of
+//! one [`PortfolioBook`], so the short leg is funded, charged and marked like
+//! any other short and the pair draws on one account.
 
-use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, Direction, ExitReason,
-    OhlcvData, Trade,
-};
-use crate::execution::FeeModel;
-use crate::metrics::streaming::StreamingMetrics;
+use crate::core::types::{BacktestConfig, BacktestResult, CompiledSignals, Direction, OhlcvData};
+use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::StepInput;
+use crate::portfolio::ledger::PositionPolicy;
+use crate::signals::processor::SignalProcessor;
+use crate::strategies::legs::{account_mode, all_flat, bar_entry, half_entered, kernel_bar};
 
 /// Pairs trading configuration.
 #[derive(Debug, Clone)]
@@ -47,17 +49,24 @@ impl Default for PairsConfig {
 pub struct PairsBacktest {
     /// Configuration.
     config: PairsConfig,
-    /// Fee model.
-    fee_model: FeeModel,
 }
 
 impl PairsBacktest {
     /// Create a new pairs backtest.
     pub fn new(config: PairsConfig) -> Self {
-        Self { fee_model: config.base.fee_model(), config }
+        Self { config }
     }
 
     /// Run pairs trading backtest.
+    ///
+    /// Leg 1 is bought and leg 2 sold when `signals.direction` is long, the
+    /// reverse when short. The pair opens when both legs are flat and closes
+    /// together. Each leg holds half of the capital free at the entry, leg 2
+    /// scaled by the hedge ratio; a ratio above one shrinks both legs so the
+    /// pair still fits the account. The ratio is the one in force on the
+    /// decision bar. The record is two trades per round trip, one per leg
+    /// (`<symbol>_LEG1`, `<symbol>_LEG2`), each with the profit and costs of
+    /// its own leg.
     ///
     /// # Arguments
     /// * `leg1_ohlcv` - OHLCV data for leg 1 (long leg when spread widens)
@@ -76,272 +85,79 @@ impl PairsBacktest {
         assert_eq!(n, leg2_ohlcv.len());
         assert_eq!(n, signals.len());
 
-        // Clean signals
-        let processor = crate::signals::processor::SignalProcessor::new();
-        let (entries, exits) = processor.clean_signals(&signals.entries, &signals.exits);
+        let (entries, exits) =
+            SignalProcessor::new().clean_signals(&signals.entries, &signals.exits);
 
-        // Execution timing. Under NextBarOpen a bar-i decision executes on
-        // bar i+1 at each leg's own open: the cleaned stream shifts one bar
-        // forward (a last-bar decision never trades) and fills read the
-        // open. The hedge ratio is decision-time information and is computed
-        // from the decision bar's window, not the fill bar's — the fill
-        // bar's close does not exist when the ratio is chosen. SameBarClose
-        // is the historical behavior, byte-identical; SameBarOpenLookahead
-        // has no distinct history in this runner and also fills at the
-        // close.
-        let next_open =
-            self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
-        let (entries, exits) = if next_open {
-            let shift = crate::signals::processor::shift_signals;
-            (shift(&entries, 1), shift(&exits, 1))
-        } else {
-            (entries, exits)
+        let (leg1_dir, leg2_dir) = match signals.direction {
+            Direction::Long => (Direction::Long, Direction::Short),
+            Direction::Short => (Direction::Short, Direction::Long),
         };
+        let legs = [(leg1_ohlcv, leg1_dir, "LEG1"), (leg2_ohlcv, leg2_dir, "LEG2")];
 
-        // Initialize state
-        let mut cash = self.config.base.initial_capital;
-        let mut position: Option<PairsPosition> = None;
-        let mut equity_curve = vec![cash; n];
-        let mut drawdown_curve = vec![0.0; n];
-        let mut returns = vec![0.0; n];
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut peak_equity = cash;
-        let mut trade_counter = 0u64;
+        let mut book =
+            PortfolioBook::new(self.config.base.clone(), account_mode(&self.config.base));
+        for (_, direction, name) in &legs {
+            book.add_instrument(
+                format!("{}_{name}", signals.symbol),
+                *direction,
+                None,
+                None,
+                PositionPolicy::Net,
+            );
+        }
 
-        // Main simulation loop
+        let mut fractions = [0.0f64; 2];
+        // A leg whose entry a limit refused leaves the other held alone; it is
+        // closed on the next bar rather than carried as an unhedged position.
+        let mut unwind = false;
         for i in 0..n {
-            let leg1_price = leg1_ohlcv.close[i];
-            let leg2_price = leg2_ohlcv.close[i];
-            // Fills pay this bar's tradeable price; equity marks at the close.
-            let leg1_fill = if next_open { leg1_ohlcv.open[i] } else { leg1_price };
-            let leg2_fill = if next_open { leg2_ohlcv.open[i] } else { leg2_price };
-
-            // Check for exit
-            if exits[i] {
-                if let Some(pos) = position.take() {
-                    let (pnl, exit_fees) = self.close_position(&pos, leg1_fill, leg2_fill);
-                    let fees = pos.entry_fees + exit_fees;
-                    let cost_basis = pos.leg1_cost + pos.leg2_cost;
-                    let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
-
-                    // Return the posted collateral plus realised PnL. `pnl` is
-                    // net of both sides' fees, but the entry fees left cash at
-                    // entry, so they are added back here. Crediting size *
-                    // fill would treat the short leg as a long and match
-                    // neither the trade PnL nor the mark-to-market below.
-                    cash += cost_basis + pnl + pos.entry_fees;
-
-                    // Record trades for both legs
-                    trades.push(Trade {
-                        id: trade_counter,
-                        symbol: format!("{}_LEG1", signals.symbol),
-                        entry_idx: pos.entry_idx,
-                        exit_idx: i,
-                        entry_price: pos.leg1_entry_price,
-                        exit_price: leg1_fill,
-                        size: pos.leg1_size,
-                        direction: pos.leg1_direction,
-                        pnl: pnl / 2.0, // Split P&L attribution
-                        return_pct: return_pct / 2.0,
-                        entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
-                        exit_time: leg1_ohlcv.timestamps[i],
-                        fees: fees / 2.0,
-                        entry_fees: pos.entry_fees / 2.0,
-                        exit_fees: exit_fees / 2.0,
-                        fee_breakdown: None,
-                        exit_reason: ExitReason::Signal,
-                        // This path synthesises the trade record rather than closing a
-                        // tracked Position, so no bar-by-bar extremes exist for it.
-                        // None means "not measured", never a zero excursion.
-                        mae_price: None,
-                        mfe_price: None,
-                        mae_pnl: None,
-                        mfe_pnl: None,
-                        money: None,
-                    });
-
-                    trade_counter += 1;
-
-                    trades.push(Trade {
-                        id: trade_counter,
-                        symbol: format!("{}_LEG2", signals.symbol),
-                        entry_idx: pos.entry_idx,
-                        exit_idx: i,
-                        entry_price: pos.leg2_entry_price,
-                        exit_price: leg2_fill,
-                        size: pos.leg2_size,
-                        direction: pos.leg2_direction,
-                        pnl: pnl / 2.0,
-                        return_pct: return_pct / 2.0,
-                        entry_time: leg2_ohlcv.timestamps[pos.entry_idx],
-                        exit_time: leg2_ohlcv.timestamps[i],
-                        fees: fees / 2.0,
-                        entry_fees: pos.entry_fees / 2.0,
-                        exit_fees: exit_fees / 2.0,
-                        fee_breakdown: None,
-                        exit_reason: ExitReason::Signal,
-                        // This path synthesises the trade record rather than closing a
-                        // tracked Position, so no bar-by-bar extremes exist for it.
-                        // None means "not measured", never a zero excursion.
-                        mae_price: None,
-                        mfe_price: None,
-                        mae_pnl: None,
-                        mfe_pnl: None,
-                        money: None,
-                    });
-
-                    trade_counter += 1;
+            let mut refused = Vec::new();
+            let mut entering = false;
+            for (k, (ohlcv, _, _)) in legs.iter().enumerate() {
+                if k == 0 {
+                    entering = entries[i] && all_flat(&book, 2);
+                    if entering {
+                        // The ratio sees up to the decision bar's close; under
+                        // `NextBarOpen` the kernel fills that decision a bar
+                        // later and the fill bar's close does not exist yet.
+                        fractions =
+                            self.leg_fractions(&leg1_ohlcv.close[..=i], &leg2_ohlcv.close[..=i]);
+                    }
                 }
-            }
-
-            // Check for entry
-            if entries[i] && position.is_none() {
-                // Determine direction from signal direction
-                let (leg1_dir, leg2_dir) = match signals.direction {
-                    Direction::Long => (Direction::Long, Direction::Short),
-                    Direction::Short => (Direction::Short, Direction::Long),
+                let input = StepInput {
+                    entry: entering && fractions[k] > 0.0,
+                    exit: exits[i] || unwind,
+                    size_mult: entering.then_some(fractions[k]),
+                    ..StepInput::default()
                 };
-
-                // Hedge ratio from the decision bar's window: under
-                // NextBarOpen the decision was made on bar i-1, whose close
-                // is the newest price the ratio may see.
-                let decision_idx = if next_open { i - 1 } else { i };
-                let hedge_ratio = if self.config.dynamic_hedge
-                    && decision_idx >= self.config.hedge_lookback
-                {
-                    self.calculate_hedge_ratio(
-                        &leg1_ohlcv.close[decision_idx - self.config.hedge_lookback..=decision_idx],
-                        &leg2_ohlcv.close[decision_idx - self.config.hedge_lookback..=decision_idx],
-                    )
-                } else {
-                    self.config.hedge_ratio
-                };
-
-                // Calculate position sizes, at the prices the fills pay
-                let allocation = cash * 0.5; // Use 50% per leg
-                let leg1_size = allocation / leg1_fill;
-                let leg2_size = (allocation * hedge_ratio) / leg2_fill;
-
-                let leg1_cost = leg1_size * leg1_fill;
-                let leg2_cost = leg2_size * leg2_fill;
-                let entry_fees = self.fee_model.calculate(leg1_fill, leg1_size, leg1_dir)
-                    + self.fee_model.calculate(leg2_fill, leg2_size, leg2_dir);
-
-                cash -= leg1_cost + leg2_cost + entry_fees;
-
-                position = Some(PairsPosition {
-                    entry_idx: i,
-                    leg1_entry_price: leg1_fill,
-                    leg2_entry_price: leg2_fill,
-                    leg1_size,
-                    leg2_size,
-                    leg1_direction: leg1_dir,
-                    leg2_direction: leg2_dir,
-                    leg1_cost,
-                    leg2_cost,
-                    entry_fees,
-                    hedge_ratio,
-                });
+                refused.extend(book.apply(&bar_entry(k, i, kernel_bar(ohlcv, i)), None, input));
             }
-
-            // Update equity
-            let position_value = if let Some(ref pos) = position {
-                let _leg1_value = pos.leg1_size * leg1_price;
-                let _leg2_value = pos.leg2_size * leg2_price;
-
-                // For pairs, value is long leg - short leg + cash equivalent
-                let leg1_pnl = (leg1_price - pos.leg1_entry_price)
-                    * pos.leg1_size
-                    * pos.leg1_direction.multiplier();
-                let leg2_pnl = (leg2_price - pos.leg2_entry_price)
-                    * pos.leg2_size
-                    * pos.leg2_direction.multiplier();
-
-                pos.leg1_cost + pos.leg2_cost + leg1_pnl + leg2_pnl
-            } else {
-                0.0
-            };
-
-            let equity = cash + position_value;
-            equity_curve[i] = equity;
-
-            // Update drawdown
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            drawdown_curve[i] = (peak_equity - equity) / peak_equity * 100.0;
-
-            // Calculate return
-            if i > 0 {
-                returns[i] = (equity - equity_curve[i - 1]) / equity_curve[i - 1];
-            }
+            unwind = half_entered(&book, 2, &refused);
         }
 
-        // Close any remaining position
-        if let Some(pos) = position.take() {
-            let last_idx = n - 1;
-            let leg1_price = leg1_ohlcv.close[last_idx];
-            let leg2_price = leg2_ohlcv.close[last_idx];
+        book.finish().result
+    }
 
-            let (pnl, exit_fees) = self.close_position(&pos, leg1_price, leg2_price);
-            let fees = pos.entry_fees + exit_fees;
-            let cost_basis = pos.leg1_cost + pos.leg2_cost;
-            let return_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
-
-            trades.push(Trade {
-                id: trade_counter,
-                symbol: signals.symbol.clone(),
-                entry_idx: pos.entry_idx,
-                exit_idx: last_idx,
-                entry_price: pos.leg1_entry_price,
-                exit_price: leg1_price,
-                size: pos.leg1_size + pos.leg2_size,
-                direction: pos.leg1_direction,
-                pnl,
-                return_pct,
-                entry_time: leg1_ohlcv.timestamps[pos.entry_idx],
-                exit_time: leg1_ohlcv.timestamps[last_idx],
-                fees,
-                entry_fees: pos.entry_fees,
-                exit_fees,
-                fee_breakdown: None,
-                exit_reason: ExitReason::EndOfData,
-                // This path synthesises the trade record rather than closing a
-                // tracked Position, so no bar-by-bar extremes exist for it.
-                // None means "not measured", never a zero excursion.
-                mae_price: None,
-                mfe_price: None,
-                mae_pnl: None,
-                mfe_pnl: None,
-                money: None,
-            });
-
-            // The close pays exit fees and the entry fees are in the pnl:
-            // the last equity point is the cash after both, so it matches
-            // initial capital plus the sum of trade pnl.
-            cash += cost_basis + pnl + pos.entry_fees;
-            let equity = cash;
-            equity_curve[last_idx] = equity;
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            drawdown_curve[last_idx] = (peak_equity - equity) / peak_equity * 100.0;
-            if last_idx > 0 {
-                returns[last_idx] =
-                    (equity - equity_curve[last_idx - 1]) / equity_curve[last_idx - 1];
-            }
-        }
-
-        // Calculate metrics
-        let metrics = self.calculate_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &leg1_ohlcv.timestamps[..],
-            &trades,
-        );
-
-        BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns)
+    /// The fraction of the free capital each leg asks for when it is sized.
+    ///
+    /// Each leg's notional is half the capital, leg 2's times the hedge ratio.
+    /// Above a ratio of one that is more than the account holds, so both are
+    /// scaled to fit. Leg 2 is sized after leg 1 has taken its share.
+    /// `closes` end at the decision bar.
+    fn leg_fractions(&self, leg1_closes: &[f64], leg2_closes: &[f64]) -> [f64; 2] {
+        let decision = leg1_closes.len() - 1;
+        let hedge_ratio = if self.config.dynamic_hedge && decision >= self.config.hedge_lookback {
+            self.calculate_hedge_ratio(
+                &leg1_closes[decision - self.config.hedge_lookback..=decision],
+                &leg2_closes[decision - self.config.hedge_lookback..=decision],
+            )
+        } else {
+            self.config.hedge_ratio
+        };
+        let fit = (2.0 / (1.0 + hedge_ratio)).min(1.0);
+        let leg1 = 0.5 * fit;
+        let leg2 = 0.5 * hedge_ratio * fit;
+        [leg1, leg2 / (1.0 - leg1)]
     }
 
     /// Calculate hedge ratio using OLS regression.
@@ -364,137 +180,6 @@ impl PairsBacktest {
         let beta = (n * sum_xy - sum_x * sum_y) / denominator;
         beta.clamp(0.1, 10.0) // Constrain to reasonable range
     }
-
-    /// Close position and calculate P&L, net of entry and exit fees.
-    /// Returns `(pnl, exit_fees)`.
-    fn close_position(
-        &self,
-        position: &PairsPosition,
-        leg1_price: f64,
-        leg2_price: f64,
-    ) -> (f64, f64) {
-        let leg1_pnl = (leg1_price - position.leg1_entry_price)
-            * position.leg1_size
-            * position.leg1_direction.multiplier();
-
-        let leg2_pnl = (leg2_price - position.leg2_entry_price)
-            * position.leg2_size
-            * position.leg2_direction.multiplier();
-
-        let exit_fees =
-            self.fee_model.calculate(leg1_price, position.leg1_size, position.leg1_direction)
-                + self.fee_model.calculate(leg2_price, position.leg2_size, position.leg2_direction);
-
-        let total_pnl = leg1_pnl + leg2_pnl - position.entry_fees - exit_fees;
-
-        (total_pnl, exit_fees)
-    }
-
-    /// Calculate metrics.
-    fn calculate_metrics(
-        &self,
-        equity_curve: &[f64],
-        drawdown_curve: &[f64],
-        returns: &[f64],
-        timestamps: &[i64],
-        trades: &[Trade],
-    ) -> BacktestMetrics {
-        let start_value = self.config.base.initial_capital;
-        let end_value = *equity_curve.last().unwrap_or(&start_value);
-
-        let total_return_pct = (end_value - start_value) / start_value * 100.0;
-        let max_drawdown_pct = drawdown_curve.iter().fold(0.0f64, |a, &b| a.max(b));
-
-        // For pairs, count trade pairs (every 2 trades = 1 round trip)
-        let total_trades = trades.len() / 2;
-        let winning_trades =
-            trades.chunks(2).filter(|chunk| chunk.iter().map(|t| t.pnl).sum::<f64>() > 0.0).count();
-        let losing_trades = total_trades.saturating_sub(winning_trades);
-
-        let win_rate_pct = if total_trades > 0 {
-            winning_trades as f64 / total_trades as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        let gross_profit: f64 = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).sum();
-        let gross_loss: f64 = trades.iter().filter(|t| t.pnl < 0.0).map(|t| t.pnl.abs()).sum();
-        let profit_factor = if gross_loss > 0.0 {
-            gross_profit / gross_loss
-        } else if gross_profit > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        // Sharpe/Sortino from per-bar returns, matching run_single_backtest.
-        //
-        // Through 0.4.1 this path annualized per-*trade* returns at a hardcoded
-        // 252, which assumes one trade per trading day and inflates the ratio by
-        // roughly sqrt(n_bars / n_trades). legacy_annualization restores that
-        // basis as well as the constant, so old results stay reproducible.
-        let (sharpe_ratio, sortino_ratio) = if self.config.base.legacy_annualization {
-            let mut streaming = StreamingMetrics::new();
-            for trade in trades {
-                streaming.update(trade.return_pct / 100.0);
-            }
-            (
-                streaming.sharpe_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
-                streaming.sortino_ratio(crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES),
-            )
-        } else {
-            let periods_per_year =
-                crate::metrics::annualization::resolve_periods_per_year_with_session(
-                    self.config.base.periods_per_year,
-                    timestamps,
-                    self.config.base.session_spec(),
-                    crate::metrics::annualization::LEGACY_PERIODS_STRATEGIES,
-                );
-            let (sharpe, sortino, _omega) = crate::portfolio::engine::risk_metrics(
-                returns,
-                periods_per_year,
-                self.config.base.risk_free_rate,
-            );
-            (sharpe, sortino)
-        };
-
-        BacktestMetrics {
-            total_return_pct,
-            sharpe_ratio,
-            sortino_ratio,
-            calmar_ratio: crate::metrics::drawdown::calmar_ratio(
-                total_return_pct,
-                max_drawdown_pct,
-            ),
-            max_drawdown_pct,
-            win_rate_pct,
-            profit_factor,
-            total_trades,
-            winning_trades,
-            losing_trades,
-            start_value,
-            end_value,
-            ..Default::default()
-        }
-    }
-}
-
-/// Internal pairs position state.
-#[derive(Debug, Clone)]
-struct PairsPosition {
-    entry_idx: usize,
-    leg1_entry_price: f64,
-    leg2_entry_price: f64,
-    leg1_size: f64,
-    leg2_size: f64,
-    leg1_direction: Direction,
-    leg2_direction: Direction,
-    leg1_cost: f64,
-    leg2_cost: f64,
-    /// Fees debited from cash when the pair was opened (both legs).
-    entry_fees: f64,
-    #[allow(dead_code)]
-    hedge_ratio: f64,
 }
 
 #[cfg(test)]

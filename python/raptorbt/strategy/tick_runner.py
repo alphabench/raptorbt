@@ -19,6 +19,8 @@ Two things are deliberately asymmetric with the bar runner:
 
 from __future__ import annotations
 
+from typing import Literal
+
 from raptorbt._raptorbt import BacktestConfig, InstrumentConfig, PortfolioResult
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.multi_runner import run_strategies
@@ -36,6 +38,8 @@ def run_tick_strategy(
     oms_type: str = "netting",
     account_type: str = "cash",
     leverage: float = 1.0,
+    corporate_actions=None,
+    adjustment_policy: Literal["raw", "adjusted"] | None = None,
 ) -> PortfolioResult:
     """Run one strategy over N instruments' tick streams.
 
@@ -49,6 +53,12 @@ def run_tick_strategy(
     ``on_bar`` and feed indicators registered without a ``stream_id``. These
     bars are a view: order matching still happens against ticks. Leave it
     ``None`` for a pure-tick strategy, where ``on_bar`` never fires.
+
+    ``corporate_actions`` and ``adjustment_policy`` are those of
+    :func:`~raptorbt.run_strategies`: splits, bonuses and cash dividends you
+    give, and what the prints mean. Only ``"raw"`` applies to ticks (an
+    ``"adjusted"`` policy is refused for a symbol with prints, which cannot be
+    restated).
 
     Everything else — account type, leverage, risk limits, OMS type — behaves
     as in :func:`run_portfolio_strategy`.
@@ -69,5 +79,7 @@ def run_tick_strategy(
         oms_type=oms_type,
         account_type=account_type,
         leverage=leverage,
+        corporate_actions=corporate_actions,
+        adjustment_policy=adjustment_policy,
         _via="run_tick_strategy",
     )[0]

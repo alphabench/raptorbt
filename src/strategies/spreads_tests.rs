@@ -704,8 +704,109 @@ fn the_metrics_summary_reports_the_costs_charged() {
 #[test]
 fn a_zero_quantity_leg_costs_nothing() {
     let premiums = vec![100.0; 6];
-    let result = costed_spread(&[(premiums, 0)], 0.001, Some("NFO-OPT"), None);
+    let alone = costed_spread(&[(premiums.clone(), 1)], 0.001, Some("NFO-OPT"), None);
+    let beside =
+        costed_spread(&[(premiums.clone(), 1), (premiums, 0)], 0.001, Some("NFO-OPT"), None);
 
-    let trade = &result.trades[0];
-    assert_eq!(trade.fees, 0.0, "a leg that trades nothing owes nothing");
+    assert_eq!(
+        beside.trades[0].fees, alone.trades[0].fees,
+        "a leg that trades nothing owes nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A structure is funded as a group
+//
+// A sold leg is funded alone at its fill, and a model that margins option
+// lines together only lowers the lock afterwards. An affordable structure was
+// refused when its sold leg, priced naked, did not fit. The bought legs go
+// first now and the sold ones lean on them.
+// ---------------------------------------------------------------------------
+
+/// A short iron condor, one lot of 50 per leg, on flat premiums, in a margin
+/// account under `model` with `capital`. Returns the result.
+fn condor_under(model: crate::accounts::MarginModel, capital: f64) -> BacktestResult {
+    let n = 6;
+    let timestamps: Vec<i64> = (0..n as i64).map(|i| i * 300_000_000_000).collect();
+    let underlying = vec![100.0; n];
+    let mut entries = vec![false; n];
+    entries[1] = true;
+    let mut exits = vec![false; n];
+    exits[4] = true;
+    // sold put 95, bought put 90, sold call 105, bought call 110
+    let legs = [
+        (OptionType::Put, 95.0, -1, 4.0),
+        (OptionType::Put, 90.0, 1, 1.0),
+        (OptionType::Call, 105.0, -1, 4.0),
+        (OptionType::Call, 110.0, 1, 1.0),
+    ];
+    let leg_configs = legs.iter().map(|(t, k, q, _)| LegConfig::new(*t, *k, *q, 50)).collect();
+    let premiums: Vec<Vec<f64>> = legs.iter().map(|(_, _, _, p)| vec![*p; n]).collect();
+    let config = SpreadConfig {
+        base: BacktestConfig {
+            initial_capital: capital,
+            fees: 0.0,
+            margin_model: Some(std::sync::Arc::new(model)),
+            ..Default::default()
+        },
+        spread_type: SpreadType::IronCondor,
+        leg_configs,
+        ..Default::default()
+    };
+    SpreadBacktest::new(config).run(&timestamps, &underlying, &premiums, &entries, &exits)
+}
+
+#[test]
+fn an_affordable_condor_is_not_refused_for_its_sold_legs() {
+    use crate::accounts::{LineView, MarginModel};
+    use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+
+    for model in
+        [MarginModel::DefinedRisk, MarginModel::SpreadCredit { seller_pct: 15.0, spread_pct: 5.0 }]
+    {
+        let spec = |strike: f64, right: OptionRight| {
+            InstrumentSpec::new(
+                "X",
+                InstrumentKind::Option {
+                    strike,
+                    right,
+                    underlying: Some("SPREAD".into()),
+                    binary: false,
+                },
+            )
+        };
+        let specs = [
+            spec(95.0, OptionRight::Put),
+            spec(90.0, OptionRight::Put),
+            spec(105.0, OptionRight::Call),
+            spec(110.0, OptionRight::Call),
+        ];
+        let lines: Vec<LineView<'_>> = [(-50.0, 4.0), (50.0, 1.0), (-50.0, 4.0), (50.0, 1.0)]
+            .iter()
+            .zip(&specs)
+            .map(|((q, p), s)| LineView::new(s, *q, *p))
+            .collect();
+        let grouped = model.group_required(&lines, 0).expect("the model prices the condor");
+        // Priced leg by leg (each sold leg naked) it costs far more than the
+        // group: that is the point.
+        let alone: f64 =
+            [0usize, 2].iter().map(|&k| model.required(&lines[k]).unwrap_or(f64::INFINITY)).sum();
+        assert!(grouped < alone, "{}: {grouped} vs {alone}", model.name());
+
+        // Room for the group, and for the bought legs before the sold ones
+        // lean on them, but far short of the sold legs priced alone.
+        let capital = 400.0;
+        assert!(capital < alone);
+        let result = condor_under(model.clone(), capital);
+        assert_eq!(result.trades.len(), 1, "{}: the condor opens", model.name());
+        // All four legs: a credit of (4 + 4 - 1 - 1) * 50, not the two bought
+        // legs alone.
+        assert_eq!(result.trades[0].entry_price, -300.0, "{}: every leg opened", model.name());
+
+        // Without room for the bought legs it does not open, and no leg is
+        // left behind.
+        let short = condor_under(model.clone(), 10.0);
+        assert!(short.trades.is_empty(), "{}: nothing opens", model.name());
+        assert!(short.equity_curve.iter().all(|e| (*e - 10.0).abs() < 1e-9));
+    }
 }

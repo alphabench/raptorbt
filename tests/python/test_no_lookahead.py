@@ -12,6 +12,7 @@ A second, separate check covers a leak that poisoning cannot see: under
 ``next_bar_open`` a decision must never fill inside the event that made it.
 """
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -134,178 +135,181 @@ def _poison_ticks(d, cut, rng):
 # ---------------------------------------------------------------------------
 # strategies
 # ---------------------------------------------------------------------------
-class _Recorder(Strategy):
-    """Logs everything it sees and does; subclasses decide."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _Recorder(Strategy):
+        """Logs everything it sees and does; subclasses decide."""
 
-    ticks = False
+        ticks = False
 
-    def __init__(self, mode="intent", nbo=False):
-        super().__init__()
-        self.mode = mode
-        self.nbo = nbo
-        self.trace: list[tuple] = []
-        self.violations: list[str] = []
-        # (kind, symbol) -> event time of an enter/exit decision not yet filled.
-        self._decided: dict = {}
+        def __init__(self, mode="intent", nbo=False):
+            super().__init__()
+            self.mode = mode
+            self.nbo = nbo
+            self.trace: list[tuple] = []
+            self.violations: list[str] = []
+            # (kind, symbol) -> event time of an enter/exit decision not yet filled.
+            self._decided: dict = {}
 
-    @staticmethod
-    def _key(ctx):
-        return getattr(ctx, "symbol", None)
+        @staticmethod
+        def _key(ctx):
+            return getattr(ctx, "symbol", None)
 
-    def _rec(self, ctx, kind, *payload, ets=None):
-        if ets is None and not self.ticks:
-            ets = int(ctx.timestamp)
-        self.trace.append((kind, ets, payload))
+        def _rec(self, ctx, kind, *payload, ets=None):
+            if ets is None and not self.ticks:
+                ets = int(ctx.timestamp)
+            self.trace.append((kind, ets, payload))
 
-    def _decide(self, ctx, kind, *detail):
-        """Record a decision; False when an earlier one is still unfilled."""
-        key = (kind, self._key(ctx))
-        if kind in ("enter", "exit"):
-            if key in self._decided:
-                return False
-            self._decided[key] = None if self.ticks else int(ctx.timestamp)
-        self._rec(ctx, "decide", kind, self._key(ctx), *detail)
-        return True
+        def _decide(self, ctx, kind, *detail):
+            """Record a decision; False when an earlier one is still unfilled."""
+            key = (kind, self._key(ctx))
+            if kind in ("enter", "exit"):
+                if key in self._decided:
+                    return False
+                self._decided[key] = None if self.ticks else int(ctx.timestamp)
+            self._rec(ctx, "decide", kind, self._key(ctx), *detail)
+            return True
 
-    def on_order_filled(self, ctx, e):
-        self._rec(ctx, "fill", self._key(ctx), e.kind, e.idx, e.price, e.size)
+        def on_fill(self, ctx, e):
+            self._rec(ctx, "fill", self._key(ctx), e.kind, e.idx, e.price, e.size)
 
-    def on_order_rejected(self, ctx, e):
-        self._rec(ctx, "reject", self._key(ctx), e.kind, e.idx, e.reject_reason)
-        self._decided.pop(("enter", self._key(ctx)), None)
-        self._decided.pop(("exit", self._key(ctx)), None)
+        def on_order_rejected(self, ctx, e):
+            self._rec(ctx, "reject", self._key(ctx), e.kind, e.idx, e.reject_reason)
+            self._decided.pop(("enter", self._key(ctx)), None)
+            self._decided.pop(("exit", self._key(ctx)), None)
 
-    def _check_same_event(self, ctx, decision, what):
-        decided_at = self._decided.pop((decision, self._key(ctx)), None)
-        if self.nbo and not self.ticks and decided_at == int(ctx.timestamp):
-            self.violations.append(
-                f"{what} of {self._key(ctx)} filled in the event that decided it "
-                f"(ts {int(ctx.timestamp)})"
+        def _check_same_event(self, ctx, decision, what):
+            decided_at = self._decided.pop((decision, self._key(ctx)), None)
+            if self.nbo and not self.ticks and decided_at == int(ctx.timestamp):
+                self.violations.append(
+                    f"{what} of {self._key(ctx)} filled in the event that decided it "
+                    f"(ts {int(ctx.timestamp)})"
+                )
+
+        def on_position_opened(self, ctx, e):
+            self._rec(ctx, "open", self._key(ctx), e.price, e.size)
+            self._check_same_event(ctx, "enter", "entry")
+
+        def on_position_closed(self, ctx, e):
+            self._rec(ctx, "close", self._key(ctx), e.price, e.size)
+            self._check_same_event(ctx, "exit", "exit")
+
+        # -- actions shared by bar and tick strategies -----------------------------
+        def _enter(self, ctx, size_hint):
+            if not self._decide(ctx, "enter", self.mode):
+                return
+            if self.mode == "orders":
+                self.submit_order(orders.Market(side="buy", units=10.0))
+            else:
+                self.enter(size_frac=size_hint)
+
+        def _exit(self, ctx, pos):
+            if not self._decide(ctx, "exit", self.mode, pos.size):
+                return
+            if self.mode == "orders":
+                self.submit_order(orders.Market(side="sell", units=pos.size, reduce_only=True))
+            elif self.mode == "targeted":
+                self.close_position(symbol=self._key(ctx) or "ASSET")
+            else:
+                self.close_position()
+
+
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _BarProbe(_Recorder):
+        """Dual SMA on the primary stream, gated by a 15m composite SMA."""
+
+        def on_start(self, ctx):
+            syms = list(getattr(ctx, "symbols", [None]))
+            # A single-instrument run keys everything by ``None``.
+            self.fast = self.register_indicators(lambda: Indicator.sma(5), syms)
+            self.slow = self.register_indicators(lambda: Indicator.sma(12), syms)
+            self.sid15 = self.subscribe_bars(15, "m")
+            self.sid1h = self.subscribe_bars(1, "h")
+            self.comp = self.register_indicators(
+                lambda: Indicator.sma(3), syms, stream_id=self.sid15
             )
+            self.last15: dict = {}
 
-    def on_position_opened(self, ctx, e):
-        self._rec(ctx, "open", self._key(ctx), e.price, e.size)
-        self._check_same_event(ctx, "enter", "entry")
+        @staticmethod
+        def _history(ctx, n=5):
+            if hasattr(ctx, "history"):
+                return ctx.history(n).tolist()
+            close = ctx.series()["close"]
+            return close[max(0, ctx.idx + 1 - n) : ctx.idx + 1].tolist()
 
-    def on_position_closed(self, ctx, e):
-        self._rec(ctx, "close", self._key(ctx), e.price, e.size)
-        self._check_same_event(ctx, "exit", "exit")
+        def on_composite_bar(self, ctx, bar):
+            sym = bar.symbol
+            if bar.stream_id == self.sid15:
+                self.last15[sym] = bar.close
+            self._rec(ctx, "comp", sym, bar[:-1])
 
-    # -- actions shared by bar and tick strategies -----------------------------
-    def _enter(self, ctx, size_hint):
-        if not self._decide(ctx, "enter", self.mode):
-            return
-        if self.mode == "orders":
-            self.submit_order(orders.Market(side="buy", units=10.0))
-        else:
-            self.enter(size_frac=size_hint)
-
-    def _exit(self, ctx, pos):
-        if not self._decide(ctx, "exit", self.mode, pos.size):
-            return
-        if self.mode == "orders":
-            self.submit_order(orders.Market(side="sell", units=pos.size, reduce_only=True))
-        elif self.mode == "targeted":
-            self.close_position(symbol=self._key(ctx) or "ASSET")
-        else:
-            self.close_position()
-
-
-class _BarProbe(_Recorder):
-    """Dual SMA on the primary stream, gated by a 15m composite SMA."""
-
-    def on_start(self, ctx):
-        syms = list(getattr(ctx, "symbols", [None]))
-        # A single-instrument run keys everything by ``None``.
-        self.fast = self.register_indicators(lambda: Indicator.sma(5), syms)
-        self.slow = self.register_indicators(lambda: Indicator.sma(12), syms)
-        self.sid15 = self.subscribe_bars(15, "m")
-        self.sid1h = self.subscribe_bars(1, "h")
-        self.comp = self.register_indicators(
-            lambda: Indicator.sma(3), syms, stream_id=self.sid15
-        )
-        self.last15: dict = {}
-
-    @staticmethod
-    def _history(ctx, n=5):
-        if hasattr(ctx, "history"):
-            return ctx.history(n).tolist()
-        close = ctx.series()["close"]
-        return close[max(0, ctx.idx + 1 - n) : ctx.idx + 1].tolist()
-
-    def on_composite_bar(self, ctx, bar):
-        sym = bar.symbol
-        if bar.stream_id == self.sid15:
-            self.last15[sym] = bar.close
-        self._rec(ctx, "comp", sym, bar[:-1])
-
-    def on_bar(self, ctx):
-        sym = self._key(ctx)
-        fast, slow, comp = self.fast[sym].value, self.slow[sym].value, self.comp[sym].value
-        pos = ctx.position
-        self._rec(
-            ctx, "bar", sym, tuple(ctx.bar), fast, slow, comp, self.last15.get(sym),
-            None if pos is None else (pos.size, pos.entry_price),
-            ctx.equity, ctx.cash, self._history(ctx),
-        )
-        if self.mode == "orders" and ctx.idx % 40 == 7 and pos is None:
-            px = round(ctx.bar.close * 0.997, 2)
-            self._decide(ctx, "limit", px)
-            self.submit_order(orders.Limit(side="buy", units=3.0, price=px))
-        if fast is None or slow is None:
-            return
-        gate = comp is None or self.last15.get(sym, 0.0) >= comp
-        if pos is None and fast > slow and gate:
-            self._enter(ctx, 0.2)
-        elif pos is not None and fast < slow:
-            self._exit(ctx, pos)
+        def on_bar(self, ctx):
+            sym = self._key(ctx)
+            fast, slow, comp = self.fast[sym].value, self.slow[sym].value, self.comp[sym].value
+            pos = ctx.position
+            self._rec(
+                ctx, "bar", sym, tuple(ctx.bar), fast, slow, comp, self.last15.get(sym),
+                None if pos is None else (pos.size, pos.entry_price),
+                ctx.equity, ctx.cash, self._history(ctx),
+            )
+            if self.mode == "orders" and ctx.idx % 40 == 7 and pos is None:
+                px = round(ctx.bar.close * 0.997, 2)
+                self._decide(ctx, "limit", px)
+                self.submit_order(orders.Limit(side="buy", units=3.0, price=px))
+            if fast is None or slow is None:
+                return
+            gate = comp is None or self.last15.get(sym, 0.0) >= comp
+            if pos is None and fast > slow and gate:
+                self._enter(ctx, 0.2)
+            elif pos is not None and fast < slow:
+                self._exit(ctx, pos)
 
 
-class _TickProbe(_Recorder):
-    """Rolling-mean cross on prints, with quote, primary-bar and composite inputs."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _TickProbe(_Recorder):
+        """Rolling-mean cross on prints, with quote, primary-bar and composite inputs."""
 
-    ticks = True
+        ticks = True
 
-    def on_start(self, ctx):
-        syms = list(ctx.symbols)
-        self.prices = {s: [] for s in syms}
-        self.bar_fast = self.register_indicators(lambda: Indicator.sma(3), syms)
-        self.sid = self.subscribe_bars(15, "m")
-        self.comp = self.register_indicators(
-            lambda: Indicator.sma(2), syms, stream_id=self.sid
-        )
-        self.last15: dict = {}
+        def on_start(self, ctx):
+            syms = list(ctx.symbols)
+            self.prices = {s: [] for s in syms}
+            self.bar_fast = self.register_indicators(lambda: Indicator.sma(3), syms)
+            self.sid = self.subscribe_bars(15, "m")
+            self.comp = self.register_indicators(
+                lambda: Indicator.sma(2), syms, stream_id=self.sid
+            )
+            self.last15: dict = {}
 
-    def on_composite_bar(self, ctx, bar):
-        self.last15[bar.symbol] = bar.close
-        self._rec(ctx, "comp", bar.symbol, bar[:-1])
+        def on_composite_bar(self, ctx, bar):
+            self.last15[bar.symbol] = bar.close
+            self._rec(ctx, "comp", bar.symbol, bar[:-1])
 
-    def on_bar(self, ctx):
-        sym = self._key(ctx)
-        self._rec(ctx, "bar", sym, tuple(ctx.bar), self.bar_fast[sym].value)
+        def on_bar(self, ctx):
+            sym = self._key(ctx)
+            self._rec(ctx, "bar", sym, tuple(ctx.bar), self.bar_fast[sym].value)
 
-    def on_quote(self, ctx, quote):
-        self._rec(ctx, "quote", self._key(ctx), tuple(quote), ets=quote.timestamp)
+        def on_quote(self, ctx, quote):
+            self._rec(ctx, "quote", self._key(ctx), tuple(quote), ets=quote.timestamp)
 
-    def on_trade_tick(self, ctx, tick):
-        sym = self._key(ctx)
-        px = self.prices[sym]
-        px.append(tick.price)
-        pos = ctx.position
-        short = sum(px[-10:]) / len(px[-10:])
-        long_ = sum(px[-30:]) / len(px[-30:])
-        self._rec(
-            ctx, "tick", sym, tuple(tick), short, long_, self.bar_fast[sym].value,
-            self.comp[sym].value, self.last15.get(sym), ctx.best_bid, ctx.best_ask,
-            None if pos is None else (pos.size, pos.entry_price), ctx.equity,
-            ets=tick.timestamp,
-        )
-        if len(px) < 30:
-            return
-        if pos is None and short > long_:
-            self._enter(ctx, 0.2)
-        elif pos is not None and short < long_:
-            self._exit(ctx, pos)
+        def on_trade(self, ctx, tick):
+            sym = self._key(ctx)
+            px = self.prices[sym]
+            px.append(tick.price)
+            pos = ctx.position
+            short = sum(px[-10:]) / len(px[-10:])
+            long_ = sum(px[-30:]) / len(px[-30:])
+            self._rec(
+                ctx, "tick", sym, tuple(tick), short, long_, self.bar_fast[sym].value,
+                self.comp[sym].value, self.last15.get(sym), ctx.best_bid, ctx.best_ask,
+                None if pos is None else (pos.size, pos.entry_price), ctx.equity,
+                ets=tick.timestamp,
+            )
+            if len(px) < 30:
+                return
+            if pos is None and short > long_:
+                self._enter(ctx, 0.2)
+            elif pos is not None and short < long_:
+                self._exit(ctx, pos)
 
 
 # ---------------------------------------------------------------------------
@@ -324,18 +328,27 @@ def _stamp_kwargs(stamp):
     return {"bar_stamp": "open", "bar_ns": MIN_NS} if stamp == "open" else {"bar_stamp": "close"}
 
 
+def _legacy_warns(stamp):
+    """Legacy bars (no declared stamp) run with the deprecation warning, which is
+    part of what this test exercises; a declared stamp must not warn."""
+    if stamp is None:
+        return pytest.warns(DeprecationWarning, match="bar_stamp not given")
+    return contextlib.nullcontext()
+
+
 def _run(runner, strategy, data, timing, stamp=None, portfolio_runner=None, tick_runner=None):
     cfg = _cfg(timing)
-    if runner == "single":
-        sym = next(iter(data))
-        return raptorbt.run_strategy_backtest(
-            strategy, **data[sym], config=cfg, **_stamp_kwargs(stamp)
-        ).trades()
-    if runner == "portfolio":
-        return portfolio_runner(
-            strategy, data, config=cfg, **_stamp_kwargs(stamp)
-        ).result.trades()
-    return tick_runner(strategy, data, config=cfg, primary_bars=(5, "m")).result.trades()
+    if runner == "tick":
+        return tick_runner(strategy, data, config=cfg, primary_bars=(5, "m")).result.trades()
+    with _legacy_warns(stamp):
+        if runner == "single":
+            sym = next(iter(data))
+            result = raptorbt.run_strategy_backtest(
+                strategy, **data[sym], config=cfg, **_stamp_kwargs(stamp)
+            )
+        else:
+            result = portfolio_runner(strategy, data, config=cfg, **_stamp_kwargs(stamp)).result
+    return result.trades()
 
 
 def _stamped(log):

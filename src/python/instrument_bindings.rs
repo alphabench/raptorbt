@@ -114,6 +114,23 @@ fn with_meta(
 
 #[pymethods]
 impl PyInstrumentSpec {
+    /// The spec as JSON text: every field, so `from_json` rebuilds an equal spec. The same spec
+    /// always gives the same text (a node journals this when an instrument is added to it).
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            refuse("invalid_parameter", "InstrumentSpec.to_json", "spec", e.to_string(), "spec")
+        })
+    }
+
+    /// Rebuild a spec from the text `to_json` wrote.
+    #[staticmethod]
+    fn from_json(text: &str) -> PyResult<Self> {
+        let inner: InstrumentSpec = serde_json::from_str(text).map_err(|e| {
+            refuse("invalid_parameter", "InstrumentSpec.from_json", "text", e.to_string(), "text")
+        })?;
+        Ok(Self { inner })
+    }
+
     /// A cash equity / spot instrument.
     #[staticmethod]
     #[pyo3(signature = (symbol, price_increment=0.0, lot_size=1.0, size_increment=0.0,

@@ -15,6 +15,7 @@ from .base import (
     AuthExpired,
     BrokerAdapter,
     Instrument,
+    MalformedRow,
     OrderStatusUpdate,
     QueuedReport,
     Secret,
@@ -25,6 +26,7 @@ from .base import (
     VenueOrder,
     VenuePosition,
     VenueRefusal,
+    new_namespace,
 )
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "IdCodec",
     "InlineExecutor",
     "Instrument",
+    "MalformedRow",
     "ManualExecutor",
     "OrderStatusUpdate",
     "QueuedReport",
@@ -51,5 +54,6 @@ __all__ = [
     "VenueOrder",
     "VenuePosition",
     "VenueRefusal",
+    "new_namespace",
     "reconnect_loop",
 ]

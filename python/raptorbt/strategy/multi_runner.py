@@ -55,6 +55,8 @@ from raptorbt.strategy._commands import (
     session_tz_offset_ns,
 )
 from raptorbt.strategy import api
+from raptorbt.strategy import context_host
+from raptorbt.strategy import order_check as order_check_mod
 from raptorbt.strategy.accounts import (
     AccountSpec,
     check_accounts,
@@ -315,7 +317,7 @@ def _normalise(strategies, data, call="run_strategies"):
     return out
 
 
-def _add_strategy(rt, strategy, symbols, adopt=None, stacklevel=4, account=None):
+def _add_strategy(rt, strategy, symbols, adopt=None, stacklevel=4, account=None, host=None):
     """Reset ``strategy``, register it with ``rt`` over ``symbols`` and run its
     ``on_start``; returns ``(sid, ctx, view)``.
 
@@ -330,7 +332,7 @@ def _add_strategy(rt, strategy, symbols, adopt=None, stacklevel=4, account=None)
     strategy.clock = Clock()
     strategy.cache = Cache()
     sid, ctx, view = rt.add_strategy(symbols, account)
-    api.begin(strategy, ctx, symbols)
+    api.begin(strategy, ctx, symbols, host=host)
     if adopt is not None:
         adopt(sid)
     strategy.on_start(ctx)
@@ -385,6 +387,8 @@ def _run_group(
     accounts=None,
     corporate_actions=(),
     adjustment_policy=None,
+    order_check=None,
+    host=None,
 ):
     """One runtime over ``entries``; returns ``(results, report, account_results)``.
 
@@ -414,6 +418,7 @@ def _run_group(
         BookSnapshot,
     )
     try:
+        order_check_mod.install(rt, order_check, "run_strategies")
         if primary_bars is not None:
             rt.set_primary_bars(*primary_bars)
         gids = {}
@@ -433,7 +438,9 @@ def _run_group(
         setups = []
         for k, (strategy, symbols) in enumerate(entries):
             gid = gids.get(names[k]) if names else None
-            sid, ctx, _ = _add_strategy(rt, strategy, symbols, stacklevel=stacklevel, account=gid)
+            sid, ctx, _ = _add_strategy(
+                rt, strategy, symbols, stacklevel=stacklevel, account=gid, host=host
+            )
             setups.append((strategy, sid, ctx))
         if adjustment_policy is not None:
             rt.set_corporate_actions(list(corporate_actions), adjustment_policy)
@@ -546,6 +553,8 @@ def run_strategies(
     memory_report: bool = False,
     corporate_actions: Iterable[CorporateAction] | None = None,
     adjustment_policy: Literal["raw", "adjusted"] | None = None,
+    order_check=None,
+    bindings: dict[str, str] | None = None,
     _via: str | None = None,
 ) -> (
     list[PortfolioResult]
@@ -651,6 +660,15 @@ def run_strategies(
     ``"adjusted"`` needs bars (it refuses a symbol with ticks that has actions).
     A dividend is credited on its ``pay_ts`` (default the ex-date) to the
     holder at the ex-date; a short pays it. See ``docs/architecture/lifecycle.md``.
+
+    ``order_check`` is the host's pre-submit order check, shared with
+    :class:`~raptorbt.LiveNode` so one rule refuses the same orders in a
+    backtest and live; see :mod:`raptorbt.strategy.order_check`.
+
+    ``bindings`` maps a requirements role name to the symbol it means
+    (``{"index": "NSE:NIFTY"}``); with ``instruments=`` it is what
+    ``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer from, as on a
+    :class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
 
     ``keep_curves=False`` drops the equity, drawdown and returns curves from
     the results (the final equity value stays as a one-element curve); trades,
@@ -768,6 +786,8 @@ def run_strategies(
         stacklevel=4 + extra,
         corporate_actions=corporate_actions,
         adjustment_policy=adjustment_policy,
+        order_check=order_check,
+        host=context_host.build(instruments, bindings, entries, universe, call),
     )
     size = 1 if not share else (batch_size or _AUTO_BATCH)
     results: list = [None] * len(entries)

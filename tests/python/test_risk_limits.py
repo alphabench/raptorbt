@@ -93,7 +93,7 @@ class Script(Strategy):
     def on_order_canceled(self, ctx, event):
         self.canceled += 1
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         self.filled.append((event.idx, event.size))
 
 
@@ -105,15 +105,15 @@ def _result(res):
 
 
 def _via_backtest(strategy, data, config, **kw):
-    return run_strategy_backtest(strategy, **data, symbol="S", config=config, **kw)
+    return run_strategy_backtest(strategy, **data, symbol="S", config=config, **kw, bar_stamp="close")
 
 
 def _via_portfolio(strategy, data, config, **kw):
-    return run_portfolio_strategy(strategy, {"S": data}, config=config, **kw)
+    return run_portfolio_strategy(strategy, {"S": data}, config=config, **kw, bar_stamp="close")
 
 
 def _via_shared(strategy, data, config, **kw):
-    return run_strategies([strategy], {"S": data}, config, **kw)[0]
+    return run_strategies([strategy], {"S": data}, config, **kw, bar_stamp="close")[0]
 
 
 def _via_stream(strategy, data, config, **kw):
@@ -181,12 +181,14 @@ class TestOrderSize:
         # 2 contracts x 100 x 50 = 10_000
         ok = Script({1: [("buy", 2.0)]})
         run_strategy_backtest(
-            ok, **data, symbol="S", config=_config(max_order_notional=10_000.0), instrument=spec
+            ok, **data, symbol="S", config=_config(max_order_notional=10_000.0), instrument=spec,
+            bar_stamp="close",
         )
         assert ok.rejected == []
         over = Script({1: [("buy", 2.0)]})
         run_strategy_backtest(
-            over, **data, symbol="S", config=_config(max_order_notional=9_999.0), instrument=spec
+            over, **data, symbol="S", config=_config(max_order_notional=9_999.0), instrument=spec,
+            bar_stamp="close",
         )
         assert over.rejected == [(1, "order_size")]
 
@@ -217,7 +219,8 @@ class TestPositionSize:
         data = _bars([100.0] * 6)
         s = Script({1: [("buy", 6.0)], 2: [("buy", 4.0)], 3: [("buy", 1.0)]})
         res = run_strategy_backtest(
-            s, **data, symbol="S", config=_config(max_position_qty=10.0), oms_type="hedging"
+            s, **data, symbol="S", config=_config(max_position_qty=10.0), oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.filled == [(1, 6.0), (2, 4.0)]
         assert s.rejected == [(3, "max_position")]
@@ -226,7 +229,7 @@ class TestPositionSize:
     def test_a_single_order_above_the_cap_is_refused_whole(self):
         data = _bars([100.0] * 4)
         s = Script({1: [("buy", 10.5)]})
-        run_strategy_backtest(s, **data, symbol="S", config=_config(max_position_qty=10.0))
+        run_strategy_backtest(s, **data, symbol="S", config=_config(max_position_qty=10.0), bar_stamp="close")
         assert s.rejected == [(1, "max_position")] and s.filled == []
 
     def test_short_positions_are_capped_in_magnitude(self):
@@ -241,6 +244,7 @@ class TestPositionSize:
             oms_type="hedging",
             account_type="margin",
             leverage=2.0,
+            bar_stamp="close",
         )
         assert s.filled == [(1, 10.0)]
         assert s.rejected == [(2, "max_position")]
@@ -249,7 +253,8 @@ class TestPositionSize:
         data = _bars([100.0] * 6)
         s = Script({1: [("buy", 10.0)], 2: [("sell", 4.0)], 3: [("buy", 4.0)]})
         run_strategy_backtest(
-            s, **data, symbol="S", config=_config(max_position_qty=10.0), oms_type="hedging"
+            s, **data, symbol="S", config=_config(max_position_qty=10.0), oms_type="hedging",
+            bar_stamp="close",
         )
         # Hedging opens a short of 4, so the net is 6; the buy brings it back
         # to exactly 10, which passes.
@@ -270,11 +275,11 @@ class TestGrossExposure:
         # A: 10 x 100 = 1000 held; B adds 1000 -> 2000.
         script = {1: [("buy", 10.0, "A")], 2: [("buy", 10.0, "B")]}
         ok = Script(script)
-        run_portfolio_strategy(ok, data, config=_config(max_gross_exposure=2000.0))
+        run_portfolio_strategy(ok, data, config=_config(max_gross_exposure=2000.0), bar_stamp="close")
         assert ok.rejected == [] and len(ok.filled) == 2
 
         over = Script(script)
-        run_portfolio_strategy(over, data, config=_config(max_gross_exposure=1999.99))
+        run_portfolio_strategy(over, data, config=_config(max_gross_exposure=1999.99), bar_stamp="close")
         assert over.rejected == [(2, "max_exposure")]
         assert len(over.filled) == 1
 
@@ -284,17 +289,18 @@ class TestGrossExposure:
         data = _two([100.0, 100.0, 200.0, 200.0], [100.0] * 4)
         script = {1: [("buy", 10.0, "A")], 2: [("buy", 10.0, "B")]}
         s = Script(script)
-        run_portfolio_strategy(s, data, config=_config(max_gross_exposure=2999.0))
+        run_portfolio_strategy(s, data, config=_config(max_gross_exposure=2999.0), bar_stamp="close")
         assert s.rejected == [(2, "max_exposure")]
         s = Script(script)
-        run_portfolio_strategy(s, data, config=_config(max_gross_exposure=3000.0))
+        run_portfolio_strategy(s, data, config=_config(max_gross_exposure=3000.0), bar_stamp="close")
         assert s.rejected == []
 
     def test_within_one_instrument(self):
         data = _bars([100.0] * 5)
         s = Script({1: [("buy", 5.0)], 2: [("buy", 5.0)], 3: [("buy", 1.0)]})
         run_strategy_backtest(
-            s, **data, symbol="S", config=_config(max_gross_exposure=1000.0), oms_type="hedging"
+            s, **data, symbol="S", config=_config(max_gross_exposure=1000.0), oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.filled == [(1, 5.0), (2, 5.0)]
         assert s.rejected == [(3, "max_exposure")]
@@ -303,7 +309,7 @@ class TestGrossExposure:
         data = _two([100.0] * 4)
         script = {1: [("buy", 10.0, "A")], 2: [("buy", 10.0, "B")]}
         a, b = Script(script), Script(script)
-        run_strategies([a, b], data, _config(max_gross_exposure=1500.0))
+        run_strategies([a, b], data, _config(max_gross_exposure=1500.0), bar_stamp="close")
         assert a.rejected == b.rejected == [(2, "max_exposure")]
 
 
@@ -332,6 +338,7 @@ class TestDailyLoss:
             symbol="S",
             config=_config(**limits),
             oms_type="hedging",
+            bar_stamp="close",
         )
         return s
 
@@ -371,7 +378,8 @@ class TestDailyLoss:
         closes = [100.0, 100.0, 90.0, 90.0, 90.0, 85.0, 85.0, 85.0]
         s = Script({1: [("buy", 100.0)], 3: [("buy", 1.0)], 6: [("buy", 1.0)]})
         run_strategy_backtest(
-            s, **_days(closes), symbol="S", config=_config(max_daily_loss=1000.0), oms_type="hedging"
+            s, **_days(closes), symbol="S", config=_config(max_daily_loss=1000.0), oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.rejected == [(3, "daily_loss")]
         assert 6 in [i for i, _ in s.filled]
@@ -386,6 +394,7 @@ class TestDailyLoss:
             symbol="S",
             config=_config(max_daily_loss=1000.0, session_tz_offset_ns=6 * HOUR),
             oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.rejected == []
 
@@ -394,7 +403,7 @@ class TestDailyLoss:
         cfg = _config(max_daily_loss=1.0, session_tz_offset_ns=2 * HOUR)
         data = _bars([100.0, 100.0, 99.0, 99.0], start=21 * HOUR, step=HOUR)
         s = Script({0: [("buy", 1.0)], 3: [("buy", 1.0)]})
-        run_strategy_backtest(s, **data, symbol="S", config=cfg, oms_type="hedging")
+        run_strategy_backtest(s, **data, symbol="S", config=cfg, oms_type="hedging", bar_stamp="close")
         # Bars at 21h, 22h | 23h (local midnight) , 24h. The 1.0 loss lands at
         # 23h (a new local day), then bar 3 (24h, same local day) is refused.
         assert s.rejected == [(3, "daily_loss")]
@@ -407,12 +416,14 @@ class TestDailyLoss:
             **data,
             symbol="S",
             config=_config(max_daily_loss=1000.0),
+            bar_stamp="close",
         )
         flat = run_strategy_backtest(
             Script({1: [("buy", 100.0)]}),
             **data,
             symbol="S",
             config=_config(max_daily_loss=1000.0, flatten_on_daily_loss=True),
+            bar_stamp="close",
         )
         # Not flattened: rides to the end of data and loses 3000.
         assert keep.trades()[0].exit_reason == "EndOfData"
@@ -433,6 +444,7 @@ class TestDailyLoss:
             **_days(closes),
             symbol="S",
             config=_config(max_daily_loss=1000.0, flatten_on_daily_loss=True),
+            bar_stamp="close",
         )
         assert s.rejected == []
         assert len(res.trades()) == 2
@@ -444,6 +456,7 @@ class TestDailyLoss:
             symbol="S",
             config=_config(max_daily_loss=1000.0),
             oms_type="hedging",
+            bar_stamp="close",
         )
         assert res.halted is False
 
@@ -464,7 +477,8 @@ class TestKillSwitch:
     def test_ctx_halt_refuses_entries_and_reports_halted(self):
         s = Script({1: [("buy", 10.0)], 2: [("halt", False)], 4: [("buy", 5.0)]})
         res = run_strategy_backtest(
-            s, **self.DATA, symbol="S", config=_config(), oms_type="hedging"
+            s, **self.DATA, symbol="S", config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.rejected == [(4, "killed")]
         assert res.halted is True and res.halted_at is not None
@@ -473,7 +487,7 @@ class TestKillSwitch:
 
     def test_ctx_halt_with_flatten_closes_positions_at_the_last_close(self):
         s = Script({1: [("buy", 10.0)], 3: [("halt", True)]})
-        res = run_strategy_backtest(s, **self.DATA, symbol="S", config=_config())
+        res = run_strategy_backtest(s, **self.DATA, symbol="S", config=_config(), bar_stamp="close")
         trade = res.trades()[0]
         assert trade.exit_reason == "Liquidation"
         # Halted on bar 3, applied as bar 3 is stepped, at the last mark: bar 2.
@@ -482,7 +496,7 @@ class TestKillSwitch:
 
     def test_halt_cancels_working_orders(self):
         s = Script({0: [("limit_buy", 50.0, 10.0)], 2: [("halt", False)]})
-        res = run_strategy_backtest(s, **self.DATA, symbol="S", config=_config())
+        res = run_strategy_backtest(s, **self.DATA, symbol="S", config=_config(), bar_stamp="close")
         assert s.canceled == 1
         assert res.orders()[0].status == "canceled"
 
@@ -494,12 +508,12 @@ class TestKillSwitch:
                 super().on_bar(ctx)
 
         s = Halts({4: [("buy", 1.0)]})
-        run_strategy_backtest(s, **self.DATA, symbol="S", config=_config())
+        run_strategy_backtest(s, **self.DATA, symbol="S", config=_config(), bar_stamp="close")
         assert ("risk_halted", "loss of nerve") in s.risk
         assert ("risk_rejected", "killed") in s.risk
 
     def test_no_halt_without_a_request(self):
-        res = run_strategy_backtest(Script({1: [("buy", 1.0)]}), **self.DATA, config=_config())
+        res = run_strategy_backtest(Script({1: [("buy", 1.0)]}), **self.DATA, config=_config(), bar_stamp="close")
         assert res.halted is False and res.halted_at is None
 
     @pytest.mark.parametrize("name", ["portfolio", "shared", "stream", "node"])
@@ -513,7 +527,7 @@ class TestKillSwitch:
     def test_halt_closes_every_instrument_in_a_portfolio(self):
         data = _two([100.0] * 6)
         s = Script({1: [("buy", 5.0, "A"), ("buy", 5.0, "B")], 3: [("halt", True)]})
-        res = run_portfolio_strategy(s, data, config=_config())
+        res = run_portfolio_strategy(s, data, config=_config(), bar_stamp="close")
         reasons = sorted(t.exit_reason for t in res.result.trades())
         assert reasons == ["Liquidation", "Liquidation"]
         assert res.halted is True
@@ -589,6 +603,7 @@ class TestRiskEvents:
             symbol="S",
             config=_config(max_daily_loss=1000.0),
             oms_type="hedging",
+            bar_stamp="close",
         )
         assert s.risk == [("risk_halted", "daily_loss"), ("risk_rejected", "daily_loss")]
 
@@ -600,7 +615,7 @@ class TestRiskEvents:
                 events.append(event)
 
         s = Spy({1: [("buy", 50.0)]})
-        run_strategy_backtest(s, **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0))
+        run_strategy_backtest(s, **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0), bar_stamp="close")
         (event,) = events
         assert event.kind == "risk_rejected"
         assert event.order_id is not None and event.client_order_id
@@ -614,7 +629,7 @@ class TestRiskEvents:
                 events.append(event)
 
         s = Spy({1: [("enter", 0.5)]})
-        run_strategy_backtest(s, **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0))
+        run_strategy_backtest(s, **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0), bar_stamp="close")
         assert [e.order_id for e in events] == [None]
 
     def test_the_hook_is_a_no_op_by_default(self):
@@ -623,11 +638,11 @@ class TestRiskEvents:
                 if ctx.idx == 1:
                     self.submit_order(orders.Market(side="buy", units=50.0))
 
-        run_strategy_backtest(Plain(), **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0))
+        run_strategy_backtest(Plain(), **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0), bar_stamp="close")
 
     def test_existing_reasons_do_not_raise_risk_events(self):
         s = Script({1: [("buy", 1.0)], 2: [("buy", 1.0)]})  # netting: position_open
-        run_strategy_backtest(s, **_bars([100.0] * 4), symbol="S", config=_config(max_order_qty=10.0))
+        run_strategy_backtest(s, **_bars([100.0] * 4), symbol="S", config=_config(max_order_qty=10.0), bar_stamp="close")
         assert s.rejected == [(2, "position_open")]
         assert s.risk == []
 
@@ -692,7 +707,7 @@ class TestOffByDefault:
         rng = np.random.default_rng(11)
         data = _days(100 + np.cumsum(rng.normal(0, 2, 12)))
         base = self._trace(
-            run_strategy_backtest(Script(self._script()), **data, config=BacktestConfig())
+            run_strategy_backtest(Script(self._script()), **data, config=BacktestConfig(), bar_stamp="close")
         )
         loose = BacktestConfig(
             max_order_qty=1e9,
@@ -702,12 +717,12 @@ class TestOffByDefault:
             max_daily_loss=1e12,
             max_daily_loss_pct=100.0,
         )
-        got = self._trace(run_strategy_backtest(Script(self._script()), **data, config=loose))
+        got = self._trace(run_strategy_backtest(Script(self._script()), **data, config=loose, bar_stamp="close"))
         assert got == base
 
     def test_no_events_without_limits(self):
         s = Script({1: [("buy", 5.0)], 2: [("buy", 5.0)]})
-        run_strategy_backtest(s, **_bars([100.0] * 4), config=BacktestConfig())
+        run_strategy_backtest(s, **_bars([100.0] * 4), config=BacktestConfig(), bar_stamp="close")
         assert s.risk == []
 
 
@@ -825,7 +840,7 @@ class _Chaos(Strategy):
                 order = orders.Market(side=side, units=units)
             self.submit_order(order, symbol=sym)
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         if event.size is None:
             return
         self.fills.append(event.size)
@@ -855,7 +870,7 @@ class _SizeChecks(_Chaos):
         if lim.get("max_gross_exposure") is not None:
             gross = 0.0
             for s in self.symbols:
-                pos = ctx.positions(s) if hasattr(ctx, "net_position_for") else ctx.positions
+                pos = ctx.positions(s)
                 gross += sum(p.size for p in pos) * self.last.get(s, 0.0)
             if gross > lim["max_gross_exposure"] * (1 + 1e-9):
                 self.violations.append(("exposure", gross))
@@ -882,10 +897,11 @@ def test_random_limits_are_never_violated_by_a_fill(seed):
     strat = _SizeChecks(np.random.default_rng(seed), symbols, limits)
     if len(symbols) == 1:
         run_strategy_backtest(
-            strat, **data["S"], symbol="S", config=cfg, oms_type="hedging"
+            strat, **data["S"], symbol="S", config=cfg, oms_type="hedging",
+            bar_stamp="close",
         )
     else:
-        run_portfolio_strategy(strat, data, config=cfg, oms_type="hedging")
+        run_portfolio_strategy(strat, data, config=cfg, oms_type="hedging", bar_stamp="close")
     assert strat.fills, "the script should fill something"
     assert strat.violations == []
 
@@ -923,6 +939,7 @@ def _risk_run(closes, stamps, script, schedule, **cfg):
         config=_config(max_daily_loss=1000.0, **cfg),
         oms_type="hedging",
         instrument=spec,
+        bar_stamp="close",
     )
     return s
 
@@ -997,5 +1014,6 @@ class TestSessionDay:
         run_portfolio_strategy(
             s, data, config=_config(max_daily_loss=1000.0), oms_type="hedging",
             instruments={"A": spec_a, "B": spec_b},
+            bar_stamp="close",
         )
         assert s.rejected == []

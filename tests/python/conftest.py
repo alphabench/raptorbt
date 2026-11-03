@@ -37,6 +37,9 @@ def tick_runner(request):
         pytest.skip("run_strategies not available")
 
     def shared(strategy, ticks, **kw):
+        # Ticks carry event times; run_strategies asks for the declaration the
+        # tick runner has no use for.
+        kw.setdefault("bar_stamp", "close")
         return raptorbt.run_strategies([strategy], ticks=ticks, **kw)[0]
 
     return shared

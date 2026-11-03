@@ -1,7 +1,8 @@
 """Margin models.
 
 ``MarginModel.no_margin()``, ``cash_only()``, ``leverage({"CASH": 5})``,
-``percent_of_notional(pct)``, ``option_simple(seller_pct)``,
+``fraction_of_notional(fraction)`` (``percent_of_notional(pct)`` is deprecated),
+``option_simple(seller_pct)``,
 ``table(per_unit, default)``, ``by_type({...})``, ``by_product(intraday,
 carry)``, ``defined_risk()``, ``spread_credit(seller_pct, spread_pct)`` and
 ``from_spec(leverage)``, the rule the engine itself applies on a margin

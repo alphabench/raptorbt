@@ -146,7 +146,7 @@ def test_a_push_reaches_every_subscriber_in_registration_order():
             super().__init__()
             self.tag = tag
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             seen.append((self.tag, ctx.symbol))
 
     node = LiveNode(
@@ -164,7 +164,7 @@ def test_strategies_have_isolated_accounts():
             super().__init__()
             self.frac = frac
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             if ctx.is_flat:
                 self.enter(size_frac=self.frac)
 
@@ -276,12 +276,12 @@ class Timed(Strategy):
     def on_start(self, ctx):
         self.clock.set_timer("t", self.interval, start_ns=self.interval)
 
-    def on_time_event(self, ctx, event):
+    def on_timer(self, ctx, event):
         self.fired.append((ctx.symbol, event.ts_fired))
         if self.buy_on == event.ts_fired:
             self.submit_order(orders.Market(side="buy", size_frac=0.5))
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self.ticks += 1
 
 
@@ -367,8 +367,8 @@ def test_initial_positions_are_per_strategy_by_index_or_by_object():
         ({"nope": {"X": {"quantity": 1.0, "avg_price": 1.0}}}, "neither a strategy index"),
         ({0: {"Z": {"quantity": 1.0, "avg_price": 1.0}}}, "unknown symbol 'Z'"),
         ({1: {"Y": {"quantity": 1.0, "avg_price": 1.0}}}, "unknown symbol 'Y'"),
-        ({0: {"X": {"quantity": 0.0, "avg_price": 1.0}}}, "positive quantity"),
-        ({0: {"X": {"quantity": 1.0, "avg_price": -1.0}}}, "positive quantity"),
+        ({0: {"X": {"quantity": 0.0, "avg_price": 1.0}}}, "non-zero quantity"),
+        ({0: {"X": {"quantity": 1.0, "avg_price": -1.0}}}, "non-zero quantity"),
     ],
 )
 def test_bad_seeds_are_refused(seeds, message):
@@ -432,7 +432,7 @@ def test_a_decreasing_timestamp_raises_and_changes_nothing():
     class Count(Strategy):
         n = 0
 
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             Count.n += 1
 
     node = LiveNode([Count()], ["X", "Y"], bar_stamp="close")
@@ -482,7 +482,7 @@ class SeriesProbe(Strategy):
         self.lengths.append(len(s["close"]))
         self.last = s
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         s = ctx.series()
         self.lengths.append(len(s["ltp"]))
         self.last = s
@@ -529,13 +529,13 @@ class Keeper(Strategy):
     def on_start(self, ctx):
         ctx.keep_history(self.rows)
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self.ticks += 1
 
 
 def test_backpressure_refuses_the_push_that_would_drop_a_kept_row():
     keeper = Keeper(rows=9)
-    node = LiveNode([keeper], ["X"], history=8)
+    node = LiveNode([keeper], ["X"], history=8, bar_stamp="close")
     for i in range(8):
         node.push_tick("X", i + 1, 10.0)
     equity = node.equity(0)
@@ -572,7 +572,7 @@ def test_a_hook_cannot_push_into_the_node_it_runs_in():
     holder = {}
 
     class Reentrant(Strategy):
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             holder["node"].push_tick("X", tick.timestamp + 1, 10.0)
 
     node = LiveNode([Reentrant()], ["X"])
@@ -628,7 +628,7 @@ def test_full_curves_are_the_only_thing_that_grows_by_default():
 
 def test_curve_samples_bounds_the_curves_and_leaves_trades_complete():
     class Churn(Strategy):
-        def on_trade_tick(self, ctx, tick):
+        def on_trade(self, ctx, tick):
             if ctx.idx % 50 == 1 and ctx.is_flat:
                 self.enter(size_frac=0.1)
             elif ctx.idx % 50 == 26 and not ctx.is_flat:
@@ -662,7 +662,7 @@ def test_bad_constructor_input():
     with pytest.raises(ValueError, match="no data for 'Z'"):
         LiveNode([(Reads(), ["Z"])], ["X"])
     with pytest.raises(ValueError, match="unknown symbol"):
-        LiveNode([Reads()], ["X"], warmup_bars={"Z": {}})
+        LiveNode([Reads()], ["X"], warmup_bars={"Z": {}}, bar_stamp="close")
     s = Reads()
     with pytest.raises(ValueError, match="twice"):
         LiveNode([s, s], ["X"])

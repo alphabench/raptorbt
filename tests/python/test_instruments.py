@@ -89,23 +89,23 @@ class TestConstructors:
         assert not spec.tradable
         data = _bars([100.0, 101.0])
         with pytest.raises(ValueError, match="not tradable"):
-            run_strategy_backtest(EnterOnce, **data, instrument=spec)
+            run_strategy_backtest(EnterOnce, **data, instrument=spec, bar_stamp="close")
 
 
 class TestKernelIntegration:
     def test_no_spec_is_bit_identical(self):
         """Attaching no spec must reproduce existing results exactly."""
         data = _bars([100.0, 101.0, 102.0, 103.0, 104.0])
-        base = run_strategy_backtest(EnterOnce, **data)
-        again = run_strategy_backtest(EnterOnce, **data, instrument=None)
+        base = run_strategy_backtest(EnterOnce, **data, bar_stamp="close")
+        again = run_strategy_backtest(EnterOnce, **data, instrument=None, bar_stamp="close")
         assert np.array_equal(base.equity_curve(), again.equity_curve())
 
     def test_neutral_spec_is_bit_identical(self):
         """A spec with neutral fields must not change results."""
         data = _bars([100.0, 101.0, 102.0, 103.0, 104.0])
-        base = run_strategy_backtest(EnterOnce, **data)
+        base = run_strategy_backtest(EnterOnce, **data, bar_stamp="close")
         spec = InstrumentSpec.equity("ASSET", price_increment=0.0, lot_size=0.0)
-        with_spec = run_strategy_backtest(EnterOnce, **data, instrument=spec)
+        with_spec = run_strategy_backtest(EnterOnce, **data, instrument=spec, bar_stamp="close")
         assert np.array_equal(base.equity_curve(), with_spec.equity_curve())
 
     def test_multiplier_scales_position_sizing(self):
@@ -118,7 +118,8 @@ class TestKernelIntegration:
             price_increment=0.0,
         )
         result = run_strategy_backtest(
-            EnterOnce, **data, config=_zero_fee_config(), instrument=spec
+            EnterOnce, **data, config=_zero_fee_config(), instrument=spec,
+            bar_stamp="close",
         )
         # 100k at price 100 with multiplier 50 -> 20 contracts;
         # +6 points -> pnl 6 * 20 * 50 = 6000 marked at the final close.
@@ -130,7 +131,8 @@ class TestKernelIntegration:
             "FUT", expiration_ns=2, lot_size=1.0, price_increment=0.0
         )
         result = run_strategy_backtest(
-            EnterOnce, **data, config=_zero_fee_config(), instrument=spec
+            EnterOnce, **data, config=_zero_fee_config(), instrument=spec,
+            bar_stamp="close",
         )
         assert len(result.trades()) == 1
         trade = result.trades()[0]
@@ -150,7 +152,8 @@ class TestKernelIntegration:
                 rejects.append(event.reject_reason)
 
         result = run_strategy_backtest(
-            Recorder, **data, config=_zero_fee_config(), instrument=spec
+            Recorder, **data, config=_zero_fee_config(), instrument=spec,
+            bar_stamp="close",
         )
         assert len(result.trades()) == 1
         assert rejects and all(r == "expired" for r in rejects)
@@ -165,7 +168,8 @@ class TestKernelIntegration:
             price_increment=0.0,
         )
         result = run_strategy_backtest(
-            EnterEveryBar, **data, config=_zero_fee_config(), instrument=spec
+            EnterEveryBar, **data, config=_zero_fee_config(), instrument=spec,
+            bar_stamp="close",
         )
         assert len(result.trades()) == 1
         # First fill can only happen once the contract activates at ts=2.
@@ -177,7 +181,8 @@ class TestKernelIntegration:
             "FUT", expiration_ns=1_000, lot_size=300.0, price_increment=0.0
         )
         result = run_strategy_backtest(
-            EnterOnce, **data, config=_zero_fee_config(), instrument=spec
+            EnterOnce, **data, config=_zero_fee_config(), instrument=spec,
+            bar_stamp="close",
         )
         # 100k / 100 = 1000 raw units -> floors to 900 (3 lots of 300).
         assert result.trades()[0].size == pytest.approx(900.0)
@@ -197,7 +202,7 @@ class TestKernelIntegration:
                 if ctx.position is not None:
                     stops.append(ctx.position.stop_price)
 
-        run_strategy_backtest(StopReader, **data, config=config, instrument=spec)
+        run_strategy_backtest(StopReader, **data, config=config, instrument=spec, bar_stamp="close")
         assert stops, "expected an open position"
         stop = stops[-1]
         assert stop == pytest.approx(round(stop / 0.25) * 0.25)

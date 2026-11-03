@@ -119,6 +119,7 @@ def _run_class(ohlcv, strategy, config=None):
         ohlcv["volume"],
         symbol="TEST",
         config=config,
+        bar_stamp="close",
     )
 
 
@@ -215,30 +216,31 @@ def test_class_accepts_class_or_instance(daily):
 def test_hook_firing_order_and_counts(daily):
     calls = []
 
-    class Recorder(Strategy):
-        def on_start(self, ctx):
-            calls.append("start")
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class Recorder(Strategy):
+            def on_start(self, ctx):
+                calls.append("start")
 
-        def on_bar(self, ctx):
-            if ctx.idx == 10:
-                self.enter()
-            elif ctx.idx == 50:
-                self.close_position()
+            def on_bar(self, ctx):
+                if ctx.idx == 10:
+                    self.enter()
+                elif ctx.idx == 50:
+                    self.close_position()
 
-        def on_stop(self, ctx):
-            calls.append("stop")
+            def on_stop(self, ctx):
+                calls.append("stop")
 
-        def on_order_filled(self, ctx, event):
-            calls.append(f"filled:{event.kind}@{event.idx}")
+            def on_fill(self, ctx, event):
+                calls.append(f"filled:{event.kind}@{event.idx}")
 
-        def on_position_opened(self, ctx, event):
-            calls.append(f"opened@{event.idx}")
+            def on_position_opened(self, ctx, event):
+                calls.append(f"opened@{event.idx}")
 
-        def on_position_closed(self, ctx, event):
-            calls.append(f"closed@{event.idx}")
-            assert event.trade is not None
-            assert event.trade.entry_idx == 10
-            assert event.trade.exit_idx == 50
+            def on_position_closed(self, ctx, event):
+                calls.append(f"closed@{event.idx}")
+                assert event.trade is not None
+                assert event.trade.entry_idx == 10
+                assert event.trade.exit_idx == 50
 
     _run_class(daily, Recorder())
     assert calls == [
@@ -310,18 +312,19 @@ def test_position_snapshot_fields(daily):
 def test_size_frac_scales_position(daily):
     sizes = {}
 
-    class Sized(Strategy):
-        def __init__(self, frac, key):
-            super().__init__()
-            self.frac = frac
-            self.key = key
+    with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+        class Sized(Strategy):
+            def __init__(self, frac, key):
+                super().__init__()
+                self.frac = frac
+                self.key = key
 
-        def on_bar(self, ctx):
-            if ctx.idx == 10:
-                self.enter(size_frac=self.frac)
+            def on_bar(self, ctx):
+                if ctx.idx == 10:
+                    self.enter(size_frac=self.frac)
 
-        def on_position_opened(self, ctx, event):
-            sizes[self.key] = event.size
+            def on_position_opened(self, ctx, event):
+                sizes[self.key] = event.size
 
     _run_class(daily, Sized(1.0, "full"))
     _run_class(daily, Sized(0.5, "half"))
@@ -371,6 +374,7 @@ def test_mismatched_lengths_raise(daily):
             daily["low"],
             daily["close"],
             daily["volume"],
+            bar_stamp="close",
         )
 
 
@@ -402,6 +406,7 @@ def test_short_direction_session(daily):
         daily["volume"],
         direction=-1,
         symbol="TEST",
+        bar_stamp="close",
     )
     _assert_identical(res_array, res_class)
 
@@ -429,6 +434,7 @@ def test_zero_size_entry_fires_on_order_rejected(daily):
         daily["volume"],
         symbol="TEST",
         instrument_config=inst,
+        bar_stamp="close",
     )
     assert res.metrics.total_trades == 0
     assert rejections == ["zero_size"]

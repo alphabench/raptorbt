@@ -121,6 +121,13 @@ pub enum AdapterError {
     /// reconciliation.
     #[error("venue unavailable: {0}")]
     Unavailable(String),
+    /// A newer execution epoch owns the account (see [`ExecutionAdapter::fence`]):
+    /// this node must send nothing more.
+    #[error("fenced: {0}")]
+    Fenced(String),
+    /// The journal could not record the request, so it was not sent.
+    #[error("journal: {0}")]
+    Journal(String),
 }
 
 /// A venue the engine can send orders to.
@@ -142,6 +149,13 @@ pub trait ExecutionAdapter {
     /// default, and the engine refuses the link.
     fn link_oco(&mut self, _client_order_ids: &[String]) -> Result<(), AdapterError> {
         Err(AdapterError::Unsupported("one-cancels-other links".into()))
+    }
+
+    /// Claim or check this node's execution epoch with the venue: return
+    /// `Err(AdapterError::Fenced(..))` when a newer epoch owns the account.
+    /// Optional: an adapter with no ownership notion keeps the default.
+    fn fence(&mut self, _epoch: u64) -> Result<(), AdapterError> {
+        Ok(())
     }
 
     /// The venue this adapter simulates, if it is a simulation that advances

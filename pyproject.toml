@@ -67,6 +67,7 @@ include = [
 ]
 
 [tool.pytest.ini_options]
-# Most tests predate bar_stamp and call the strategy runners without it;
-# tests of the contract itself pass it explicitly or use pytest.warns.
-filterwarnings = ["ignore:.*bar_stamp not given:DeprecationWarning"]
+# Every warning is an error: a test that triggers one either fixes its cause or
+# asserts it with pytest.warns. Add a third-party exemption here only by message,
+# with the reason.
+filterwarnings = ["error"]

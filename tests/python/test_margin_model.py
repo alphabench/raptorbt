@@ -27,7 +27,7 @@ def test_models_compute_what_they_say_and_describe_themselves():
     assert MarginModel.cash_only().required(eq, -10.0, 100.0) == float("inf")
     assert MarginModel.leverage({"CONTRACT": 5}).required(fut, 400.0, 1500.0) == 120_000.0
     assert MarginModel.leverage({"FUTURE": 5}).required(fut, 400.0, 1500.0) == 120_000.0
-    assert MarginModel.percent_of_notional(10).required(fut, 400.0, 1500.0) == 60_000.0
+    assert MarginModel.fraction_of_notional(0.1).required(fut, 400.0, 1500.0) == 60_000.0
     os15 = MarginModel.option_simple(15)
     assert os15.required(call, 75.0, 100.0) == 7500.0
     assert os15.required(call, -75.0, 100.0) == 25000.0 * 75.0 * 0.15 + 7500.0
@@ -45,7 +45,7 @@ def test_a_class_without_a_rule_and_a_bad_class_name_are_errors_never_zero():
     with pytest.raises(InvalidParameter, match="unknown instrument class"):
         MarginModel.by_type({"SWAP": MarginModel.cash_only()})
     with pytest.raises(InvalidParameter):
-        MarginModel.percent_of_notional(-1)
+        MarginModel.fraction_of_notional(-0.01)
     with pytest.raises(InvalidParameter):
         MarginModel.from_spec(0)
     with pytest.raises(InvalidParameter, match="no margin for"):
@@ -66,7 +66,7 @@ def test_a_spread_locks_its_worst_loss_and_spread_credit_needs_the_time():
 def test_by_product_prices_each_part():
     eq = InstrumentSpec.equity("X")
     m = MarginModel.by_product(
-        MarginModel.by_type({"EQUITY": MarginModel.percent_of_notional(20)}),
+        MarginModel.by_type({"EQUITY": MarginModel.fraction_of_notional(0.2)}),
         MarginModel.by_type({"EQUITY": MarginModel.cash_only()}),
     )
     assert m.required_split(eq, 100.0, 100.0, 40.0) == 800.0 + 6000.0
@@ -102,6 +102,7 @@ def test_from_spec_is_the_deposit_and_the_rate_the_kernel_locks():
     result = run_portfolio_strategy(
         SellOnce(), {"BN57500CE": bars}, config=cfg, directions={"BN57500CE": -1},
         instruments={"BN57500CE": spec}, account_type="margin", leverage=1.0,
+        bar_stamp="close",
     )
     trade = result.result.trades()[0]
     model = MarginModel.from_spec(1.0)

@@ -38,6 +38,7 @@ import math
 import re
 import types
 import typing
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -65,8 +66,10 @@ __all__ = [
     "StrikeWindow",
     "SymbolPlan",
     "Underlying",
+    "InstrumentPlan",
     "check_requirements",
     "param",
+    "plan_instruments",
     "params_schema",
     "requirements_hash",
     "resolve",
@@ -214,16 +217,26 @@ class Instrument:
 @dataclass(frozen=True)
 class Future:
     """A futures contract of another role's underlying: ``front`` (the nearest unexpired),
-    ``next``, or ``continuous`` (the front, rolled to the next at its expiry)."""
+    ``next``, or ``continuous`` (the front, rolled to the next ``roll_days`` days before its
+    expiry; ``0`` rolls at the expiry itself)."""
 
     of: str
     contract: str = "front"
+    roll_days: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.of, str) or not self.of:
             _fail("invalid_value", "of", f"the name of another role, got {self.of!r}")
         if self.contract not in CONTRACTS:
             _fail("invalid_value", "contract", f"one of {', '.join(CONTRACTS)}, got {self.contract!r}")
+        if (
+            isinstance(self.roll_days, bool)
+            or not isinstance(self.roll_days, (int, float))
+            or not (0.0 <= self.roll_days < 366.0)
+        ):
+            _fail("invalid_value", "roll_days", f"days in [0, 366), got {self.roll_days!r}")
+        if self.roll_days and self.contract != "continuous":
+            _fail("invalid_value", "roll_days", "only a continuous future rolls")
 
     kind = "future"
 
@@ -231,7 +244,10 @@ class Future:
         return (self.of,)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": "future", "of": self.of, "contract": self.contract}
+        out = {"kind": "future", "of": self.of, "contract": self.contract}
+        if self.roll_days:
+            out["roll_days"] = self.roll_days
+        return out
 
 
 @dataclass(frozen=True)
@@ -288,7 +304,7 @@ def _role_from_dict(d: Mapping[str, Any]) -> Role:
     if kind == "instrument":
         return Instrument(d["symbol"], d["asset"])
     if kind == "future":
-        return Future(d["of"], d["contract"])
+        return Future(d["of"], d["contract"], d.get("roll_days", 0.0))
     if kind == "chain":
         s = d["strikes"]
         strikes = StrikeWindow(s["low"], s["high"]) if s["by"] == "window" else ByDelta(s["low"], s["high"])
@@ -806,9 +822,10 @@ def resolve(
             done(RolePlan(role_name, role.kind, (role.symbol,)))
         elif isinstance(role, Future):
             base = live(role.of).symbols
+            cutoff = int(role.roll_days * 86_400 * 10**9) if role.contract == "continuous" else 0
             contracts = [
                 s.symbol for s in futures
-                if base and s.underlying == base[0] and s.expiration_ns > now_ns
+                if base and s.underlying == base[0] and s.expiration_ns - cutoff > now_ns
                 and (s.activation_ns is None or s.activation_ns <= now_ns)
             ]
             idx = 1 if role.contract == "next" else 0
@@ -885,6 +902,153 @@ def resolve(
     ordered = {n: plans[n] for n in requirements.roles}
     all_symbols = tuple(dict.fromkeys(s for p in ordered.values() for s in p.symbols))
     return SymbolPlan(now_ns, ordered, all_symbols, tuple(issues))
+
+
+# ---------------------------------------------------------------------------
+# Moving the instrument set of a running node
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InstrumentPlan:
+    """What a host does to a running :class:`~raptorbt.LiveNode` so its symbols cover what the
+    strategies' roles mean now.
+
+    ``add`` maps a symbol to the strategy indices that should trade it; ``retire`` lists symbols
+    that were added to the node, that no strategy's roles want any more and that nothing holds;
+    ``holding`` lists those that no role wants but a position or a working order still holds, to
+    be retired once it is gone. ``issues`` lists what could not be planned. Apply it with
+    :meth:`~raptorbt.LiveNode.apply_plan` or one step at a time.
+    """
+
+    now_ns: int
+    add: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
+    retire: tuple[str, ...] = ()
+    holding: tuple[str, ...] = ()
+    issues: tuple[Issue, ...] = ()
+
+    @property
+    def empty(self) -> bool:
+        return not (self.add or self.retire)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "now_ns": self.now_ns,
+            "add": {s: list(k) for s, k in self.add.items()},
+            "retire": list(self.retire),
+            "holding": list(self.holding),
+            "issues": [i.to_dict() for i in self.issues],
+        }
+
+
+def plan_instruments(
+    node: Any,
+    *,
+    now_ns: int | None = None,
+    prices: Mapping[str, float] | None = None,
+    vols: Mapping[str, float] | None = None,
+    margin_strikes: int = 0,
+    roll_lead_days: float = 0.0,
+) -> InstrumentPlan:
+    """Which instruments to add to and retire from a running node at ``now_ns`` (default: the
+    node's clock), so every strategy that declares ``requirements`` trades the symbols its roles
+    resolve to. Pure: it reads the node (its strategies, symbols, specs, bindings and last
+    prices) and changes nothing; the host applies the plan.
+
+    Roles resolve with :func:`resolve` from ``node.instruments`` (the listed contracts the host
+    gave) and the last prices the strategy reads; ``prices`` / ``vols`` override or add. A chain
+    window that moves with the money, a continuous future that rolls, an expiry that passes: each
+    shows up as symbols to add and symbols to retire.
+
+    - ``margin_strikes``: subscribe, and keep subscribed, this many listed strikes beyond each
+      side of a chain's :class:`StrikeWindow`. The window moves when the money moves, and the
+      host plans after the move: with a margin the strikes the next event needs are already
+      there, and a price that wanders back over the edge is not retired and revived at once.
+      A retired symbol that a window needs again is revived by ``add_instrument`` (same id).
+    - ``roll_lead_days``: add the next contract of a continuous :class:`Future` this many days
+      before its rule rolls, so it has data when the roll comes.
+
+    Only symbols added to the node are ever retired, never the ones it was built with.
+    """
+    from raptorbt.strategy.continuous import front
+
+    specs = node.instruments
+    bindings = node.bindings
+    now = node.now_ns if now_ns is None else now_ns
+    issues: list[Issue] = []
+    add: dict[str, list[int]] = {}
+    keep: set[str] = set()
+    managed = False
+    retired = set(node.retired_instruments)
+    day = 86_400 * 10**9
+    for k, strategy in enumerate(node.strategies):
+        req = getattr(type(strategy), "requirements", None)
+        if not isinstance(req, Requirements):
+            continue
+        managed = True
+        ctx = node.ctx(k)
+        held = set(ctx.symbols)
+        seen = {**node.last_prices(k), **(prices or {})}
+
+        def resolved(requirements: Requirements) -> SymbolPlan:
+            return resolve(
+                requirements, now_ns=now, bindings=bindings, specs=specs.values(), prices=seen, vols=vols
+            )
+
+        plan = resolved(req)
+        issues.extend(Issue(i.code, f"strategies[{k}].{i.path}", i.message) for i in plan.issues)
+        want = list(plan.symbols)
+        for name, role in req.roles.items():
+            rolled = plan.roles.get(name)
+            if isinstance(role, Future) and role.contract == "continuous" and rolled is not None:
+                nxt = rolled.detail.get("roll_to")
+                base = plan.roles[role.of].symbols
+                if nxt and base and roll_lead_days > 0:
+                    futures = [s for s in specs.values() if s.kind == "contract" and s.underlying == base[0]]
+                    _, roll_ns = front(futures, role.roll_days, now)
+                    if roll_ns is not None and now >= roll_ns - int(roll_lead_days * day):
+                        want.append(nxt)
+        wide = list(dict.fromkeys(want))
+        if margin_strikes > 0:
+            widened = {
+                name: dataclasses.replace(
+                    role, strikes=StrikeWindow(role.strikes.low - margin_strikes, role.strikes.high + margin_strikes)
+                )
+                if isinstance(role, Chain) and isinstance(role.strikes, StrikeWindow)
+                else role
+                for name, role in req.roles.items()
+            }
+            wide = list(dict.fromkeys([*wide, *resolved(dataclasses.replace(req, roles=widened)).symbols]))
+        keep.update(wide)
+        for symbol in wide:
+            if symbol in held:
+                continue
+            if symbol in retired and k not in node.holders_of(symbol):
+                issues.append(Issue("never_held", f"strategies[{k}]", f"{symbol!r} was retired and strategy {k} never held it, so it cannot come back for that strategy"))
+                continue
+            if symbol not in specs and symbol not in bindings.values():
+                issues.append(Issue("no_spec", f"strategies[{k}]", f"{symbol!r} has no InstrumentSpec in the node's instruments"))
+                continue
+            add.setdefault(symbol, []).append(k)
+    retire: list[str] = []
+    holding: list[str] = []
+    if managed:
+        for symbol in node.added_instruments:
+            if symbol in retired or symbol in keep:
+                continue
+            busy = any(
+                symbol in node.ctx(k).symbols
+                and (node.ctx(k).positions(symbol) or node.ctx(k).open_orders(symbol))
+                for k in range(len(node.strategies))
+            )
+            (holding if busy else retire).append(symbol)
+    return InstrumentPlan(
+        now,
+        {s: tuple(k) for s, k in add.items()},
+        tuple(retire),
+        tuple(holding),
+        tuple(issues),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -973,8 +1137,14 @@ def _dry_run(strategy_cls: type, req: Requirements) -> list[Issue]:
 
     api.subscribe = record
     try:
-        run_strategies([(strategy, list(plan.symbols))], data, BacktestConfig(initial_capital=1_000_000.0),
-                       instruments=listed or None, account_type="margin" if listed else "cash")
+        # The tape's stamps are bar close times. The synthetic universe is a probe: a
+        # `register_indicator` without `symbol=` would warn about interleaved bars here, and
+        # it warns again in the real run, so the probe does not repeat it.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="register_indicator", category=UserWarning)
+            run_strategies([(strategy, list(plan.symbols))], data, BacktestConfig(initial_capital=1_000_000.0),
+                           instruments=listed or None, account_type="margin" if listed else "cash",
+                           bar_stamp="close")
     except Exception as exc:  # the strategy's own code: reported, never hidden
         add("dry_run_failed", "strategy", f"{type(exc).__name__}: {exc}")
     finally:

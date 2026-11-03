@@ -53,7 +53,7 @@ class TestNewOrderKinds:
 
         data = _bars([100.0, 100.0, 98.5], lows=[99.5, 99.0, 97.5])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_filled"]
         assert result.trades()[0].entry_price == pytest.approx(98.0)
 
@@ -72,7 +72,7 @@ class TestNewOrderKinds:
             lows=[99.5, 97.8, 97.2],  # touch trigger on bar 1, limit fills bar 2
         )
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_triggered", "order_filled"]
         assert result.trades()[0].entry_price == pytest.approx(97.5)
 
@@ -84,7 +84,7 @@ class TestNewOrderKinds:
 
         data = _bars([100.0, 101.0, 102.0], opens=[100.0, 100.7, 101.5])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert result.trades()[0].entry_price == pytest.approx(100.7)
 
     def test_at_open_and_at_close(self):
@@ -99,7 +99,7 @@ class TestNewOrderKinds:
 
         data = _bars([100.0, 101.0, 102.0, 103.0], opens=[100.0, 100.4, 101.5, 102.5])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert result.trades()[0].entry_price == pytest.approx(100.4)
 
     def test_trailing_stop_market_bps(self):
@@ -123,7 +123,7 @@ class TestNewOrderKinds:
             lows=[99.5, 104.0, 108.5, 106.5],
         )
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         trade = result.trades()[0]
         assert trade.exit_reason == "Order"
         assert trade.exit_price == pytest.approx(110.0 * 0.98)
@@ -140,11 +140,11 @@ class TestNewOrderKinds:
 
         data = _bars([100.0, 101.0])
         with pytest.raises(ValueError, match="price_increment"):
-            run_strategy_backtest(S, **data, config=_zero_fee_config())
+            run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
 
         # With a tick size it converts to a price offset and works.
         spec = InstrumentSpec.equity("EQ", price_increment=0.5)
-        run_strategy_backtest(S, **data, config=_zero_fee_config(), instrument=spec)
+        run_strategy_backtest(S, **data, config=_zero_fee_config(), instrument=spec, bar_stamp="close")
 
 
 class TestFlags:
@@ -160,7 +160,7 @@ class TestFlags:
 
         data = _bars([100.0, 100.5, 100.0], opens=[100.0, 100.2, 100.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.kinds() == ["order_accepted", "order_rejected"]
         assert strategy.events[-1][0] == "order_rejected"
         assert len(result.trades()) == 0
@@ -184,7 +184,7 @@ class TestFlags:
 
         data = _bars([100.0, 98.5, 99.0])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.rejects == ["reduce_only"]
 
 
@@ -209,7 +209,7 @@ class TestBrackets:
             lows=[99.5, 102.0, 105.0, 106.0],
         )
         strategy = self._bracket_strategy()()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         trade = result.trades()[0]
         assert trade.exit_price == pytest.approx(106.0)
         # Entry fill activates both legs; target fill cancels the stop.
@@ -225,7 +225,7 @@ class TestBrackets:
             lows=[99.5, 97.5, 93.5, 94.5],
         )
         strategy = self._bracket_strategy()()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         trade = result.trades()[0]
         # Bar 2 opens at 94, gapping through the 95 trigger: fill at the open.
         assert trade.exit_price == pytest.approx(94.0)
@@ -247,7 +247,7 @@ class TestBrackets:
 
         data = _bars([100.0, 100.0, 100.0, 100.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert len(result.trades()) == 0
         # Entry cancel is acknowledged, then both held legs die.
         assert strategy.kinds().count("order_canceled") == 3
@@ -266,5 +266,5 @@ class TestBrackets:
 
         fixtures = json.loads((here / "golden" / "fixtures.json").read_text())
         ts, o, h, l, c, v, _, _ = thaw_inputs(fixtures["inputs"]["shared"])
-        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
+        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v, bar_stamp="close")
         assert result_digest(result) == fixtures["class/sma_cross"]

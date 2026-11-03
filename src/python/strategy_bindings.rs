@@ -149,6 +149,10 @@ pub struct PyEngineEvent {
     /// it paid, as a short pays a dividend).
     #[pyo3(get)]
     pub cash: Option<f64>,
+    /// For `order_resized`: the order's units before the cut (`size` holds
+    /// the units it now offers).
+    #[pyo3(get)]
+    pub previous_size: Option<f64>,
 }
 
 #[pymethods]
@@ -176,6 +180,7 @@ impl From<EngineEvent> for PyEngineEvent {
             quantity: None,
             amount: None,
             cash: None,
+            previous_size: None,
         };
         match event {
             EngineEvent::Entered { idx, price, size, direction } => Self {
@@ -238,6 +243,15 @@ impl From<EngineEvent> for PyEngineEvent {
                 client_order_id: Some(client_id),
                 ..empty
             },
+            EngineEvent::OrderResized { idx, order_id, client_id, from, to } => Self {
+                kind: "order_resized".to_string(),
+                idx,
+                size: Some(to),
+                previous_size: Some(from),
+                order_id: Some(order_id),
+                client_order_id: Some(client_id),
+                ..empty
+            },
             EngineEvent::OrderExpired { idx, order_id, client_id } => Self {
                 kind: "order_expired".to_string(),
                 idx,
@@ -275,6 +289,26 @@ impl From<EngineEvent> for PyEngineEvent {
                 client_order_id: order_id.map(|_| client_id),
                 ..empty
             },
+            EngineEvent::FillBreach { idx, reason, order_id, client_id } => Self {
+                kind: "fill_breach".to_string(),
+                idx,
+                reject_reason: Some(reason.to_string()),
+                order_id: Some(order_id),
+                client_order_id: Some(client_id),
+                ..empty
+            },
+            EngineEvent::FillDeferred { idx, order_id, client_id, price, size, reason, .. } => {
+                Self {
+                    kind: "fill_deferred".to_string(),
+                    idx,
+                    price: Some(price),
+                    size: Some(size),
+                    reject_reason: Some(reason),
+                    order_id: Some(order_id),
+                    client_order_id: Some(client_id),
+                    ..empty
+                }
+            }
             EngineEvent::RiskHalted { idx, reason } => {
                 Self { kind: "risk_halted".to_string(), idx, reject_reason: Some(reason), ..empty }
             }
@@ -481,6 +515,7 @@ impl PyKernelSession {
             size_mult,
             stop_price_override: stop_price,
             target_price_override: target_price,
+            ..StepInput::default()
         };
 
         Ok(runner.step(idx, &bar, input).into_iter().map(PyEngineEvent::from).collect())
@@ -1038,6 +1073,58 @@ pub(crate) fn submit_order_on(
     reduce_only: bool,
     parent_id: Option<u64>,
 ) -> PyResult<u64> {
+    submit_order_checked(
+        kernel,
+        side,
+        kind,
+        submitted_idx,
+        submitted_ts,
+        client_id,
+        units,
+        size_frac,
+        limit_price,
+        trigger_price,
+        tif,
+        expire_ns,
+        stop_price,
+        target_price,
+        offset,
+        offset_kind,
+        limit_offset,
+        post_only,
+        reduce_only,
+        parent_id,
+        None,
+    )
+}
+
+/// [`submit_order_on`], or, with a `refusal`, the same order recorded as
+/// rejected with that code and never working (see
+/// [`EngineKernel::submit_refused_order`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_order_checked(
+    kernel: &mut crate::portfolio::kernel::EngineKernel,
+    side: &str,
+    kind: &str,
+    submitted_idx: usize,
+    submitted_ts: i64,
+    client_id: &str,
+    units: Option<f64>,
+    size_frac: Option<f64>,
+    limit_price: Option<f64>,
+    trigger_price: Option<f64>,
+    tif: &str,
+    expire_ns: Option<i64>,
+    stop_price: Option<f64>,
+    target_price: Option<f64>,
+    offset: Option<f64>,
+    offset_kind: &str,
+    limit_offset: f64,
+    post_only: bool,
+    reduce_only: bool,
+    parent_id: Option<u64>,
+    refusal: Option<&'static str>,
+) -> PyResult<u64> {
     let ParsedOrder { side, qty, kind: kind_parsed, tif } = parse_order(
         kernel.price_increment(),
         side,
@@ -1053,6 +1140,35 @@ pub(crate) fn submit_order_on(
         limit_offset,
         post_only,
     )?;
+    // A protective child (a bracket's stop or target) reduces the position
+    // its parent opened. Under hedging every order opens its own position and
+    // a reduce-only order is always refused at its fill, so the bracket would
+    // leave its position open without a word. Refuse it here instead.
+    if reduce_only && parent_id.is_some() && kernel.is_hedging() {
+        return Err(Fail::new(
+            "bracket_under_hedging",
+            "a reduce-only child order (a bracket's stop or target) cannot close a position \
+             under hedging, where every order opens its own position; attach \
+             stop_price/target_price to the entry, or use oms_type='netting'",
+        )
+        .op("submit_order")
+        .param("client_id")
+        .value(client_id)
+        .into());
+    }
+    if let Some(reason) = refusal {
+        return Ok(kernel.submit_refused_order(
+            side,
+            qty,
+            kind_parsed,
+            tif,
+            submitted_idx,
+            submitted_ts,
+            client_id.to_string(),
+            reduce_only,
+            reason,
+        ));
+    }
     Ok(kernel.submit_order_full(
         side,
         qty,

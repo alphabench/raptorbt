@@ -641,3 +641,43 @@ fn a_quote_or_book_between_prints_delivers_nothing() {
     // No primary configured: no primary bar.
     assert!(hub.primary_trade(inst, 3, 12.0, 1.0).is_none());
 }
+
+#[test]
+fn a_newest_instrument_gets_aggregations_that_follow_the_strategies_and_retire_frees_them() {
+    let key = |instrument, step| {
+        AggKey::new(
+            InstrumentId::new(instrument),
+            BarSpec::new(step, AggregationUnit::Tick).unwrap(),
+            0.0,
+            0,
+            BarStamp::Open,
+        )
+        .unwrap()
+    };
+    let (s0, s1) = (StrategyId::new(0), StrategyId::new(1));
+    let mut b = AggregatorHubBuilder::new(1);
+    assert_eq!(b.register(s0, key(0, 1)).unwrap(), (AggId::new(0), 0));
+    assert_eq!(b.register(s1, key(0, 1)).unwrap(), (AggId::new(0), 0));
+    let mut hub = b.build().unwrap();
+
+    hub.add_instrument(None).unwrap();
+    // s0 declared two subscriptions in all; its stream ids go on from its own list.
+    assert_eq!(hub.subscribe(s0, key(1, 1), None).unwrap(), (AggId::new(1), 1));
+    assert_eq!(hub.subscribe(s1, key(1, 1), None).unwrap(), (AggId::new(1), 1));
+    assert_eq!(hub.subscribe(s0, key(1, 2), None).unwrap(), (AggId::new(2), 2));
+    assert_eq!(hub.subscribers(AggId::new(1)), &[(s0, 1), (s1, 1)]);
+    assert!(hub.subscribe(s0, key(0, 5), None).is_err(), "only the newest instrument grows");
+
+    let (i0, i1) = (InstrumentId::new(0), InstrumentId::new(1));
+    hub.on_bar(i1, &bar(0, 1.0));
+    assert_eq!(hub.deliveries(s0).map(|(l, _)| l).collect::<Vec<_>>(), [1]);
+    assert_eq!(hub.deliveries(s1).map(|(l, _)| l).collect::<Vec<_>>(), [1]);
+    hub.on_bar(i0, &bar(1, 1.0));
+    assert_eq!(hub.deliveries(s0).map(|(l, _)| l).collect::<Vec<_>>(), [0]);
+
+    hub.retire_instrument(i1).unwrap();
+    assert!(hub.on_bar(i1, &bar(2, 1.0)).is_empty());
+    assert_eq!(hub.deliveries(s0).count(), 0);
+    hub.on_bar(i0, &bar(3, 1.0));
+    assert_eq!(hub.deliveries(s0).map(|(l, _)| l).collect::<Vec<_>>(), [0]);
+}

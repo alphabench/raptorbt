@@ -44,16 +44,17 @@ class TestHedging:
                     self.submit_order(orders.Market(side="sell", units=5.0))
                 if ctx.idx == 1:
                     self.seen = [
-                        (p.position_id, p.direction, p.size) for p in ctx.positions
+                        (p.position_id, p.direction, p.size) for p in ctx.positions()
                     ]
                     # Close only the short.
-                    short = next(p for p in ctx.positions if p.direction == -1)
+                    short = next(p for p in ctx.positions() if p.direction == -1)
                     self.close_position(short.position_id)
 
         data = _bars([100.0, 101.0, 102.0, 103.0])
         strategy = S()
         result = run_strategy_backtest(
-            strategy, **data, config=_zero_fee_config(), oms_type="hedging"
+            strategy, **data, config=_zero_fee_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert len(strategy.seen) == 2
         directions = sorted(d for _, d, _ in strategy.seen)
@@ -80,7 +81,7 @@ class TestHedging:
 
         data = _bars([100.0, 101.0, 102.0])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.rejects == ["position_open"]
 
     def test_per_position_stops_fire_independently(self):
@@ -101,7 +102,8 @@ class TestHedging:
             highs=[100.5, 100.0, 100.5, 101.5],
         )
         result = run_strategy_backtest(
-            S, **data, config=_zero_fee_config(), oms_type="hedging"
+            S, **data, config=_zero_fee_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         trades = result.trades()
         assert len(trades) == 2
@@ -118,13 +120,14 @@ class TestMarginAccount:
                     self.enter()
 
         data = _bars([100.0, 101.0, 102.0])
-        cash = run_strategy_backtest(EnterOnce, **data, config=_zero_fee_config())
+        cash = run_strategy_backtest(EnterOnce, **data, config=_zero_fee_config(), bar_stamp="close")
         levered = run_strategy_backtest(
             EnterOnce,
             **data,
             config=_zero_fee_config(),
             account_type="margin",
             leverage=5.0,
+            bar_stamp="close",
         )
         # 5x leverage sizes ~5x the units of the fully-funded account.
         ratio = levered.trades()[0].size / cash.trades()[0].size
@@ -153,6 +156,7 @@ class TestMarginAccount:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=1.0,
+            bar_stamp="close",
         )
         assert strategy.marks[-1] > strategy.marks[0] > 100_000.0 * 0.999
 
@@ -186,6 +190,7 @@ class TestMarginAccount:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=10.0,
+            bar_stamp="close",
         )
         assert strategy.margin_calls == 1
         assert "margin_call" in strategy.rejects
@@ -202,7 +207,7 @@ class TestStochasticFill:
                 if ctx.idx == 0:
                     self.submit_order(orders.Limit(side="buy", price=99.5, units=10.0))
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 self.fill_bars.append(event.idx)
 
         return S
@@ -211,7 +216,7 @@ class TestStochasticFill:
         config = _zero_fee_config(fill_prob_limit=0.0)
         data = _bars([100.0] * 10, lows=[98.0] * 10)
         strategy = self._limit_strategy()()
-        result = run_strategy_backtest(strategy, **data, config=config)
+        result = run_strategy_backtest(strategy, **data, config=config, bar_stamp="close")
         assert strategy.fill_bars == []
         assert len(result.trades()) == 0
 
@@ -221,13 +226,13 @@ class TestStochasticFill:
         for _ in range(2):
             config = _zero_fee_config(fill_prob_limit=0.5, fill_seed=1234)
             strategy = self._limit_strategy()()
-            run_strategy_backtest(strategy, **data, config=config)
+            run_strategy_backtest(strategy, **data, config=config, bar_stamp="close")
             runs.append(tuple(strategy.fill_bars))
         assert runs[0] == runs[1]
 
         config = _zero_fee_config(fill_prob_limit=0.5, fill_seed=99)
         strategy = self._limit_strategy()()
-        run_strategy_backtest(strategy, **data, config=config)
+        run_strategy_backtest(strategy, **data, config=config, bar_stamp="close")
         # A different seed is allowed to fill on a different bar; the fill
         # itself must still eventually happen with 20 chances at p=0.5.
         assert strategy.fill_bars, "expected an eventual fill"
@@ -235,7 +240,7 @@ class TestStochasticFill:
     def test_default_probs_are_deterministic_legacy(self):
         data = _bars([100.0] * 5, lows=[98.0] * 5)
         strategy = self._limit_strategy()()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.fill_bars == [1]  # first bar after submission
 
 
@@ -257,7 +262,7 @@ class TestBarPathModel:
             highs=[100.5, 104.0, 97.5],
             lows=[99.5, 96.0, 96.0],
         )
-        result = run_strategy_backtest(S, **data, config=config)
+        result = run_strategy_backtest(S, **data, config=config, bar_stamp="close")
         return result.trades()[0]
 
     def test_legacy_stop_first(self):
@@ -280,7 +285,7 @@ class TestSidedEntries:
                     self.enter_short(size_frac=0.5)
 
         data = _bars([100.0, 95.0, 90.0])
-        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config(), bar_stamp="close")
         trades = result.trades()
         assert len(trades) == 1
         assert trades[0].direction == -1
@@ -295,7 +300,8 @@ class TestSidedEntries:
 
         data = _bars([100.0, 95.0, 90.0])
         result = run_strategy_backtest(
-            S(), **data, config=_zero_fee_config(), direction=-1
+            S(), **data, config=_zero_fee_config(), direction=-1,
+            bar_stamp="close",
         )
         trades = result.trades()
         assert len(trades) == 1
@@ -312,7 +318,7 @@ class TestSidedEntries:
                     self.enter_short(size_frac=0.4)
 
         data = _bars([100.0, 102.0, 104.0, 103.0, 102.0, 100.0, 98.0])
-        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config(), bar_stamp="close")
         dirs = [t.direction for t in result.trades()]
         assert dirs[:2] == [1, -1], f"expected long then short, got {dirs}"
 
@@ -325,7 +331,7 @@ class TestSidedEntries:
                     self.submit_order(orders.Market(side="sell", size_frac=0.4))
 
         data = _bars([100.0, 102.0, 104.0, 106.0])
-        result = run_strategy_backtest(S(), **data, config=_zero_fee_config())
+        result = run_strategy_backtest(S(), **data, config=_zero_fee_config(), bar_stamp="close")
         trades = result.trades()
         assert len(trades) == 1, "the sell closed the long; it did not reverse"
         assert trades[0].direction == 1
@@ -356,6 +362,7 @@ class TestSidedEntries:
             strategy,
             data={"A": _bars([100.0, 101.0, 102.0])},
             config=_zero_fee_config(),
+            bar_stamp="close",
         )
         assert strategy.rejects == ["reduce_only"]
         assert result.rejected_entries >= 1, "a refusal must never be silent"
@@ -383,5 +390,6 @@ class TestSidedEntries:
             S(),
             data={"A": _bars([100.0, 101.0, 102.0, 103.0])},
             config=_zero_fee_config(),
+            bar_stamp="close",
         )
         assert result.rejected_entries >= 1

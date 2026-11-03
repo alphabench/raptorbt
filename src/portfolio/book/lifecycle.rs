@@ -154,7 +154,8 @@ impl PortfolioBook {
             }
         }
         // 3. Contracts that expired with no later bar of their own.
-        for i in 0..self.kernels.len() {
+        for k in 0..self.live_count() {
+            let i = self.live_at(k);
             if Some(i) == current || !self.kernels[i].expired_at(ts) {
                 continue;
             }
@@ -223,7 +224,8 @@ impl PortfolioBook {
         }
         let symbol = self.kernels[u].symbol().to_owned();
         let mut events = Vec::new();
-        for i in 0..self.kernels.len() {
+        for k in 0..self.live_count() {
+            let i = self.live_at(k);
             let waiting = i != u
                 && self.noticed[i] == Some(ts)
                 && self.kernels[i].expired_at(ts)

@@ -122,6 +122,11 @@ pub enum OrderEventError {
     VenueIdConflict { order_id: u64, known: String, got: String },
     #[error("order {order_id}: quantity is not an explicit unit count")]
     UnresolvedQty { order_id: u64 },
+    /// The venue repeated an execution id with other terms. The id is the
+    /// idempotency key, so this is not a repeat: one of the two reports is
+    /// wrong, and neither is applied over the other.
+    #[error("order {order_id}: execution {exec_id} was already reported with different terms")]
+    ConflictingDuplicate { order_id: u64, exec_id: String },
     #[error("order {order_id}: already filled or ended by the in-process matcher")]
     NotVenueDriven { order_id: u64 },
     #[error("order {order_id}: a request is already pending")]
@@ -278,6 +283,13 @@ impl Order {
         self.broker.as_ref().map_or(0.0, |b| b.totals().fee)
     }
 
+    /// `(qty, price, fee)` of one execution as it currently counts: restated
+    /// if a correction replaced it, `None` if busted or never reported.
+    pub fn exec_effective(&self, exec_id: &str) -> Option<(f64, f64, f64)> {
+        let b = self.broker.as_ref()?;
+        b.execs.get(b.find(exec_id).ok()?)?.effective()
+    }
+
     /// Number of executions that currently count (busted ones excluded).
     pub fn exec_count(&self) -> usize {
         self.broker
@@ -371,7 +383,10 @@ impl Order {
             ExecutionReport::Rejected { .. } => {
                 if st.rejected {
                     ReportOutcome::Duplicate
-                } else if before > 0.0 {
+                } else if st.execs.iter().any(|e| e.fill.is_some()) {
+                    // Any fill ever reported, busted or not: a venue does not
+                    // refuse an order it executed, and the answer must not
+                    // depend on whether the bust arrived first.
                     return Err(OrderEventError::IllegalReport {
                         order_id: id,
                         status,
@@ -379,8 +394,6 @@ impl Order {
                     });
                 } else {
                     st.rejected = true;
-                    st.cancel_pending = false;
-                    st.replace_pending = false;
                     ReportOutcome::Applied
                 }
             }
@@ -399,7 +412,13 @@ impl Order {
                     });
                 }
                 let e = st.entry(exec_id);
-                if e.fill.is_some() {
+                if let Some(seen) = e.fill {
+                    if seen != (*qty, *price, *fee) {
+                        return Err(OrderEventError::ConflictingDuplicate {
+                            order_id: id,
+                            exec_id: exec_id.clone(),
+                        });
+                    }
                     ReportOutcome::Duplicate
                 } else {
                     e.fill = Some((*qty, *price, *fee));
@@ -415,17 +434,20 @@ impl Order {
             }
             ExecutionReport::CancelAck { .. } => {
                 st.cancel_pending = false;
-                if st.cause == Some(EndCause::Canceled) {
-                    ReportOutcome::Duplicate
-                } else if st.cause.is_some() || st.rejected {
-                    ReportOutcome::Late
-                } else {
-                    st.cause = Some(EndCause::Canceled);
-                    st.accepted = true;
-                    if terminal_fact {
-                        ReportOutcome::Late
-                    } else {
-                        ReportOutcome::Applied
+                st.accepted = true;
+                // A cancel and an expiry both end the order; when a venue
+                // reports both, the expiry is the order's end whichever
+                // arrived first (`EndCause::Expired` outranks `Canceled`).
+                match st.cause {
+                    Some(EndCause::Canceled) => ReportOutcome::Duplicate,
+                    Some(EndCause::Expired) => ReportOutcome::Late,
+                    None => {
+                        st.cause = Some(EndCause::Canceled);
+                        if st.rejected || terminal_fact {
+                            ReportOutcome::Late
+                        } else {
+                            ReportOutcome::Applied
+                        }
                     }
                 }
             }
@@ -447,13 +469,12 @@ impl Order {
                     ReportOutcome::Late
                 } else {
                     st.replace_pending = false;
-                    if terminal_fact {
-                        ReportOutcome::Late
-                    } else {
-                        new_kind = Some(with_prices(&self.kind, *new_limit, *new_trigger, id)?);
-                        new_total = *new_qty;
-                        ReportOutcome::Applied
-                    }
+                    // Applied whether or not the order has ended: the venue
+                    // changed the terms, and a fill or cancel reported
+                    // before or after the ack must leave the same order.
+                    new_kind = Some(with_prices(&self.kind, *new_limit, *new_trigger, id)?);
+                    new_total = *new_qty;
+                    ReportOutcome::Applied
                 }
             }
             ExecutionReport::ReplaceRejected { .. } => {
@@ -465,16 +486,12 @@ impl Order {
                 }
             }
             ExecutionReport::Expired { .. } => {
-                st.replace_pending = false;
-                st.cancel_pending = false;
+                st.accepted = true;
                 if st.cause == Some(EndCause::Expired) {
                     ReportOutcome::Duplicate
-                } else if st.cause.is_some() || st.rejected {
-                    ReportOutcome::Late
                 } else {
-                    st.cause = Some(EndCause::Expired);
-                    st.accepted = true;
-                    if terminal_fact {
+                    let was = st.cause.replace(EndCause::Expired);
+                    if was.is_none() && (st.rejected || terminal_fact) {
                         ReportOutcome::Late
                     } else {
                         ReportOutcome::Applied
@@ -536,7 +553,7 @@ impl Order {
         if outcome == ReportOutcome::Duplicate {
             return Ok(outcome);
         }
-        self.commit_with(st, new_kind, new_total, exec_changing)?;
+        self.commit_with(st, new_kind, new_total, exec_changing || new_total.is_some())?;
         Ok(outcome)
     }
 
@@ -614,9 +631,17 @@ impl Order {
         let from = self.status;
         let implied_accept =
             from == OrderStatus::Submitted && OrderStatus::Accepted.can_transition_to(to);
-        let reconcile = exec_changing
-            && (matches!(from, OrderStatus::Filled | OrderStatus::Canceled | OrderStatus::Expired)
-                || matches!(
+        // Facts can arrive in any order, so an end already reached can be
+        // superseded by a stronger one: expired over canceled, rejected over
+        // either (a refused order never ran, whatever else is reported).
+        let reconcile = (from == OrderStatus::Canceled && to == OrderStatus::Expired)
+            || (to == OrderStatus::Rejected
+                && matches!(from, OrderStatus::Canceled | OrderStatus::Expired))
+            || exec_changing
+                && (matches!(
+                    from,
+                    OrderStatus::Filled | OrderStatus::Canceled | OrderStatus::Expired
+                ) || matches!(
                     to,
                     OrderStatus::Accepted | OrderStatus::PartiallyFilled | OrderStatus::Filled
                 ));
@@ -1172,3 +1197,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "report_convergence_tests.rs"]
+mod convergence_tests;

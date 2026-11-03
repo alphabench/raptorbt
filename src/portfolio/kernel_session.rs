@@ -60,6 +60,10 @@ impl EngineKernel {
     pub(crate) fn session_gate(&mut self, ts: i64, mode: StepMode) -> SessionGate {
         self.session_state.squareoff_now = false;
         self.session_state.entries_blocked = false;
+        if self.schedule().is_none() {
+            self.configured_squareoff(ts);
+            return SessionGate { decision_open: true, data_open: true };
+        }
         let Some(schedule) = self.schedule() else {
             return SessionGate { decision_open: true, data_open: true };
         };
@@ -77,6 +81,23 @@ impl EngineKernel {
         self.session_state.entries_blocked =
             today.is_some() && today == self.session_state.squareoff_day;
         gate
+    }
+
+    /// The square-off `BacktestConfig.squareoff_time` asks for, on an
+    /// instrument with no calendar: the first event at or after that local
+    /// time of day closes every position, and entries are refused with
+    /// `squareoff` until the day ends. An instrument's own `SessionSchedule`
+    /// takes precedence and this does nothing for it.
+    fn configured_squareoff(&mut self, ts: i64) {
+        let Some(minutes) = self.config.squareoff_time_minutes else { return };
+        let local_s = (ts + self.config.session_tz_offset_ns).div_euclid(1_000_000_000);
+        let day = local_s.div_euclid(86_400);
+        let minute_of_day = (local_s.rem_euclid(86_400) / 60) as u32;
+        if minute_of_day >= minutes && self.session_state.squareoff_day != Some(day) {
+            self.session_state.squareoff_day = Some(day);
+            self.session_state.squareoff_now = true;
+        }
+        self.session_state.entries_blocked = self.session_state.squareoff_day == Some(day);
     }
 
     /// Why an entry is refused right now, given whether `open` holds for the

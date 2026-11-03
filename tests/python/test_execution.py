@@ -11,6 +11,7 @@
   strategy and the count of orders it has sent.
 """
 
+import contextlib
 import sys
 from pathlib import Path
 
@@ -349,6 +350,8 @@ def test_paper_follows_positions_the_node_was_seeded_with():
 class Venue:
     """Records what it is sent. It answers nothing: the test does that."""
 
+    namespace = "T1"
+
     def __init__(self, refuse=None, fail=None):
         self.requests, self.cancels, self.modifies, self.links = [], [], [], []
         self.refuse, self.fail = refuse or {}, fail
@@ -532,11 +535,10 @@ def test_a_report_can_reach_the_book_only_through_the_node():
     assert e.value.code == "unknown_client_order_id"
     with pytest.raises(InvalidParameter):
         node.push_report(cid, "accepted", arrival_ns=1)
-    with pytest.raises(UnsupportedOperation) as e:
-        node.push_report(cid, ExecutionReport.correction("E", 1.0, 1.0, 1), arrival_ns=1)
-    assert e.value.code == "unsupported_in_venue_run"
+    # A correction of an execution the book never took is the order's to note.
+    assert node.push_report(cid, ExecutionReport.correction("E", 1.0, 1.0, 1), arrival_ns=1) == "late"
     with pytest.raises(InvalidData) as e:  # fills beyond the order
-        node.push_report(cid, ExecutionReport.fill("E", 5.0, 1.0, 1), arrival_ns=1)
+        node.push_report(cid, ExecutionReport.fill("F", 5.0, 1.0, 1), arrival_ns=1)
     assert e.value.code == "invalid_execution_report"
     plain = LiveNode([Hooked()], ["A"], bar_stamp="close")
     with pytest.raises(InvalidParameter) as e:
@@ -842,9 +844,13 @@ def test_a_real_venue_is_never_sent_an_order_made_on_warmup_history():
         s.submit_order(orders.Limit(side="buy", price=90.0, units=1.0))
 
     venue = Venue()
+    # Asked to trade the history, a real venue refuses; by default its warm-up is muted.
     with pytest.raises(UnsupportedOperation, match="warmup"):
-        LiveNode([Hooked(script)], ["A"], BacktestConfig(initial_capital=1e6), bar_stamp="close", warmup_bars=warmup, execution=venue)
+        LiveNode([Hooked(script)], ["A"], BacktestConfig(initial_capital=1e6), bar_stamp="close", warmup_bars=warmup, execution=venue, warmup="live")
     assert venue.requests == []
+    muted = LiveNode([Hooked(script)], ["A"], BacktestConfig(initial_capital=1e6), bar_stamp="close", warmup_bars=warmup, execution=venue)
+    assert venue.requests == []
+    muted.finish()
     # A simulated venue has no one to hurt: the history trades there.
     node = LiveNode([Hooked(script)], ["A"], BacktestConfig(initial_capital=1e6), bar_stamp="close", warmup_bars=warmup, execution=PaperExecution())
     assert len(node.finish()[0].result.orders()) == 5
@@ -916,33 +922,45 @@ def test_the_stream_corpus_equals_in_process_on_a_paper_node(name):
     assert stream_digest(name, PaperExecution()) == stream_digest(name, None)
 
 
+def _declared_warnings(sc, kw):
+    """The warnings a scenario is meant to raise: a run that names no bar stamp
+    is the legacy form and says so, and an unrouted indicator says so too."""
+    stack = contextlib.ExitStack()
+    if "bar_stamp" not in kw:
+        stack.enter_context(pytest.warns(DeprecationWarning, match="bar_stamp not given"))
+    if sc["script"]["args"].get("unrouted"):
+        stack.enter_context(pytest.warns(UserWarning, match="register_indicator"))
+    return stack
+
+
 def portfolio_result(name, execution):
     sc = SCENARIOS[name]
     rec = rf.Recorder(script=rf._script_for(sc, DATASETS))
     config = rf.build_config(sc["config"])
     kw = rf._run_kwargs(sc)
     bars = rf._bars_for(sc, DATASETS)
-    if execution == "batch":
-        return run_strategies(
-            [rec], config=config, data=bars, instrument_configs=rf._instrument_configs(sc), **kw
-        )[0]
-    symbols = list(bars)
-    node = LiveNode(
-        [rec], symbols, config, instrument_configs=rf._instrument_configs(sc), execution=execution, **kw
-    )
-    stamp = kw.get("bar_stamp", "open")
-    shift = kw.get("bar_ns", 0) if stamp == "open" else 0
-    if isinstance(shift, dict):
-        shift = shift[symbols[0]]
-    rows = sorted(
-        (int(bars[s]["timestamps"][i]) + shift, k, i)
-        for k, s in enumerate(symbols)
-        for i in range(len(bars[s]["timestamps"]))
-    )
-    for _, k, i in rows:
-        a = bars[symbols[k]]
-        node.push_bar(symbols[k], int(a["timestamps"][i]), *(float(a[c][i]) for c in ("open", "high", "low", "close", "volume")))
-    return node.finish()[0]
+    with _declared_warnings(sc, kw):
+        if execution == "batch":
+            return run_strategies(
+                [rec], config=config, data=bars, instrument_configs=rf._instrument_configs(sc), **kw
+            )[0]
+        symbols = list(bars)
+        node = LiveNode(
+            [rec], symbols, config, instrument_configs=rf._instrument_configs(sc), execution=execution, **kw
+        )
+        stamp = kw.get("bar_stamp", "open")
+        shift = kw.get("bar_ns", 0) if stamp == "open" else 0
+        if isinstance(shift, dict):
+            shift = shift[symbols[0]]
+        rows = sorted(
+            (int(bars[s]["timestamps"][i]) + shift, k, i)
+            for k, s in enumerate(symbols)
+            for i in range(len(bars[s]["timestamps"]))
+        )
+        for _, k, i in rows:
+            a = bars[symbols[k]]
+            node.push_bar(symbols[k], int(a["timestamps"][i]), *(float(a[c][i]) for c in ("open", "high", "low", "close", "volume")))
+        return node.finish()[0]
 
 
 PORTFOLIO_OK = [
@@ -1222,3 +1240,47 @@ def test_a_live_node_refuses_what_a_batch_run_refuses_about_corporate_actions():
     with pytest.raises(Exception) as e:
         LiveNode([Hooked()], ["A"], bar_stamp="close", corporate_actions=[CorporateAction.split("B", 2, 2.0)], adjustment_policy="raw")
     assert e.value.code == "unknown_symbol"
+
+
+# -- a send that failed, and a booking that failed -------------------------------------
+
+
+def test_an_order_whose_send_failed_is_sent_again_when_its_id_is_submitted_again():
+    venue = Venue(fail=ConnectionError("link down"))
+
+    def script(s, ctx, n):
+        s.submit_order(orders.Limit(side="buy", price=99.0, units=1.0), client_id="a")
+
+    node = node_with(venue, [Hooked(script)], symbols=("A",))
+    with pytest.raises(ConnectionError, match="link down"):
+        bar(node, "A", 0)
+    assert venue.requests == []
+    # The venue is back: the same id is the same order, and this time it goes.
+    venue.fail = None
+    bar(node, "A", 1)
+    assert [(r.client_order_id, r.tags["client_id"]) for r in venue.requests] == [("s0-0", "a")]
+    # Once it went, the id is known and nothing is sent twice.
+    bar(node, "A", 2)
+    assert len(venue.requests) == 1
+
+
+def test_a_node_that_stopped_part_way_through_a_booking_refuses_every_later_call():
+    venue = Venue()
+
+    def script(s, ctx, n):
+        if n == 1:
+            s.submit_order(orders.Market(side="buy", units=1.0), client_id="a")
+
+    node = node_with(venue, [Hooked(script)], symbols=("A",))
+    bar(node, "A", 0)
+    cid = venue.requests[0].client_order_id
+    # A price no account can book: the booking stops on a money fault.
+    with pytest.raises(Exception, match="money_overflow|cannot be represented"):
+        node.push_report(cid, ExecutionReport.fill("E1", 1.0, 1e300, MIN), arrival_ns=MIN)
+    for call in (
+        lambda: bar(node, "A", 1),
+        lambda: node.push_report(cid, ExecutionReport.accepted("V1", MIN), arrival_ns=MIN),
+    ):
+        with pytest.raises(StateError) as e:
+            call()
+        assert e.value.code == "node_poisoned"

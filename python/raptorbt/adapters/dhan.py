@@ -43,7 +43,7 @@ from typing import Any
 from raptorbt.execution import OrderRequest, Unsupported
 
 from ._limits import RateLimiter, TokenBucket
-from ._rest import ist_ns, num, price, rest
+from ._rest import ist_ns, need_num, num, price, rest
 from .base import (
     CANCELLED,
     EXPIRED,
@@ -97,6 +97,7 @@ class DhanAdapter(BrokerAdapter):
     products = frozenset(_PRODUCT)
     tag_max_len = 30
     tag_charset = "A-Za-z0-9_-"
+    currency = "INR"
 
     def __init__(
         self,
@@ -222,6 +223,7 @@ class DhanAdapter(BrokerAdapter):
         status = _STATUS.get(str(d.get("Status", "")).upper())
         oid = d.get("OrderNo") or d.get("orderNo")
         if status is None or not oid:
+            self._unmapped_status(oid, d.get("Status"), d.get("CorrelationId"))
             return None
         seg = _SEGMENT.get((str(d.get("Exchange", "")).upper(), str(d.get("Segment", "")).upper()))
         key = f"{seg}:{d.get('SecurityId')}"
@@ -235,7 +237,7 @@ class DhanAdapter(BrokerAdapter):
             order_type=_ORDER_TYPE_BACK.get(d.get("OrderType")),
             product=_PRODUCT_BACK.get(d.get("Product")),
             quantity=num(d.get("Quantity")),
-            filled_qty=num(d.get("TradedQty"), 0.0) or 0.0,
+            filled_qty=need_num(d, "TradedQty", what="Dhan order update"),
             avg_price=price(d.get("AvgTradedPrice")),
             limit_price=price(d.get("Price")),
             trigger_price=price(d.get("TriggerPrice")),
@@ -246,9 +248,9 @@ class DhanAdapter(BrokerAdapter):
     def _book_row(self, d: Mapping[str, Any]) -> OrderStatusUpdate | None:
         status = _STATUS.get(str(d.get("orderStatus", "")).upper())
         if status is None or not d.get("orderId"):
+            self._unmapped_status(d.get("orderId"), d.get("orderStatus"), d.get("correlationId"))
             return None
         key = f"{d.get('exchangeSegment')}:{d.get('securityId')}"
-        filled = d.get("filledQty", d.get("tradedQuantity", 0))
         return OrderStatusUpdate(
             venue_order_id=str(d["orderId"]),
             status=status,
@@ -258,7 +260,7 @@ class DhanAdapter(BrokerAdapter):
             order_type=_ORDER_TYPE_BACK.get(d.get("orderType")),
             product=_PRODUCT_BACK.get(d.get("productType")),
             quantity=num(d.get("quantity")),
-            filled_qty=num(filled, 0.0) or 0.0,
+            filled_qty=need_num(d, "filledQty", "tradedQuantity", what="Dhan order"),
             avg_price=price(d.get("averageTradedPrice")),
             limit_price=price(d.get("price")),
             trigger_price=price(d.get("triggerPrice")),
@@ -273,7 +275,7 @@ class DhanAdapter(BrokerAdapter):
     def fetch_trades(self) -> list[TradeRow]:
         rows = self._do("GET", "/trades", write=False) or []
         return [
-            TradeRow(str(d["exchangeTradeId"]), str(d["orderId"]), num(d["tradedQuantity"], 0.0) or 0.0, num(d["tradedPrice"], 0.0) or 0.0, ist_ns(d.get("updateTime")) or ist_ns(d.get("createTime")))
+            TradeRow(str(d["exchangeTradeId"]), str(d["orderId"]), need_num(d, "tradedQuantity", what="Dhan trade"), need_num(d, "tradedPrice", what="Dhan trade"), ist_ns(d.get("updateTime")) or ist_ns(d.get("createTime")))
             for d in rows
         ]  # fmt: skip
 
@@ -281,15 +283,15 @@ class DhanAdapter(BrokerAdapter):
         rows = self._do("GET", "/positions", write=False) or []
         out = []
         for d in rows:
-            qty = num(d.get("netQty"), 0.0) or 0.0
+            qty = need_num(d, "netQty", what="Dhan position")
             if qty == 0:
                 continue
             key = f"{d.get('exchangeSegment')}:{d.get('securityId')}"
-            avg = num(d.get("buyAvg") if qty > 0 else d.get("sellAvg"), 0.0) or 0.0
+            avg = need_num(d, "buyAvg" if qty > 0 else "sellAvg", what="Dhan position")
             out.append(VenuePosition(self.symbol_of(key) or key, qty, avg, _PRODUCT_BACK.get(d.get("productType"))))
         return out
 
     def fetch_balances(self) -> VenueBalances:
         d = self._do("GET", "/fundlimit", write=False) or {}
-        avail = d.get("availabelBalance", d.get("availableBalance"))  # Dhan's field is spelt "availabel"
-        return VenueBalances(available=num(avail, 0.0) or 0.0, used=num(d.get("utilizedAmount")), total=num(d.get("sodLimit")))
+        avail = need_num(d, "availabelBalance", "availableBalance", what="Dhan fund limit")  # Dhan spells it "availabel"
+        return VenueBalances(available=avail, currency=self.currency, used=num(d.get("utilizedAmount")), total=num(d.get("sodLimit")))

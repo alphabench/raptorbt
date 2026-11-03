@@ -139,7 +139,7 @@ it moves the equity curve and `session.dividends_received`, not the trade list.
 | Runner | Expiry and settlement | Physical delivery | Corporate actions |
 | --- | --- | --- | --- |
 | `run_strategies`, `run_portfolio_strategy` | yes: kernel branch, book timer, waits for the underlying | yes | yes (`corporate_actions=`, `adjustment_policy=`) |
-| `run_tick_strategy` | yes, as above | yes | not exposed; pass ticks to `run_strategies` (`raw` only) |
+| `run_tick_strategy` | yes, as above | yes | yes (`corporate_actions=`, `adjustment_policy=`; `raw` only for prints) |
 | `PortfolioSession` (event session) | yes | yes | yes (`set_corporate_actions`) |
 | `LiveNode` | yes, on its events; `advance_to` for a clock | yes | `Runtime.set_corporate_actions` exists; the node does not expose it yet |
 | `run_strategy_backtest`, `KernelSession` | cash settlement on the first bar at or after the expiry | refused (no underlying) | no |

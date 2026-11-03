@@ -6,7 +6,7 @@ import datetime as _dt
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .base import Ambiguous, Transient
+from .base import Ambiguous, MalformedRow, Transient
 from .http import HttpResponse, MaybeSent, NotSent, Transport
 
 IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
@@ -39,6 +39,16 @@ def price(x: Any) -> float | None:
     """A price field: the brokers send 0 for 'none' on market and limit orders."""
     v = num(x)
     return v if v else None
+
+
+def need_num(d: Mapping[str, Any], *keys: str, what: str = "row") -> float:
+    """A number the layer cannot do without: the first of ``keys`` present. A missing or
+    non-numeric value is a ``MalformedRow`` naming the field, never a zero."""
+    for k in keys:
+        v = num(d.get(k))
+        if v is not None:
+            return v
+    raise MalformedRow(f"malformed {what}: missing or non-numeric {' / '.join(keys)}")
 
 
 def rest(

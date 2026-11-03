@@ -50,10 +50,10 @@ class TwapOnce(Strategy):
     def on_bar(self, ctx):
         self._go()
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self._go()
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         self.fills.append(("fill", event.idx, event.size))
 
     def on_algo_started(self, ctx, event):
@@ -70,8 +70,8 @@ def _trades(result):
 def test_run_strategies_matches_run_portfolio_strategy():
     data = {"A": _bars(6)}
     legacy, shared = TwapOnce(), TwapOnce()
-    a = raptorbt.run_portfolio_strategy(legacy, data, config=_cfg(), oms_type="hedging")
-    (b,) = raptorbt.run_strategies([shared], data, config=_cfg(), oms_type="hedging")
+    a = raptorbt.run_portfolio_strategy(legacy, data, config=_cfg(), oms_type="hedging", bar_stamp="close")
+    (b,) = raptorbt.run_strategies([shared], data, config=_cfg(), oms_type="hedging", bar_stamp="close")
     assert legacy.fills == [("fill", 0, 10.0), ("fill", 1, 10.0), ("fill", 2, 10.0)]
     assert (legacy.fills, legacy.algos) == (shared.fills, shared.algos)
     assert _trades(a) == _trades(b)
@@ -81,13 +81,13 @@ def test_run_strategies_matches_run_portfolio_strategy():
 def test_run_strategies_with_several_strategies():
     data = {"A": _bars(8), "B": _bars(8, price=50.0)}
     alone = TwapOnce(units=30.0, slices=3, symbol="A")
-    raptorbt.run_portfolio_strategy(alone, data, config=_cfg(), oms_type="hedging")
+    raptorbt.run_portfolio_strategy(alone, data, config=_cfg(), oms_type="hedging", bar_stamp="close")
     items = [
         (TwapOnce(units=30.0, slices=3, symbol="A"), ["A", "B"]),
         (TwapOnce(units=8.0, slices=4, symbol="B"), ["A", "B"]),
         (TwapOnce(units=5.0, slices=1), ["B"]),
     ]
-    results = raptorbt.run_strategies(items, data, config=_cfg(), oms_type="hedging")
+    results = raptorbt.run_strategies(items, data, config=_cfg(), oms_type="hedging", bar_stamp="close")
     first, second, third = (s for s, _ in items)
     # Strategies do not see each other's schedules.
     assert first.fills == alone.fills
@@ -147,10 +147,10 @@ class TwapThenCancel(Strategy):
     def on_bar(self, ctx):
         self._step()
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         self._step()
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         self.fills.append(event.size)
 
     def on_algo_started(self, ctx, event):
@@ -164,15 +164,15 @@ N_EVENTS = 10
 
 
 def _run_single(s):
-    raptorbt.run_strategy_backtest(s, **_bars(N_EVENTS), config=_cfg(), oms_type="hedging")
+    raptorbt.run_strategy_backtest(s, **_bars(N_EVENTS), config=_cfg(), oms_type="hedging", bar_stamp="close")
 
 
 def _run_portfolio(s):
-    raptorbt.run_portfolio_strategy(s, {"A": _bars(N_EVENTS)}, config=_cfg(), oms_type="hedging")
+    raptorbt.run_portfolio_strategy(s, {"A": _bars(N_EVENTS)}, config=_cfg(), oms_type="hedging", bar_stamp="close")
 
 
 def _run_shared(s):
-    raptorbt.run_strategies([s], {"A": _bars(N_EVENTS)}, config=_cfg(), oms_type="hedging")
+    raptorbt.run_strategies([s], {"A": _bars(N_EVENTS)}, config=_cfg(), oms_type="hedging", bar_stamp="close")
 
 
 def _ticks():

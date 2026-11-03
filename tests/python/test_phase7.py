@@ -78,7 +78,7 @@ class TestStreamingIndicators:
                 observed.append((ctx.idx, self.fast.value))
 
         data = _bars([100.0, 101.0, 102.0, 103.0])
-        run_strategy_backtest(S, **data, config=_zero_fee_config())
+        run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         # Warm at idx 2 (three bars seen), value visible inside on_bar.
         assert observed[0] == (0, None)
         assert observed[1] == (1, None)
@@ -88,16 +88,17 @@ class TestStreamingIndicators:
     def test_registration_on_composite_stream(self):
         values = []
 
-        class S(Strategy):
-            def on_start(self, ctx):
-                h5 = self.subscribe_bars(5, "m")
-                self.trend = self.register_indicator(Indicator.sma(2), stream_id=h5)
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def on_start(self, ctx):
+                    h5 = self.subscribe_bars(5, "m")
+                    self.trend = self.register_indicator(Indicator.sma(2), stream_id=h5)
 
-            def on_composite_bar(self, ctx, bar):
-                values.append(self.trend.value)
+                def on_composite_bar(self, ctx, bar):
+                    values.append(self.trend.value)
 
         data = _bars(np.arange(100.0, 121.0))  # 21 one-minute bars
-        run_strategy_backtest(S, **data, config=_zero_fee_config())
+        run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         # 4 completed 5m windows: SMA(2) of composite closes warms on the 2nd.
         assert values[0] is None
         assert values[1] is not None
@@ -118,7 +119,7 @@ class TestStreamingIndicators:
 
         data = _bars(np.arange(100.0, 110.0))
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.ready_at == 4  # slowest (ema 5) warms at idx 4
 
 
@@ -135,11 +136,11 @@ class TestClock:
                     self.clock.set_time_alert("flatten", 3 * MIN_NS)
                 events.append(("bar", ctx.idx))
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 events.append(("time", ctx.idx, event.name, event.ts_scheduled))
 
         data = _bars([100.0] * 6)
-        run_strategy_backtest(S, **data, config=_zero_fee_config())
+        run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         time_events = [e for e in events if e[0] == "time"]
         assert time_events == [("time", 3, "flatten", 3 * MIN_NS)]
         # Fired before that bar's on_bar.
@@ -155,11 +156,11 @@ class TestClock:
                 if ctx.idx == 5:
                     self.clock.cancel_timer("beat")
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 fires.append(ctx.idx)
 
         data = _bars([100.0] * 10)
-        run_strategy_backtest(S, **data, config=_zero_fee_config())
+        run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         # Set at ts=0 -> first due at 2min (idx 2), then 4 (idx 4); canceled at 5.
         assert fires == [2, 4]
 
@@ -174,12 +175,12 @@ class TestClock:
                 if ctx.idx == 0:
                     self.enter()
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 if event.name == "eod" and ctx.position is not None:
                     self.close_position()
 
         data = _bars([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
-        result = run_strategy_backtest(S, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         trade = result.trades()[0]
         assert trade.exit_reason == "Signal"
         assert trade.exit_idx == 4
@@ -211,7 +212,7 @@ class TestCacheAndPortfolioView:
 
         data = _bars([100.0, 100.0, 98.5, 99.5])
         strategy = S()
-        run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.checks["filled"] == "filled"
         assert strategy.checks["canceled"] == "canceled"
         assert strategy.checks["open"] == []
@@ -232,7 +233,7 @@ class TestCacheAndPortfolioView:
 
         data = _bars([100.0, 101.0, 102.0, 102.0])
         strategy = S()
-        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config())
+        result = run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
         assert strategy.observed == pytest.approx(result.trades()[0].pnl)
 
     def test_net_position_view_under_hedging(self):
@@ -258,7 +259,8 @@ class TestCacheAndPortfolioView:
         data = _bars([100.0, 101.0, 102.0])
         strategy = S()
         run_strategy_backtest(
-            strategy, **data, config=_zero_fee_config(), oms_type="hedging"
+            strategy, **data, config=_zero_fee_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert strategy.views == [(6.0, True, False, False)]
 
@@ -273,5 +275,5 @@ class TestCacheAndPortfolioView:
 
         fixtures = json.loads((here / "golden" / "fixtures.json").read_text())
         ts, o, h, l, c, v, _, _ = thaw_inputs(fixtures["inputs"]["shared"])
-        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
+        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v, bar_stamp="close")
         assert result_digest(result) == fixtures["class/sma_cross"]

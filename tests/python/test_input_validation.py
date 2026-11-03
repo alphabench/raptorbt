@@ -139,7 +139,28 @@ def test_decreasing_timestamps_are_refused_with_the_series_named(runner, label):
         runner(BAD)
 
 
+def _both(ts):
+    """The basket and the pair trade their legs bar by bar, so a tied clock is
+    tied on every leg."""
+    return {
+        basket: lambda t: r.run_basket_backtest([_instrument(t, "AAA"), _instrument(t, "BBB")]),
+        basket_second_instrument: lambda t: r.run_basket_backtest(
+            [_instrument(t, "AAA"), _instrument(t, "BBB")]
+        ),
+        pairs_leg1: lambda t: _pairs(t, t),
+        pairs_leg2: lambda t: _pairs(t, t),
+    }
+
+
 @pytest.mark.parametrize("runner,label", CASES)
 def test_sorted_and_tied_timestamps_still_run(runner, label):
     runner(GOOD)
-    runner(TIES)
+    runner_for_ties = _both(TIES).get(runner, runner)
+    runner_for_ties(TIES)
+
+
+def test_legs_on_different_clocks_are_refused():
+    with pytest.raises(ValueError, match="share|same bars"):
+        r.run_basket_backtest([_instrument(GOOD, "AAA"), _instrument(TIES, "BBB")])
+    with pytest.raises(ValueError, match="share"):
+        _pairs(GOOD, TIES)

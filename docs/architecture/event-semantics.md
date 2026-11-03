@@ -193,8 +193,11 @@ Scope:
   place this changes a result is `run_spread_backtest`'s session square-off,
   which flattens on the first bar whose stamp is at or after the cutoff
   (`squareoff_flags`, `src/core/session.rs`); open stamps would flatten one
-  bar width late. The event session ignores `squareoff_time`: a strategy
-  that squares off does so itself, from `ctx.bar_close_ts` or `ctx.datetime`.
+  bar width late. The event session honours `squareoff_time` too, for an
+  instrument with no `SessionSchedule`: the first event at or after the
+  cutoff closes every position (`Squareoff`), and entries are refused with
+  `squareoff` until that local day ends. An instrument's own
+  `SessionSchedule.squareoff_minute` takes precedence.
 
 ## Three times of an event
 
@@ -247,3 +250,23 @@ Reports may repeat, arrive late and arrive out of order; applying them again
 or in another order leaves the same orders, positions and cash
 (`order-lifecycle.md`, "Convergence"). Only the order a venue's reports are
 *pushed* in can differ between runs, never what they mean.
+
+## Limit fill prices
+
+A limit order is put against the market for the first time on its arrival:
+the first bar (or print) it can execute on. A held child released by its
+parent, an order waiting for a closed session or for its latency, and the
+limit leg of a triggered stop-limit each arrive on the first bar after they
+become eligible. The engine records the ordinal on the order (`arrival_idx`).
+
+| situation | fill price |
+|---|---|
+| marketable on arrival (the bar opens through the limit; a print through it) | the open (the touch), no limit slippage |
+| resting, the bar trades through the limit | the limit, plus `limit_slippage` if configured |
+| resting, the bar opens through the limit mid-session | the limit: a resting order gets no price improvement |
+| resting, the bar opens a new session (session day changes) through the limit | the open |
+| queue model grants the fill | the limit |
+| position target (a resting limit set at entry) | the target level; the open across a session open |
+| if-touched order | the open if the bar opens through the trigger, else the trigger |
+
+A stop is different: a gap through the stop always fills at the open.

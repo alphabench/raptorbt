@@ -42,10 +42,27 @@ struct Placed {
     local: usize,
     order_id: u64,
     request: OrderRequest,
+    /// The adapter was unavailable when the request was sent: the venue has
+    /// not seen it. The same client id again sends it again.
+    unsent: bool,
+    /// The order ended and is queued in `Ledger::ended` for eviction.
+    ended: bool,
+    /// The venue made the order itself (an exit rule it holds): the engine
+    /// never sent it and never resends it; only its reports are booked.
+    external: bool,
 }
+
+/// How many ended orders the route keeps entries for. An id sent again, or a
+/// late or repeated report, for one of the last `RETAINED_ENDED` orders to end
+/// finds it; past that the entries are dropped so a long run holds a bounded
+/// number of orders. A report for a dropped order is `late`; a client id used
+/// again after its order was dropped is a new order.
+const RETAINED_ENDED: usize = 4096;
 
 #[derive(Default)]
 struct Ledger {
+    /// Venue ids of ended orders, oldest first.
+    ended: std::collections::VecDeque<String>,
     /// Orders sent so far per strategy, the `seq` of the next id.
     seq: Vec<u64>,
     /// Synthesised close orders so far per strategy.
@@ -97,6 +114,9 @@ fn venue_err(e: VenueError) -> PyErr {
             Fail::new("venue_fill_not_booked", e.to_string()).into()
         }
         VenueError::Unsupported(what) => Fail::new("unsupported_in_venue_run", what).into(),
+        VenueError::NotReversible { .. } => {
+            Fail::new("correction_not_reversible", e.to_string()).into()
+        }
         other => Fail::new("invalid_execution_report", other.to_string()).into(),
     }
 }
@@ -126,6 +146,39 @@ impl VenueRoute {
         }
     }
 
+    /// The adapter layer stopped a request: a newer epoch owns the account, or
+    /// the journal could not record it. Nothing was sent.
+    /// Tell a simulated venue about an instrument added to strategy `strategy` after the node
+    /// started, so its shadow book steps and takes orders on it. A venue that is not a
+    /// simulation (a real broker connection) is told nothing: orders name the symbol.
+    pub(super) fn add_instrument(
+        &self,
+        strategy: usize,
+        symbol: &str,
+        direction: crate::core::types::Direction,
+        spec: Option<&crate::instruments::InstrumentSpec>,
+        policy: crate::portfolio::ledger::PositionPolicy,
+    ) -> PyResult<()> {
+        let mut adapter = self.adapter.borrow_mut();
+        let Some(venue) = adapter.as_simulation() else { return Ok(()) };
+        venue
+            .add_instrument(strategy, symbol.to_string(), direction, spec.cloned(), None, policy)
+            .map_err(|e| Fail::new("invalid_execution", e.to_string()).into())
+    }
+
+    /// Whether the engine watches a protective level on this strategy's local instrument.
+    pub(super) fn watches(&self, strategy: usize, local: usize) -> bool {
+        self.ledger.borrow().watchers.iter().any(|w| w.sid == strategy && w.local == local)
+    }
+
+    fn stopped(&self, e: AdapterError) -> PyErr {
+        match e {
+            AdapterError::Fenced(why) => Fail::new("fenced", why).into(),
+            AdapterError::Journal(why) => Fail::new("journal_failed", why).into(),
+            other => Fail::new("venue_unavailable", other.to_string()).into(),
+        }
+    }
+
     fn unavailable(&self, message: String) -> PyErr {
         match self.raised.borrow_mut().take() {
             Some(original) => original,
@@ -139,6 +192,55 @@ impl VenueRoute {
 
     fn venue_id_of(&self, sid: StrategyId, local: usize, order_id: u64) -> Option<String> {
         self.ledger.borrow().by_engine.get(&(sid.index(), local, order_id)).cloned()
+    }
+
+    /// Whether `venue_id` is an id this route issued whose order has since
+    /// been dropped from the ledger.
+    pub(super) fn is_dropped(&self, venue_id: &str) -> bool {
+        let Some((strategy, seq)) = crate::execution::adapter::parse_client_order_id(venue_id)
+        else {
+            return false;
+        };
+        let ledger = self.ledger.borrow();
+        ledger.seq.get(strategy as usize).is_some_and(|issued| seq < *issued)
+            && !ledger.by_venue.contains_key(venue_id)
+    }
+
+    /// Note that an order ended, and drop the oldest ended orders past
+    /// [`RETAINED_ENDED`].
+    fn note_ended(&self, venue_id: &str) {
+        let mut ledger = self.ledger.borrow_mut();
+        match ledger.by_venue.get_mut(venue_id) {
+            Some(placed) if !placed.ended => placed.ended = true,
+            _ => return,
+        }
+        ledger.ended.push_back(venue_id.to_string());
+        while ledger.ended.len() > RETAINED_ENDED {
+            let Some(old) = ledger.ended.pop_front() else { break };
+            if let Some(placed) = ledger.by_venue.remove(&old) {
+                let client = placed.request.tags.get("client_id").cloned().unwrap_or_default();
+                ledger.by_client.remove(&(placed.sid, client));
+                ledger.by_engine.remove(&(placed.sid, placed.local, placed.order_id));
+            }
+            for group in &mut ledger.oco {
+                group.retain(|v| *v != old);
+            }
+            ledger.oco.retain(|g| g.len() > 1);
+        }
+    }
+
+    /// [`Self::note_ended`] when the order has reached a final state.
+    fn note_if_ended(&self, sh: &Shared, sid: StrategyId, local: usize, order_id: u64) {
+        let ended = sh
+            .with_book(sid, |b, _| {
+                Ok(b.kernel(local).order(order_id).is_some_and(|o| o.status.is_terminal()))
+            })
+            .unwrap_or(false);
+        if ended {
+            if let Some(venue_id) = self.venue_id_of(sid, local, order_id) {
+                self.note_ended(&venue_id);
+            }
+        }
     }
 
     // -- requests --------------------------------------------------------
@@ -219,7 +321,7 @@ impl VenueRoute {
             .into());
         }
         let global = sh.global_of(sid, local)?;
-        let symbol = sh.store.symbols().symbol(global).unwrap_or_default().to_string();
+        let symbol = sh.symbol_text(global.index());
         let tick = sh.with_book(sid, |b, _| Ok(b.kernel(local).price_increment()))?;
 
         // The same id again with the same terms is the same order: it is not
@@ -256,6 +358,19 @@ impl VenueRoute {
                 && r.kind == parsed.kind
                 && r.tif == parsed.tif
             {
+                if known.unsent {
+                    // The attempt never reached the venue: this call is the
+                    // retry, and the order is still the same order.
+                    self.send(
+                        sh,
+                        sid,
+                        known.local,
+                        known.order_id,
+                        ts,
+                        known.request.submitted_idx,
+                        &known.request,
+                    )?;
+                }
                 Ok(known.order_id)
             } else {
                 Err(Fail::new(
@@ -313,6 +428,11 @@ impl VenueRoute {
             (client_order_id(sid.index() as u32, seq), parent_vid)
         };
 
+        // The host's own check comes before the book's, so its refusal is the
+        // one the strategy hears whatever else would have refused the order. It
+        // runs before the order exists: a check that raises leaves no order
+        // behind that the venue never heard of.
+        let refusal = sh.refusal_for(sid, local, spec, client_id, ts)?;
         let (order_id, sub_idx) = sh.with_book_mut(sid, |book, current| {
             let sub_idx = book.submission_idx(local, idx, current);
             let id = book.kernel_mut(local).submit_venue_order(
@@ -331,6 +451,18 @@ impl VenueRoute {
             );
             Ok((id, sub_idx))
         })?;
+        if let Some(code) = refusal {
+            self.book_silently(
+                sh,
+                sid,
+                local,
+                order_id,
+                sub_idx,
+                ts,
+                &ExecutionReport::Rejected { reason: code.to_string(), ts_ns: ts },
+            )?;
+            return Ok(order_id);
+        }
         if let Err(reason) = sized_to {
             self.book_silently(
                 sh,
@@ -363,7 +495,7 @@ impl VenueRoute {
                 return Ok(order_id);
             }
         }
-        let mut tags = std::collections::BTreeMap::new();
+        let mut tags = spec.tags.clone();
         tags.insert("client_id".to_string(), client_id.to_string());
         let request = OrderRequest {
             client_order_id: venue_id.clone(),
@@ -384,24 +516,54 @@ impl VenueRoute {
         };
         {
             let mut ledger = self.ledger.borrow_mut();
-            let placed = Placed { sid: sid.index(), local, order_id, request: request.clone() };
+            let placed = Placed {
+                sid: sid.index(),
+                local,
+                order_id,
+                request: request.clone(),
+                unsent: false,
+                ended: false,
+                external: false,
+            };
             ledger.by_client.insert((sid.index(), client_id.to_string()), venue_id.clone());
             ledger.by_engine.insert((sid.index(), local, order_id), venue_id.clone());
             ledger.by_venue.insert(venue_id.clone(), placed);
         }
-        let sent = self.adapter.borrow_mut().submit(&request);
+        self.send(sh, sid, local, order_id, ts, sub_idx, &request)?;
+        Ok(order_id)
+    }
+
+    /// Hand a request to the adapter. A refusal rejects the order; an
+    /// adapter that is unavailable leaves the order marked unsent and raises,
+    /// so sending the same client id again retries it instead of leaving an
+    /// order the venue never saw `Submitted` forever.
+    #[allow(clippy::too_many_arguments)]
+    fn send(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        order_id: u64,
+        ts: i64,
+        sub_idx: usize,
+        request: &OrderRequest,
+    ) -> PyResult<()> {
+        let sent = self.adapter.borrow_mut().submit(request);
+        let unsent = matches!(sent, Err(AdapterError::Unavailable(_)));
+        if let Some(placed) = self.ledger.borrow_mut().by_venue.get_mut(&request.client_order_id) {
+            placed.unsent = unsent;
+        }
         match sent {
-            Ok(()) => Ok(order_id),
+            Ok(()) => Ok(()),
             Err(AdapterError::Refused(why)) => {
-                self.refuse(sh, sid, local, order_id, ts, sub_idx, why)?;
-                Ok(order_id)
+                self.refuse(sh, sid, local, order_id, ts, sub_idx, why)
             }
             Err(AdapterError::Unsupported(why)) => {
                 self.unsupported_sent.set(true);
-                self.refuse(sh, sid, local, order_id, ts, sub_idx, format!("unsupported: {why}"))?;
-                Ok(order_id)
+                self.refuse(sh, sid, local, order_id, ts, sub_idx, format!("unsupported: {why}"))
             }
             Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
         }
     }
 
@@ -446,7 +608,9 @@ impl VenueRoute {
                 book.apply_venue_report(local, idx, ts, order_id, report).map_err(venue_err)?;
             book.kernel_mut(local).pending_events.extend(events);
             Ok(())
-        })
+        })?;
+        self.note_if_ended(sh, sid, local, order_id);
+        Ok(())
     }
 
     /// Ask the venue to cancel an order it works.
@@ -485,6 +649,7 @@ impl VenueRoute {
                     &ExecutionReport::CancelRejected { reason, ts_ns: ts },
                 ),
             Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
         }
     }
 
@@ -551,6 +716,7 @@ impl VenueRoute {
                     &ExecutionReport::ReplaceRejected { reason, ts_ns: ts },
                 ),
             Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
         }
     }
 
@@ -576,6 +742,7 @@ impl VenueRoute {
             }
             Err(AdapterError::Refused(why)) => Err(Fail::new("invalid_order_link", why).into()),
             Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
         }
     }
 
@@ -647,6 +814,7 @@ impl VenueRoute {
             limit_offset: 0.0,
             post_only: false,
             reduce_only: true,
+            tags: Default::default(),
         };
         self.submit(sh, sid, local, &spec, idx, ts, &format!("close-{n}"), None).map(|_| ())
     }
@@ -692,6 +860,12 @@ impl VenueRoute {
         }
         let mut heard = false;
         for (venue_id, report) in out {
+            // The simulated venue's answer is its own decision, not an input
+            // the host pushed: it is on the record, with its reason, before
+            // the book takes it.
+            sh.jlog_now(jk::SIMULATED_REPORT, jsrc::ENGINE, Some(&venue_id), || {
+                super::report_value(&report)
+            })?;
             heard |= self.deliver(py, sh, st, &venue_id, &report, entry.local_idx, ev.event.ts)?
                 != ReportOutcome::Duplicate;
         }
@@ -712,6 +886,11 @@ impl VenueRoute {
         ts: i64,
     ) -> PyResult<ReportOutcome> {
         let Some(placed) = self.placed(venue_id) else {
+            // An order dropped after it ended: whatever the venue says about
+            // it now no longer matters.
+            if self.is_dropped(venue_id) {
+                return Ok(ReportOutcome::Late);
+            }
             return Err(Fail::new(
                 "unknown_client_order_id",
                 format!("the venue reported on order {venue_id:?}, which was never sent"),
@@ -742,10 +921,12 @@ impl VenueRoute {
                 })?;
             }
         }
+        let halted_before = sh.halted(st.sid);
         let (outcome, events) = sh.with_book_mut(st.sid, |book, _| {
             book.apply_venue_report(placed.local, idx, ts, placed.order_id, report)
                 .map_err(venue_err)
         })?;
+        sh.journal_halt_edge(st.sid, halted_before, &events)?;
         if matches!(report, ExecutionReport::Fill { .. })
             && outcome == ReportOutcome::Applied
             && sh.with_book(st.sid, |b, _| {
@@ -756,19 +937,44 @@ impl VenueRoute {
         {
             self.emulate_oco(sh, st.sid, venue_id, idx)?;
         }
+        super::journal_engine_events(sh, st, &events, true)?;
+        // A fill the book could not book yet is on the record, so recovery
+        // knows the book and the venue disagree until it is booked.
+        for event in &events {
+            if let crate::portfolio::EngineEvent::FillDeferred {
+                order_id,
+                exec_id,
+                price,
+                size,
+                reason,
+                ..
+            } = event
+            {
+                sh.jlog_now(jk::UNBOOKED_FILL, jsrc::ENGINE, Some(venue_id), || {
+                    JV::map([
+                        ("order_id", JV::Int(*order_id as i64)),
+                        ("exec_id", JV::str(exec_id)),
+                        ("price", JV::Float(*price)),
+                        ("qty", JV::Float(*size)),
+                        ("reason", JV::str(reason)),
+                    ])
+                })?;
+            }
+        }
         self.after_booking(sh, st.sid, placed.local, idx, ts)?;
+        self.note_if_ended(sh, st.sid, placed.local, placed.order_id);
         if !events.is_empty() {
             let ctx = st.ctx.bind(py);
             let before = ctx.borrow().local.replace(placed.local);
             let global = sh.global_of(st.sid, placed.local)?;
-            let symbol = sh.symbols[global.index()].bind(py);
+            let symbol = sh.symbol(py, global.index());
             let dispatched = dispatch_events(
                 py,
                 st.strategy.bind(py),
                 ctx.as_any(),
                 st.mask,
                 events,
-                Some(symbol),
+                Some(&symbol),
             );
             ctx.borrow().local.set(before);
             dispatched?;
@@ -802,6 +1008,7 @@ impl VenueRoute {
             limit_offset: 0.0,
             post_only: false,
             reduce_only,
+            tags: Default::default(),
         }
     }
 
@@ -908,6 +1115,13 @@ impl VenueRoute {
             self.submit(sh, sid, local, &spec, idx, ts, &slice.client_id, None)?;
         }
         if squareoff {
+            sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
+                JV::map([
+                    ("strategy", JV::Int(sid.index() as i64)),
+                    ("reason", JV::str("squareoff")),
+                    ("venue", JV::Bool(true)),
+                ])
+            })?;
             self.cancel_adding(sh, sid, local, idx)?;
             let ids: Vec<u64> = sh.with_book(sid, |b, _| {
                 Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
@@ -945,14 +1159,22 @@ impl VenueRoute {
                 let target =
                     w.target.is_some_and(|p| if sell { bar.high >= p } else { bar.low <= p });
                 if stop || target {
-                    hit.push((w.exit, w.qty));
+                    hit.push((w.exit, w.qty, if stop { "watch_stop" } else { "watch_target" }));
                     false
                 } else {
                     true
                 }
             });
         }
-        for (exit, qty) in hit {
+        for (exit, qty, why) in hit {
+            sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
+                JV::map([
+                    ("strategy", JV::Int(sid.index() as i64)),
+                    ("reason", JV::str(why)),
+                    ("size", JV::Float(qty)),
+                    ("venue", JV::Bool(true)),
+                ])
+            })?;
             let n = self.next_prot(sid);
             let spec = Self::spec(exit, "market", Some(qty), true);
             self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
@@ -1130,6 +1352,142 @@ impl VenueRoute {
     }
 
     /// The venue id and strategy of an order, for `push_report`.
+    /// Every order sent, in the order of their ids: the venue id, the
+    /// strategy, the local instrument, the engine's order id and the request.
+    pub(super) fn sent(&self) -> Vec<(String, usize, usize, u64, OrderRequest)> {
+        let ledger = self.ledger.borrow();
+        let mut out: Vec<_> = ledger
+            .by_venue
+            .iter()
+            .map(|(id, p)| (id.clone(), p.sid, p.local, p.order_id, p.request.clone()))
+            .collect();
+        // By strategy, then by the order's own count: an id is `s{strategy}-{seq}`.
+        out.sort_by_key(|o| {
+            (o.1, crate::execution::adapter::parse_client_order_id(&o.0).map(|p| p.1))
+        });
+        out
+    }
+
+    /// Check the node's execution epoch with the venue.
+    pub(super) fn heartbeat(&self) -> PyResult<()> {
+        let epoch = self.adapter.borrow_mut().fence(0);
+        match epoch {
+            Ok(()) => Ok(()),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
+            Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(other) => Err(Fail::new("venue_unavailable", other.to_string()).into()),
+        }
+    }
+
+    /// Send an order again, as the request the engine first made of it. The
+    /// caller has asked the venue whether it holds the order and was told it
+    /// does not.
+    pub(super) fn resend(&self, venue_id: &str) -> PyResult<()> {
+        let Some(placed) = self.placed(venue_id) else {
+            return Err(Fail::new(
+                "unknown_client_order_id",
+                format!("no order was sent under {venue_id:?}"),
+            )
+            .param("client_order_id")
+            .value(venue_id)
+            .into());
+        };
+        if placed.external {
+            return Err(Fail::new(
+                "unsupported_in_venue_run",
+                format!("{venue_id:?} is an order the venue makes itself (an exit rule it holds): it cannot be resent"),
+            )
+            .into());
+        }
+        let sent = self.adapter.borrow_mut().submit(&placed.request);
+        match sent {
+            Ok(()) => Ok(()),
+            Err(AdapterError::Refused(why) | AdapterError::Unsupported(why)) => {
+                Err(Fail::new("venue_unavailable", format!("the venue refused the resend: {why}"))
+                    .into())
+            }
+            Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
+        }
+    }
+
+    /// Register an order the venue makes on its own (an exit rule it holds
+    /// fires `{rule}:x{n}`), so that its reports are booked like any order's.
+    /// The engine did not send it and never resends it. The same id again is a
+    /// no-op.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn register_external(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        venue_id: &str,
+        side: OrderSide,
+        quantity: f64,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        if self.placed(venue_id).is_some() {
+            return Ok(());
+        }
+        let global = sh.global_of(sid, local)?;
+        let symbol = sh.store.symbols().symbol(global).unwrap_or_default().to_string();
+        let (order_id, sub_idx) = sh.with_book_mut(sid, |book, current| {
+            let sub_idx = book.submission_idx(local, idx, current);
+            let id = book.kernel_mut(local).submit_venue_order(
+                side,
+                quantity,
+                crate::execution::orders::OrderKind::Market,
+                crate::execution::orders::TimeInForce::Day,
+                sub_idx,
+                ts,
+                venue_id.to_string(),
+                false,
+                true,
+                None,
+                None,
+                None,
+            );
+            Ok((id, sub_idx))
+        })?;
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("client_id".to_string(), venue_id.to_string());
+        tags.insert("held_by".to_string(), "venue".to_string());
+        let request = OrderRequest {
+            client_order_id: venue_id.to_string(),
+            symbol,
+            side,
+            quantity,
+            kind: crate::execution::orders::OrderKind::Market,
+            tif: crate::execution::orders::TimeInForce::Day,
+            strategy_id: sid.index() as u32,
+            account_id: self.account_id.clone(),
+            reduce_only: true,
+            post_only: false,
+            parent_client_order_id: None,
+            tags: tags.into_iter().collect(),
+            submitted_ns: ts,
+            submitted_idx: sub_idx,
+            size_frac: None,
+        };
+        let mut ledger = self.ledger.borrow_mut();
+        ledger.by_client.insert((sid.index(), venue_id.to_string()), venue_id.to_string());
+        ledger.by_engine.insert((sid.index(), local, order_id), venue_id.to_string());
+        ledger.by_venue.insert(
+            venue_id.to_string(),
+            Placed {
+                sid: sid.index(),
+                local,
+                order_id,
+                request,
+                unsent: false,
+                ended: false,
+                external: true,
+            },
+        );
+        Ok(())
+    }
+
     pub(super) fn lookup(&self, venue_id: &str) -> Option<(usize, usize)> {
         self.placed(venue_id).map(|p| (p.sid, p.local))
     }

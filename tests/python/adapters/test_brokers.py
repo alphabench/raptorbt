@@ -37,6 +37,8 @@ def j(status, payload):
 def kite(*answers, **kw):
     t = Script(*answers)
     kw.setdefault("gtc", "day")
+    kw.setdefault("namespace", "N1")
+    kw.setdefault("trusted", True)
     a = KiteAdapter(Session("ACCESS", api_key="KEY"), {"A": Instrument("NFO", "NIFTY25NOVFUT", lot_size=25.0), "B": Instrument("NSE", "INFY")}, transport=t, sleep=lambda s: None, **kw)
     return a, t
 
@@ -44,6 +46,8 @@ def kite(*answers, **kw):
 def upstox(*answers, **kw):
     t = Script(*answers)
     kw.setdefault("gtc", "day")
+    kw.setdefault("namespace", "N1")
+    kw.setdefault("trusted", True)
     ins = {"A": Instrument("NSE_EQ", "INFY", key="NSE_EQ|INE009A01021"), "B": Instrument("MCX_FO", "CRUDE", key="MCX_FO|123", lot_size=100.0, quantity_in_lots=True)}
     return UpstoxAdapter(Session("ACCESS"), ins, transport=t, sleep=lambda s: None, **kw), t
 
@@ -51,6 +55,8 @@ def upstox(*answers, **kw):
 def dhan(*answers, **kw):
     t = Script(*answers)
     kw.setdefault("gtc", "day")
+    kw.setdefault("namespace", "N1")
+    kw.setdefault("trusted", True)
     ins = {"A": Instrument("NSE_EQ", "INFY", key="1594"), "B": Instrument("NSE_FNO", "NIFTY", key="35003")}
     return DhanAdapter(Session("ACCESS"), ins, client_id="1000", transport=t, sleep=lambda s: None, **kw), t
 
@@ -66,7 +72,7 @@ def test_kite_place_translates_and_authenticates():
     assert s["headers"] == {"X-Kite-Version": "3", "Authorization": "token KEY:ACCESS"}
     assert s["form"] == {
         "tradingsymbol": "INFY", "exchange": "NSE", "transaction_type": "BUY", "order_type": "LIMIT",
-        "quantity": 10, "product": "MIS", "validity": "DAY", "tag": "s0x0", "price": 99.0,
+        "quantity": 10, "product": "MIS", "validity": "DAY", "tag": "N1s0x0", "price": 99.0,
     }  # fmt: skip
 
 
@@ -119,7 +125,7 @@ def test_kite_rate_limit_is_retried_and_a_gateway_timeout_is_looked_up_not_resen
     a, t = kite(j(429, {"status": "error", "message": "slow", "error_type": "NetworkException"}), j(200, {"status": "success", "data": {"order_id": "9"}}))
     a.submit(request(symbol="B"))
     assert [s["method"] for s in t.sent] == ["POST", "POST"] and a._orders["s0-0"].venue_order_id == "9"
-    row = {"order_id": "77", "status": "OPEN", "tag": "s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 10, "filled_quantity": 0, "price": 99.0}
+    row = {"order_id": "77", "status": "OPEN", "tag": "N1s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 10, "filled_quantity": 0, "price": 99.0}
     a, t = kite(j(504, {"status": "error", "message": "timeout", "error_type": "NetworkException"}), j(200, {"status": "success", "data": [row]}))
     a.submit(request(symbol="B"))
     assert [(s["method"], s["url"].rsplit("/", 1)[1]) for s in t.sent] == [("POST", "regular"), ("GET", "orders")]
@@ -142,7 +148,7 @@ def test_kite_cumulative_updates_become_deterministic_fills():
     a.submit(request(symbol="B"))
 
     def post(status, filled, avg, **kw):
-        return {"order_id": "9", "status": status, "tag": "s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 10,
+        return {"order_id": "9", "status": status, "tag": "N1s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 10,
                 "filled_quantity": filled, "average_price": avg, "price": 99.0, "order_timestamp": "2026-11-02 09:15:01",
                 "exchange_update_timestamp": "2026-11-02 09:15:02", **kw}  # fmt: skip
 
@@ -162,7 +168,7 @@ def test_kite_modify_cancel_and_replace_ack():
     a.submit(request(symbol="B"))
     a.modify("s0-0", quantity=8.0, limit_price=98.0)
     assert (t.sent[1]["method"], t.sent[1]["url"], t.sent[1]["form"]) == ("PUT", "https://api.kite.trade/orders/regular/9", {"quantity": 8, "price": 98.0})
-    a.handle_payload({"order_id": "9", "status": "UPDATE", "tag": "s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 8, "price": 98.0, "filled_quantity": 0})
+    a.handle_payload({"order_id": "9", "status": "UPDATE", "tag": "N1s0x0", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 8, "price": 98.0, "filled_quantity": 0})
     assert [q.report.kind for q in a.drain_reports()] == ["accepted", "replace_ack"]
     a.cancel("s0-0")
     assert t.sent[2]["method"] == "DELETE" and [q.report.kind for q in a.drain_reports()] == ["cancel_rejected"]
@@ -172,7 +178,7 @@ def test_kite_modify_cancel_and_replace_ack():
 
 def test_kite_reads_orders_positions_balances_and_trades():
     a, _ = kite(
-        j(200, {"status": "success", "data": [{"order_id": "1", "status": "TRIGGER PENDING", "tag": "s0x3", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 5, "filled_quantity": 0, "trigger_price": 90}]}),
+        j(200, {"status": "success", "data": [{"order_id": "1", "status": "TRIGGER PENDING", "tag": "N1s0x3", "exchange": "NSE", "tradingsymbol": "INFY", "quantity": 5, "filled_quantity": 0, "trigger_price": 90}]}),
         j(200, {"status": "success", "data": {"net": [{"tradingsymbol": "INFY", "exchange": "NSE", "product": "MIS", "quantity": -5, "average_price": 1500.5}, {"tradingsymbol": "X", "exchange": "NSE", "quantity": 0}]}}),
         j(200, {"status": "success", "data": {"equity": {"net": 1000.0, "available": {"live_balance": 900.0}, "utilised": {"debits": 100.0}}}}),
         j(200, {"status": "success", "data": [{"trade_id": "T1", "order_id": "1", "quantity": 5, "average_price": 90.0, "fill_timestamp": "2026-11-02 09:20:00"}]}),
@@ -180,7 +186,7 @@ def test_kite_reads_orders_positions_balances_and_trades():
     (o,) = a.open_orders()
     assert (o.client_order_id, o.status, o.trigger_price) == ("s0-3", "open", 90.0)
     (p,) = a.positions()
-    assert (p.symbol, p.net_qty, p.avg_price, p.product) == ("NSE:INFY", -5.0, 1500.5, "intraday")
+    assert (p.symbol, p.net_qty, p.avg_price, p.product) == ("B", -5.0, 1500.5, "intraday")
     b = a.balances()
     assert (b.available, b.used, b.total, b.currency) == (900.0, 100.0, 1000.0, "INR")
     (tr,) = a.fetch_trades()
@@ -195,7 +201,7 @@ def test_kite_postback_checksum():
 
 def test_kite_needs_the_api_key_and_prints_no_secrets():
     with pytest.raises(ValueError):
-        KiteAdapter(Session("tok"), {})
+        KiteAdapter(Session("tok"), {}, namespace="N1")
     a, _ = kite()
     assert "ACCESS" not in repr(a) and "KEY" not in repr(a)
 
@@ -210,7 +216,7 @@ def test_upstox_place_uses_the_hft_host_v3_body_and_protection():
     assert (s["method"], s["url"]) == ("POST", "https://api-hft.upstox.com/v3/order/place")
     assert s["headers"]["Authorization"] == "Bearer ACCESS"
     assert s["body"] == {
-        "quantity": 10, "product": "I", "validity": "DAY", "price": 0, "tag": "s0x0", "instrument_token": "NSE_EQ|INE009A01021",
+        "quantity": 10, "product": "I", "validity": "DAY", "price": 0, "tag": "N1s0x0", "instrument_token": "NSE_EQ|INE009A01021",
         "order_type": "MARKET", "transaction_type": "BUY", "disclosed_quantity": 0, "trigger_price": 0, "is_amo": False,
         "slice": False, "market_protection": -1,
     }  # fmt: skip
@@ -221,7 +227,7 @@ def test_upstox_commodity_quantity_goes_as_lots_and_comes_back_as_units():
     a, t = upstox(j(200, {"status": "success", "data": {"order_ids": ["5"]}}))
     a.submit(request(symbol="B", quantity=300.0))
     assert t.sent[0]["body"]["quantity"] == 3
-    a.handle_payload({"update_type": "order", "order_id": "5", "status": "complete", "tag": "s0x0", "instrument_token": "MCX_FO|123", "quantity": 3, "filled_quantity": 3, "average_price": 7000.0, "price": 7000.0})
+    a.handle_payload({"update_type": "order", "order_id": "5", "status": "complete", "tag": "N1s0x0", "instrument_token": "MCX_FO|123", "quantity": 3, "filled_quantity": 3, "average_price": 7000.0, "price": 7000.0})
     assert [(q.report.kind, q.report.qty) for q in a.drain_reports()] == [("accepted", None), ("fill", 300.0)]
     with pytest.raises(OrderRefused, match="lot size"):
         a.submit(request(symbol="B", quantity=250.0, strategy=1))
@@ -262,8 +268,9 @@ def test_upstox_invalid_token_pauses_and_cancel_modify_wire():
 
 
 def test_upstox_status_strings():
-    a, _ = upstox()
-    base = {"order_id": "1", "tag": "s0x0", "instrument_token": "NSE_EQ|INE009A01021", "quantity": 1, "filled_quantity": 0}
+    a, _ = upstox(j(200, {"status": "success", "data": {"order_ids": ["1"]}}))
+    a.submit(request())
+    base = {"order_id": "1", "tag": "N1s0x0", "instrument_token": "NSE_EQ|INE009A01021", "quantity": 1, "filled_quantity": 0}
     cases = {"put order req received": "received", "open pending": "received", "trigger pending": "open", "cancel pending": "open",
              "complete": "filled", "rejected": "rejected", "cancelled": "cancelled", "modified": "open"}  # fmt: skip
     for raw, norm in cases.items():
@@ -294,7 +301,7 @@ def test_dhan_place_body_and_headers():
     assert (s["method"], s["url"]) == ("POST", "https://api.dhan.co/v2/orders")
     assert s["headers"]["access-token"] == "ACCESS" and "Authorization" not in s["headers"]
     assert s["body"] == {
-        "dhanClientId": "1000", "correlationId": "s0-0", "transactionType": "BUY", "exchangeSegment": "NSE_EQ",
+        "dhanClientId": "1000", "correlationId": "N1s0-0", "transactionType": "BUY", "exchangeSegment": "NSE_EQ",
         "productType": "INTRADAY", "orderType": "STOP_LOSS", "validity": "DAY", "securityId": "1594", "quantity": 10,
         "price": 94.0, "triggerPrice": 95.0,
     }  # fmt: skip
@@ -315,7 +322,7 @@ def test_dhan_rate_limit_retries_internal_error_is_looked_up_and_token_error_pau
     a, t = dhan(j(429, {"errorCode": "DH-904", "errorMessage": "slow"}), j(200, {"orderId": "1"}))
     a.submit(request())
     assert len(t.sent) == 2 and a._orders["s0-0"].venue_order_id == "1"
-    book = [{"orderId": "88", "correlationId": "s0-0", "orderStatus": "PENDING", "exchangeSegment": "NSE_EQ", "securityId": "1594", "quantity": 10, "price": 99.0, "filledQty": 0}]
+    book = [{"orderId": "88", "correlationId": "N1s0-0", "orderStatus": "PENDING", "exchangeSegment": "NSE_EQ", "securityId": "1594", "quantity": 10, "price": 99.0, "filledQty": 0}]
     a, t = dhan(j(500, {"errorCode": "DH-908", "errorMessage": "internal"}), j(200, book))
     a.submit(request())
     assert a._orders["s0-0"].venue_order_id == "88" and len(t.sent) == 2
@@ -330,7 +337,7 @@ def test_dhan_live_update_frames_are_cumulative_fills():
 
     def frame(status, traded, avg):
         return json.dumps({"Type": "order_alert", "Data": {
-            "Exchange": "NSE", "Segment": "E", "SecurityId": "1594", "OrderNo": "55", "CorrelationId": "s0-0", "Status": status,
+            "Exchange": "NSE", "Segment": "E", "SecurityId": "1594", "OrderNo": "55", "CorrelationId": "N1s0-0", "Status": status,
             "TxnType": "B", "OrderType": "LMT", "Product": "I", "Quantity": 10, "TradedQty": traded, "AvgTradedPrice": avg,
             "Price": 99.0, "TriggerPrice": 0, "LastUpdatedTime": "2026-11-02 09:16:00"}})  # fmt: skip
 
@@ -364,7 +371,7 @@ def test_dhan_modify_cancel_and_reads():
 
 def test_dhan_instruments_without_a_security_id_are_unsupported():
     t = Script()
-    a = DhanAdapter(Session("T"), {"A": Instrument("NSE_EQ", "INFY")}, client_id="1", transport=t, gtc="day")
+    a = DhanAdapter(Session("T"), {"A": Instrument("NSE_EQ", "INFY")}, client_id="1", transport=t, gtc="day", namespace="N1")
     with pytest.raises(Unsupported, match="securityId"):
         a.submit(request())
 

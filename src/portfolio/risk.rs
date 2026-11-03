@@ -48,6 +48,12 @@ pub enum RejectReason {
     DailyLoss,
     /// The strategy was halted by hand (`ctx.halt` / `LiveNode.halt`).
     Killed,
+    /// Netting holds a position and the order would open a second entry on
+    /// its side.
+    PositionOpen,
+    /// A reduce-only order that cannot reduce the position (none held, or
+    /// held on the order's own side).
+    ReduceOnly,
 }
 
 impl RejectReason {
@@ -67,6 +73,8 @@ impl RejectReason {
             RejectReason::Squareoff => "squareoff",
             RejectReason::OrderSize => "order_size",
             RejectReason::MaxPosition => "max_position",
+            RejectReason::PositionOpen => "position_open",
+            RejectReason::ReduceOnly => "reduce_only",
             RejectReason::MaxExposure => "max_exposure",
             RejectReason::DailyLoss => "daily_loss",
             RejectReason::Killed => "killed",

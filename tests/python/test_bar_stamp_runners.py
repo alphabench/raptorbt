@@ -44,85 +44,86 @@ def _stamp_kwargs(stamp):
     return {"bar_stamp": "open", "bar_ns": 60e9} if stamp == "open" else {"bar_stamp": "close"}
 
 
-class _Det(Strategy):
-    """Deterministic strategy touching every time-sensitive surface.
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _Det(Strategy):
+        """Deterministic strategy touching every time-sensitive surface.
 
-    Records only close-time quantities, so open- and close-stamped runs can be
-    compared entry by entry.
-    """
+        Records only close-time quantities, so open- and close-stamped runs can be
+        compared entry by entry.
+        """
 
-    def __init__(self):
-        super().__init__()
-        self.trace = []
-        self.raw = []
+        def __init__(self):
+            super().__init__()
+            self.trace = []
+            self.raw = []
 
-    def on_start(self, ctx):
-        syms = list(getattr(ctx, "symbols", [None]))
-        self.fast = self.register_indicators(lambda: Indicator.sma(5), syms)
-        self.slow = self.register_indicators(lambda: Indicator.sma(12), syms)
-        self.s5 = self.subscribe_bars(5, "m")
-        self.s15 = self.subscribe_bars(15, "m")
-        self.s1d = self.subscribe_bars(1, "d")
-        self.comp = self.register_indicators(
-            lambda: Indicator.sma(3), syms, stream_id=self.s15
-        )
-        self.last15 = {}
-        self.clock.set_timer("half-hour", 30 * 60 * 10**9)
-
-    @staticmethod
-    def _sym(ctx):
-        return getattr(ctx, "symbol", None)
-
-    def on_time_event(self, ctx, event):
-        self.trace.append(("time", self._sym(ctx), tuple(event)))
-
-    def on_composite_bar(self, ctx, bar):
-        if bar.stream_id == self.s15:
-            self.last15[bar.symbol] = bar.close
-        self.trace.append(("comp", self._sym(ctx), tuple(bar)))
-
-    def on_order_filled(self, ctx, e):
-        self.trace.append(("fill", self._sym(ctx), ctx.bar_close_ts, e.kind, e.price, e.size))
-
-    def on_order_expired(self, ctx, e):
-        self.trace.append(("expired", self._sym(ctx), ctx.bar_close_ts))
-
-    def on_bar(self, ctx):
-        sym = self._sym(ctx)
-        now = ctx.bar_close_ts
-        self.raw.append((sym, ctx.timestamp, now))
-        fast, slow, comp = self.fast[sym].value, self.slow[sym].value, self.comp[sym].value
-        pos = ctx.position
-        bar = tuple(ctx.bar)[1:]
-        self.trace.append(
-            ("bar", sym, now, bar, fast, slow, comp, ctx.equity,
-             None if pos is None else (pos.size, pos.entry_price))
-        )
-        # Local (IST) minute of the bar's close: flatten from 15:25, the way a
-        # broker's square-off reads the clock.
-        minute = ((now + synthetic.IST_OFFSET_NS) // (60 * 10**9)) % 1440
-        late = minute >= 15 * 60 + 25
-        if pos is not None and late:
-            self.close_position()
-            return
-        if ctx.idx % 97 == 50 and pos is None:
-            # Far below the market: never fills, expires with the day.
-            self.submit_order(
-                orders.Limit(side="buy", units=1.0, price=round(ctx.bar.close * 0.5, 2),
-                             tif="day")
+        def on_start(self, ctx):
+            syms = list(getattr(ctx, "symbols", [None]))
+            self.fast = self.register_indicators(lambda: Indicator.sma(5), syms)
+            self.slow = self.register_indicators(lambda: Indicator.sma(12), syms)
+            self.s5 = self.subscribe_bars(5, "m")
+            self.s15 = self.subscribe_bars(15, "m")
+            self.s1d = self.subscribe_bars(1, "d")
+            self.comp = self.register_indicators(
+                lambda: Indicator.sma(3), syms, stream_id=self.s15
             )
-        if ctx.idx % 41 == 7 and pos is None and not late:
-            self.submit_order(
-                orders.Limit(side="buy", units=2.0, price=round(ctx.bar.close * 0.998, 2),
-                             tif="day")
+            self.last15 = {}
+            self.clock.set_timer("half-hour", 30 * 60 * 10**9)
+
+        @staticmethod
+        def _sym(ctx):
+            return getattr(ctx, "symbol", None)
+
+        def on_timer(self, ctx, event):
+            self.trace.append(("time", self._sym(ctx), tuple(event)))
+
+        def on_composite_bar(self, ctx, bar):
+            if bar.stream_id == self.s15:
+                self.last15[bar.symbol] = bar.close
+            self.trace.append(("comp", self._sym(ctx), tuple(bar)))
+
+        def on_fill(self, ctx, e):
+            self.trace.append(("fill", self._sym(ctx), ctx.bar_close_ts, e.kind, e.price, e.size))
+
+        def on_order_expired(self, ctx, e):
+            self.trace.append(("expired", self._sym(ctx), ctx.bar_close_ts))
+
+        def on_bar(self, ctx):
+            sym = self._sym(ctx)
+            now = ctx.bar_close_ts
+            self.raw.append((sym, ctx.timestamp, now))
+            fast, slow, comp = self.fast[sym].value, self.slow[sym].value, self.comp[sym].value
+            pos = ctx.position
+            bar = tuple(ctx.bar)[1:]
+            self.trace.append(
+                ("bar", sym, now, bar, fast, slow, comp, ctx.equity,
+                 None if pos is None else (pos.size, pos.entry_price))
             )
-        if fast is None or slow is None or late:
-            return
-        gate = comp is None or self.last15.get(sym, 0.0) >= comp
-        if pos is None and fast > slow and gate:
-            self.enter(size_frac=0.1)
-        elif pos is not None and fast < slow:
-            self.close_position()
+            # Local (IST) minute of the bar's close: flatten from 15:25, the way a
+            # broker's square-off reads the clock.
+            minute = ((now + synthetic.IST_OFFSET_NS) // (60 * 10**9)) % 1440
+            late = minute >= 15 * 60 + 25
+            if pos is not None and late:
+                self.close_position()
+                return
+            if ctx.idx % 97 == 50 and pos is None:
+                # Far below the market: never fills, expires with the day.
+                self.submit_order(
+                    orders.Limit(side="buy", units=1.0, price=round(ctx.bar.close * 0.5, 2),
+                                 tif="day")
+                )
+            if ctx.idx % 41 == 7 and pos is None and not late:
+                self.submit_order(
+                    orders.Limit(side="buy", units=2.0, price=round(ctx.bar.close * 0.998, 2),
+                                 tif="day")
+                )
+            if fast is None or slow is None or late:
+                return
+            gate = comp is None or self.last15.get(sym, 0.0) >= comp
+            if pos is None and fast > slow and gate:
+                self.enter(size_frac=0.1)
+            elif pos is not None and fast < slow:
+                self.close_position()
 
 
 def _public(obj):

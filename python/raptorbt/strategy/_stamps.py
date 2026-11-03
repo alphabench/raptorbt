@@ -152,3 +152,25 @@ class BarStamps:
     @property
     def offsets(self) -> dict:
         return dict(self._offsets)
+
+    def offset_for_new(self, symbol: str, bar_ns, call: str) -> int:
+        """The offset a symbol added to a running node would get: the node's single bar width
+        under ``bar_stamp="open"`` unless ``bar_ns`` gives this symbol's own, else ``0``."""
+        if self.bar_stamp != "open":
+            return 0
+        if bar_ns is not None:
+            return _width(bar_ns, f"{call}: bar_ns")
+        widths = set(self._offsets.values())
+        if len(widths) != 1:
+            raise InvalidParameter(
+                f"{call}: bar_stamp='open' with different bar widths per symbol needs bar_ns "
+                f"for {symbol!r}, the bar width in nanoseconds",
+                code="missing_bar_ns",
+                operation=call,
+                parameter="bar_ns",
+                value=None,
+            )
+        return widths.pop()
+
+    def add(self, symbol: str, offset: int) -> None:
+        self._offsets[symbol] = offset

@@ -373,6 +373,8 @@ class CommandPath:
                     # it does nothing, as for a filled order.
                     instrument, algo_id = self._algo_map[command[1]]
                     target.cancel_twap(instrument, algo_id, local_idx)
+                else:
+                    raise self._unknown_order("cancel", command[1])
             elif kind == "cancel_all":
                 for instrument in range(target.n_instruments):
                     target.cancel_all_orders(instrument, local_idx)
@@ -402,3 +404,20 @@ class CommandPath:
                 mapped = id_map.get(command[1])
                 if mapped is not None:
                     target.modify_order(mapped[0], mapped[1], **command[2])
+                else:
+                    raise self._unknown_order("modify", command[1])
+
+    def _unknown_order(self, what: str, client_id: str) -> InvalidOrder:
+        """The refusal for naming a client id this run never submitted. A submitted order
+        that has since finished is a no-op, as it is at a venue."""
+        if client_id in self._algo_map:
+            message = f"{what}: {client_id!r} is a schedule, which can only be cancelled"
+        else:
+            message = f"{what}: no order was submitted with client id {client_id!r}"
+        return InvalidOrder(
+            message,
+            code="unknown_order",
+            parameter="client_id",
+            value=client_id,
+            valid=list(self._id_map),
+        )

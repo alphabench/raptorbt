@@ -57,6 +57,10 @@ fn side_as_fill_args(side: OrderSide) -> (Direction, bool) {
 #[derive(Debug, Default)]
 pub struct OrderEngine {
     orders: Vec<Order>,
+    /// Every order before this index has ended. An order never leaves a
+    /// terminal state, so scans for working orders start here and a node that
+    /// has placed a million orders does not walk them on every event.
+    first_live: std::sync::atomic::AtomicUsize,
     next_id: u64,
     /// Offset applied before deriving the trading date for DAY expiry.
     /// `0` is UTC, which is what `Default` yields.
@@ -67,6 +71,9 @@ pub struct OrderEngine {
     /// The instrument's trading calendar, when it has one: resting orders
     /// are not matched outside it and DAY orders lapse at its close.
     session: Option<SessionSchedule>,
+    /// The instant the previous bar or print covered, to tell a bar that
+    /// opens a new session from one that continues it.
+    prev_session_ts: Option<Timestamp>,
 }
 
 impl OrderEngine {
@@ -93,6 +100,22 @@ impl OrderEngine {
         self.session = session;
     }
 
+    /// Whether a bar at `session_ts` opens a new trading session: the first
+    /// one seen, or one whose session day (the instrument's calendar, else
+    /// the date at the engine's offset) differs from the previous bar's. A
+    /// limit that was resting overnight and is gapped through fills at this
+    /// bar's open.
+    pub(crate) fn opens_session(&self, session_ts: Timestamp) -> bool {
+        let Some(prev) = self.prev_session_ts else { return true };
+        match self.session.as_ref() {
+            Some(s) => s.session_day(prev) != s.session_day(session_ts),
+            None => {
+                let day = |t: Timestamp| t.saturating_add(self.tz_offset_ns).div_euclid(NS_PER_DAY);
+                day(prev) != day(session_ts)
+            }
+        }
+    }
+
     /// Set the tick-path order-entry latency (see `order_latency_ns`).
     pub fn with_latency(mut self, order_latency_ns: i64) -> Self {
         self.order_latency_ns = order_latency_ns.max(0);
@@ -106,9 +129,21 @@ impl OrderEngine {
         }
     }
 
+    /// The orders that may still be working: everything from the first that
+    /// has not ended.
+    fn live(&self) -> &[Order] {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut at = self.first_live.load(Relaxed);
+        while at < self.orders.len() && self.orders[at].status.is_terminal() {
+            at += 1;
+        }
+        self.first_live.store(at, Relaxed);
+        &self.orders[at..]
+    }
+
     /// Working orders released by a schedule.
     pub fn algo_order_ids(&self, algo_id: u64) -> Vec<u64> {
-        self.orders
+        self.live()
             .iter()
             .filter(|o| o.algo_id == Some(algo_id) && !o.status.is_terminal())
             .map(|o| o.id)
@@ -130,22 +165,32 @@ impl OrderEngine {
 
     /// Shared view of an order by id.
     pub fn get(&self, id: u64) -> Option<&Order> {
-        self.orders.iter().find(|o| o.id == id)
+        // Ids are issued in submission order and orders are never removed, so
+        // the book is sorted by id: a long-running node does not scan it.
+        self.orders.binary_search_by_key(&id, |o| o.id).ok().map(|i| &self.orders[i])
     }
 
     /// Mutable view of an order by id.
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Order> {
-        self.orders.iter_mut().find(|o| o.id == id)
+        let at = self.orders.binary_search_by_key(&id, |o| o.id).ok()?;
+        Some(&mut self.orders[at])
     }
 
     /// All non-terminal orders, in submission order.
     pub fn working(&self) -> impl Iterator<Item = &Order> {
-        self.orders.iter().filter(|o| !o.status.is_terminal())
+        self.live().iter().filter(|o| !o.status.is_terminal())
     }
 
     /// Every order ever submitted, in submission order.
     pub fn all(&self) -> &[Order] {
         &self.orders
+    }
+
+    /// The orders that may still be working, mutably, in submission order
+    /// (ended ones among them are to be skipped by the caller).
+    pub fn live_mut(&mut self) -> &mut [Order] {
+        let first = self.orders.len() - self.live().len();
+        &mut self.orders[first..]
     }
 
     /// Every order, mutably, in submission order.
@@ -168,7 +213,7 @@ impl OrderEngine {
     /// Cancel every working in-process order, returning the ids canceled.
     pub fn cancel_all(&mut self) -> Vec<u64> {
         let ids: Vec<u64> = self
-            .orders
+            .live()
             .iter()
             .filter(|o| !o.status.is_terminal() && !o.is_venue_driven())
             .map(|o| o.id)
@@ -315,16 +360,27 @@ impl OrderEngine {
             MatchMode::Bar => bar.timestamp.saturating_sub(1),
             MatchMode::Trade => bar.timestamp,
         };
+        // Only a bar can open a session: a print has no range to gap through.
+        let session_open = mode == MatchMode::Bar && self.opens_session(session_ts);
+        self.prev_session_ts = Some(session_ts);
         let session = self.session.as_ref();
         let in_session = session.is_none_or(|s| s.is_open(session_ts));
 
         // Parent states for one-triggers-other gating, resolved up front so
         // the mutable iteration below stays borrow-clean. Held children of a
         // filled parent become matchable; children of a dead parent cancel.
-        let parent_state: std::collections::HashMap<u64, OrderStatus> =
-            self.orders.iter().map(|o| (o.id, o.status)).collect();
+        // Only the parents of orders still working matter, so the map is not
+        // the size of every order the node ever placed.
+        let parent_state: std::collections::HashMap<u64, OrderStatus> = self
+            .live()
+            .iter()
+            .filter(|o| !o.status.is_terminal())
+            .filter_map(|o| o.parent_id)
+            .filter_map(|p| self.get(p).map(|parent| (p, parent.status)))
+            .collect();
 
-        for order in &mut self.orders {
+        let first_live = self.orders.len() - self.live().len();
+        for order in &mut self.orders[first_live..] {
             // A venue-driven order is matched by its venue, never here.
             if order.status.is_terminal() || order.submitted_idx >= idx || order.is_venue_driven() {
                 continue;
@@ -366,7 +422,12 @@ impl OrderEngine {
                 continue;
             }
 
-            let first_bar = order.submitted_idx + 1 == idx;
+            // The first bar the order can execute on: it is marketable on
+            // arrival if the open is through its limit, and trades at the
+            // market there. After that it rests, at its limit, except across
+            // a session open that gaps past it.
+            let first_bar = *order.arrival_idx.get_or_insert(idx) == idx;
+            let at_market = first_bar || session_open;
             let (direction, is_entry) = side_as_fill_args(order.side);
             let oid = order.id;
             let fill = move |p: Price| MatchOutcome::Fill { order_id: oid, price: p };
@@ -398,7 +459,9 @@ impl OrderEngine {
                         let _ = order.transition(OrderStatus::Rejected);
                         Some(MatchOutcome::Reject { order_id: oid, reason: "post_only" })
                     } else {
-                        fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
+                        fill_model
+                            .get_limit_fill_price(price, bar, direction, is_entry, at_market)
+                            .map(fill)
                     }
                 }
                 OrderKind::StopMarket { trigger } => {
@@ -407,16 +470,18 @@ impl OrderEngine {
                 // If-touched orders trigger on the *favorable* side — the
                 // limit-style touch — then fill like a market at the touch
                 // price (a bar opening through the trigger fills at the open).
-                OrderKind::MarketIfTouched { trigger } => {
-                    fill_model.get_limit_fill_price(trigger, bar, direction, is_entry).map(fill)
-                }
+                OrderKind::MarketIfTouched { trigger } => fill_model
+                    .get_limit_fill_price(trigger, bar, direction, is_entry, true)
+                    .map(fill),
                 OrderKind::StopLimit { trigger, price } => match order.status {
-                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
-                        fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
-                    }
+                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => fill_model
+                        .get_limit_fill_price(price, bar, direction, is_entry, at_market)
+                        .map(fill),
                     _ => {
                         if fill_model.would_trigger_stop(trigger, bar, direction, is_entry) {
                             let _ = order.transition(OrderStatus::Triggered);
+                            // The limit leg arrives on the next bar.
+                            order.arrival_idx = None;
                             Some(MatchOutcome::Trigger { order_id: oid })
                         } else {
                             None
@@ -424,12 +489,14 @@ impl OrderEngine {
                     }
                 },
                 OrderKind::LimitIfTouched { trigger, price } => match order.status {
-                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
-                        fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
-                    }
+                    OrderStatus::Triggered | OrderStatus::PartiallyFilled => fill_model
+                        .get_limit_fill_price(price, bar, direction, is_entry, at_market)
+                        .map(fill),
                     _ => {
                         if fill_model.would_fill_limit(trigger, bar, direction, is_entry) {
                             let _ = order.transition(OrderStatus::Triggered);
+                            // The limit leg arrives on the next bar.
+                            order.arrival_idx = None;
                             Some(MatchOutcome::Trigger { order_id: oid })
                         } else {
                             None
@@ -456,7 +523,9 @@ impl OrderEngine {
                 OrderKind::TrailingStopLimit { offset, limit_offset } => match order.status {
                     OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
                         let price = order.trail_limit.unwrap_or(bar.close);
-                        fill_model.get_limit_fill_price(price, bar, direction, is_entry).map(fill)
+                        fill_model
+                            .get_limit_fill_price(price, bar, direction, is_entry, at_market)
+                            .map(fill)
                     }
                     _ => {
                         let favorable = match order.side {
@@ -478,6 +547,8 @@ impl OrderEngine {
                                 OrderSide::Buy => trigger + limit_offset,
                             });
                             let _ = order.transition(OrderStatus::Triggered);
+                            // The limit leg arrives on the next bar.
+                            order.arrival_idx = None;
                             Some(MatchOutcome::Trigger { order_id: oid })
                         } else {
                             None
@@ -560,6 +631,38 @@ mod tests {
         let _ = order.transition(OrderStatus::Accepted);
         let id = engine.submit(order);
         (engine, id)
+    }
+
+    #[test]
+    fn ended_orders_are_skipped_by_working_and_found_by_id() {
+        let mut engine = OrderEngine::new();
+        let mut ids = Vec::new();
+        for n in 0..50 {
+            let mut order = Order::plain(
+                OrderSide::Buy,
+                QtySpec::Units(1.0),
+                OrderKind::Limit { price: 90.0 },
+                TimeInForce::Gtc,
+            );
+            order.client_id = format!("t-{n}");
+            let _ = order.transition(OrderStatus::Accepted);
+            ids.push(engine.submit(order));
+        }
+        // Every order but the 41st ends; a later one is still working.
+        for (n, id) in ids.iter().enumerate() {
+            if n != 40 {
+                assert!(engine.cancel(*id));
+            }
+        }
+        let working: Vec<u64> = engine.working().map(|o| o.id).collect();
+        assert_eq!(working, vec![ids[40]]);
+        for id in &ids {
+            assert_eq!(engine.get(*id).map(|o| o.id), Some(*id));
+        }
+        assert!(engine.get(ids[49] + 1).is_none());
+        assert_eq!(engine.cancel_all(), vec![ids[40]]);
+        assert_eq!(engine.working().count(), 0);
+        assert_eq!(engine.all().len(), 50, "ended orders stay in the book");
     }
 
     #[test]

@@ -44,7 +44,7 @@ class EnterOnce(Strategy):
         super().__init__(config)
         self.entered = False
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         if not self.entered:
             self.entered = True
             self.enter(size_frac=0.5)
@@ -78,7 +78,7 @@ class TestStreamMatchesBatch:
                 super().__init__(config)
                 self.seen = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.seen.append(("trade", tick.timestamp, tick.price))
 
             def on_quote(self, ctx, quote):
@@ -113,9 +113,9 @@ class TestWarmupBars:
                 self.sma_at_first_tick = None
 
             def on_start(self, ctx):
-                self.sma = self.register_indicator(Indicator.sma(3))
+                self.sma = self.register_indicator(Indicator.sma(3), symbol="AAA")
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if self.sma_at_first_tick is None:
                     self.sma_at_first_tick = self.sma.value
 
@@ -132,7 +132,8 @@ class TestWarmupBars:
         }
         strategy = S()
         stream = TickStrategyStream(
-            strategy, ["AAA"], config=_zero_fee_config(), warmup_bars=warmup
+            strategy, ["AAA"], config=_zero_fee_config(), warmup_bars=warmup,
+            bar_stamp="close",
         )
         stream.push_tick("AAA", 10, 105.0)
         assert strategy.sma_at_first_tick == pytest.approx(102.0)
@@ -154,7 +155,8 @@ class TestWarmupBars:
             }
         }
         stream = TickStrategyStream(
-            S(), ["AAA"], config=_zero_fee_config(), warmup_bars=warmup
+            S(), ["AAA"], config=_zero_fee_config(), warmup_bars=warmup,
+            bar_stamp="close",
         )
         assert stream.positions("AAA"), "a warmup bar carried the entry"
 
@@ -232,9 +234,10 @@ class TestContextParity:
             bars["volume"],
             symbol="AAA",
             config=_zero_fee_config(),
+            bar_stamp="close",
         )
 
-        stream = TickStrategyStream(SmaCross(), ["AAA"], config=_zero_fee_config())
+        stream = TickStrategyStream(SmaCross(), ["AAA"], config=_zero_fee_config(), bar_stamp="close")
         for i in range(len(bars["timestamps"])):
             stream.push_bar(
                 "AAA",
@@ -290,7 +293,7 @@ class TestARefusedPrintStillTellsTheTime:
             def on_start(self, ctx):
                 self.clock.set_time_alert("entry", at_ns=5)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append((ctx.symbol, event.name, event.ts_fired))
 
         strategy = S()
@@ -317,7 +320,7 @@ class TestARefusedPrintStillTellsTheTime:
             def on_start(self, ctx):
                 self.clock.set_timer("beat", interval_ns=4, start_ns=4)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append((ctx.symbol, event.ts_fired))
 
         strategy = S()
@@ -334,7 +337,7 @@ class TestARefusedPrintStillTellsTheTime:
             def on_start(self, ctx):
                 self.clock.set_time_alert("entry", at_ns=5)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.submit_order(orders.Market(side="buy", units=10.0), symbol="AAA")
 
         stream = TickStrategyStream(S(), ["AAA"], config=_zero_fee_config())
@@ -363,11 +366,11 @@ class TestARefusedPrintStillTellsTheTime:
             def on_start(self, ctx):
                 self.clock.set_time_alert("flatten", at_ns=5)
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.position is None and tick.timestamp < 5:
                     self.enter(size_frac=0.4)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append((ctx.symbol, event.ts_fired))
                 if ctx.symbol == "AAA":
                     self.close_position()

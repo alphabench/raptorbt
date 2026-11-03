@@ -45,7 +45,7 @@ class TestTickDispatch:
                 super().__init__(config)
                 self.seen = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.seen.append(("trade", tick.timestamp, tick.price))
 
             def on_quote(self, ctx, quote):
@@ -72,7 +72,7 @@ class TestTickDispatch:
                 super().__init__(config)
                 self.observed = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.observed.append(ctx.best_bid)
 
         data = {
@@ -95,7 +95,7 @@ class TestTickDispatch:
                 self.quotes = 0
                 self.trades = 0
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.trades += 1
 
             def on_quote(self, ctx, quote):
@@ -131,7 +131,7 @@ class TestTickDispatch:
 class TestTickExecution:
     def test_market_entry_fills_at_the_print(self):
         class S(Strategy):
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.idx == 0:
                     self.enter(size_frac=0.5)
 
@@ -168,14 +168,16 @@ class TestTickExecution:
 
         trades = result.result.trades()
         assert len(trades) == 1
-        # The print (94) traded through the 95 limit: the fill is the print.
-        assert trades[0].entry_price == pytest.approx(94.0)
+        # The order was not marketable when it arrived, so it rested; the
+        # print (94) traded through the 95 limit and a resting order fills at
+        # its limit.
+        assert trades[0].entry_price == pytest.approx(95.0)
 
     def test_quotes_do_not_lengthen_the_equity_curve(self):
         """Metrics must not shift with feed verbosity."""
 
         class S(Strategy):
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.idx == 0:
                     self.enter(size_frac=0.5)
 
@@ -209,11 +211,11 @@ class TestTickExecution:
                 super().__init__(config)
                 self.fills = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.symbol == "AAA" and ctx.idx == 2:
                     self.submit_order(orders.Market(units=10, side="buy"), symbol="BBB")
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 self.fills.append((ctx.symbol, event.price))
 
         prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
@@ -242,7 +244,7 @@ class TestTickExecution:
                 super().__init__(config)
                 self.prints, self.quotes = [], []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.prints.append((tick.size, tick.oi))
 
             def on_quote(self, ctx, quote):
@@ -275,12 +277,12 @@ class TestTickExecution:
                 self.prints = 0
                 self.fills = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.prints += 1
                 if self.prints == 1:
                     self.submit_order(orders.Limit(side="buy", price=99.0, units=10))
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 # Which print the fill landed on: the 100 print (2nd) must
                 # not reach us behind 300 displayed; the 250 print (3rd) does.
                 self.fills.append(self.prints)
@@ -309,12 +311,12 @@ class TestTickExecution:
                 super().__init__(config)
                 self.fills, self.working = [], []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.idx == 0:
                     self.submit_order(orders.Market(units=100, side="buy"))
                 self.working.append([(o.status, o.filled_qty, o.remaining) for o in ctx.open_orders()])
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 self.fills.append(event.size)
 
         # The submission print itself sweeps the order (same-print market
@@ -344,12 +346,12 @@ class TestTickExecution:
                 self.prints = 0
                 self.fill_on_print = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.prints += 1
                 if self.prints == 1:
                     self.submit_order(orders.Market(units=10, side="buy"))
 
-            def on_order_filled(self, ctx, event):
+            def on_fill(self, ctx, event):
                 self.fill_on_print.append(self.prints)
 
         ticks = _ticks([100.0, 100.0, 100.0, 100.0], start_ts=0, step=100_000_000)
@@ -369,7 +371,7 @@ class TestTickExecution:
         """
 
         class TickS(Strategy):
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 if ctx.idx == 0:
                     self.enter(size_frac=0.5)
 
@@ -396,6 +398,7 @@ class TestTickExecution:
                 }
             },
             config=_zero_fee_config(),
+            bar_stamp="close",
         )
 
         tick_trades = tick_result.result.trades()
@@ -411,7 +414,7 @@ class TestTickExecution:
                 super().__init__(config)
                 self.rejects = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.enter(size_frac=0.2)
 
             def on_order_rejected(self, ctx, event):
@@ -473,16 +476,17 @@ class TestBarsFromTicks:
         assert strategy.values == [pytest.approx(104.0), pytest.approx(108.0)]
 
     def test_composite_subscriptions_work_on_ticks(self):
-        class S(Strategy):
-            def __init__(self, config=None):
-                super().__init__(config)
-                self.composites = []
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def __init__(self, config=None):
+                    super().__init__(config)
+                    self.composites = []
 
-            def on_start(self, ctx):
-                self.h = self.subscribe_bars(3, "tick")
+                def on_start(self, ctx):
+                    self.h = self.subscribe_bars(3, "tick")
 
-            def on_composite_bar(self, ctx, bar):
-                self.composites.append((bar.symbol, bar.close))
+                def on_composite_bar(self, ctx, bar):
+                    self.composites.append((bar.symbol, bar.close))
 
         data = {"AAA": _ticks([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])}
         strategy = S()
@@ -520,7 +524,7 @@ class TestOrderBook:
                 super().__init__(config)
                 self.books = []
 
-            def on_order_book(self, ctx, book):
+            def on_book(self, ctx, book):
                 self.books.append(book)
 
         depth = _depth([([(99.0, 300.0), (98.0, 200.0)], [(101.0, 400.0)])], start_ts=5)
@@ -548,7 +552,7 @@ class TestOrderBook:
                 super().__init__(config)
                 self.seen = []
 
-            def on_trade_tick(self, ctx, tick):
+            def on_trade(self, ctx, tick):
                 self.seen.append(ctx.book.best_bid if ctx.book else None)
 
         depth = _depth([([(99.0, 300.0)], [(101.0, 400.0)])], start_ts=5)
@@ -563,7 +567,7 @@ class TestOrderBook:
 
     def test_a_book_alone_produces_no_trades_or_equity_samples(self):
         class S(Strategy):
-            def on_order_book(self, ctx, book):
+            def on_book(self, ctx, book):
                 # Displayed size is intent; this rests until a print.
                 self.submit_order(orders.Limit(side="buy", price=99.0, units=10.0))
 
@@ -589,7 +593,7 @@ class TestQueueFills:
                 super().__init__(config)
                 self.sent = False
 
-            def on_order_book(self, ctx, book):
+            def on_book(self, ctx, book):
                 if not self.sent:
                     self.sent = True
                     self.submit_order(orders.Limit(side="buy", price=99.0, units=10.0))

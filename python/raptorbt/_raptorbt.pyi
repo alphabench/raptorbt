@@ -891,7 +891,11 @@ class MarginModel:
     @staticmethod
     def leverage(factors: dict[str, float]) -> MarginModel: ...
     @staticmethod
-    def percent_of_notional(pct: float) -> MarginModel: ...
+    def percent_of_notional(pct: float) -> MarginModel:
+        """Deprecated: takes a percent. Use :meth:`fraction_of_notional` (``pct / 100``)."""
+    @staticmethod
+    def fraction_of_notional(fraction: float) -> MarginModel:
+        """A fraction of the notional (``0.2`` is 20 percent); above 1 is refused."""
     @staticmethod
     def option_simple(seller_pct: float) -> MarginModel: ...
     @staticmethod
@@ -957,6 +961,9 @@ class InstrumentSpec:
     #: With a schedule the kernel enforces the session; without one the
     #: instrument trades at any timestamp, as before.
     session: SessionSchedule | None
+    def to_json(self) -> str: ...
+    @staticmethod
+    def from_json(text: str) -> InstrumentSpec: ...
     @staticmethod
     def equity(
         symbol: str,
@@ -1190,6 +1197,11 @@ class RuntimeContext:
     last_price: float | None
     def series(self, symbol: str | None = ...) -> dict[str, _F64 | _I64]: ...
     def keep_history(self, rows: int, symbol: str | None = ...) -> None: ...
+    #: True while a warm-up bar is handled (see LiveNode's ``warmup``).
+    is_warmup: bool
+    def instrument(self, key: str | None = ...) -> InstrumentSpec: ...
+    def option_chain(self, underlying: str | None = ...) -> OptionChain: ...
+    def role(self, name: str) -> str | tuple[str, ...]: ...
     def position_for(self, symbol: str | None = ...) -> PositionSnapshot | None: ...
     def positions(self, symbol: str | None = ...) -> list[PositionSnapshot]: ...
     def set_underlying_price(
@@ -1466,7 +1478,14 @@ class Runtime:
     def run(self) -> None: ...
     def set_curve_window(self, window: int | None) -> None: ...
     def adopt_position(
-        self, sid: int, local: int, timestamp_ns: int, price: float, quantity: float
+        self,
+        sid: int,
+        local: int,
+        timestamp_ns: int,
+        price: float,
+        quantity: float,
+        margin_minor: int | None = ...,
+        cost_minor: int | None = ...,
     ) -> int: ...
     def push_tick(
         self,
@@ -1503,6 +1522,17 @@ class Runtime:
         arrival_ns: int | None = ...,
     ) -> None: ...
     def advance_time(self, timestamp: int) -> None: ...
+    def add_instrument(
+        self,
+        symbol: str,
+        spec: InstrumentSpec | None,
+        direction: int,
+        strategies: list[int],
+        history: int | None = ...,
+        offset: int = ...,
+    ) -> int: ...
+    def retire_instrument(self, symbol: str) -> None: ...
+    def last_event_ns(self) -> int: ...
     def set_execution(
         self,
         kind: str,
@@ -1511,7 +1541,10 @@ class Runtime:
         protective: str = ...,
     ) -> None: ...
     def set_processing_latency(self, latency_ns: int) -> None: ...
-    def set_warmup(self, warmup: bool) -> None: ...
+    def set_warmup(self, warmup: bool, muted: bool = ...) -> None: ...
+    def hold_boot(self) -> None: ...
+    def release_boot(self) -> None: ...
+    def set_order_check(self, check: Any, proposal: Any) -> None: ...
     def push_report(
         self, client_order_id: str, report: ExecutionReport, arrival_ns: int
     ) -> str: ...
@@ -1721,6 +1754,11 @@ class EngineEvent:
     quantity: float | None
     amount: float | None
     cash: float | None
+    # "order_resized" (the engine cut a working order's units: a sibling of a
+    # one-cancels-other group whose partner partly filled): size is the units
+    # it offers now, previous_size what it offered before. Reaches
+    # on_order_event only.
+    previous_size: float | None
 
 class CorporateAction:
     """A split, bonus or cash dividend on one instrument, effective at ``ts``
@@ -2047,7 +2085,7 @@ def full_report(
     fees: Any = ...,
     periods_per_year: float | None = ...,
     risk_free: float = ...,
-    session_minutes: float = ...,
+    session_minutes: float | None = ...,
     tz_offset_ns: int = ...,
     *,
     slippage: float = ...,
@@ -2161,3 +2199,61 @@ def resample_trades(
     min_source: int = ...,
     flush: bool = ...,
 ) -> dict[str, np.ndarray]: ...
+
+
+class Record:
+    seq: int
+    ts_event: int
+    ts_arrival: int
+    kind: str
+    source: str
+    client_order_id: str | None
+    chain: str
+    payload: Any
+    def canonical(self) -> bytes: ...
+
+class Journal:
+    def __init__(
+        self,
+        header: Any = None,
+        *,
+        seq_base: int = 0,
+        chain: str | None = None,
+        file: str | None = None,
+        fsync: str | int | None = None,
+        memory: bool | int | None = None,
+        sink: Any = None,
+    ) -> None: ...
+    def since(self, seq: int) -> list[Record]: ...
+    def head(self) -> tuple[int, str, Any]: ...
+    def append(
+        self,
+        kind: str,
+        ts_event: int,
+        payload: Any = None,
+        *,
+        ts_arrival: int | None = None,
+        source: str = "host",
+        client_order_id: str | None = None,
+    ) -> int: ...
+    def sync(self) -> None: ...
+    def expect(self, records: list[Any]) -> None: ...
+    def peek(self) -> Record | None: ...
+    count: int
+    chain: str
+    chain_from: str
+    seq_base: int
+    broken: bool
+    last_kind: str | None
+    replaying: bool
+    remaining: int
+    @staticmethod
+    def read(path: str) -> tuple[Any, int, str | None, list[Record], int]: ...
+
+def chain_step(prev_hex: str, canonical: bytes) -> str: ...
+def chain_start(header: Any) -> str: ...
+def canonical(value: Any) -> bytes: ...
+
+_INDICATOR_FUNCTIONS: list[str]
+
+def capabilities_json() -> str: ...

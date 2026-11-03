@@ -37,8 +37,9 @@ def _clock():
 class Fake:
     """Common: run a venue call, turning the scenario's failures into HTTP outcomes."""
 
-    def __init__(self, venue: ScriptedVenue) -> None:
+    def __init__(self, venue: ScriptedVenue, lot: float = 1.0) -> None:
         self.venue = venue
+        self.lot = lot  # the broker counts this instrument in lots of this size (the venue always in units)
         self.calls: list[tuple[str, str]] = []
 
     def guard(self, fn, ok, refuse, unavailable):
@@ -63,8 +64,8 @@ class FakeKite(Fake):
         return {
             "order_id": e.venue_order_id, "status": self.STATUS[e.status], "status_message": e.reason, "tag": e.ref,
             "tradingsymbol": e.symbol, "exchange": "NSE", "transaction_type": e.side.upper(),
-            "order_type": "LIMIT" if e.limit_price else "MARKET", "product": "MIS", "quantity": e.quantity,
-            "filled_quantity": e.filled_qty, "average_price": e.avg_price or 0, "price": e.limit_price or 0,
+            "order_type": "LIMIT" if e.limit_price else "MARKET", "product": "MIS", "quantity": e.quantity / self.lot,
+            "filled_quantity": e.filled_qty / self.lot, "average_price": e.avg_price or 0, "price": e.limit_price or 0,
             "trigger_price": e.trigger_price or 0,
         }  # fmt: skip
 
@@ -77,7 +78,7 @@ class FakeKite(Fake):
         if method == "POST" and path == "/orders/regular":
             f = form
             return self.guard(
-                lambda: {"order_id": self.venue.place(f["tag"], f["tradingsymbol"], f["transaction_type"].lower(), float(f["quantity"]), f.get("price"), f.get("trigger_price"))},
+                lambda: {"order_id": self.venue.place(f["tag"], f["tradingsymbol"], f["transaction_type"].lower(), float(f["quantity"]) * self.lot, f.get("price"), f.get("trigger_price"))},
                 ok, err("InputException"), busy,
             )  # fmt: skip
         if path.startswith("/orders/regular/"):
@@ -87,7 +88,7 @@ class FakeKite(Fake):
             if method == "PUT":
                 f = form
                 return self.guard(
-                    lambda: (self.venue.modify(vid, float(f["quantity"]) if "quantity" in f else None, f.get("price"), f.get("trigger_price")), {"order_id": vid})[1],
+                    lambda: (self.venue.modify(vid, float(f["quantity"]) * self.lot if "quantity" in f else None, f.get("price"), f.get("trigger_price")), {"order_id": vid})[1],
                     ok, err("InputException"), busy,
                 )  # fmt: skip
         if method == "GET" and path == "/orders":
@@ -106,8 +107,8 @@ class FakeUpstox(Fake):
         return {
             "order_id": e.venue_order_id, "status": self.STATUS[e.status], "status_message": e.reason, "tag": e.ref,
             "instrument_token": f"NSE_EQ|{e.symbol}", "transaction_type": e.side.upper(),
-            "order_type": "LIMIT" if e.limit_price else "MARKET", "product": "I", "quantity": e.quantity,
-            "filled_quantity": e.filled_qty, "average_price": e.avg_price or 0, "price": e.limit_price or 0,
+            "order_type": "LIMIT" if e.limit_price else "MARKET", "product": "I", "quantity": e.quantity / self.lot,
+            "filled_quantity": e.filled_qty / self.lot, "average_price": e.avg_price or 0, "price": e.limit_price or 0,
             "trigger_price": e.trigger_price or 0,
         }  # fmt: skip
 
@@ -122,7 +123,7 @@ class FakeUpstox(Fake):
         if method == "POST" and path == "/v3/order/place":
             b = body
             return self.guard(
-                lambda: {"order_ids": [self.venue.place(b["tag"], b["instrument_token"].split("|")[1], b["transaction_type"].lower(), float(b["quantity"]), b["price"] or None, b["trigger_price"] or None)]},
+                lambda: {"order_ids": [self.venue.place(b["tag"], b["instrument_token"].split("|")[1], b["transaction_type"].lower(), float(b["quantity"]) * self.lot, b["price"] or None, b["trigger_price"] or None)]},
                 ok, err, busy,
             )  # fmt: skip
         if method == "DELETE" and path == "/v3/order/cancel":
@@ -131,7 +132,7 @@ class FakeUpstox(Fake):
         if method == "PUT" and path == "/v3/order/modify":
             b = body
             return self.guard(
-                lambda: (self.venue.modify(b["order_id"], float(b["quantity"]) if "quantity" in b else None, b["price"] or None, b["trigger_price"] or None), {"order_id": b["order_id"]})[1],
+                lambda: (self.venue.modify(b["order_id"], float(b["quantity"]) * self.lot if "quantity" in b else None, b["price"] or None, b["trigger_price"] or None), {"order_id": b["order_id"]})[1],
                 ok, err, busy,
             )  # fmt: skip
         if method == "GET" and path == "/v2/order/retrieve-all":
@@ -151,8 +152,8 @@ class FakeDhan(Fake):
         return {"Type": "order_alert", "Data": {
             "Exchange": "NSE", "Segment": "E", "SecurityId": self.IDS[e.symbol], "OrderNo": e.venue_order_id,
             "CorrelationId": e.ref, "Status": self.STATUS[e.status], "TxnType": "B" if e.side == "buy" else "S",
-            "OrderType": "LMT" if e.limit_price else "MKT", "Product": "I", "Quantity": e.quantity,
-            "TradedQty": e.filled_qty, "AvgTradedPrice": e.avg_price or 0, "Price": e.limit_price or 0,
+            "OrderType": "LMT" if e.limit_price else "MKT", "Product": "I", "Quantity": e.quantity / self.lot,
+            "TradedQty": e.filled_qty / self.lot, "AvgTradedPrice": e.avg_price or 0, "Price": e.limit_price or 0,
             "TriggerPrice": e.trigger_price or 0, "ReasonDescription": e.reason or "",
         }}  # fmt: skip
 
@@ -161,8 +162,8 @@ class FakeDhan(Fake):
             "orderId": e.venue_order_id, "correlationId": e.ref, "orderStatus": self.STATUS[e.status],
             "transactionType": e.side.upper(), "exchangeSegment": "NSE_EQ", "productType": "INTRADAY",
             "orderType": "LIMIT" if e.limit_price else "MARKET", "securityId": self.IDS[e.symbol],
-            "quantity": e.quantity, "price": e.limit_price or 0, "triggerPrice": e.trigger_price or 0,
-            "filledQty": e.filled_qty, "averageTradedPrice": e.avg_price or 0, "omsErrorDescription": e.reason or "",
+            "quantity": e.quantity / self.lot, "price": e.limit_price or 0, "triggerPrice": e.trigger_price or 0,
+            "filledQty": e.filled_qty / self.lot, "averageTradedPrice": e.avg_price or 0, "omsErrorDescription": e.reason or "",
         }  # fmt: skip
 
     def __call__(self, method, url, *, headers=None, params=None, form=None, body=None, timeout=10.0):
@@ -175,7 +176,7 @@ class FakeDhan(Fake):
         if method == "POST" and path == "/orders":
             b = body
             return self.guard(
-                lambda: {"orderId": self.venue.place(b["correlationId"], rev[b["securityId"]], b["transactionType"].lower(), float(b["quantity"]), b["price"] or None, b.get("triggerPrice")), "orderStatus": "TRANSIT"},
+                lambda: {"orderId": self.venue.place(b["correlationId"], rev[b["securityId"]], b["transactionType"].lower(), float(b["quantity"]) * self.lot, b["price"] or None, b.get("triggerPrice")), "orderStatus": "TRANSIT"},
                 ok, err, busy,
             )  # fmt: skip
         if path.startswith("/orders/") and method == "DELETE":
@@ -184,7 +185,7 @@ class FakeDhan(Fake):
         if path.startswith("/orders/") and method == "PUT":
             vid, b = path.rsplit("/", 1)[1], body
             return self.guard(
-                lambda: (self.venue.modify(vid, float(b["quantity"]), b.get("price"), b.get("triggerPrice")), {"orderId": vid, "orderStatus": "PENDING"})[1],
+                lambda: (self.venue.modify(vid, float(b["quantity"]) * self.lot, b.get("price"), b.get("triggerPrice")), {"orderId": vid, "orderStatus": "PENDING"})[1],
                 ok, err, busy,
             )  # fmt: skip
         if method == "GET" and path == "/orders":
@@ -200,7 +201,8 @@ class BrokerBinding:
 
     def __init__(self, venue, options, *, fake_cls, build, render):
         self.venue, self.options = venue, options
-        self.fake = fake_cls(venue)
+        self.lot = float(options.get("lot_size", 1.0))
+        self.fake = fake_cls(venue, self.lot)
         self._build, self._render = build, render
         self.adapter = self._new()
 
@@ -232,12 +234,18 @@ class BrokerBinding:
 
 
 def _common(clock, options):
-    return dict(sleep=lambda s: None, clock_ns=clock, gtc="day", **options)
+    opts = {k: v for k, v in options.items() if k != "lot_size"}
+    return dict(sleep=lambda s: None, clock_ns=clock, gtc="day", namespace="CF", trusted=True, **opts)
+
+
+def _instrument(fake, exchange, symbol, **kw):
+    lots = fake.lot != 1.0
+    return Instrument(exchange, symbol, lot_size=fake.lot, quantity_in_lots=lots, **kw)
 
 
 def kite_binding(venue, options):
     def build(fake, clock, opts):
-        ins = {s: Instrument("NSE", s) for s in SYMS}
+        ins = {s: _instrument(fake, "NSE", s) for s in SYMS}
         return KiteAdapter(Session("tok", api_key="key"), ins, transport=fake, **_common(clock, opts))
 
     return BrokerBinding(venue, options, fake_cls=FakeKite, build=build, render=lambda f, ev: {"type": "order", "data": f.row(ev)})
@@ -245,7 +253,7 @@ def kite_binding(venue, options):
 
 def upstox_binding(venue, options):
     def build(fake, clock, opts):
-        ins = {s: Instrument("NSE_EQ", s, key=f"NSE_EQ|{s}") for s in SYMS}
+        ins = {s: _instrument(fake, "NSE_EQ", s, key=f"NSE_EQ|{s}") for s in SYMS}
         return UpstoxAdapter(Session("tok"), ins, transport=fake, **_common(clock, opts))
 
     return BrokerBinding(venue, options, fake_cls=FakeUpstox, build=build, render=lambda f, ev: f.row(ev))
@@ -253,7 +261,7 @@ def upstox_binding(venue, options):
 
 def dhan_binding(venue, options):
     def build(fake, clock, opts):
-        ins = {s: Instrument("NSE_EQ", s, key=FakeDhan.IDS[s]) for s in SYMS}
+        ins = {s: _instrument(fake, "NSE_EQ", s, key=FakeDhan.IDS[s]) for s in SYMS}
         return DhanAdapter(Session("tok"), ins, client_id="1000000001", transport=fake, **_common(clock, opts))
 
     return BrokerBinding(venue, options, fake_cls=FakeDhan, build=build, render=lambda f, ev: f.frame(ev))

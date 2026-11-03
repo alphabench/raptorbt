@@ -31,20 +31,21 @@ def _zero_fee_config(**kwargs):
     return config
 
 
-class _EnterOnce(Strategy):
-    """Enter every symbol once, on its first bar, at a fixed fraction."""
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _EnterOnce(Strategy):
+        """Enter every symbol once, on its first bar, at a fixed fraction."""
 
-    def __init__(self, config=None, size_frac=0.25):
-        super().__init__(config)
-        self.size_frac = size_frac
-        self.sizes = {}
+        def __init__(self, config=None, size_frac=0.25):
+            super().__init__(config)
+            self.size_frac = size_frac
+            self.sizes = {}
 
-    def on_bar(self, ctx):
-        if ctx.idx == 0:
-            self.enter(size_frac=self.size_frac)
+        def on_bar(self, ctx):
+            if ctx.idx == 0:
+                self.enter(size_frac=self.size_frac)
 
-    def on_position_opened(self, ctx, event):
-        self.sizes[ctx.symbol] = event.size
+        def on_position_opened(self, ctx, event):
+            self.sizes[ctx.symbol] = event.size
 
 
 class TestPortfolioMargin:
@@ -55,7 +56,7 @@ class TestPortfolioMargin:
         }
 
         cash_strategy = _EnterOnce()
-        portfolio_runner(cash_strategy, data, config=_zero_fee_config())
+        portfolio_runner(cash_strategy, data, config=_zero_fee_config(), bar_stamp="close")
 
         margin_strategy = _EnterOnce()
         portfolio_runner(
@@ -64,6 +65,7 @@ class TestPortfolioMargin:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=5.0,
+            bar_stamp="close",
         )
 
         assert set(cash_strategy.sizes) == {"AAA", "BBB"}
@@ -98,6 +100,7 @@ class TestPortfolioMargin:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=5.0,
+            bar_stamp="close",
         )
 
         assert len(strategy.seen) == 2
@@ -130,6 +133,7 @@ class TestPortfolioMargin:
             directions={"AAA": 1, "BBB": -1},
             account_type="margin",
             leverage=2.0,
+            bar_stamp="close",
         )
 
         summary = {s.symbol: s for s in result.per_instrument}
@@ -172,6 +176,7 @@ class TestPortfolioMargin:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=50.0,
+            bar_stamp="close",
         )
 
         assert strategy.margin_calls >= 1
@@ -203,6 +208,7 @@ class TestPortfolioMargin:
             config=_zero_fee_config(),
             account_type="margin",
             leverage=50.0,
+            bar_stamp="close",
         )
 
         assert result.rejected_entries > 0
@@ -224,9 +230,10 @@ class TestPortfolioMargin:
             "BBB": _bars([50.0, 50.5, 51.0, 51.5], start_ts=5_000_000_000),
         }
         explicit = portfolio_runner(
-            S(), data, config=_zero_fee_config(), account_type="cash"
+            S(), data, config=_zero_fee_config(), account_type="cash",
+            bar_stamp="close",
         )
-        default = portfolio_runner(S(), data, config=_zero_fee_config())
+        default = portfolio_runner(S(), data, config=_zero_fee_config(), bar_stamp="close")
 
         assert np.array_equal(
             np.asarray(default.result.equity_curve()),
@@ -242,7 +249,8 @@ class TestPortfolioMargin:
         data = {"AAA": _bars([100.0, 101.0])}
         with pytest.raises(ValueError, match="account_type must be"):
             portfolio_runner(
-                _EnterOnce(), data, config=_zero_fee_config(), account_type="futures"
+                _EnterOnce(), data, config=_zero_fee_config(), account_type="futures",
+                bar_stamp="close",
             )
         with pytest.raises(ValueError, match="leverage must be > 0"):
             portfolio_runner(
@@ -251,4 +259,5 @@ class TestPortfolioMargin:
                 config=_zero_fee_config(),
                 account_type="margin",
                 leverage=0.0,
+                bar_stamp="close",
             )

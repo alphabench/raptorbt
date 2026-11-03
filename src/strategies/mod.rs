@@ -1,6 +1,7 @@
 //! Strategy implementations for different backtest types.
 
 pub mod basket;
+mod legs;
 pub mod multi;
 pub mod options;
 pub mod pairs;

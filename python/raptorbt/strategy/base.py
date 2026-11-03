@@ -116,6 +116,37 @@ class Strategy:
         the halt reason). A refused order also reaches ``on_order_rejected``.
         """
 
+    def state(self):
+        """Plain data (JSON-serialisable: dicts, lists, str, numbers, bool,
+        None) that is your own state and is not derived from the market, to be
+        carried across runs by ``LiveNode.checkpoint()``. Default: none.
+
+        Whatever the engine owns (positions, orders, cash, indicators) is
+        rebuilt by the node; keep here only what your hooks computed and
+        nothing else knows, such as a regime flag set by an operator.
+        """
+        return None
+
+    def load_state(self, state) -> None:
+        """Receive what :meth:`state` returned in an earlier run, before
+        :meth:`on_start`. Called only when a node is built with
+        ``strategy_states=``."""
+
+    def on_discrepancy(self, ctx: StrategyContext, discrepancy) -> None:
+        """A recovery found the venue and the node disagree
+        (:class:`raptorbt.journal.Discrepancy`). Informational: the node does
+        not resume until the host accepts or resolves it, and orders queued here
+        are sent with the first event after it resumes."""
+
+    def on_instrument_added(self, ctx: StrategyContext, symbol: str) -> None:
+        """A :class:`~raptorbt.LiveNode` added ``symbol`` to this strategy's symbols (or brought a
+        retired one back): it is in ``ctx.symbols`` and takes data from now on. Orders queued here
+        are sent with the strategy's next event."""
+
+    def on_instrument_retired(self, ctx: StrategyContext, symbol: str) -> None:
+        """A :class:`~raptorbt.LiveNode` retired ``symbol``: it left ``ctx.symbols`` and takes no
+        more data. It held no position and no working order of this strategy."""
+
     def on_stop(self, ctx: StrategyContext) -> None:
         """Called once after the last bar, before finalization."""
 
@@ -508,8 +539,11 @@ class Strategy:
         The legs close the full position on the opposite side. They are
         ``reduce_only``, so a leg still working after the position closed by
         another route can never open a fresh position on the opposite side.
-        Netting policy only — under hedging every order opens, so use
-        per-position ``stop_price``/``target_price`` attachments instead.
+        Netting policy only — under hedging every order opens its own
+        position, so the legs could never close the bracket's: submitting one
+        raises ``bracket_under_hedging`` rather than leaving the position
+        open. Use per-position ``stop_price``/``target_price`` attachments
+        instead.
 
         Returns ``(entry_id, stop_id, target_id)``.
         """
@@ -557,6 +591,32 @@ class Strategy:
             book = self.__dict__["_structures"] = StructureBook(self)
         return book
 
+    def _exit_book(self):
+        # One book per run, like the structure book.
+        from raptorbt.strategy.exits import ExitBook
+
+        book = self.__dict__.get("_exits")
+        if book is None or book.cache is not self.cache:
+            book = self.__dict__["_exits"] = ExitBook(self)
+        return book
+
+    def set_exit(self, ctx, rule, *, symbol=None, symbols=None, group=None, name=None):
+        """Set an :class:`~raptorbt.strategy.exits.ExitRule` on one symbol's positions
+        (``symbol=``), a named group of symbols (``symbols=`` and ``name=``) or a structure
+        group (``group=``). Returns an :class:`~raptorbt.strategy.exits.ExitHandle`. The engine
+        closes the positions with reduce-only orders when the rule fires."""
+        return self._exit_book().set(ctx, rule, symbol=symbol, symbols=symbols, group=group, name=name)
+
+    def update_exits(self, ctx, marks=None):
+        """Evaluate the exit rules (``marks`` maps symbol to price; default the last prices) and
+        send the closes of those that fire. Mix in :class:`~raptorbt.strategy.exits.ExitEvents`
+        to have this run on every price."""
+        return self._exit_book().update(ctx, marks)
+
+    def cancel_exit(self, handle) -> None:
+        """Disarm an exit rule that has not fired."""
+        self._exit_book().cancel(handle)
+
     @staticmethod
     def _event_ns(ctx, now_ns):
         if now_ns is not None:
@@ -588,7 +648,9 @@ class Strategy:
 
     def cancel_order(self, client_id: str) -> None:
         """Queue cancellation of a working order, or of a ``Twap`` schedule's
-        unreleased slices, by client id. A finished one is left alone."""
+        unreleased slices, by client id. An order that finished first (filled,
+        canceled, expired) is left alone, as at a venue; a client id this run
+        never submitted raises ``unknown_order``."""
         self._queue.cancel(client_id)
 
     def cancel_all_orders(self) -> None:
@@ -603,7 +665,8 @@ class Strategy:
         limit_price: float | None = None,
         trigger_price: float | None = None,
     ) -> None:
-        """Queue a price/quantity replacement of a working order."""
+        """Queue a price/quantity replacement of a working order. A client id this run
+        never submitted raises ``unknown_order``; one that has finished is left alone."""
         self._queue.modify(client_id, units, size_frac, limit_price, trigger_price)
 
     def drain_orders(self) -> list[tuple]:

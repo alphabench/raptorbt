@@ -56,10 +56,10 @@ impl PortfolioBook {
             &mut crate::portfolio::kernel::EngineKernel,
         ) -> Result<(R, Vec<EngineEvent>), VenueError>,
     ) -> Result<(R, Vec<EngineEvent>), VenueError> {
-        let portfolio_open = self.config.max_positions.map(|_| {
-            self.kernels.iter().map(|k| k.open_count()).sum::<usize>()
-                + self.grouped.map_or(0, |g| g.external_open)
-        });
+        let portfolio_open = self
+            .config
+            .max_positions
+            .map(|_| self.live_open_total() + self.grouped.map_or(0, |g| g.external_open));
         let external_exposure = self.kernels[instrument].tracks_exposure().then(|| {
             let own = self
                 .kernels

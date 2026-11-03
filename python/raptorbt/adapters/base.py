@@ -56,7 +56,10 @@ across a restart. See ``docs/architecture/broker-adapters.md``.
 
 from __future__ import annotations
 
+import json
 import logging
+import secrets
+import string
 import threading
 import time
 from collections import deque
@@ -94,7 +97,9 @@ __all__ = [
     "AuthExpired",
     "Ambiguous",
     "BrokerAdapter",
+    "Fenced",
     "Instrument",
+    "MalformedRow",
     "OrderStatusUpdate",
     "QueuedReport",
     "Secret",
@@ -105,6 +110,7 @@ __all__ = [
     "VenueOrder",
     "VenuePosition",
     "VenueRefusal",
+    "new_namespace",
 ]
 
 
@@ -127,8 +133,16 @@ class Ambiguous(AdapterError):
     """A write that may have been processed (timeout, reset, 5xx from the gateway)."""
 
 
+class MalformedRow(AdapterError):
+    """A broker row or message lacks a field this layer cannot do without (a price, a quantity)."""
+
+
 class AuthExpired(AdapterError):
     """The session token is no longer valid."""
+
+
+class Fenced(AdapterError):
+    """This adapter no longer holds the host's lease (or its epoch was superseded): it sends nothing."""
 
 
 # -- data ----------------------------------------------------------------------
@@ -213,7 +227,10 @@ class Instrument:
 class OrderStatusUpdate:
     """One broker order row, normalised: a feed message or a row of the order book.
 
-    ``filled_qty`` is cumulative and ``avg_price`` the average over it (units).
+    ``filled_qty`` is cumulative and ``avg_price`` the average over it. A mapping builds its rows
+    with the broker's own count (lots for an instrument declared ``quantity_in_lots``); the base
+    converts every inbound row once, so rows seen through ``orders()``, ``open_orders()`` and
+    ``handle_update`` are always in **units** (prices are per unit).
     """
 
     venue_order_id: str
@@ -231,6 +248,8 @@ class OrderStatusUpdate:
     trigger_price: float | None = None
     reason: str | None = None
     ts_ns: int = 0
+    cancel_failed: bool = False  # the broker says the cancel it was asked for did not happen
+    modify_failed: bool = False  # likewise for a modify
 
 
 VenueOrder = OrderStatusUpdate
@@ -250,7 +269,9 @@ class TradeRow:
 
 @dataclass(frozen=True)
 class VenuePosition:
-    """A net position at the venue. ``net_qty`` is signed (short negative), in units."""
+    """A net position at the venue. ``net_qty`` is in **units**, never lots (the base converts a
+    broker's lot count), and signed: long positive, short negative, flat rows are not listed.
+    ``avg_price`` is per unit and positive."""
 
     symbol: str
     net_qty: float
@@ -260,12 +281,17 @@ class VenuePosition:
 
 @dataclass(frozen=True)
 class VenueBalances:
-    """Money at the venue, in ``currency``. ``available`` can be used for new orders now."""
+    """Money at the venue, in ``currency`` (always named: the mapping knows its venue's).
+
+    ``available`` can be used for new orders now; ``used`` is margin or funds already committed and
+    ``total`` the account's whole balance, both ``None`` when the broker does not say. Amounts are
+    positive money in the currency's main unit (rupees, not paise); a shortfall shows as a small or
+    zero ``available``, never a negative ``used``."""
 
     available: float
+    currency: str
     used: float | None = None
     total: float | None = None
-    currency: str = "INR"
 
 
 @dataclass(frozen=True)
@@ -309,6 +335,8 @@ class _Rec:
     trade_fed: bool = False
     seen_exec: set[str] = field(default_factory=set)
     unconfirmed: bool = False
+    attempted: bool = False  # a place request for this order has been started: it may be out there
+    terminal_at: float | None = None
 
 
 @dataclass
@@ -317,6 +345,26 @@ class _Job:
     client_order_id: str | None = None
     epoch: int = 0
     change: tuple[float | None, float | None, float | None] | None = None
+
+
+def new_namespace(length: int = 4) -> str:
+    """A fresh per-run tag prefix from the operating system's random source.
+
+    Client ids restart at ``s0-0`` every run, so tags from two runs of a node
+    (or two nodes on one account) would collide without it. Generate one at
+    each start; keep it in the saved state so a recovered run keeps its own.
+    """
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _eq(a: float | None, b: float | None) -> bool:
+    return a is not None and b is not None and abs(a - b) <= 1e-9 + 1e-9 * abs(a)
+
+
+def _qty_text(q: float) -> str:
+    """Exact text of a quantity: an integer count when it is one, else the shortest round-trip form."""
+    return str(int(q)) if q == int(q) else repr(q)
 
 
 def _clock_ns() -> int:
@@ -329,6 +377,13 @@ def _same(a: float | None, b: float | None) -> bool:
 
 class BrokerAdapter:
     """Base of the broker mappings. See the module docs; subclasses fill the hooks.
+
+    ``lease`` (default ``None``): the host's proof that this process may still send for the
+    current epoch, ``callable(epoch) -> bool`` or an object with ``holds(epoch)``. It is consulted
+    before every outbound write (submit, cancel, modify and their retries). A ``False`` answer, or
+    an exception, fails closed: the write is refused with :class:`Fenced`, queued writes are
+    dropped (``fenced_drop`` events) and nothing more is sent until ``fence()`` is called with a
+    higher epoch. Without a lease ``can_fence`` is ``False`` and ``fence()`` guards only this process.
 
     ``gtc`` (default ``"refuse"``): the venues here have no good-till-cancelled
     order, so ``gtc`` orders (the engine's default) are ``Unsupported`` unless
@@ -360,13 +415,21 @@ class BrokerAdapter:
         clock_ns: Callable[[], int] = _clock_ns,
         max_attempts: int = 4,
         resend_if_absent: bool = False,
+        resend_delay: float = 2.0,
         default_product: str = "intraday",
         reduce_only: str = "refuse",
         gtc: str = "refuse",
-        namespace: str = "",
+        namespace: str,
         account_id: str | None = None,
         fill_source: str | None = None,
+        verifier: Callable[[Any], bool] | None = None,
+        trusted: bool = False,
+        retention_s: float | None = 3600.0,
+        monotonic: Callable[[], float] = time.monotonic,
+        lease: Callable[[int], bool] | Any | None = None,
     ) -> None:
+        if not namespace:
+            raise ValueError("namespace is required: client ids restart at s0-0 every run, so pass new_namespace() (a fresh one per run)")
         if fill_source is not None:
             if fill_source not in ("order_updates", "trades"):
                 raise ValueError("fill_source is 'order_updates' or 'trades'")
@@ -379,12 +442,20 @@ class BrokerAdapter:
             raise ValueError(f"default_product must be one of {sorted(self.products)}")
         self.session = session
         self._instruments = instruments
+        #: Instruments a running node added, by symbol (see ``add_instrument``).
+        self._added: dict[str, Instrument] = {}
         self._limiter = limiter or self.default_limiter(sleep)
         self._backoff = backoff or Backoff()
         self._sleep = sleep
         self._now = clock_ns
         self.max_attempts = max_attempts
         self.resend_if_absent = resend_if_absent
+        self.resend_delay = resend_delay
+        self._verifier = verifier
+        self.trusted = trusted
+        self.retention_s = retention_s
+        self._mono = monotonic
+        self._last_sweep = monotonic()
         self.default_product = default_product
         self.reduce_only = reduce_only
         self.gtc = gtc
@@ -398,9 +469,14 @@ class BrokerAdapter:
         self._by_native: dict[str, str] = {}
         self._outbox: deque[_Job] = deque()
         self._reports: deque[QueuedReport] = deque()
-        self._events: deque[AdapterEvent] = deque()
+        self._events: deque[AdapterEvent] = deque(maxlen=10_000)
+        self._evicted: dict[str, None] = {}  # ids of finished orders forgotten after the retention
         self._paused = False
         self._epoch = 0
+        self._fenced = False
+        self._lease = self._lease_check(lease)
+        self._seen_unmapped: dict[tuple[str, str], None] = {}
+        self._native_index: tuple[int, dict[str, str]] = (-1, {})
         self.ignored_updates = 0
         self._executor = executor or InlineExecutor()
         self._executor.bind(self.pump)
@@ -440,25 +516,60 @@ class BrokerAdapter:
     def fetch_balances(self) -> VenueBalances:
         raise Unsupported(f"{self.name}: balances are not mapped")
 
+    def place_exit_rule(self, request: Any) -> None:
+        """Hold an exit rule (an :class:`~raptorbt.strategy.exits.ExitRuleRequest`) at the venue.
+
+        Unsupported by default, so the engine evaluates every rule itself. A mapping whose
+        broker can hold a percent or P&L exit overrides this, and reports the orders the rule
+        makes under ``request.exit_client_ids``."""
+        raise Unsupported(f"{self.name}: exit rules are not held at the venue")
+
     def parse_order_update(self, payload: Any) -> OrderStatusUpdate | None:
         """A feed message to an update; ``None`` for messages that are not order updates."""
         raise NotImplementedError
 
-    def find_by_tag(self, tag: str) -> OrderStatusUpdate | None:
-        for row in self._read(self.fetch_orders):
-            if row.tag == tag:
-                return row
-        return None
+    def find_by_tag(self, tag: str) -> list[OrderStatusUpdate]:
+        """Every row of the day's book carrying ``tag`` (an earlier run's included)."""
+        return [row for row in self.fetch_orders() if row.tag == tag]
 
     # -- the ExecutionAdapter surface (node thread) ---------------------------------
 
+    def resolve_instrument(self, symbol: str, spec: Any) -> Instrument | None:
+        """How a contract added to a running node is named at the broker, when ``instruments`` does
+        not know it yet. A mapping that can find it (a lookup in the day's instrument master)
+        overrides this; the default knows nothing."""
+        return None
+
+    def add_instrument(self, symbol: str, spec: Any = None) -> None:
+        """A node added ``symbol`` (its :class:`~raptorbt.InstrumentSpec` is ``spec``): learn how
+        the broker names it, so orders for it can be sent. Looks in ``instruments`` first, then
+        asks :meth:`resolve_instrument`; raises :class:`Unsupported` when neither knows it, which
+        makes the node refuse the add. Idempotent: a restored node replays it."""
+        ins = self._added.get(symbol)
+        if ins is None:
+            try:
+                ins = self.instrument(symbol)
+            except Unsupported:
+                ins = self.resolve_instrument(symbol, spec)
+        if ins is None:
+            raise Unsupported(f"{self.name}: no instrument is mapped for symbol {symbol!r}")
+        self._added[symbol] = ins
+
+    def retire_instrument(self, symbol: str) -> None:
+        """A node retired ``symbol``: forget what :meth:`add_instrument` learned. Orders still
+        working at the broker are not touched (a node retires a symbol only with none)."""
+        self._added.pop(symbol, None)
+
     def instrument(self, symbol: str) -> Instrument:
-        ins = self._instruments.get(symbol) if isinstance(self._instruments, Mapping) else self._instruments(symbol)
+        ins = self._added.get(symbol)
+        if ins is None:
+            ins = self._instruments.get(symbol) if isinstance(self._instruments, Mapping) else self._instruments(symbol)
         if ins is None:
             raise Unsupported(f"{self.name}: no instrument is mapped for symbol {symbol!r}")
         return ins
 
     def submit(self, request: OrderRequest) -> None:
+        self._refuse_if_fenced()
         if request.account_id and self.account_id and request.account_id != self.account_id:
             raise OrderRefused("order is for another account than this session")
         if request.post_only:
@@ -484,6 +595,8 @@ class BrokerAdapter:
             request.trigger_price, request.time_in_force, product,
         )  # fmt: skip
         with self._lock:
+            if request.client_order_id in self._evicted:
+                raise OrderRefused("duplicate_client_order_id: the id belongs to a finished order")
             have = self._orders.get(request.client_order_id)
             if have is not None:
                 if have.fingerprint == fp:
@@ -499,6 +612,7 @@ class BrokerAdapter:
         self._executor.kick()
 
     def cancel(self, client_order_id: str) -> None:
+        self._refuse_if_fenced()
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec is None:
@@ -517,6 +631,7 @@ class BrokerAdapter:
         limit_price: float | None = None,
         trigger_price: float | None = None,
     ) -> None:
+        self._refuse_if_fenced()
         with self._lock:
             rec = self._orders.get(client_order_id)
             if rec is None:
@@ -558,6 +673,7 @@ class BrokerAdapter:
                     done += 1
             finally:
                 self._pump_lock.release()
+            self.sweep()
             with self._lock:
                 if self._paused or not self._outbox:
                     return done
@@ -574,7 +690,11 @@ class BrokerAdapter:
             if stale:
                 self._event("fenced_drop", job.client_order_id, f"{job.kind} of epoch {job.epoch} < {self._epoch}")
             return True
-        return getattr(self, f"_do_{job.kind}")(rec, job)
+        try:
+            return getattr(self, f"_do_{job.kind}")(rec, job)
+        except Fenced:
+            self._drop_fenced()
+            return True
 
     def _call(self, fn: Callable[[], Any], klass: str, *, retry_ambiguous: bool) -> Any:
         """Rate limit, call, retry on ``Transient`` (and ``Ambiguous`` when idempotent).
@@ -584,6 +704,8 @@ class BrokerAdapter:
         """
         refreshed = False
         for attempt in range(self.max_attempts):
+            if klass != "read" and not self._holds_lease():
+                raise Fenced(f"lease lost at epoch {self._epoch}")
             self._limiter.acquire(klass)
             try:
                 return fn()
@@ -622,6 +744,12 @@ class BrokerAdapter:
     def _do_submit(self, rec: _Rec, job: _Job) -> bool:
         if rec.terminal or rec.venue_order_id:
             return True
+        if rec.attempted:
+            # A request for this order was already started (before a restart, or by an earlier try):
+            # it may be at the venue. Look it up; never place it blindly again.
+            self._settle_unconfirmed(rec, "resumed with a request possibly in flight")
+            return True
+        rec.attempted = True
         try:
             vid = self._call(lambda: self.place(rec), "orders", retry_ambiguous=False)
         except VenueRefusal as e:
@@ -630,54 +758,72 @@ class BrokerAdapter:
             self._event("submit_failed", rec.client_order_id, str(e))
             self._terminal(rec, "rejected", ExecutionReport.rejected(f"venue unreachable: {e}", self._now()))
         except AuthExpired:
+            rec.attempted = False  # the venue turned the request away; it goes again with the new token
             return self._hold("submit", rec)
         except Ambiguous as e:
             self._settle_unconfirmed(rec, str(e))
         else:
-            with self._lock:
-                rec.venue_order_id = vid
-                self._by_venue[vid] = rec.client_order_id
+            self._bind(rec, vid)
         return True
 
-    def _settle_unconfirmed(self, rec: _Rec, why: str) -> None:
-        """A write may have landed. Look it up; adopt it, or leave it to reconciliation."""
+    def _bind(self, rec: _Rec, vid: str) -> None:
+        with self._lock:
+            rec.venue_order_id = vid
+            self._by_venue[vid] = rec.client_order_id
+
+    def _try_lookup(self, rec: _Rec) -> tuple[OrderStatusUpdate | None, str]:
+        """Find our order in the day's book by tag, among rows whose terms are this order's.
+
+        Returns the row and ``found``; or ``absent``, ``ambiguous`` (several rows fit: an earlier
+        run left an identical order) or ``failed`` (the book could not be read).
+        """
         try:
-            found = self._read(lambda: self.find_by_tag(rec.tag))
-        except AuthExpired:
-            found = None
+            rows = [self._in_units(r) for r in self._read(lambda: self.find_by_tag(rec.tag))]
         except AdapterError:
-            found = None
-            why += "; lookup failed"
-        if found is not None:
-            self.handle_update(found)
+            return None, "failed"
+        ours = [r for r in rows if self._matches(rec, r)]
+        if len(ours) > 1:
+            return None, "ambiguous"
+        return (ours[0], "found") if ours else (None, "absent")
+
+    def _settle_unconfirmed(self, rec: _Rec, why: str) -> None:
+        """A write may have landed. Look it up; adopt it, or leave it to reconciliation.
+
+        With ``resend_if_absent`` an order still absent is sent once more, but only after
+        ``resend_delay`` seconds and a second lookup: the book can lag a request that is
+        still in flight.
+        """
+        row, state = self._try_lookup(rec)
+        if state == "absent" and self.resend_if_absent:
+            self._sleep(self.resend_delay)
+            row, state = self._try_lookup(rec)
+            if state == "absent":
+                self._event("resend", rec.client_order_id, "absent from the book twice after an ambiguous failure")
+                try:
+                    vid = self._call(lambda: self.place(rec), "orders", retry_ambiguous=False)
+                except VenueRefusal as e:
+                    self._terminal(rec, "rejected", ExecutionReport.rejected(self._reason(e), self._now()))
+                    return
+                except Fenced:
+                    raise
+                except AdapterError as e:
+                    why = f"resend failed: {e}"
+                else:
+                    self._bind(rec, vid)
+                    return
+        if row is not None:
+            self.handle_update(row)
             return
-        if found is None and self.resend_if_absent and "lookup failed" not in why:
-            self._event("resend", rec.client_order_id, "absent at the venue after an ambiguous failure")
-            try:
-                vid = self._call(lambda: self.place(rec), "orders", retry_ambiguous=False)
-            except VenueRefusal as e:
-                self._terminal(rec, "rejected", ExecutionReport.rejected(self._reason(e), self._now()))
-                return
-            except AdapterError as e:
-                why = f"resend failed: {e}"
-            else:
-                with self._lock:
-                    rec.venue_order_id = vid
-                    self._by_venue[vid] = rec.client_order_id
-                return
         rec.unconfirmed = True
-        self._event("unconfirmed", rec.client_order_id, why)
+        self._event("unconfirmed", rec.client_order_id, f"{why} ({state})")
 
     def _ensure_venue_id(self, rec: _Rec) -> bool:
         if rec.venue_order_id:
             return True
-        try:
-            found = self._read(lambda: self.find_by_tag(rec.tag))
-        except AdapterError:
+        row, _ = self._try_lookup(rec)
+        if row is None:
             return False
-        if found is None:
-            return False
-        self.handle_update(found)
+        self.handle_update(row)
         return bool(rec.venue_order_id)
 
     def _do_cancel(self, rec: _Rec, job: _Job) -> bool:
@@ -694,9 +840,41 @@ class BrokerAdapter:
             self._push(rec, ExecutionReport.cancel_rejected(self._reason(e), self._now()))
         except AuthExpired:
             return self._hold("cancel", rec)
+        except Fenced:
+            raise
         except AdapterError as e:
-            self._event("cancel_unconfirmed", rec.client_order_id, str(e))
+            self._settle_cancel(rec, str(e))
         return True
+
+    def _settle_cancel(self, rec: _Rec, why: str) -> None:
+        """The cancel could not be confirmed: read the book, ask once more.
+
+        Only a definite answer (the venue refused, or certainly did not receive the request) is
+        reported as ``cancel_rejected``. If the second try is ambiguous too, the cancel may have
+        landed: the order stays ``cancel_requested`` (pending), a ``cancel_pending`` event is
+        raised, and ``settle_pending()`` or the next resync decides against the venue's book.
+        """
+        self._event("cancel_unconfirmed", rec.client_order_id, why)
+        try:
+            self._resync_now()
+        except AdapterError:
+            pass
+        if rec.terminal:
+            return
+        try:
+            self._call(lambda: self.cancel_remote(rec), "cancel", retry_ambiguous=True)
+            return  # the venue took it; the ack comes from the feed or the next resync
+        except VenueRefusal as e:
+            why = self._reason(e)
+        except Transient as e:
+            why = str(e)  # certainly not received
+        except Fenced:
+            raise
+        except AdapterError as e:
+            self._event("cancel_pending", rec.client_order_id, f"may have landed, left pending: {e}")
+            return
+        rec.cancel_requested = False
+        self._push(rec, ExecutionReport.cancel_rejected(f"cancel unconfirmed: {why}", self._now()))
 
     def _do_modify(self, rec: _Rec, job: _Job) -> bool:
         if rec.terminal:
@@ -714,9 +892,67 @@ class BrokerAdapter:
             self._push(rec, ExecutionReport.replace_rejected(self._reason(e), self._now()))
         except AuthExpired:
             return self._hold("modify", rec)
+        except Fenced:
+            raise
         except AdapterError as e:
-            self._event("modify_unconfirmed", rec.client_order_id, str(e))
+            self._settle_modify(rec, (q, lim, trg), str(e))
         return True
+
+    def _settle_modify(self, rec: _Rec, change: tuple, why: str) -> None:
+        """The modify could not be confirmed: read the book, ask once more.
+
+        Only a definite answer (refused, or certainly not received) becomes ``replace_rejected``.
+        If the second try is ambiguous too the change may have landed, so ``pending_modify`` stays
+        (``rec.quantity`` is not touched, and ``_matches`` accepts the old and the new terms) with
+        a ``modify_pending`` event, until ``settle_pending()`` or a resync shows the venue's terms.
+        """
+        self._event("modify_unconfirmed", rec.client_order_id, why)
+        try:
+            self._resync_now()
+        except AdapterError:
+            pass
+        if rec.terminal or rec.pending_modify is None:
+            return  # the change showed in the book (acked) or the order ended
+        try:
+            self._call(lambda: self.modify_remote(rec, *change), "modify", retry_ambiguous=True)
+            return
+        except VenueRefusal as e:
+            why = self._reason(e)
+        except Transient as e:
+            why = str(e)  # certainly not received
+        except Fenced:
+            raise
+        except AdapterError as e:
+            self._event("modify_pending", rec.client_order_id, f"may have landed, left pending: {e}")
+            return
+        rec.pending_modify = None
+        self._push(rec, ExecutionReport.replace_rejected(f"modify unconfirmed: {why}", self._now()))
+
+    def settle_pending(self) -> None:
+        """Answer cancels and modifies the venue took but never confirmed.
+
+        Reads the order book (blocking: call it from a worker or a timer, not the node's thread).
+        A modify whose terms the book still shows unchanged becomes ``replace_rejected``, a
+        cancel of an order the book still shows working becomes ``cancel_rejected``, so the
+        strategy is never left in PendingReplace or PendingCancel. Call it once the venue has had
+        time to answer (seconds); brokers that report a failed request (Upstox "not modified")
+        are answered from the feed without it.
+        """
+        rows = {r.venue_order_id: r for r in self._read_orders()}
+        for r in rows.values():
+            self.handle_update(r)
+        with self._lock:
+            queued = {j.client_order_id for j in self._outbox}
+            for rec in list(self._orders.values()):
+                row = rows.get(rec.venue_order_id or "")
+                if row is None or rec.terminal or rec.client_order_id in queued:
+                    continue
+                if rec.pending_modify is not None:
+                    rec.pending_modify = None
+                    self._push(rec, ExecutionReport.replace_rejected("the venue still shows the old terms", self._now()))
+                if rec.cancel_requested:
+                    rec.cancel_requested = False
+                    self._push(rec, ExecutionReport.cancel_rejected("the venue still shows the order working", self._now()))
 
     @staticmethod
     def _reason(e: VenueRefusal) -> str:
@@ -733,11 +969,36 @@ class BrokerAdapter:
 
     # -- feed side ----------------------------------------------------------------------
 
-    def handle_payload(self, payload: Any, *, arrival_ns: int | None = None) -> None:
-        """A raw feed message (postback, websocket frame already decoded)."""
-        update = self.parse_order_update(payload)
+    def handle_payload(self, payload: Any, *, arrival_ns: int | None = None, authenticated: bool = False) -> None:
+        """A raw feed message (postback, websocket frame already decoded).
+
+        Nothing from a push channel becomes a report unless it is authenticated: the adapter was
+        built with ``trusted=True`` (the host authenticated every channel itself, e.g. a websocket
+        opened with the account's token), or with a ``verifier`` that accepts this payload (e.g.
+        ``kite.postback_verifier``), or this call passes ``authenticated=True``. Otherwise it raises.
+        A payload the verifier refuses, or that lacks a field the layer needs, is dropped with a
+        ``payload_rejected`` / ``malformed_payload`` event.
+        """
+        if not (self.trusted or authenticated):
+            if self._verifier is None:
+                raise AdapterError(
+                    "unauthenticated payload: pass verifier=..., trusted=True (the host authenticated the channel) "
+                    "or authenticated=True for this call"
+                )
+            try:
+                accepted = bool(self._verifier(payload))
+            except Exception:  # noqa: BLE001 - a verifier that fails verifies nothing
+                accepted = False
+            if not accepted:
+                self._event("payload_rejected", None, "failed verification")
+                return
+        try:
+            update = self.parse_order_update(payload)
+        except MalformedRow as e:
+            self._event("malformed_payload", None, str(e))
+            return
         if update is not None:
-            self.handle_update(update, arrival_ns=arrival_ns)
+            self.handle_update(self._in_units(update), arrival_ns=arrival_ns)
 
     def handle_update(self, u: OrderStatusUpdate, *, arrival_ns: int | None = None) -> None:
         """Fold one order row into reports. Safe to repeat and to reorder."""
@@ -747,10 +1008,17 @@ class BrokerAdapter:
                 self.ignored_updates += 1
                 return
             if rec.venue_order_id is None:
+                if not self._matches(rec, u):
+                    # the same tag with other terms: an earlier run's order, not ours
+                    self.ignored_updates += 1
+                    return
                 rec.venue_order_id = u.venue_order_id
                 self._by_venue[u.venue_order_id] = rec.client_order_id
             elif rec.venue_order_id != u.venue_order_id:
-                self._event("venue_id_mismatch", rec.client_order_id, f"{u.venue_order_id} != {rec.venue_order_id}")
+                if self._matches(rec, u):
+                    self._event("venue_id_mismatch", rec.client_order_id, f"{u.venue_order_id} != {rec.venue_order_id}")
+                else:
+                    self.ignored_updates += 1
                 return
             arrival = arrival_ns if arrival_ns is not None else self._now()
             ts = u.ts_ns or arrival
@@ -764,6 +1032,12 @@ class BrokerAdapter:
                 rec.limit_price = lim if lim is not None else rec.limit_price
                 rec.trigger_price = trg if trg is not None else rec.trigger_price
                 self._push(rec, ExecutionReport.replace_ack(ts, new_qty=q, new_limit=lim, new_trigger=trg), arrival)
+            if u.modify_failed and rec.pending_modify is not None:
+                rec.pending_modify = None
+                self._push(rec, ExecutionReport.replace_rejected(u.reason or "modify refused by the venue", ts), arrival)
+            if u.cancel_failed and rec.cancel_requested and not rec.terminal:
+                rec.cancel_requested = False
+                self._push(rec, ExecutionReport.cancel_rejected(u.reason or "cancel refused by the venue", ts), arrival)
             if self.fill_source == "order_updates":
                 self._fold_cumulative(rec, u, ts, arrival)
             if u.status == CANCELLED or (u.status == REJECTED and u.filled_qty > 0):
@@ -773,7 +1047,7 @@ class BrokerAdapter:
             elif u.status == EXPIRED:
                 self._terminal(rec, "expired", ExecutionReport.expired(ts), arrival)
             elif u.status == FILLED:
-                rec.terminal.add("filled")
+                self._mark_terminal(rec, "filled")
 
     def handle_trade(
         self,
@@ -786,8 +1060,12 @@ class BrokerAdapter:
         fee: float = 0.0,
         ts_ns: int = 0,
         arrival_ns: int | None = None,
+        wire: bool = False,
     ) -> None:
-        """A real execution with the venue's own id (for ``fill_source="trades"``)."""
+        """A real execution with the venue's own id (for ``fill_source="trades"``).
+
+        ``qty`` is in units, unless ``wire=True``: then it is the broker's own count (lots for an
+        instrument declared ``quantity_in_lots``) and is converted here, once."""
         with self._lock:
             cid = client_order_id or self._by_venue.get(venue_order_id or "")
             rec = self._orders.get(cid or "")
@@ -796,14 +1074,35 @@ class BrokerAdapter:
                 return
             if exec_id in rec.seen_exec:
                 return
+            if wire:
+                qty = self.units(self.instrument(rec.symbol), qty)
             rec.seen_exec.add(exec_id)
             rec.trade_fed = True
             arrival = arrival_ns if arrival_ns is not None else self._now()
             self._push(rec, ExecutionReport.fill(exec_id, qty, price, ts_ns or arrival, fee=fee), arrival)
 
     def _resolve(self, u: OrderStatusUpdate) -> _Rec | None:
-        cid = u.client_order_id or self.ids.decode(u.tag) or self._by_venue.get(u.venue_order_id)
+        cid = self._by_venue.get(u.venue_order_id) or u.client_order_id or self.ids.decode(u.tag)
         return self._orders.get(cid) if cid else None
+
+    def _matches(self, rec: _Rec, u: OrderStatusUpdate) -> bool:
+        """Does a venue row carry this order's terms (symbol, side, quantity, type, price)?
+
+        A tag alone never makes a row ours: ids restart every run, so an earlier run's order can
+        carry the same one. A pending modify's target terms count as well.
+        """
+        if u.symbol is not None and u.symbol != rec.symbol:
+            return False
+        if u.side is not None and u.side != rec.side:
+            return False
+        if u.order_type is not None and u.order_type != rec.order_type:
+            return False
+        pq, pl, _ = rec.pending_modify or (None, None, None)
+        if u.quantity is not None and not (_eq(rec.quantity, u.quantity) or _eq(pq, u.quantity)):
+            return False
+        if u.limit_price is not None and rec.limit_price is not None and not (_eq(rec.limit_price, u.limit_price) or _eq(pl, u.limit_price)):
+            return False
+        return True
 
     def _terms_match(self, rec: _Rec, u: OrderStatusUpdate) -> bool:
         q, lim, trg = rec.pending_modify or (None, None, None)
@@ -820,7 +1119,7 @@ class BrokerAdapter:
         notional = u.filled_qty * avg
         px = round((notional - rec.cum_notional) / delta, 6)
         rec.cum_qty, rec.cum_notional = u.filled_qty, notional
-        exec_id = f"{u.venue_order_id}:{u.filled_qty:g}"
+        exec_id = f"{u.venue_order_id}:{_qty_text(u.filled_qty)}"
         rec.seen_exec.add(exec_id)
         self._push(rec, ExecutionReport.fill(exec_id, delta, px, ts), arrival)
 
@@ -828,8 +1127,41 @@ class BrokerAdapter:
         with self._lock:
             if kind in rec.terminal:
                 return
-            rec.terminal.add(kind)
+            self._mark_terminal(rec, kind)
             self._push(rec, report, arrival)
+
+    def _mark_terminal(self, rec: _Rec, kind: str) -> None:
+        rec.terminal.add(kind)
+        if rec.terminal_at is None:
+            rec.terminal_at = self._mono()
+
+    def sweep(self) -> int:
+        """Forget finished orders older than ``retention_s`` (None keeps them). Returns how many.
+
+        What an order needs after it ends is its id (a repeated submit is refused), its venue id
+        and fill ids (late and repeated reports add nothing). Reports for an order finish within
+        seconds of its end, so an hour is far more than needed; the ids of forgotten orders are
+        remembered (the last 100 000) so a repeated submit is still refused and a late message
+        still ignored.
+        """
+        if self.retention_s is None:
+            return 0
+        now = self._mono()
+        with self._lock:
+            queued = {j.client_order_id for j in self._outbox}
+            gone = [
+                c for c, r in self._orders.items()
+                if r.terminal_at is not None and now - r.terminal_at >= self.retention_s
+                and c not in queued and r.pending_modify is None
+            ]  # fmt: skip
+            for c in gone:
+                r = self._orders.pop(c)
+                if r.venue_order_id:
+                    self._by_venue.pop(r.venue_order_id, None)
+                self._evicted[c] = None
+            while len(self._evicted) > 100_000:
+                self._evicted.pop(next(iter(self._evicted)))
+        return len(gone)
 
     # -- queues ---------------------------------------------------------------------------
 
@@ -880,7 +1212,7 @@ class BrokerAdapter:
         self._executor.kick()
 
     def _resync_now(self) -> None:
-        for row in self._read(self.fetch_orders):
+        for row in self._read_orders():
             self.handle_update(row)
         if self.fill_source == "trades":
             self.sync_trades()
@@ -888,23 +1220,65 @@ class BrokerAdapter:
     def sync_trades(self) -> None:
         """Read the trade book and book every execution not yet seen (``fill_source="trades"``)."""
         for t in self._read(self.fetch_trades):
-            self.handle_trade(exec_id=t.exec_id, qty=t.qty, price=t.price, venue_order_id=t.venue_order_id, fee=t.fee, ts_ns=t.ts_ns)
+            self.handle_trade(exec_id=t.exec_id, qty=t.qty, price=t.price, venue_order_id=t.venue_order_id, fee=t.fee, ts_ns=t.ts_ns, wire=True)
 
     # -- reconcile reads and fencing (the journal work uses these) ---------------------------
 
     def orders(self) -> list[VenueOrder]:
         """The venue's order book for the day, normalised; ``client_order_id`` set where the tag is ours."""
-        return [self._with_cid(r) for r in self._read(self.fetch_orders)]
+        return [self._with_cid(r) for r in self._read_orders()]
 
     def open_orders(self) -> list[VenueOrder]:
         """``orders()`` that are not finished."""
         return [o for o in self.orders() if o.status not in _TERMINAL]
 
     def positions(self) -> list[VenuePosition]:
-        return self._read(self.fetch_positions)
+        """Net positions at the venue in **units** (short negative); lots are converted here."""
+        out = []
+        for p in self._read(self.fetch_positions):
+            ins = self._instrument_or_none(p.symbol)
+            if ins is None:
+                self._event("unmapped_instrument", None, json.dumps({"symbol": p.symbol, "net_qty": p.net_qty, "what": "position left as the broker counts it"}))
+                out.append(p)
+            else:
+                out.append(replace(p, net_qty=self.units(ins, p.net_qty)))
+        return out
 
     def balances(self) -> VenueBalances:
         return self._read(self.fetch_balances)
+
+    def _read_orders(self) -> list[OrderStatusUpdate]:
+        return [self._in_units(r) for r in self._read(self.fetch_orders)]
+
+    def _instrument_or_none(self, symbol: str | None) -> Instrument | None:
+        if symbol is None:
+            return None
+        try:
+            return self.instrument(symbol)
+        except Unsupported:
+            return None
+
+    def _in_units(self, u: OrderStatusUpdate) -> OrderStatusUpdate:
+        """The one place an inbound order row goes from the broker's count to units."""
+        ins = self._instrument_or_none(u.symbol)
+        if ins is None or not ins.quantity_in_lots:
+            return u
+        return replace(
+            u,
+            quantity=None if u.quantity is None else self.units(ins, u.quantity),
+            filled_qty=self.units(ins, u.filled_qty),
+        )
+
+    def _unmapped_status(self, order_id: Any, raw: Any, tag: Any = None) -> None:
+        """A row whose status (or id) the mapping cannot read: say so, once per order and status."""
+        key = (str(order_id), str(raw))
+        if key in self._seen_unmapped:
+            return
+        self._seen_unmapped[key] = None
+        while len(self._seen_unmapped) > 10_000:
+            self._seen_unmapped.pop(next(iter(self._seen_unmapped)))
+        detail = json.dumps({"order_id": str(order_id) if order_id else None, "status": None if raw is None else str(raw), "tag": tag})
+        self._event("unmapped_status", self.ids.decode(tag) if tag else None, detail)
 
     def _with_cid(self, r: OrderStatusUpdate) -> OrderStatusUpdate:
         if r.client_order_id or not r.tag:
@@ -915,18 +1289,76 @@ class BrokerAdapter:
     def fence(self, epoch: int) -> None:
         """Make ``epoch`` current. Queued, unsent work of an older epoch is dropped.
 
-        Monotonic: a lower epoch raises. This stops *this process* sending
-        stale work; it cannot recall a request already in flight, and does not
-        stop another process (that is the lease's job).
+        Monotonic: a lower epoch raises. **Without a ``lease`` this only guards this process**: it
+        compares a number held here, so two processes that were each given an epoch both keep
+        sending (``can_fence`` is ``False``). With a ``lease`` the host's check runs before every
+        write and a process that lost it is refused with :class:`Fenced`. Neither recalls a
+        request already in flight. A higher epoch lifts a previous ``Fenced`` refusal (the host
+        re-acquired the lease).
         """
         with self._lock:
             if epoch < self._epoch:
                 raise AdapterError(f"epoch {epoch} is behind {self._epoch}")
+            if epoch > self._epoch:
+                self._fenced = False
             self._epoch = epoch
 
     @property
     def epoch(self) -> int:
         return self._epoch
+
+    @property
+    def can_fence(self) -> bool:
+        """True only when the host gave a ``lease``: fencing then holds across processes."""
+        return self._lease is not None
+
+    @property
+    def namespace(self) -> str:
+        """The tag prefix of this run (read-only). A saved state restores only under its own."""
+        return self.ids.namespace
+
+    @staticmethod
+    def _lease_check(lease: Any) -> Callable[[int], bool] | None:
+        if lease is None:
+            return None
+        holds = getattr(lease, "holds", None)
+        if callable(holds):
+            return holds
+        if callable(lease):
+            return lease
+        raise ValueError("lease is a callable(epoch) -> bool or an object with holds(epoch)")
+
+    def _holds_lease(self) -> bool:
+        """The host's lease check for the current epoch; fails closed (an error is a no)."""
+        if self._lease is None:
+            return True
+        if self._fenced:
+            return False
+        try:
+            ok = bool(self._lease(self._epoch))
+        except Exception as exc:  # noqa: BLE001 - a check that fails proves nothing
+            self._event("lease_check_failed", None, type(exc).__name__)
+            ok = False
+        if not ok:
+            self._fenced = True
+            self._event("fenced", None, f"lease not held at epoch {self._epoch}")
+        return ok
+
+    def _refuse_if_fenced(self) -> None:
+        if self._fenced:
+            raise Fenced(f"this adapter lost its lease at epoch {self._epoch}; fence() with a higher epoch after re-acquiring it")
+
+    def _drop_fenced(self) -> None:
+        """Lease lost: drop every queued write (no report: the new owner reconciles from the venue)."""
+        with self._lock:
+            self._fenced = True
+            keep: deque[_Job] = deque()
+            for j in self._outbox:
+                if j.kind == "resync":
+                    keep.append(j)
+                else:
+                    self._event("fenced_drop", j.client_order_id, f"{j.kind} of epoch {j.epoch}: lease lost")
+            self._outbox = keep
 
     # -- state ---------------------------------------------------------------------------------
 
@@ -935,6 +1367,7 @@ class BrokerAdapter:
         with self._lock:
             return {
                 "version": 1,
+                "namespace": self.ids.namespace,
                 "epoch": self._epoch,
                 "registry": self.ids.export(),
                 "orders": {
@@ -942,7 +1375,7 @@ class BrokerAdapter:
                         "tag": r.tag, "symbol": r.symbol, "side": r.side, "quantity": r.quantity,
                         "order_type": r.order_type, "limit_price": r.limit_price, "trigger_price": r.trigger_price,
                         "tif": r.tif, "product": r.product, "wire": r.wire, "venue_order_id": r.venue_order_id,
-                        "accepted": r.accepted, "terminal": sorted(r.terminal), "cancel_requested": r.cancel_requested,
+                        "accepted": r.accepted, "terminal": sorted(r.terminal), "attempted": r.attempted, "cancel_requested": r.cancel_requested,
                         "pending_modify": list(r.pending_modify) if r.pending_modify else None,
                         "cum_qty": r.cum_qty, "cum_notional": r.cum_notional, "seen_exec": sorted(r.seen_exec),
                     }  # fmt: skip
@@ -958,6 +1391,8 @@ class BrokerAdapter:
         """Load ``export_state()`` into a fresh adapter. Unsent jobs are queued again and run."""
         if state.get("version") != 1:
             raise AdapterError("unknown adapter state version")
+        if state.get("namespace") != self.ids.namespace:
+            raise AdapterError("the saved state belongs to another namespace: build the adapter with the namespace it was saved under")
         with self._lock:
             self._epoch = state["epoch"]
             self.ids.restore(state["registry"])
@@ -969,6 +1404,8 @@ class BrokerAdapter:
                     set(d["terminal"]), d["cancel_requested"],
                     tuple(d["pending_modify"]) if d["pending_modify"] else None,
                     d["cum_qty"], d["cum_notional"], False, set(d["seen_exec"]),
+                    attempted=d.get("attempted", d["venue_order_id"] is None),
+                    terminal_at=self._mono() if d["terminal"] else None,
                 )  # fmt: skip
                 self._orders[cid] = rec
                 if rec.venue_order_id:
@@ -1001,7 +1438,16 @@ class BrokerAdapter:
 
     def symbol_of(self, native_key: str | None) -> str | None:
         """Engine symbol for a broker-native key, as far as orders sent so far reveal it."""
-        return self._by_native.get(native_key or "")
+        key = native_key or ""
+        sym = self._by_native.get(key)
+        if sym is not None or not isinstance(self._instruments, Mapping):
+            return sym
+        n, idx = self._native_index
+        if n != len(self._instruments) + len(self._added):
+            idx = {self.native_key(i): s for s, i in self._instruments.items()}
+            idx.update({self.native_key(i): s for s, i in self._added.items()})
+            self._native_index = (len(self._instruments) + len(self._added), idx)
+        return idx.get(key)
 
     def units(self, ins: Instrument, wire_qty: float) -> float:
         return wire_qty * ins.lot_size if ins.quantity_in_lots else wire_qty

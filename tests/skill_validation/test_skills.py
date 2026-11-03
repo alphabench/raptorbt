@@ -189,8 +189,8 @@ def test_frontmatter_unknown_key(tree):
 
 
 def test_frontmatter_unclosed(tree):
-    edit(tree / "strategy" / "SKILL.md", "status: draft\n---", "status: draft")
-    assert has(errs(tree), "strategy/SKILL.md", "not closed")
+    edit(tree / "execution" / "SKILL.md", "status: stable\n---", "status: stable")
+    assert has(errs(tree), "execution/SKILL.md", "not closed")
 
 
 def test_manifest_api_version_must_match_package(tree):
@@ -226,7 +226,7 @@ def test_modules_entry_must_resolve(tree):
 
 
 def test_index_out_of_date(tree):
-    edit(tree / "INDEX.md", "Risk limits, margin models and safety controls.", "Something else entirely.")
+    edit(tree / "INDEX.md", "Where a strategy's orders go:", "Something else entirely:")
     assert has(errs(tree), "INDEX.md", "out of date")
 
 

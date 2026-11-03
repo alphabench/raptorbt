@@ -46,7 +46,7 @@ impl OrderLog {
             EngineEvent::OrderRejected { order_id, reason, .. } => (*order_id, None, Some(reason)),
             _ => return,
         };
-        let Some(order) = kernel.order_book().iter().find(|o| o.id == order_id) else { return };
+        let Some(order) = kernel.order(order_id) else { return };
         let mut seed = OrderRecord::from_order(order, kernel.symbol());
         if fill.is_some() {
             // Zero the seed ONCE, as it is created: `record_fill` folds each
@@ -204,9 +204,12 @@ impl SingleRunner {
     /// The returned events are the same ones the kernel produced; completed
     /// trades have already been recorded internally.
     pub fn step(&mut self, idx: usize, bar: &KernelBar, input: StepInput) -> Vec<EngineEvent> {
+        // The halt's cleanup is recorded where it is made; recording it again
+        // with the step's events would book the flattened trade twice.
         let mut events = self.apply_pending_halt(idx);
-        events.extend(self.kernel.step(idx, bar, input));
-        self.record(&events);
+        let stepped = self.kernel.step(idx, bar, input);
+        self.record(&stepped);
+        events.extend(stepped);
 
         let mut equity = self.kernel.equity(bar.close);
         // The day's loss limit, judged on the bar's mark: reaching it refuses
@@ -266,8 +269,13 @@ impl SingleRunner {
         let Some((reason, flatten)) = self.pending_halt.take() else {
             return Vec::new();
         };
-        let bar = self.last_bar.map(|(_, bar)| bar);
-        let mut events = self.kernel.halt_cleanup(idx, bar.as_ref(), true, flatten);
+        // The cleanup belongs to the last bar seen, whose close it trades at:
+        // the flattened trade exits there, as a portfolio book books it.
+        let (cleanup_idx, bar) = match self.last_bar {
+            Some((last, bar)) => (last, Some(bar)),
+            None => (idx, None),
+        };
+        let mut events = self.kernel.halt_cleanup(cleanup_idx, bar.as_ref(), true, flatten);
         self.record(&events);
         events.push(EngineEvent::RiskHalted { idx, reason });
         events
@@ -370,5 +378,46 @@ impl SingleRunner {
     #[inline]
     pub fn kernel(&self) -> &EngineKernel {
         &self.kernel
+    }
+}
+
+#[cfg(test)]
+mod halt_tests {
+    use super::*;
+    use crate::core::types::ExitReason;
+
+    fn bar(ts: i64, close: f64) -> KernelBar {
+        KernelBar {
+            timestamp: ts,
+            open: close,
+            high: close + 1.0,
+            low: close - 1.0,
+            close,
+            volume: 1000.0,
+        }
+    }
+
+    #[test]
+    fn a_flattening_halt_books_one_trade_at_the_last_marks_bar() {
+        let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
+        let mut runner = SingleRunner::from_config(config, "S".to_string(), Direction::Long, None);
+        let enter = StepInput { entry: true, ..StepInput::default() };
+        runner.step(0, &bar(0, 100.0), enter);
+        runner.step(1, &bar(1, 100.0), StepInput::default());
+        runner.halt("manual", true);
+        let events = runner.step(2, &bar(2, 90.0), StepInput::default());
+        let exits: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                EngineEvent::Exited { trade, .. } => Some(trade),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].exit_reason, ExitReason::Liquidation);
+        assert_eq!(exits[0].exit_price, 100.0);
+        let result = runner.finish();
+        assert_eq!(result.trades.len(), 1, "the flattened trade is booked once");
+        assert_eq!(result.trades[0].exit_idx, 1, "on the bar of the mark it trades at");
     }
 }

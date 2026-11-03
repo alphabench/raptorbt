@@ -291,7 +291,10 @@ fn benchmark_to_py<'py>(py: Python<'py>, b: &Benchmark) -> PyResult<Bound<'py, P
 /// The full report over an equity curve, its closed trades and orders.
 ///
 /// `periods_per_year=None` infers the basis from the timestamps' spacing and
-/// `session_minutes` (0 for a 24x7 market), falling back to 252. `fees=None` takes the
+/// `session_minutes` (`None` or 0 for a market that trades round the clock, 375 for
+/// a six-and-a-quarter-hour session), falling back to 252. `tz_offset_ns` places
+/// the day boundaries of the monthly and yearly tables (UTC by default). Neither
+/// is assumed from any one exchange. `fees=None` takes the
 /// fees total from the trades and their `fee_breakdown`s; a dict is fees by component
 /// (with an optional `total`). Returns a dict: `report`, `report_unavailable`
 /// (`key → "CODE: reason"`), `drawdown_curve`, `drawdowns`, `monthly`, `yearly`, `costs`,
@@ -299,7 +302,7 @@ fn benchmark_to_py<'py>(py: Python<'py>, b: &Benchmark) -> PyResult<Bound<'py, P
 #[pyfunction]
 #[pyo3(signature = (
     equity_ts, equity, trades=None, orders=None, fees=None, periods_per_year=None,
-    risk_free=0.0, session_minutes=375.0, tz_offset_ns=crate::data::IST_OFFSET_NS, *,
+    risk_free=0.0, session_minutes=None, tz_offset_ns=0, *,
     slippage=0.0, multipliers=None, exposure=None, exposure_time=None, benchmark=None,
     period=None, attribution=false, rule_metrics=None, unrealised=None
 ))]
@@ -313,7 +316,7 @@ fn full_report<'py>(
     fees: Option<&Bound<'py, PyAny>>,
     periods_per_year: Option<f64>,
     risk_free: f64,
-    session_minutes: f64,
+    session_minutes: Option<f64>,
     tz_offset_ns: i64,
     slippage: f64,
     multipliers: Option<BTreeMap<String, f64>>,
@@ -373,10 +376,9 @@ fn full_report<'py>(
         Some((a, b)) => Some((period_day(a)?, period_day(b)?)),
         None => None,
     };
-    let session = if session_minutes > 0.0 {
-        SessionSpec::Session { minutes: session_minutes }
-    } else {
-        SessionSpec::Continuous
+    let session = match session_minutes {
+        Some(minutes) if minutes > 0.0 => SessionSpec::Session { minutes },
+        _ => SessionSpec::Continuous,
     };
     let ppy = resolve_periods_per_year_with_session(periods_per_year, &equity_ts, session, 252.0);
     let exposure = exposure.unwrap_or_default();

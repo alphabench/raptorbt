@@ -563,6 +563,7 @@ impl PyPortfolioSession {
             size_mult,
             stop_price_override: stop_price,
             target_price_override: target_price,
+            ..StepInput::default()
         };
         Ok(self.session_mut()?.apply_current(input).into_iter().map(PyEngineEvent::from).collect())
     }

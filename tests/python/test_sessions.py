@@ -602,7 +602,7 @@ class TestSquareoff:
         class Eager(Log):
             def on_bar(self, ctx):
                 # Try to hold a position at every bar until the Friday morning.
-                if ctx.idx < per_day + 4 and not ctx.positions:
+                if ctx.idx < per_day + 4 and not ctx.positions():
                     self.enter()
 
         s = Eager()
@@ -638,18 +638,19 @@ class TestSquareoff:
         data = self._two_days()
         per_day = len(bars(regular_day(THU))["timestamps"])
 
-        class Eager(Log):
-            holding = False
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class Eager(Log):
+                holding = False
 
-            def on_position_opened(self, ctx, event):
-                self.holding = True
+                def on_position_opened(self, ctx, event):
+                    self.holding = True
 
-            def on_position_closed(self, ctx, event):
-                self.holding = False
+                def on_position_closed(self, ctx, event):
+                    self.holding = False
 
-            def on_bar(self, ctx):
-                if ctx.idx < per_day + 4 and not self.holding:
-                    self.enter()
+                def on_bar(self, ctx):
+                    if ctx.idx < per_day + 4 and not self.holding:
+                        self.enter()
 
         schedule = SessionSchedule.nse_equity()
         a = Eager()
@@ -711,16 +712,17 @@ class TestDayOrders:
 # ---------------------------------------------------------------------------
 # Daily composite bars
 # ---------------------------------------------------------------------------
-class DailyBars(Strategy):
-    def __init__(self):
-        super().__init__(None)
-        self.daily = []
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class DailyBars(Strategy):
+        def __init__(self):
+            super().__init__(None)
+            self.daily = []
 
-    def on_start(self, ctx):
-        self.subscribe_bars(1, "d")
+        def on_start(self, ctx):
+            self.subscribe_bars(1, "d")
 
-    def on_composite_bar(self, ctx, bar):
-        self.daily.append(bar)
+        def on_composite_bar(self, ctx, bar):
+            self.daily.append(bar)
 
 
 class TestDailyBars:
@@ -873,7 +875,7 @@ class TestRunners:
 class TickBuyer(Log):
     """Buys on every print until it holds something."""
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         if not self.kinds().count("order_filled"):
             self.submit_order(orders.Market(side="buy", units=1.0))
 

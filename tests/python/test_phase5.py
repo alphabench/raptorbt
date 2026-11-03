@@ -158,20 +158,22 @@ class TestMultiTimeframeStrategy:
     def test_composite_bars_dispatch_in_order(self):
         events = []
 
-        class S(Strategy):
-            def on_start(self, ctx):
-                self.h5 = self.subscribe_bars(5, "m")
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def on_start(self, ctx):
+                    self.h5 = self.subscribe_bars(5, "m")
 
-            def on_composite_bar(self, ctx, bar):
-                events.append(("composite", ctx.idx, bar.timestamp, bar.stream_id))
+                def on_composite_bar(self, ctx, bar):
+                    events.append(("composite", ctx.idx, bar.timestamp, bar.stream_id))
 
-            def on_bar(self, ctx):
-                events.append(("bar", ctx.idx))
+                def on_bar(self, ctx):
+                    events.append(("bar", ctx.idx))
 
         data = _minute_bars(12)
         config = BacktestConfig()
         config.fees = 0.0
-        run_strategy_backtest(S, **data, config=config)
+        # Minute bars stamped at their open: the first composite closes with bar 4.
+        run_strategy_backtest(S, **data, config=config, bar_stamp="open", bar_ns=60_000_000_000)
 
         composites = [e for e in events if e[0] == "composite"]
         # Bars 0-4 fill window one; bar 5 (ts=5min... window keyed on ts)
@@ -187,17 +189,18 @@ class TestMultiTimeframeStrategy:
     def test_trend_filter_gates_entries(self):
         """The capability test: a 5-minute trend filter gating 1-minute entries."""
 
-        class S(Strategy):
-            def on_start(self, ctx):
-                self.subscribe_bars(5, "m")
-                self.trend_up = False
+        with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+            class S(Strategy):
+                def on_start(self, ctx):
+                    self.subscribe_bars(5, "m")
+                    self.trend_up = False
 
-            def on_composite_bar(self, ctx, bar):
-                self.trend_up = bar.close > bar.open
+                def on_composite_bar(self, ctx, bar):
+                    self.trend_up = bar.close > bar.open
 
-            def on_bar(self, ctx):
-                if self.trend_up and ctx.position is None:
-                    self.enter()
+                def on_bar(self, ctx):
+                    if self.trend_up and ctx.position is None:
+                        self.enter()
 
         # Falling first half, rising second half.
         n = 20
@@ -214,7 +217,7 @@ class TestMultiTimeframeStrategy:
         }
         config = BacktestConfig()
         config.fees = 0.0
-        result = run_strategy_backtest(S, **data, config=config)
+        result = run_strategy_backtest(S, **data, config=config, bar_stamp="close")
         trades = result.trades()
         assert len(trades) == 1
         # The first up-trending composite closes at the 15-minute boundary
@@ -232,7 +235,7 @@ class TestMultiTimeframeStrategy:
 
         fixtures = json.loads((here / "golden" / "fixtures.json").read_text())
         ts, o, h, l, c, v, _, _ = thaw_inputs(fixtures["inputs"]["shared"])
-        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v)
+        result = raptorbt.run_strategy_backtest(GoldenSma, ts, o, h, l, c, v, bar_stamp="close")
         assert result_digest(result) == fixtures["class/sma_cross"]
 
 

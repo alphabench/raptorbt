@@ -56,6 +56,23 @@ pub fn ensure_prices_finite(label: &str, ohlcv: &crate::core::types::OhlcvData<'
     Ok(())
 }
 
+/// Refuse a price series that holds a NaN or an infinity.
+///
+/// For the series a run takes one by one (an option's premiums, a tick
+/// feed's last price) rather than as OHLCV bars. The error names the column
+/// and the first offending index.
+pub fn ensure_series_finite(label: &str, column: &'static str, values: &[f64]) -> Result<()> {
+    match values.iter().enumerate().find(|(_, v)| !v.is_finite()) {
+        Some((index, value)) => Err(RaptorError::NonFinitePrice {
+            label: label.to_string(),
+            column,
+            index,
+            value: *value,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Heap entry; reversed ordering turns `BinaryHeap` into a min-heap.
 struct Entry {
     event: MarketEvent,

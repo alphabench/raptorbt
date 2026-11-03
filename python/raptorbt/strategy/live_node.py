@@ -30,6 +30,7 @@ Typical shape::
 
 from __future__ import annotations
 
+import weakref
 from typing import Iterable, Literal
 
 import numpy as np
@@ -60,6 +61,8 @@ from raptorbt.strategy.accounts import (
 from raptorbt.strategy._validate import ensure_prices_finite, ensure_pushed_finite
 from raptorbt.strategy._commands import dispatch_events, reject_atr_stops, session_tz_offset_ns
 from raptorbt.strategy._stamps import BarStamps
+from raptorbt.strategy import context_host
+from raptorbt.strategy import order_check as order_check_mod
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import (
     Bar,
@@ -98,10 +101,31 @@ class LiveNode:
     ``initial_positions`` seeds positions the account already holds, per
     strategy: a dict keyed by the strategy's index in ``strategies`` or by the
     strategy object itself, whose value maps symbol -> ``{"quantity",
-    "avg_price", "timestamp_ns"?}``. Each seed is adopted, with no order, fill
-    or fee, before that strategy's ``on_start``, so ``on_start`` sees it. Seeds
-    are long-only, need a positive quantity and price, and are refused unless
-    the account is cash or fully funded margin (``leverage=1.0``).
+    "avg_price", "timestamp_ns"?, "margin_minor"?, "cost_minor"?}``. Each seed
+    is adopted, with no order, fill, fee, trade record or entry event, before
+    that strategy's ``on_start``, so ``on_start`` sees it. ``quantity`` is
+    signed: negative is a short, which needs a margin account (a cash account
+    cannot hold one). ``avg_price`` is the position's entry price, so a short
+    gains as the price falls from it. The seed's money is the account's own
+    fact, stated in minor units of its money scale (``money_decimals``,
+    paise for two decimals) as an ``int``:
+
+    * margin account: ``margin_minor`` is the margin the account has posted
+      for this position. The position is adopted with exactly that locked,
+      whatever the leverage, margin model or instrument (options, shorts
+      included); the balance is not debited, as for any position on margin.
+      Without it only a fully funded account (``leverage=1.0``, or a model
+      that demands the whole cost basis) is adopted, locking the notional, and
+      anything else is refused: the margin a broker holds against a position
+      cannot be derived from quantity and price. An option leg margined by a
+      built-in SPAN-style deposit is re-priced with its group after the first
+      event applied, like any leg; the stated margin holds until then.
+    * cash account: ``cost_minor`` is the cash the position cost, debited in
+      place of ``avg_price * quantity`` (exact where the broker's figure
+      differs by rounding). Longs only.
+
+    A seed needs a non-zero quantity and a positive price. Positions are
+    adopted before any event is applied (the equity curve starts with them).
 
     ``bar_stamp`` / ``bar_ns`` say what the timestamps of warmup and pushed
     bars mean, as in :class:`~raptorbt.TickStrategyStream`. Ticks are instants.
@@ -163,12 +187,44 @@ class LiveNode:
     are rescaled, and dividends paid, at the ex-date. Declare them for every
     action the node will see; without a policy there must be none.
 
+    ``order_check`` is the host's pre-submit order check, the same callable
+    :func:`~raptorbt.run_strategies` takes: every typed order passes it before
+    the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
+
+    ``bindings`` maps a requirements role name to the symbol it means; with
+    ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
+    ``ctx.option_chain`` answer from, identically to
+    :func:`~raptorbt.run_strategies` (see :mod:`raptorbt.strategy.context_host`).
+
+    ``warmup`` says what warm-up bars do. ``"live"`` replays them as bars:
+    orders match and equity is marked, as before. ``"muted"`` runs the
+    strategies' hooks on them so indicators, aggregators and the strategies'
+    own state are primed, but the orders and intents the strategies queue are
+    discarded: no order is made, no position is held (positions adopted with
+    ``initial_positions`` stay), no fill or fee happens, and nothing reaches
+    the venue. ``None`` (the default) is ``"muted"`` for a node with your own
+    venue (an :class:`~raptorbt.execution.ExecutionAdapter`), which a
+    real exchange must never be sent history orders by, and ``"live"``
+    otherwise. In either mode ``ctx.is_warmup`` is true in every hook that runs
+    on a warm-up bar, and :meth:`warm_up` primes the node from history pushed
+    after construction, always muted.
+
     ``processing_latency_ns`` declares how long the engine takes to act on an
     event after it arrives. Every event has three times (see
     ``docs/architecture/event-semantics.md``): the exchange's, the arrival and
     the processing time, read in hooks as ``ctx.event_ns``,
     ``ctx.arrival_ns`` and ``ctx.processing_ns``. The push methods take
     ``arrival_ns``; without it arrival is the event's own time.
+
+    ``journal`` (a :class:`raptorbt.journal.Journal`) records everything the
+    node is told, decides and sends, before it acts (see
+    :mod:`raptorbt.journal`); without it nothing is recorded and nothing is
+    paid. ``epoch`` is the node's execution epoch: an adapter with a
+    ``fence(epoch)`` method raises :class:`~raptorbt.execution.Fenced` when a
+    newer epoch owns the account, after which the node sends nothing (see
+    :meth:`heartbeat`). ``strategy_states`` hands each strategy the plain data
+    its ``state()`` returned in an earlier run, before ``on_start``.
+    :meth:`checkpoint` and :meth:`restore` rebuild a node from its journal.
 
     Everything else (account type, leverage, risk limits, OMS type) behaves as
     in :class:`~raptorbt.TickStrategyStream`. ATR-based stops are refused, as
@@ -201,7 +257,14 @@ class LiveNode:
         corporate_actions: Iterable[CorporateAction] | None = None,
         adjustment_policy: Literal["raw", "adjusted"] | None = None,
         processing_latency_ns: int = 0,
+        journal=None,
+        epoch: int | None = None,
+        strategy_states: list | None = None,
+        order_check=None,
+        bindings: dict[str, str] | None = None,
+        warmup: Literal["live", "muted"] | None = None,
         _via: str | None = None,
+        _replay=None,
     ):
         # ``_via`` names the wrapper (``TickStrategyStream``) that builds this
         # node: its name leads every warning and error, its extra frame is
@@ -263,6 +326,12 @@ class LiveNode:
         strategies, names = unpack_entries(strategies, accounts, name)
         check_group_sizes(names, name)
         entries = _normalise(strategies, dict.fromkeys(symbols), name)
+        # A strategy given no symbols trades every symbol of the node, those added later too.
+        self._open_ended = [
+            not (isinstance(item, tuple) and item[1] is not None) for item in strategies
+        ]
+        self._added: list[str] = []
+        self._init_recovery(journal, epoch, execution, execution_kind, entries, strategy_states, _replay)
         seeds = _seeds(initial_positions, entries)
         reject_atr_stops(config, instrument_configs, symbols)
         # Pushed events cannot be put on one later basis, so every symbol counts
@@ -272,9 +341,31 @@ class LiveNode:
             corporate_actions, adjustment_policy, set(symbols), set(symbols), name
         )
 
+        if warmup not in (None, "live", "muted"):
+            raise InvalidParameter(
+                f"warmup must be 'live', 'muted' or None, got {warmup!r}",
+                code="invalid_warmup",
+                operation=name,
+                parameter="warmup",
+                value=warmup,
+                valid=["live", "muted", None],
+            )
+        self._warmup_muted = (warmup == "muted") or (warmup is None and execution_kind == "adapter")
+        self._host = context_host.build(instruments, bindings, entries, symbols, name)
+        self._muted_now = False
+        if execution_kind == "adapter" and callable(getattr(execution, "place_exit_rule", None)):
+            self._host.venue = _VenueExits(self, execution)
+            self._host.index_of = lambda strategy: next(
+                (k for k, s in enumerate(self._strategies) if s is strategy), None
+            )
+        self._host.node = weakref.ref(self)
+        #: What strategies asked the node to add; the host appends, the node drains (in place).
+        self._requests = self._host.pending
         self._protective = protective
         self._symbols = symbols
         self._index_of = {s: i for i, s in enumerate(symbols)}
+        self._retired: dict[str, int] = {}
+        self._holders: dict[str, list[int]] = {}
         self._finished = False
         self._stamps = BarStamps.resolve(
             bar_stamp, bar_ns, symbols, name, warn=bool(warmup_bars), stacklevel=4 + extra
@@ -304,7 +395,10 @@ class LiveNode:
             BookSnapshot,
         )
         self._rt = rt
+        if _replay is not None:
+            rt.set_replay(True)
         try:
+            order_check_mod.install(rt, order_check, name)
             if execution_kind is not None:
                 rt.set_execution(
                     execution_kind,
@@ -318,6 +412,13 @@ class LiveNode:
                 rt.set_curve_window(curve_samples)
             if primary_bars is not None:
                 rt.set_primary_bars(*primary_bars)
+            # The journal is attached, and its first record written, before any
+            # strategy code runs: what ``on_init`` / ``on_start`` do (an order
+            # queued, a halt, an adopted position) is on the record from its
+            # first act.
+            if journal is not None or epoch is not None:
+                rt.set_journal(journal, epoch)
+            self._journal_start(symbols, len(entries), strategy_states)
             self._strategies: list[Strategy] = []
             self._sids: list[int] = []
             self._ctxs = []
@@ -346,6 +447,7 @@ class LiveNode:
                     adopt=_adopter(rt, syms, seeds[k]),
                     stacklevel=3 + extra,
                     account=self._gids.get(names[k]),
+                    host=self._host,
                 )
                 self._strategies.append(strategy)
                 self._sids.append(sid)
@@ -356,11 +458,21 @@ class LiveNode:
                 rt.set_corporate_actions(corporate_actions, adjustment_policy)
             rt.finalize()
             # Prime indicators and strategy state from the warmup history now,
-            # so the node is warm before the first live event.
-            rt.set_warmup(True)
-            for push in warmup:
-                rt.push_bar(*push)
+            # so the node is warm before the first live event. Muted history
+            # discards what hooks queue; what ``on_start`` queued is not
+            # history's, so it waits and goes with the first live event.
+            if warmup and self._warmup_muted:
+                rt.hold_boot()
+            rt.set_warmup(True, self._warmup_muted)
+            self._muted_now = self._warmup_muted
+            try:
+                for push in warmup:
+                    rt.push_bar(*push)
+            finally:
+                self._muted_now = False
             rt.set_warmup(False)
+            if warmup and self._warmup_muted:
+                rt.release_boot()
         except BaseException:
             rt.close()
             raise
@@ -402,7 +514,7 @@ class LiveNode:
         Timestamps must not decrease per symbol (equal ones are allowed);
         a decreasing one raises ``ValueError`` and changes nothing.
         """
-        self._check_open()
+        self._check_open(push=True)
         ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
         return self._rt.push_tick(
             self._index_of[symbol],
@@ -435,7 +547,7 @@ class LiveNode:
 
         ``timestamp`` is stamped as the node's ``bar_stamp`` declares.
         """
-        self._check_open()
+        self._check_open(push=True)
         ensure_pushed_finite(
             symbol, f"{self._name}.push_bar", open=open, high=high, low=low, close=close
         )
@@ -443,6 +555,29 @@ class LiveNode:
         self._rt.push_bar(
             self._index_of[symbol], timestamp, open, high, low, close, volume, arrival_ns
         )
+
+    def warm_up(self, bars: dict[str, dict]) -> None:
+        """Prime the strategies from history pushed after construction.
+
+        ``bars`` is ``warmup_bars``: symbol -> OHLCV arrays, stamped as the
+        node's ``bar_stamp`` declares. The bars of different symbols merge by
+        close time, ties by symbol order, and are replayed muted: hooks run and
+        indicators, aggregators and strategy state update, with
+        ``ctx.is_warmup`` true, but no order is made and no position held. They
+        are ordinary bars for the node's clock, so they must not be older than
+        what was already pushed for a symbol (that raises and changes nothing
+        for the rest).
+        """
+        self._check_open()
+        pushes = _warmup(bars, self._index_of, self._stamps)
+        self._rt.set_warmup(True, True)
+        self._muted_now = True
+        try:
+            for push in pushes:
+                self._rt.push_bar(*push)
+        finally:
+            self._muted_now = False
+            self._rt.set_warmup(False)
 
     def push_depth(
         self,
@@ -454,7 +589,7 @@ class LiveNode:
         arrival_ns: int | None = None,
     ) -> None:
         """Feed one depth snapshot: ``(price, size)`` lists, best first."""
-        self._check_open()
+        self._check_open(push=True)
         ensure_pushed_finite(
             symbol,
             f"{self._name}.push_depth",
@@ -469,7 +604,7 @@ class LiveNode:
         of its symbols' clocks, in strategy order. Orders they submit are
         routed at once and match from their instrument's next print.
         """
-        self._check_open()
+        self._check_open(push=True)
         self._rt.advance_time(timestamp)
 
     def push_report(
@@ -494,10 +629,9 @@ class LiveNode:
         ``"late"`` (no longer matters, or cannot matter yet).
 
         Raises when the node has no execution adapter, when no order was sent
-        under ``client_order_id``, when the report contradicts the order, or
-        when it is a correction or bust (not supported yet).
+        under ``client_order_id``, or when the report contradicts the order.
         """
-        self._check_open()
+        self._check_open(push="report")
         if not isinstance(report, ExecutionReport):
             raise InvalidParameter(
                 f"report must be a raptorbt.execution.ExecutionReport, got {type(report).__name__}",
@@ -507,6 +641,205 @@ class LiveNode:
                 value=type(report).__name__,
             )
         return self._rt.push_report(client_order_id, report, arrival_ns)
+
+    # -- the instrument set ------------------------------------------------------
+
+    def add_instrument(
+        self,
+        symbol: str,
+        spec=None,
+        *,
+        strategies: list[int] | None = None,
+        history: int | None = None,
+        direction: int = 1,
+        bar_ns: int | None = None,
+    ) -> None:
+        """Add an instrument to the running node, between pushes.
+
+        ``symbol`` becomes a symbol of the node (``node.symbols``, ``ctx.symbols``) for
+        ``strategies``, a list of strategy indices, or by default every strategy that was given
+        no symbols of its own. ``spec`` is its :class:`~raptorbt.InstrumentSpec` (also what
+        ``ctx.instrument`` and ``ctx.option_chain`` then answer from); it must be tradable and
+        name ``symbol``. ``history`` is how many rows its rings hold (default: the node's
+        ``history``), always at least what the node's indicators read. ``bar_ns`` is its bar
+        width under ``bar_stamp="open"`` when the node's symbols do not share one.
+
+        The instrument gets the highest id and is each chosen strategy's last local instrument,
+        so nothing that exists moves: every strategy's other symbols, order ids, positions and
+        event ordinals are as they were. The composite subscriptions and the symbol-less
+        indicators a strategy declared in ``on_start`` follow the new instrument, a clock copy
+        of the schedule it set there is started for it, a ``PaperExecution`` venue's shadow book
+        and the order engine take orders on it, and a strategy that has ``Requirements``
+        resolves it through ``ctx.role`` / ``ctx.option_chain``. An indicator registered with
+        ``symbol=`` belongs to that symbol and is not created again for the new one.
+
+        A symbol that was retired comes back with the same id: fresh rings, its kernels flat as
+        they were retired, fresh aggregators, for ``strategies`` that held it (default: those
+        that did), with the spec it had. The record says ``revive``. An execution adapter that
+        has ``add_instrument(symbol, spec)`` is told before any order for the symbol can reach it
+        (it may refuse: nothing changes); ``retire_instrument(symbol)`` likewise. Each strategy
+        then hears ``on_instrument_added(ctx, symbol)``.
+
+        The add is journaled (kind ``instrument_add``, with the spec) before the engine acts,
+        stamped at the node's clock, and :meth:`restore` replays it. Raises on a symbol the node
+        already trades, and in ``recovering`` state; changes nothing then.
+        """
+        self._check_open(push="instrument")
+        name = f"{self._name}.add_instrument"
+        if not isinstance(symbol, str) or not symbol:
+            raise InvalidParameter(
+                f"symbol must be a non-empty string, got {symbol!r}",
+                code="duplicate_symbols", operation=name, parameter="symbol", value=symbol,
+            )
+        revive = symbol in self._retired
+        if symbol in self._index_of:
+            raise InvalidParameter(
+                f"{symbol!r} is already an instrument of this node",
+                code="duplicate_symbols", operation=name, parameter="symbol", value=symbol,
+            )
+        if revive:
+            have = self._host.specs.get(symbol)
+            if spec is None:
+                spec = have
+            elif have is not None and spec.to_json() != have.to_json():
+                raise InvalidParameter(
+                    f"{symbol!r} comes back with the spec it was retired with",
+                    code="invalid_instrument_spec", operation=name, parameter="spec", value=symbol,
+                )
+            if strategies is None:
+                strategies = list(self._holders[symbol])
+        if spec is not None and getattr(spec, "symbol", symbol) != symbol:
+            raise InvalidParameter(
+                f"spec is for {spec.symbol!r}, not {symbol!r}",
+                code="invalid_instrument_spec", operation=name, parameter="spec", value=symbol,
+            )
+        if strategies is None:
+            strategies = [k for k, open_ in enumerate(self._open_ended) if open_]
+            if not strategies:
+                raise InvalidParameter(
+                    "every strategy of this node names its own symbols: say which should trade "
+                    f"{symbol!r} with strategies=[...]",
+                    code="invalid_strategies", operation=name, parameter="strategies",
+                )
+        else:
+            strategies = sorted(set(strategies))
+        offset = self._stamps.offsets[symbol] if revive else self._stamps.offset_for_new(symbol, bar_ns, name)
+        index = self._rt.add_instrument(symbol, spec, direction, strategies, history, offset)
+        self._requests[:] = [r for r in self._requests if r[0] != symbol]
+        if not self._requests and self._state == "adding":
+            self._state = "live"
+        if revive:
+            self._retired.pop(symbol)
+        else:
+            self._stamps.add(symbol, offset)
+            self._added.append(symbol)
+        self._holders[symbol] = list(strategies)
+        self._symbols.append(symbol)
+        self._index_of[symbol] = index
+        for k in strategies:
+            self._symbols_of[k] = [*self._symbols_of[k], symbol]
+            run = getattr(self._strategies[k], "_api", None)
+            if run is not None:
+                run.add_symbol(symbol)
+        if spec is not None:
+            self._host.specs[symbol] = spec
+        self._host.changed()
+        for k in strategies:
+            self._strategies[k].on_instrument_added(self._ctxs[k], symbol)
+
+    @property
+    def retired_instruments(self) -> tuple[str, ...]:
+        """The symbols retired with :meth:`retire_instrument` (:meth:`add_instrument` revives them)."""
+        return tuple(self._retired)
+
+    def holders_of(self, symbol: str) -> tuple[int, ...]:
+        """The strategy indices that traded ``symbol`` when it was last added or revived."""
+        return tuple(self._holders.get(symbol, ()))
+
+    @property
+    def added_instruments(self) -> tuple[str, ...]:
+        """The symbols added with :meth:`add_instrument`, in the order added (retired ones too)."""
+        return tuple(self._added)
+
+    @property
+    def instruments(self) -> dict:
+        """The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and
+        :meth:`add_instrument`), listed contracts the node does not trade included. A copy."""
+        return dict(self._host.specs)
+
+    @property
+    def bindings(self) -> dict[str, str]:
+        """The role bindings the node was built with. A copy."""
+        return dict(self._host.bindings)
+
+    @property
+    def now_ns(self) -> int:
+        """Event time of the latest input the node took (``0`` before the first)."""
+        return self._rt.last_event_ns()
+
+    def last_prices(self, strategy_index: int) -> dict[str, float]:
+        """The last price of each symbol strategy ``strategy_index`` trades, as it reads them."""
+        return self._host._prices(self._ctxs[strategy_index])
+
+    def apply_plan(self, plan) -> None:
+        """Apply a :func:`~raptorbt.strategy.requirements.plan_instruments` plan: retire what it
+        says to retire, then add what it says to add, each as its own journaled step. Stops at
+        the first refusal; what was applied stays applied."""
+        for symbol in plan.retire:
+            self.retire_instrument(symbol)
+        specs = self._host.specs
+        for symbol, strategies in plan.add.items():
+            self.add_instrument(symbol, specs.get(symbol), strategies=list(strategies))
+
+    def _requested(self) -> None:
+        """A strategy queued a request in ``self._requests``: the next input adds it."""
+        if self._state == "live":
+            self._state = "adding"
+
+    def _add_requested(self) -> None:
+        """Add what strategies asked for (``ctx`` hosts a request when an ``auto_roll`` needs a
+        contract the node does not trade) before the next input is taken."""
+        self._state = "live"
+        wanted: dict[str, list[int]] = {}
+        for symbol, k in self._requests:
+            wanted.setdefault(symbol, []).append(k)
+        for symbol, strategies in wanted.items():
+            self.add_instrument(symbol, self._host.specs[symbol], strategies=sorted(set(strategies)))
+
+    def retire_instrument(self, symbol: str) -> None:
+        """Stop trading ``symbol`` and free its history, between pushes.
+
+        Refused with ``instrument_in_use`` while any strategy holds a position or a working
+        order on it (or a protective level the engine watches, or intents held for its next
+        step); nothing changes then, and the error says which. A retired symbol leaves
+        ``node.symbols`` and ``ctx.symbols``, takes no more data, and its rings, aggregators and
+        indicator references are freed; its id and its trades and orders stay for
+        :meth:`finish` and the node's results, and the id is never reused. The spec stays in
+        ``instruments`` so ``ctx.option_chain`` still lists the contract. Journaled
+        (``instrument_retire``) and replayed like :meth:`add_instrument`.
+        """
+        self._check_open(push="instrument")
+        name = f"{self._name}.retire_instrument"
+        if symbol not in self._index_of:
+            raise UnknownSymbol(
+                f"{symbol!r} is not an active instrument of this node",
+                code="unknown_symbol", operation=name, parameter="symbol", value=symbol,
+                valid=list(self._symbols),
+            )
+        self._rt.retire_instrument(symbol)
+        self._requests[:] = [r for r in self._requests if r[0] != symbol]
+        self._retired[symbol] = self._index_of.pop(symbol)
+        self._symbols.remove(symbol)
+        holders = [k for k, symbols in enumerate(self._symbols_of) if symbol in symbols]
+        for k, symbols in enumerate(self._symbols_of):
+            if symbol in symbols:
+                self._symbols_of[k] = [s for s in symbols if s != symbol]
+                run = getattr(self._strategies[k], "_api", None)
+                if run is not None:
+                    run.drop_symbol(symbol)
+        self._host.changed()
+        for k in holders:
+            self._strategies[k].on_instrument_retired(self._ctxs[k], symbol)
 
     # -- state ---------------------------------------------------------------
 
@@ -568,6 +901,9 @@ class LiveNode:
                 value=account,
                 valid=list(self._gids),
             )
+        self._journal_host(
+            "halt", {"account": account, "reason": reason, "flatten": flatten}
+        )
         self._rt.halt_account(self._gids[account], reason, flatten)
 
     def positions(self, strategy_index: int, symbol: str | None = None):
@@ -595,7 +931,8 @@ class LiveNode:
         each account that has strategies to its :class:`~raptorbt.AccountResult`.
         The node is unusable afterwards: any further call raises ``RuntimeError``.
         """
-        self._check_open()
+        self._check_open(push=True)
+        self._journal_host("finish", None)
         self._finished = True
         try:
             results = []
@@ -613,10 +950,313 @@ class LiveNode:
             return results, owned
         finally:
             self._rt.close()
+            if self._journal is not None:
+                self._journal.sync()
+
+    # -- journal, checkpoint and recovery -------------------------------------
+
+    @property
+    def journal(self):
+        """The node's :class:`~raptorbt.journal.Journal`, or ``None``."""
+        return self._journal
+
+    @property
+    def state(self) -> str:
+        """``"live"``, or ``"recovering"`` after :meth:`restore` until
+        :meth:`resume`."""
+        return "live" if self._state == "adding" else self._state
+
+    @property
+    def epoch(self) -> int | None:
+        return self._epoch
+
+    @property
+    def fenced(self) -> bool:
+        """Whether a newer execution epoch owns the account."""
+        return self._epoch is not None and self._rt.fenced
+
+    def annotate(self, ts: int, kind: str, detail=None) -> None:
+        """Write a note of your own into the journal at event time ``ts``
+        (an adoption, an unattributed fill, an operator command): record kind
+        ``annotation``, payload ``{"kind", "detail"}``. Refused without a
+        journal."""
+        self._check_open()
+        if self._journal is None:
+            raise InvalidParameter(
+                "annotate() needs a node built with journal=",
+                code="invalid_execution",
+                operation=f"{self._name}.annotate",
+                parameter="journal",
+            )
+        self._journal.append(
+            "annotation", ts, {"kind": kind, "detail": detail}, source="host"
+        )
+
+    def checkpoint(self, include_log: bool = True) -> bytes:
+        """A versioned snapshot to rebuild this node from: the journal head,
+        a digest of the state to check the rebuild against, each strategy's
+        ``state()``, the epoch and (``include_log``) every journal record since
+        the journal's ``seq_base``. Taken between pushes. See
+        :meth:`restore`."""
+        self._check_open()
+        from raptorbt.strategy import _recovery
+
+        return _recovery.checkpoint(self, include_log)
+
+    @classmethod
+    def restore(cls, checkpoint, strategies, symbols, config=None, **kwargs):
+        """Rebuild a node from its journal after a crash.
+
+        ``checkpoint`` is what :meth:`checkpoint` returned (or ``None`` with
+        ``journal=`` and ``records=`` from
+        :func:`raptorbt.journal.open_for_recovery`); ``strategies``, ``symbols``,
+        ``config`` and the other arguments are those the node was built with
+        (the same ``warmup_bars`` too), plus ``execution=`` the adapter to
+        reconnect. The journal is replayed into the fresh node with the adapter
+        muted: every record the replay makes must equal the one the journal
+        holds, or ``replay_diverged`` is raised. A request whose result was
+        never written is *not* sent again; its order stays as it was.
+
+        Then, if there is an adapter, the node asks the venue what it holds
+        (:meth:`reconcile`). With no discrepancy it resumes. With some, it stays
+        ``state == "recovering"`` (market data is refused; reports, ``resend``
+        and ``reconcile`` are not) until you :meth:`resume`, accepting them.
+        ``reconcile="skip"`` skips the venue and says so in the journal.
+        ``on_discrepancy`` is called with each :class:`~raptorbt.journal.Discrepancy`.
+        """
+        from raptorbt.strategy import _recovery
+
+        return _recovery.restore(cls, checkpoint, strategies, symbols, config, **kwargs)
+
+    def reconcile(self, cash_tolerance: float = 0.0):
+        """Ask the adapter what the venue holds (``open_orders()``,
+        ``positions()``, ``balances()``, each optional) and compare it with
+        the node. Returns the list of :class:`~raptorbt.journal.Discrepancy`
+        and delivers each to the strategy's ``on_discrepancy``."""
+        self._check_open()
+        from raptorbt.strategy import _recovery
+
+        return _recovery.reconcile(self, cash_tolerance)
+
+    def resume(self, accept=()) -> None:
+        """Leave ``recovering``. Every discrepancy of the last reconcile must be
+        in ``accept`` (``Discrepancy`` objects, their ``.key``, or ``"all"``);
+        otherwise ``recovering`` is raised and nothing changes."""
+        self._check_open()
+        if self._state != "recovering":
+            return
+        if isinstance(accept, str):
+            if accept != "all":
+                raise InvalidParameter(
+                    "accept is 'all' or a list of discrepancies",
+                    code="invalid_execution", operation=f"{self._name}.resume",
+                    parameter="accept", value=accept,
+                )
+            keys = set(self._pending)
+        else:
+            keys = {getattr(a, "key", None) or tuple(a) for a in accept}
+        left = [d for k, d in self._pending.items() if k not in keys]
+        if left:
+            raise StateError(
+                f"{len(left)} discrepancies are neither resolved nor accepted: "
+                + "; ".join(f"{d.kind} {d.client_order_id or d.symbol}" for d in left[:5]),
+                code="recovering",
+                operation=f"{self._name}.resume",
+            )
+        self._resume_record({"accepted": [list(k) for k in sorted(map(str, keys & set(self._pending)))]})
+        self._pending = {}
+        self._state = "adding" if self._requests else "live"
+
+    def resend(self, client_order_id: str) -> None:
+        """Send an order again under its first request (same client order id).
+        Only for an order :meth:`reconcile` reported ``missing_order`` after
+        the venue was asked and does not hold it."""
+        self._check_open()
+        self._rt.resend(client_order_id)
+
+    def heartbeat(self) -> dict:
+        """Check the execution epoch with the adapter now and return
+        :meth:`health`. Raises ``fenced`` when a newer epoch owns the account.
+        Call it on a timer; the node also checks before every request."""
+        self._check_open()
+        if self._epoch is not None:
+            self._rt.heartbeat()
+        return self.health()
+
+    def health(self) -> dict:
+        """State for a supervisor: ``state``, ``epoch``, ``fenced``, the
+        journal's ``count`` and ``chain``, and the orders with no confirmed
+        outcome."""
+        out = {
+            "state": self.state,
+            "epoch": self._epoch,
+            "fenced": self.fenced,
+            "finished": self._finished,
+        }
+        if self._journal is not None:
+            out["journal_count"] = self._journal.count
+            out["chain"] = self._journal.chain
+        if not self._finished:
+            out["unconfirmed"] = sorted(self._rt.unconfirmed())
+            out["clock_ns"] = self._rt.clock()[0]
+        return out
+
+    def state_digest(self) -> str:
+        """A hash of the books, orders and cash. Equal digests mean equal
+        account state."""
+        self._check_open()
+        from raptorbt.strategy import _recovery
+
+        return _recovery.state_digest(self)
 
     # -- internals -----------------------------------------------------------
 
-    def _check_open(self) -> None:
+    def _init_recovery(self, journal, epoch, execution, execution_kind, entries, states, replay):
+        if epoch is not None and (isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0):
+            raise InvalidParameter(
+                f"epoch must be a non-negative integer, got {epoch!r}",
+                code="invalid_execution", operation=self._name, parameter="epoch", value=epoch,
+            )
+        if replay is not None and journal is None:
+            raise InvalidParameter(
+                "a replay needs the journal to check it against",
+                code="invalid_checkpoint", operation=self._name, parameter="journal",
+            )
+        self._namespace = None
+        if execution_kind == "adapter":
+            # The engine names its orders s{k}-{n} in every run, so two runs on one
+            # account send the same ids. The adapter's namespace is what keeps them
+            # apart, and what lets a rebuilt node recognise its own working orders.
+            namespace = getattr(execution, "namespace", None)
+            if not isinstance(namespace, str) or not namespace:
+                raise InvalidParameter(
+                    "an execution adapter must expose a non-empty `namespace` (a string that "
+                    "marks the orders of one node): the engine's client ids restart at s0-0 "
+                    "every run, and a rebuilt node finds its own orders by the namespace",
+                    code="adapter_namespace_missing",
+                    operation=self._name,
+                    parameter="execution",
+                    value=type(execution).__name__,
+                )
+            self._namespace = namespace
+            if epoch is not None and not getattr(execution, "can_fence", False):
+                raise InvalidParameter(
+                    "epoch= fences a stale node through the adapter's fence(epoch), and only an "
+                    f"adapter with can_fence true enforces it; {type(execution).__name__} does not "
+                    "(a BrokerAdapter needs a host lease=), so the epoch would protect nothing",
+                    code="fence_unsupported",
+                    operation=self._name,
+                    parameter="epoch",
+                    value=epoch,
+                )
+        self._journal = journal
+        self._epoch = epoch
+        self._execution = execution
+        self._adapter_kind = execution_kind
+        self._state = "live"
+        self._replaying = replay is not None
+        self._pending: dict = {}
+        self._on_discrepancy = None
+        if states is not None:
+            if len(states) != len(entries):
+                raise InvalidParameter(
+                    f"strategy_states holds {len(states)} entries for {len(entries)} strategies",
+                    code="invalid_checkpoint", operation=self._name, parameter="strategy_states",
+                )
+            for (strategy, _), state in zip(entries, states):
+                if state is not None:
+                    strategy.load_state(state)
+        if replay is not None:
+            journal.expect(replay)
+
+    def _journal_start(self, symbols, strategies, states) -> None:
+        if self._journal is None:
+            return
+        import json
+
+        self._journal.append(
+            "start",
+            0,
+            {
+                "node": self._name,
+                "symbols": list(symbols),
+                "strategies": strategies,
+                "execution": self._adapter_kind or "in_process",
+                "protective": self._protective,
+                "namespace": self._namespace,
+                "strategy_states": None
+                if states is None
+                else [None if st is None else json.dumps(st, sort_keys=True) for st in states],
+            },
+            source="engine",
+        )
+        # The epoch is a record of its own, not part of what a replay compares in
+        # `start`: a node that takes over (restore with a newer epoch) must be
+        # able to replay the journal of the node it replaces.
+        if self._epoch is not None:
+            self._journal.append("epoch", 0, {"epoch": self._epoch}, source="engine")
+
+    def _claim_epoch(self, epoch: int, recorded: int | None = None) -> None:
+        """Take ``epoch`` after a replay: tell the venue now (an older node is
+        fenced at its next request) and write it down. Raises ``fenced`` if a
+        newer epoch already owns the account."""
+        if not getattr(self._execution, "can_fence", False):
+            raise InvalidParameter(
+                "epoch= fences a stale node through the adapter's fence(epoch), and only an "
+                f"adapter with can_fence true enforces it; {type(self._execution).__name__} does not "
+                "(a BrokerAdapter needs a host lease=), so the epoch would protect nothing",
+                code="fence_unsupported", operation=self._name, parameter="epoch", value=epoch,
+            )
+        previous = self._epoch
+        self._rt.set_epoch(epoch)
+        self._epoch = epoch
+        try:
+            self._rt.heartbeat()
+        except BaseException:
+            self._epoch = previous
+            raise
+        if epoch != recorded:
+            self._journal_host("epoch", {"epoch": epoch})
+
+    def _register_exit_orders(self, request) -> None:
+        """Make the orders a venue-held exit rule will fire known to the books."""
+        k = request.strategy_index
+        rows = [
+            (cid, self._index_of[sym], side, float(qty))
+            for cid, (sym, side, qty) in zip(request.exit_client_ids, request.legs)
+        ]
+        if rows:
+            self._rt.register_venue_orders(k, rows)
+
+    def _journal_host(self, kind: str, payload) -> None:
+        if self._journal is not None:
+            self._journal.append(kind, self._rt.clock()[0], payload, source="host")
+
+    def _resume_record(self, payload) -> None:
+        self._journal_host("resume", payload)
+
+    def _guard_push(self, what) -> None:
+        if self._epoch is not None and self._rt.fenced:
+            raise StateError(
+                "a newer execution epoch owns the account; this node sends nothing more",
+                code="fenced",
+                operation=self._name,
+            )
+        if self._state != "live" and what != "report":
+            if self._state == "adding":
+                # A strategy asked for an instrument (see ``_add_requested``): one test of the
+                # state the guard already makes, so a node that is never asked pays nothing.
+                if what != "instrument":
+                    self._add_requested()
+                return
+            raise StateError(
+                "the node was rebuilt from its journal and has not resumed: reconcile with "
+                "the venue, then resume()",
+                code="recovering",
+                operation=self._name,
+            )
+
+    def _check_open(self, push: bool = False) -> None:
         if self._finished:
             what = "stream" if self._extra else "node"
             raise StateError(
@@ -624,6 +1264,93 @@ class LiveNode:
                 code="node_finished",
                 operation="TickStrategyStream" if self._extra else "LiveNode",
             )
+        if push and not self._replaying:
+            self._guard_push(push)
+        elif push and self._state == "adding" and push != "instrument":
+            self._add_requested()  # replaying: the guard above is not run
+
+
+class _VenueExits:
+    """The adapter's optional ``place_exit_rule`` as a node offers it to a strategy's exit
+    rules: through the node's fence, its journal and its replay.
+
+    The request and what became of it are journaled like any adapter call (the request before
+    the adapter is called). While a journal is replayed, or warm-up bars are replayed muted, the
+    adapter is not called: a replay answers with the result the journal holds. A rule the venue
+    takes gets its exit orders registered at the node, so the fills of the exits the venue fires
+    are booked as the orders they are."""
+
+    def __init__(self, node, adapter) -> None:
+        self._node = node
+        self._adapter = adapter
+
+    def place_exit_rule(self, request) -> None:
+        from raptorbt.execution import AdapterError, OrderRefused, Unsupported
+
+        node = self._node
+        if node._muted_now:
+            raise Unsupported("warm-up bars hold no exit at the venue")
+        if node._epoch is not None:
+            node._rt.heartbeat()  # raises `fenced` when a newer epoch owns the account
+        j = node._journal
+        ts = node._rt.clock()[0]
+        if j is not None:
+            j.append(
+                "adapter_request", ts,
+                {"op": "place_exit_rule", "request": _exit_request_value(request)},
+                source="engine", client_order_id=request.rule_id,
+            )
+        raised = None
+        if node._replaying:
+            status, message = _replayed_result(j)
+        else:
+            try:
+                self._adapter.place_exit_rule(request)
+                status, message = "ok", ""
+            except Unsupported as e:
+                status, message = "unsupported", str(e)
+            except OrderRefused as e:
+                status, message = "refused", str(e)
+            except Exception as e:  # the venue could not be asked: the strategy sees it
+                status, message, raised = "error", str(e), e
+        if j is not None:
+            j.append(
+                "adapter_result", ts,
+                {"op": "place_exit_rule", "status": status, "message": message},
+                source="engine", client_order_id=request.rule_id,
+            )
+        if status == "ok":
+            node._register_exit_orders(request)
+            return
+        if raised is not None:
+            raise raised
+        if status == "unsupported":
+            raise Unsupported(message)
+        if status == "refused":
+            raise OrderRefused(message)
+        raise AdapterError(message or "the venue could not take the exit rule")
+
+
+def _exit_request_value(request) -> dict:
+    return {
+        "rule_id": request.rule_id,
+        "kind": request.kind,
+        "legs": [[sym, side, float(qty)] for sym, side, qty in request.legs],
+        "rule": {k: float(v) for k, v in request.rule.items()},
+        "exit_client_ids": list(request.exit_client_ids),
+        "strategy_index": request.strategy_index,
+    }
+
+
+def _replayed_result(journal):
+    """The result the journal holds for the request just replayed; a request whose result
+    was never written has an outcome nobody knows, and is not held at the venue as far as the
+    node can tell (the engine watches the rule; reconcile settles the rest)."""
+    nxt = journal.peek() if journal is not None else None
+    if nxt is not None and nxt.kind == "adapter_result":
+        payload = nxt.payload
+        return payload.get("status", "error"), payload.get("message", "")
+    return "unsupported", "the request was written; its result was not"
 
 
 def _execution_kind(execution, name):
@@ -687,7 +1414,7 @@ def _warmup(warmup_bars, index_of, stamps):
 
 
 def _seeds(initial_positions, entries):
-    """Per strategy, ``{symbol: (quantity, avg_price, timestamp_ns)}``."""
+    """Per strategy, ``{symbol: (quantity, avg_price, timestamp_ns, margin_minor, cost_minor)}``."""
     out = [dict() for _ in entries]
     if not initial_positions:
         return out
@@ -749,16 +1476,38 @@ def _seeds(initial_positions, entries):
                 )
             quantity = float(seed.get("quantity") or 0)
             avg_price = float(seed.get("avg_price") or 0)
-            if quantity <= 0 or avg_price <= 0:
+            if not np.isfinite(quantity) or quantity == 0 or not avg_price > 0:
                 raise InvalidParameter(
-                    f"initial_positions[{k}][{symbol!r}] needs positive quantity "
-                    f"and avg_price (got {quantity} @ {avg_price})",
+                    f"initial_positions[{k}][{symbol!r}] needs a non-zero quantity "
+                    f"and a positive avg_price (got {quantity} @ {avg_price})",
                     code="invalid_initial_positions",
                     operation="LiveNode",
                     parameter=f"initial_positions[{k}][{symbol!r}]",
                     value=f"{quantity} @ {avg_price}",
                 )
-            out[k][symbol] = (quantity, avg_price, int(seed.get("timestamp_ns") or 0))
+            minor = {}
+            for field in ("margin_minor", "cost_minor"):
+                value = seed.get(field)
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 0:
+                    raise InvalidParameter(
+                        f"initial_positions[{k}][{symbol!r}][{field!r}] must be a "
+                        f"non-negative int of minor units, got {value!r}",
+                        code="invalid_initial_positions",
+                        operation="LiveNode",
+                        parameter=f"initial_positions[{k}][{symbol!r}][{field!r}]",
+                        value=value,
+                        valid=["a non-negative int"],
+                    )
+                minor[field] = int(value)
+            out[k][symbol] = (
+                quantity,
+                avg_price,
+                int(seed.get("timestamp_ns") or 0),
+                minor.get("margin_minor"),
+                minor.get("cost_minor"),
+            )
     return out
 
 
@@ -768,7 +1517,9 @@ def _adopter(rt, syms, seeds):
         return None
 
     def adopt(sid):
-        for symbol, (quantity, avg_price, ts) in seeds.items():
-            rt.adopt_position(sid, syms.index(symbol), ts, avg_price, quantity)
+        for symbol, (quantity, avg_price, ts, margin_minor, cost_minor) in seeds.items():
+            rt.adopt_position(
+                sid, syms.index(symbol), ts, avg_price, quantity, margin_minor, cost_minor
+            )
 
     return adopt

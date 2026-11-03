@@ -363,3 +363,31 @@ fn a_configured_stop_is_left_to_the_runtime_not_acted_on_by_the_shadow() {
     }
     assert_eq!(fills, 1, "only the entry traded");
 }
+
+#[test]
+fn the_venue_holds_a_bounded_number_of_ended_orders() {
+    // Each market order fills on the bar it is sent, so it ends at once.
+    let config = fees(0.0);
+    let mut venue = PaperVenue::new(vec![(
+        vec!["A".to_string()],
+        book(&config, AccountMode::Cash, PositionPolicy::Independent),
+    )]);
+    let n = RETAINED_ENDED + 500;
+    let tape = bars(8);
+    for i in 0..n {
+        let bar = tape[i % tape.len()];
+        let bar = KernelBar { timestamp: (i as i64 + 1) * MIN, ..bar };
+        venue
+            .submit(&OrderRequest {
+                client_order_id: format!("s0-{i}"),
+                kind: OrderKind::Market,
+                quantity: 1.0,
+                submitted_ns: bar.timestamp,
+                ..sample_request()
+            })
+            .unwrap();
+        let mut out = Vec::new();
+        venue.on_market_event(0, &entry(i, bar), None, 0.0, &mut out).unwrap();
+    }
+    assert!(venue.held() <= RETAINED_ENDED, "{} orders held", venue.held());
+}

@@ -77,6 +77,10 @@ def expected_trade_figures(trades):
 
 def replay(case):
     kw = dict(case["kwargs"])
+    # The reference report assumed an NSE session in IST; the defaults are
+    # generic now, so the case says so.
+    kw.setdefault("session_minutes", 375.0)
+    kw.setdefault("tz_offset_ns", r.IST_OFFSET_NS)
     if "period" in kw:
         kw["period"] = tuple(kw["period"])
     if "exposure" in kw:

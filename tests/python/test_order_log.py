@@ -52,7 +52,7 @@ class _UnreachableLimit(Strategy):
 
 
 def test_a_filled_order_reports_what_it_actually_filled():
-    result = run_strategy_backtest(_MarketOnce, **_bars(np.full(20, 100.0)))
+    result = run_strategy_backtest(_MarketOnce, **_bars(np.full(20, 100.0)), bar_stamp="close")
     log = result.orders()
     assert log, "an order was placed; the log must not be empty"
 
@@ -70,7 +70,7 @@ def test_a_filled_order_reports_what_it_actually_filled():
 
 def test_an_order_that_never_filled_is_still_in_the_log():
     """The whole point: silence is not the same as nothing having happened."""
-    result = run_strategy_backtest(_UnreachableLimit, **_bars(np.full(20, 100.0)))
+    result = run_strategy_backtest(_UnreachableLimit, **_bars(np.full(20, 100.0)), bar_stamp="close")
     log = result.orders()
     assert log, "a resting order that never filled must still be reported"
 
@@ -86,7 +86,7 @@ def test_a_run_that_placed_no_typed_orders_reports_an_empty_log():
         def on_bar(self, ctx):
             pass
 
-    result = run_strategy_backtest(_NoOrders, **_bars(np.full(10, 100.0)))
+    result = run_strategy_backtest(_NoOrders, **_bars(np.full(10, 100.0)), bar_stamp="close")
     assert result.orders() == []
 
 
@@ -100,6 +100,6 @@ def test_the_log_reads_in_submission_order():
                         client_id=f"o{i}",
                     )
 
-    result = run_strategy_backtest(_Three, **_bars(np.full(10, 100.0)))
+    result = run_strategy_backtest(_Three, **_bars(np.full(10, 100.0)), bar_stamp="close")
     ids = [o.client_id for o in result.orders()]
     assert ids == ["o0", "o1", "o2"], ids

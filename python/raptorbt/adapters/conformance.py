@@ -109,6 +109,7 @@ class _VOrder:
     notional: float = 0.0
     reason: str | None = None
     pending: tuple[float | None, float | None, float | None] | None = None
+    legacy: bool = False  # left over from an earlier run of the same node; not part of this run's accounting
 
 
 class ScriptedVenue:
@@ -121,7 +122,7 @@ class ScriptedVenue:
     """
 
     def __init__(self) -> None:
-        self.orders: dict[str, _VOrder] = {}
+        self.orders: dict[str, _VOrder] = {}  # by venue order id, in the order they were placed
         self.place_calls: dict[str, int] = defaultdict(int)  # ref -> times place() was called
         self.duplicates: list[str] = []  # refs placed again after the venue already had them: a second live order
         self.cancel_calls: dict[str, int] = defaultdict(int)
@@ -156,16 +157,14 @@ class ScriptedVenue:
         out: list[str] = []
 
         def do() -> None:
-            if ref in self.orders:
-                self.duplicates.append(ref)  # a real venue would now hold two orders
-                out.append(self.orders[ref].vid)
-                return
+            if any(o.ref == ref and not o.legacy for o in self.orders.values()):
+                self.duplicates.append(ref)  # two live orders for one decision
             vid = f"V{len(self.orders) + 1}"
-            self.orders[ref] = _VOrder(ref, vid, symbol, side, qty, limit, trigger)
+            self.orders[vid] = _VOrder(ref, vid, symbol, side, qty, limit, trigger)
             out.append(vid)
 
         self._maybe_fail("place", processed=do)
-        return out[0] if out else self.orders[ref].vid
+        return out[0]
 
     def cancel(self, vid: str) -> None:
         o = self._by_vid(vid)
@@ -183,15 +182,26 @@ class ScriptedVenue:
     def book(self) -> list[VenueEvent]:
         return [self._snapshot(o) for o in self.orders.values()]
 
-    def find(self, ref: str) -> VenueEvent | None:
-        o = self.orders.get(ref)
-        return self._snapshot(o) if o else None
+    def find(self, ref: str) -> list[VenueEvent]:
+        """Every order in the day's book carrying ``ref``, oldest first (an earlier run's too)."""
+        return [self._snapshot(o) for o in self.orders.values() if o.ref == ref]
+
+    def preload(self, ref: str, symbol: str, side: str, qty: float, price: float, filled: float) -> None:
+        """An order an earlier run of this node left in the day's book, under the same reference."""
+        vid = f"V{len(self.orders) + 1}"
+        o = _VOrder(ref, vid, symbol, side, qty, price, None, "filled" if filled >= qty else "open", filled, filled * price, legacy=True)
+        self.orders[vid] = o
 
     def _by_vid(self, vid: str) -> _VOrder:
-        for o in self.orders.values():
-            if o.vid == vid:
+        if vid not in self.orders:
+            raise VenueRefused("lookup", "order not found")
+        return self.orders[vid]
+
+    def _latest(self, ref: str) -> _VOrder:
+        for o in reversed(self.orders.values()):
+            if o.ref == ref:
                 return o
-        raise VenueRefused("lookup", "order not found")
+        raise KeyError(ref)
 
     # -- scenario steps ------------------------------------------------------------------------
     def _emit(self, o: _VOrder) -> None:
@@ -207,34 +217,34 @@ class ScriptedVenue:
         )  # fmt: skip
 
     def accept(self, ref: str) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         o.status = "open"
         self._emit(o)
 
     def fill(self, ref: str, qty: float, price: float) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         o.cum += qty
         o.notional += qty * price
         o.status = "filled" if o.cum >= o.qty - 1e-9 else "open"
         self._emit(o)
 
     def reject(self, ref: str, reason: str) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         o.status, o.reason = "rejected", reason
         self._emit(o)
 
     def ack_cancel(self, ref: str) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         o.status = "cancelled"
         self._emit(o)
 
     def expire(self, ref: str) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         o.status = "expired"
         self._emit(o)
 
     def apply_modify(self, ref: str) -> None:
-        o = self.orders[ref]
+        o = self._latest(ref)
         if o.pending:
             q, lim, trg = o.pending
             o.qty = q if q is not None else o.qty
@@ -271,13 +281,21 @@ class Scenario:
     ``("bar",)`` a market bar (the strategy then does its queued actions);
     ``("submit", side, qty, price)``, ``("cancel", name)``, ``("modify", name, qty, price)``;
     ``("venue", "fill", name, qty, price)`` and the other ScriptedVenue steps;
-    ``("fail", op, how[, reason])`` arms ``fail_next``.
+    ``("fail", op, how[, reason])`` arms ``fail_next``;
+    ``("old", name, side, qty, price)`` leaves a finished order from an earlier run of the node in the day's book under the
+    reference the named order will use.
+
+    Steps always speak in units. A scenario with ``lot_size > 1`` is for the lot asymmetry: the factory is given
+    ``options["lot_size"]`` (pop it before building the adapter) and must declare its instruments with that lot
+    size and ``quantity_in_lots=True``, send the venue lots (the venue's units divided by the lot size) and render
+    every row, frame and trade in lots. The outcome must equal the same script with ``lot_size=1``.
     """
 
     name: str
     steps: tuple[tuple, ...]
     options: dict = field(default_factory=dict)
     needs_resync: bool = False
+    lot_size: float = 1.0  # > 1: the binding declares its instruments in lots of this size (``options["lot_size"]``)
 
 
 B = ("bar",)
@@ -339,6 +357,24 @@ SCENARIOS: tuple[Scenario, ...] = (
          ("venue", "fill", "o0", 10, 99.0), B),
         options={"resend_if_absent": True},
     ),  # fmt: skip
+    Scenario(
+        "lots_partial_fills",
+        (("submit", "buy", 100, 99.0), B, ("venue", "accept", "o0"), ("venue", "fill", "o0", 25, 99.0), B,
+         ("venue", "fill", "o0", 75, 98.5), B),
+        lot_size=25.0,
+    ),  # fmt: skip
+    Scenario(
+        "lots_replace_then_fill",
+        (("submit", "buy", 100, 99.0), B, ("venue", "accept", "o0"), ("modify", "o0", 75, 98.0), B,
+         ("venue", "apply_modify", "o0"), B, ("venue", "fill", "o0", 75, 98.0), B),
+        lot_size=25.0,
+    ),  # fmt: skip
+    Scenario(
+        "restart_same_day_with_old_orders_in_the_book",
+        (("old", "o0", "buy", 10, 99.0), ("fail", "place", "timeout_after"), ("submit", "buy", 5, 98.0), B,
+         ("venue", "accept", "o0"), ("venue", "fill", "o0", 5, 98.0), B),
+        needs_resync=True,
+    ),  # fmt: skip
 )
 
 PROFILES = ("in_order", "duplicate", "delay", "reorder", "drop", "restart", "chaos")
@@ -365,6 +401,10 @@ class _Proxy:
 
     def __init__(self, binding: Binding) -> None:
         self.binding = binding
+
+    @property
+    def namespace(self) -> str:
+        return self.binding.adapter.namespace
 
     def submit(self, request: OrderRequest) -> None:
         self.binding.adapter.submit(request)
@@ -442,7 +482,10 @@ class Failure:
 
 def run_scenario(factory: BindingFactory, sc: Scenario, profile: str, *, seed: int = 7) -> Outcome:
     venue = ScriptedVenue()
-    binding = factory(venue, dict(sc.options))
+    options = dict(sc.options)
+    if sc.lot_size != 1.0:
+        options["lot_size"] = sc.lot_size
+    binding = factory(venue, options)
     chan = _Channel(binding, profile, seed)
     venue.subscribers.append(chan.send)
     strat = _Scripted()
@@ -495,6 +538,9 @@ def run_scenario(factory: BindingFactory, sc: Scenario, profile: str, *, seed: i
             push_pending()
             _, method, name, *args = step
             getattr(venue, method)(binding.ref_of(f"s0-{int(name[1:])}"), *args)
+        elif op == "old":
+            _, name, side, qty, price = step
+            venue.preload(binding.ref_of(f"s0-{int(name[1:])}"), "A", side, float(qty), price, float(qty))
         elif op == "fail":
             venue.fail_next(step[1], step[2], *(step[3:4]))
         if profile == "restart" and i == restart_at:
@@ -577,13 +623,17 @@ def _reference_adapter(venue: ScriptedVenue, options: dict):
         VenueRefusal,
     )
 
+    options = dict(options)  # the binding keeps its own: a restart builds again from it
+    lot = float(options.pop("lot_size", 1.0))
+
     class Reference(BrokerAdapter):
         name = "reference"
+        currency = "INR"
         order_types = frozenset({"limit", "market"})
         time_in_forces = frozenset({"gtc", "day"})
 
         def translate(self, request, instrument, product, tag):
-            return {"ref": tag, "symbol": request.symbol, "side": request.side, "qty": request.quantity,
+            return {"ref": tag, "symbol": request.symbol, "side": request.side, "qty": self.wire_qty(instrument, request.quantity),
                     "limit": request.limit_price, "trigger": request.trigger_price}  # fmt: skip
 
         def _wire(self, fn):
@@ -598,26 +648,25 @@ def _reference_adapter(venue: ScriptedVenue, options: dict):
 
         def place(self, rec):
             w = rec.wire
-            return self._wire(lambda: venue.place(w["ref"], w["symbol"], w["side"], w["qty"], w["limit"], w["trigger"]))
+            return self._wire(lambda: venue.place(w["ref"], w["symbol"], w["side"], w["qty"] * lot, w["limit"], w["trigger"]))
 
         def cancel_remote(self, rec):
             self._wire(lambda: venue.cancel(rec.venue_order_id))
 
         def modify_remote(self, rec, q, lim, trg):
-            self._wire(lambda: venue.modify(rec.venue_order_id, q, lim, trg))
+            self._wire(lambda: venue.modify(rec.venue_order_id, None if q is None else self.wire_qty(self.instrument(rec.symbol), q) * lot, lim, trg))
 
         def fetch_orders(self):
             return [self.row(e) for e in venue.book()]
 
         def find_by_tag(self, tag):
-            e = venue.find(tag)
-            return self.row(e) if e else None
+            return [self.row(e) for e in venue.find(tag)]
 
         @staticmethod
         def row(e: VenueEvent) -> OrderStatusUpdate:
             return OrderStatusUpdate(
-                e.venue_order_id, e.status, tag=e.ref, symbol=e.symbol, side=e.side, quantity=e.quantity,
-                filled_qty=e.filled_qty, avg_price=e.avg_price, limit_price=e.limit_price,
+                e.venue_order_id, e.status, tag=e.ref, symbol=e.symbol, side=e.side, quantity=e.quantity / lot,
+                filled_qty=e.filled_qty / lot, avg_price=e.avg_price, limit_price=e.limit_price,
                 trigger_price=e.trigger_price, reason=e.reason,
             )  # fmt: skip
 
@@ -627,10 +676,8 @@ def _reference_adapter(venue: ScriptedVenue, options: dict):
     clock = iter(range(1, 10**9))
     return Reference(
         Session("reference-token"),
-        lambda symbol: Instrument("X", symbol),
-        sleep=lambda s: None,
-        clock_ns=lambda: next(clock),
-        **options,
+        lambda symbol: Instrument("X", symbol, lot_size=lot, quantity_in_lots=lot != 1.0),
+        **{"sleep": lambda s: None, "clock_ns": lambda: next(clock), "namespace": "CF", "trusted": True, **options},
     )
 
 

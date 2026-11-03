@@ -27,7 +27,7 @@ use crate::data::DepthTick;
 use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
-use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
+use crate::portfolio::kernel::{Adoption, EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 use crate::portfolio::runner::OrderLog;
@@ -110,6 +110,13 @@ pub struct PortfolioBook {
     /// Per instrument, the instant its expiry was first noticed while its
     /// settlement waited for the underlying's print.
     noticed: Vec<Option<Timestamp>>,
+    /// Instruments retired from a running node: flat, with no order, and skipped by the loops
+    /// that run on every event. The kernel stays (its trades and orders are in the results).
+    retired: Vec<bool>,
+    /// How many kernels are retired; `0` is the common case and keeps the loops plain.
+    dormant: usize,
+    /// The kernels that are not retired, ascending: what the loops visit once any is retired.
+    live: Vec<usize>,
 }
 
 /// What a book keeps when its account belongs to a group.
@@ -163,6 +170,9 @@ impl PortfolioBook {
             lifecycle: lifecycle::Lifecycle::default(),
             has_expiries: false,
             noticed: Vec::new(),
+            retired: Vec::new(),
+            dormant: 0,
+            live: Vec::new(),
         }
     }
 
@@ -197,9 +207,108 @@ impl PortfolioBook {
         self.kernels.push(kernel);
         self.order_logs.push(OrderLog::default());
         self.noticed.push(None);
+        self.retired.push(false);
+        self.live.push(self.kernels.len() - 1);
         self.last_close.push(None);
         self.last_seen.push(None);
         self.kernels.len() - 1
+    }
+
+    /// Retire kernel `instrument`: it must hold no position and no working order. From now on the
+    /// per-event loops skip it, so the cost of an event does not grow with instruments retired.
+    pub fn retire_kernel(&mut self, instrument: usize) -> Result<(), String> {
+        let kernel = &self.kernels[instrument];
+        if kernel.open_count() > 0 || !kernel.open_orders().is_empty() {
+            return Err(format!("{} holds a position or a working order", kernel.symbol()));
+        }
+        if !self.retired[instrument] {
+            self.retired[instrument] = true;
+            self.dormant += 1;
+            self.live.retain(|&i| i != instrument);
+            self.last_close[instrument] = None;
+        }
+        Ok(())
+    }
+
+    /// Bring a retired kernel back. It missed the risk gates' updates while it was dormant, so if
+    /// the book has halted since, the kernel is killed like the others.
+    pub fn revive_kernel(&mut self, instrument: usize) {
+        if self.retired[instrument] {
+            self.retired[instrument] = false;
+            self.dormant -= 1;
+            let at = self.live.partition_point(|&i| i < instrument);
+            self.live.insert(at, instrument);
+            if self.is_halted() {
+                self.kernels[instrument].kill();
+            }
+        }
+    }
+
+    /// How many kernels the per-event loops visit, and the `k`-th of them.
+    #[inline]
+    pub(super) fn live_count(&self) -> usize {
+        if self.dormant == 0 {
+            self.kernels.len()
+        } else {
+            self.live.len()
+        }
+    }
+
+    #[inline]
+    pub(super) fn live_at(&self, k: usize) -> usize {
+        if self.dormant == 0 {
+            k
+        } else {
+            self.live[k]
+        }
+    }
+
+    pub fn is_retired(&self, instrument: usize) -> bool {
+        self.retired[instrument]
+    }
+
+    #[inline]
+    fn live_any(&self, f: impl Fn(&EngineKernel) -> bool) -> bool {
+        if self.dormant == 0 {
+            self.kernels.iter().any(f)
+        } else {
+            self.live.iter().any(|&i| f(&self.kernels[i]))
+        }
+    }
+
+    #[inline]
+    fn live_each_mut(&mut self, mut f: impl FnMut(&mut EngineKernel)) {
+        if self.dormant == 0 {
+            self.kernels.iter_mut().for_each(f);
+        } else {
+            for &i in &self.live {
+                f(&mut self.kernels[i]);
+            }
+        }
+    }
+
+    /// Sum `f(kernel, last mark)` over the live kernels, skipping unmarked ones.
+    #[inline]
+    fn live_marked_sum(&self, f: impl Fn(&EngineKernel, f64) -> f64) -> f64 {
+        if self.dormant == 0 {
+            let marked =
+                |(k, close): (&EngineKernel, &Option<f64>)| close.map(|c| f(k, c)).unwrap_or(0.0);
+            self.kernels.iter().zip(&self.last_close).map(marked).sum()
+        } else {
+            self.live
+                .iter()
+                .map(|&i| self.last_close[i].map(|c| f(&self.kernels[i], c)).unwrap_or(0.0))
+                .sum()
+        }
+    }
+
+    #[inline]
+    fn live_open_total(&self) -> usize {
+        if self.dormant == 0 {
+            self.kernels.iter().map(|k| k.open_count()).sum()
+        } else {
+            self.live.iter().map(|&i| self.kernels[i].open_count()).sum()
+        }
     }
 
     /// Equity sampled so far, once per distinct timestamp.
@@ -296,18 +405,8 @@ impl PortfolioBook {
     /// The marks of the open positions that equity adds to the cash.
     fn positions_value(&self) -> f64 {
         match self.account.mode() {
-            AccountMode::Cash => self
-                .kernels
-                .iter()
-                .zip(&self.last_close)
-                .map(|(k, close)| close.map(|c| k.position_value(c)).unwrap_or(0.0))
-                .sum(),
-            AccountMode::Margin { .. } => self
-                .kernels
-                .iter()
-                .zip(&self.last_close)
-                .map(|(k, close)| close.map(|c| k.unrealized_value(c)).unwrap_or(0.0))
-                .sum(),
+            AccountMode::Cash => self.live_marked_sum(|k, c| k.position_value(c)),
+            AccountMode::Margin { .. } => self.live_marked_sum(|k, c| k.unrealized_value(c)),
         }
     }
 
@@ -375,6 +474,27 @@ impl PortfolioBook {
         price: f64,
         size: f64,
     ) -> Result<u64, String> {
+        // The long-only form; see `adopt_position_with` for a signed one.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(size > 0.0) || !(price > 0.0) {
+            return Err(format!(
+                "adopt_position needs positive price and size (got size {size} @ {price})"
+            ));
+        }
+        self.adopt_position_with(instrument, timestamp, price, size, &Adoption::default())
+    }
+
+    /// [`PortfolioBook::adopt_position`] with a signed size (negative is a
+    /// short) and the posted margin or cost the caller states; see
+    /// [`EngineKernel::adopt_position_with`].
+    pub fn adopt_position_with(
+        &mut self,
+        instrument: usize,
+        timestamp: Timestamp,
+        price: f64,
+        size: f64,
+        extras: &Adoption,
+    ) -> Result<u64, String> {
         if instrument >= self.kernels.len() {
             return Err(format!("unknown instrument index {instrument}"));
         }
@@ -393,7 +513,7 @@ impl PortfolioBook {
             }
         };
         let injected = kernel.lend_cash(injected);
-        let result = kernel.adopt_position(timestamp, price, size);
+        let result = kernel.adopt_position_with(timestamp, price, size, extras);
         let delta_cash = kernel.cash_money() - injected;
         // Carry the locked delta too. Leaving this at 0.0 would mean the
         // shared account never learns about the adopted margin, so portfolio
@@ -454,7 +574,7 @@ impl PortfolioBook {
     /// Whether a margin call, the drawdown kill-switch or an explicit halt
     /// has latched.
     pub fn is_halted(&self) -> bool {
-        self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted())
+        self.account.is_halted() || self.live_any(|k| k.risk_halted())
     }
 
     /// Halt the whole book: from now on every instrument refuses new entries
@@ -470,9 +590,7 @@ impl PortfolioBook {
 
     /// [`PortfolioBook::halt`] with the ordinal `halted_at` reports.
     fn halt_at(&mut self, reason: &str, flatten: bool, idx: usize) {
-        for kernel in &mut self.kernels {
-            kernel.kill();
-        }
+        self.live_each_mut(|k| k.kill());
         self.halt_all(idx, HaltCause::Killed);
         match &mut self.pending_halt {
             Some((_, f)) => *f |= flatten,
@@ -583,10 +701,10 @@ impl PortfolioBook {
         // Portfolio-wide open count, skipped entirely when no limit is set.
         // Summing every kernel's ledger covers hedging policies, where one
         // instrument can hold several positions at once.
-        let portfolio_open = self.config.max_positions.map(|_| {
-            self.kernels.iter().map(|k| k.open_count()).sum::<usize>()
-                + self.grouped.map_or(0, |g| g.external_open)
-        });
+        let portfolio_open = self
+            .config
+            .max_positions
+            .map(|_| self.live_open_total() + self.grouped.map_or(0, |g| g.external_open));
 
         // Gross notional held by the other instruments, for
         // `max_gross_exposure`; skipped entirely when no cap is set.
@@ -610,6 +728,8 @@ impl PortfolioBook {
         // *other* kernel's locks — then its arithmetic sees the portfolio's
         // free capital.
 
+        let group_context = self.group_context_for(instrument, entry.timestamp());
+        let hedge_pending = self.hedge_pending_for(instrument);
         let kernel = &mut self.kernels[instrument];
         let locked_before = kernel.locked_margin();
         let injected = match self.account.mode() {
@@ -621,6 +741,8 @@ impl PortfolioBook {
         let injected = kernel.lend_cash(injected);
         kernel.set_external_open_count(portfolio_open);
         kernel.set_external_exposure(external_exposure);
+        kernel.set_group_context(group_context);
+        kernel.set_hedge_pending(hedge_pending);
         let mut events = match entry.data {
             ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
             ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
@@ -635,6 +757,8 @@ impl PortfolioBook {
         kernel.set_cash_money(Money::ZERO);
         kernel.set_external_open_count(None);
         kernel.set_external_exposure(None);
+        kernel.set_group_context(None);
+        kernel.set_hedge_pending(false);
         self.settle(delta_cash, delta_locked);
         // In a group the runtime regroups across every member, and escalates
         // a margin call to every member.
@@ -765,14 +889,12 @@ impl PortfolioBook {
 
         // The day's loss limit, on portfolio equity. Every kernel sees the
         // same figure, so they latch together; report the rising edge once.
-        let day_blocked_before = self.kernels.iter().any(|k| k.is_day_blocked());
+        let day_blocked_before = self.live_any(|k| k.is_day_blocked());
         // The book's day follows the schedule of the instrument whose event
         // this is, so every kernel shares one day.
         let day = self.kernels[instrument].risk_day(ts);
         let mut breached = false;
-        for kernel in &mut self.kernels {
-            breached |= kernel.observe_day_in(day, equity);
-        }
+        self.live_each_mut(|k| breached |= k.observe_day_in(day, equity));
         if breached && !day_blocked_before {
             events.push(EngineEvent::RiskHalted { idx, reason: "daily_loss".to_string() });
             if self.config.flatten_on_daily_loss {
@@ -788,11 +910,9 @@ impl PortfolioBook {
         // Kernels all see the same portfolio equity, so their drawdown gates
         // latch in lockstep; record the rising edge once.
         let peak = self.peak_equity;
-        let risk_halted_before = self.kernels.iter().any(|k| k.risk_halted());
-        for kernel in &mut self.kernels {
-            kernel.observe_equity(equity, peak);
-        }
-        if !risk_halted_before && self.kernels.iter().any(|k| k.risk_halted()) {
+        let risk_halted_before = self.live_any(|k| k.risk_halted());
+        self.live_each_mut(|k| k.observe_equity(equity, peak));
+        if !risk_halted_before && self.live_any(|k| k.risk_halted()) {
             self.halt_all(halt_idx, HaltCause::Drawdown);
         }
     }
@@ -856,9 +976,7 @@ impl PortfolioBook {
     fn halt_all(&mut self, idx: usize, cause: HaltCause) {
         self.account.halt(idx);
         if matches!(cause, HaltCause::MarginCall) {
-            for kernel in &mut self.kernels {
-                kernel.halt_margin();
-            }
+            self.live_each_mut(|k| k.halt_margin());
         }
     }
 

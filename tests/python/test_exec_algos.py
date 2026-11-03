@@ -36,7 +36,7 @@ class _TwapStrategy(raptorbt.Strategy):
         if ctx.idx == 0:
             self.client_id = self.submit_order(orders.Twap(**self.twap))
 
-    def on_order_filled(self, ctx, event):
+    def on_fill(self, ctx, event):
         self.fills.append((event.idx, event.client_order_id, event.size))
 
     def on_algo_started(self, ctx, event):
@@ -50,7 +50,8 @@ class TestTwap:
     def test_slices_release_one_per_interval(self):
         strategy = _TwapStrategy(side="buy", units=30.0, slices=3, every=1)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(5), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(5), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert [f[0] for f in strategy.fills] == [0, 1, 2]
         assert [f[2] for f in strategy.fills] == [10.0, 10.0, 10.0]
@@ -58,7 +59,8 @@ class TestTwap:
     def test_slice_client_ids_derive_from_the_parent(self):
         strategy = _TwapStrategy(side="buy", units=30.0, slices=3, every=1)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(5), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(5), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         parent = strategy.started[0]
         assert [f[1] for f in strategy.fills] == [f"{parent}#{i}" for i in range(3)]
@@ -67,14 +69,16 @@ class TestTwap:
         # 100 into 3 does not divide evenly; nothing may be lost or invented.
         strategy = _TwapStrategy(side="buy", units=100.0, slices=3, every=1)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(5), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(5), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert sum(f[2] for f in strategy.fills) == pytest.approx(100.0)
 
     def test_lifecycle_events_fire(self):
         strategy = _TwapStrategy(side="buy", units=20.0, slices=2, every=1)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(5), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(5), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert len(strategy.started) == 1
         assert len(strategy.completed) == 1
@@ -82,7 +86,8 @@ class TestTwap:
     def test_a_single_slice_is_a_plain_order(self):
         strategy = _TwapStrategy(side="buy", units=25.0, slices=1, every=1)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(3), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(3), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert len(strategy.fills) == 1
         assert strategy.fills[0][2] == 25.0
@@ -92,7 +97,8 @@ class TestTwap:
         # them, so slices must not release once per bar.
         strategy = _TwapStrategy(side="buy", units=30.0, slices=3, every=10)
         raptorbt.run_strategy_backtest(
-            strategy, **_flat_bars(6), config=_config(), oms_type="hedging"
+            strategy, **_flat_bars(6), config=_config(), oms_type="hedging",
+            bar_stamp="close",
         )
         assert len(strategy.fills) == 1, "only the first slice is due"
 
@@ -154,7 +160,8 @@ class TestDayExpiryTradingDate:
         }
         strategy = S()
         raptorbt.run_strategy_backtest(
-            strategy, **bars, config=_config(session_tz_offset_ns=offset_ns)
+            strategy, **bars, config=_config(session_tz_offset_ns=offset_ns),
+            bar_stamp="close",
         )
         return strategy.expired
 
@@ -179,13 +186,14 @@ class TestPerSymbolClock:
             def on_start(self, ctx):
                 self.clock.set_timer("beat", interval_ns=2, start_ns=2)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append((ctx.symbol, event.ts_fired))
 
         bars = _flat_bars(6)
         strategy = S()
         raptorbt.run_portfolio_strategy(
-            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config()
+            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config(),
+            bar_stamp="close",
         )
 
         symbols = {sym for sym, _ in strategy.fired}
@@ -201,13 +209,14 @@ class TestPerSymbolClock:
             def on_start(self, ctx):
                 self.clock.set_time_alert("once", at_ns=3)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append(ctx.symbol)
 
         bars = _flat_bars(6)
         strategy = S()
         raptorbt.run_portfolio_strategy(
-            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config()
+            strategy, {"AAA": bars, "BBB": dict(bars)}, config=_config(),
+            bar_stamp="close",
         )
         assert sorted(strategy.fired) == ["AAA", "BBB"]
 
@@ -220,7 +229,7 @@ class TestPerSymbolClock:
             def on_start(self, ctx):
                 self.clock.set_timer("beat", interval_ns=2, start_ns=2)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired.append(ctx.symbol)
 
         def ticks(n):
@@ -245,11 +254,11 @@ class TestPerSymbolClock:
             def on_start(self, ctx):
                 self.clock.set_timer("beat", interval_ns=2, start_ns=2)
 
-            def on_time_event(self, ctx, event):
+            def on_timer(self, ctx, event):
                 self.fired += 1
 
         strategy = S()
-        raptorbt.run_strategy_backtest(strategy, **_flat_bars(6), config=_config())
+        raptorbt.run_strategy_backtest(strategy, **_flat_bars(6), config=_config(), bar_stamp="close")
         assert strategy.fired == 2
 
 
@@ -269,7 +278,7 @@ class TestLimitSlippage:
         # order rests and fills at its limit (not at the open).
         bars = _flat_bars(3, price=100.0)
         bars["low"] = np.full(3, 98.0)
-        result = raptorbt.run_strategy_backtest(S(), **bars, config=config)
+        result = raptorbt.run_strategy_backtest(S(), **bars, config=config, bar_stamp="close")
         return result.trades()[0].entry_price
 
     def test_limit_fills_at_the_limit_by_default(self):
@@ -307,7 +316,8 @@ class TestOptionSettlement:
             "volume": np.ones(4),
         }
         result = raptorbt.run_strategy_backtest(
-            S(), **bars, config=_config(), instrument=spec
+            S(), **bars, config=_config(), instrument=spec,
+            bar_stamp="close",
         )
         return result.trades()[0]
 
@@ -348,6 +358,7 @@ class TestOptionSettlement:
             {"CE": opt, "OTHER": _flat_bars(4)},
             config=_config(),
             instruments={"CE": spec},
+            bar_stamp="close",
         )
         settled = [t for t in result.result.trades() if t.symbol == "CE"]
         assert settled[0].exit_price == pytest.approx(12.0)
@@ -366,7 +377,8 @@ class TestSettlementFees:
                     self.enter(size_frac=0.5)
 
         result = raptorbt.run_strategy_backtest(
-            S(), **_flat_bars(5), config=_config(), instrument=spec
+            S(), **_flat_bars(5), config=_config(), instrument=spec,
+            bar_stamp="close",
         )
         return result.trades()[0]
 
@@ -403,7 +415,8 @@ class TestForcedLiquidation:
         }
         strategy = S()
         result = raptorbt.run_strategy_backtest(
-            strategy, **bars, config=config, account_type="margin", leverage=50.0
+            strategy, **bars, config=config, account_type="margin", leverage=50.0,
+            bar_stamp="close",
         )
         return strategy, result
 

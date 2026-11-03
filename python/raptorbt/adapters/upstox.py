@@ -44,7 +44,7 @@ from typing import Any
 from raptorbt.execution import OrderRequest, Unsupported
 
 from ._limits import RateLimiter, TokenBucket
-from ._rest import ist_ns, num, price, rest
+from ._rest import ist_ns, need_num, num, price, rest
 from .base import (
     CANCELLED,
     FILLED,
@@ -53,6 +53,7 @@ from .base import (
     REJECTED,
     Ambiguous,
     AuthExpired,
+    MalformedRow,
     BrokerAdapter,
     Instrument,
     OrderStatusUpdate,
@@ -100,6 +101,7 @@ class UpstoxAdapter(BrokerAdapter):
     products = frozenset(_PRODUCT)
     tag_max_len = 40
     tag_charset = "A-Za-z0-9"
+    currency = "INR"
 
     def __init__(
         self,
@@ -230,12 +232,15 @@ class UpstoxAdapter(BrokerAdapter):
     def _row(self, d: Mapping[str, Any]) -> OrderStatusUpdate | None:
         status = _STATUS.get(str(d.get("status", "")).lower())
         if status is None or not d.get("order_id"):
+            self._unmapped_status(d.get("order_id"), d.get("status"), d.get("tag"))
             return None
         key = d.get("instrument_token") or d.get("instrument_key") or ""
-        sym = self.symbol_of(key) or key or None
-        ins = self._instruments.get(sym) if isinstance(self._instruments, Mapping) and sym else None
-        lot = ins.lot_size if (ins is not None and ins.quantity_in_lots) else 1.0
-        q = num(d.get("quantity"))
+        sym = self.symbol_of(key)
+        if sym is None:
+            if self.ids.decode(d.get("tag")) is None:
+                return None  # someone else's order, on an instrument we have not traded: its lot size is unknown
+            raise MalformedRow(f"upstox: order {d.get('order_id')} carries our tag on an unmapped instrument {key!r}")
+        raw = str(d.get("status", "")).lower()
         return OrderStatusUpdate(
             venue_order_id=str(d["order_id"]),
             status=status,
@@ -244,13 +249,15 @@ class UpstoxAdapter(BrokerAdapter):
             side=str(d.get("transaction_type", "")).lower() or None,
             order_type=_ORDER_TYPE_BACK.get(d.get("order_type")),
             product=_PRODUCT_BACK.get(d.get("product")),
-            quantity=q * lot if q is not None else None,
-            filled_qty=(num(d.get("filled_quantity"), 0.0) or 0.0) * lot,
+            quantity=num(d.get("quantity")),  # the broker's count: the base converts lots to units
+            filled_qty=need_num(d, "filled_quantity", what="Upstox order"),
             avg_price=price(d.get("average_price")),
             limit_price=price(d.get("price")),
             trigger_price=price(d.get("trigger_price")),
             reason=d.get("status_message") or d.get("status_message_raw"),
             ts_ns=ist_ns(d.get("exchange_timestamp")) or ist_ns(d.get("order_timestamp")),
+            modify_failed=raw == "not modified",
+            cancel_failed=raw == "not cancelled",
         )
 
     def fetch_orders(self) -> list[OrderStatusUpdate]:
@@ -260,7 +267,7 @@ class UpstoxAdapter(BrokerAdapter):
     def fetch_trades(self) -> list[TradeRow]:
         rows = self._do("GET", self._r, "/v2/order/trades/get-trades-for-day", write=False) or []
         return [
-            TradeRow(str(d["trade_id"]), str(d["order_id"]), num(d["quantity"], 0.0) or 0.0, num(d["average_price"], 0.0) or 0.0, ist_ns(d.get("exchange_timestamp")))
+            TradeRow(str(d["trade_id"]), str(d["order_id"]), need_num(d, "quantity", what="Upstox trade"), need_num(d, "average_price", what="Upstox trade"), ist_ns(d.get("exchange_timestamp")))
             for d in rows
         ]  # fmt: skip
 
@@ -268,14 +275,13 @@ class UpstoxAdapter(BrokerAdapter):
         rows = self._do("GET", self._r, "/v2/portfolio/short-term-positions", write=False) or []
         out = []
         for d in rows:
-            qty = num(d.get("quantity"), 0.0) or 0.0
+            qty = need_num(d, "quantity", what="Upstox position")
             if qty == 0:
                 continue
             key = d.get("instrument_token") or ""
-            out.append(VenuePosition(self.symbol_of(key) or key or str(d.get("trading_symbol")), qty, num(d.get("average_price"), 0.0) or 0.0, _PRODUCT_BACK.get(d.get("product"))))
+            out.append(VenuePosition(self.symbol_of(key) or key or str(d.get("trading_symbol")), qty, need_num(d, "average_price", what="Upstox position"), _PRODUCT_BACK.get(d.get("product"))))
         return out
 
     def fetch_balances(self) -> VenueBalances:
-        data = self._do("GET", self._r, "/v2/user/get-funds-and-margin", write=False) or {}
-        seg = data.get("equity") or {}
-        return VenueBalances(available=num(seg.get("available_margin"), 0.0) or 0.0, used=num(seg.get("used_margin")))
+        seg = (self._do("GET", self._r, "/v2/user/get-funds-and-margin", write=False) or {}).get("equity") or {}
+        return VenueBalances(available=need_num(seg, "available_margin", what="Upstox equity margin"), currency=self.currency, used=num(seg.get("used_margin")))

@@ -133,7 +133,8 @@ class TestSettlementPrice:
         assert fut.settlement_price == 105.0
         s = holder("FUT")
         r = run_strategy_backtest(
-            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=config(), instrument=fut
+            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=config(), instrument=fut,
+            bar_stamp="close",
         )
         (t,) = r.trades()
         assert t.exit_price == 105.0 and t.exit_reason == "Settlement"
@@ -163,7 +164,8 @@ class TestSettlementPrice:
         opt.settlement_price = "underlying"
         s = holder("OPT")
         r = run_strategy_backtest(
-            holder_cls('FUT'), **bars([7, 8, 9, 10]), config=config(), instrument=opt
+            holder_cls('FUT'), **bars([7, 8, 9, 10]), config=config(), instrument=opt,
+            bar_stamp="close",
         )
         (t,) = r.trades()
         # the position was not closed at a guess: the run's own end closed it
@@ -204,7 +206,7 @@ class TestOrdersOnAnExpiredContract:
         s = Late()
         s.sym = "FUT"
         run_strategy_backtest(holder_cls('FUT'), **bars([100, 101, 102, 103, 104]), config=config(),
-                              instrument=fut)
+                              instrument=fut, bar_stamp="close")
         s2 = Late()
         s2.sym = "FUT"
         run(s2, {"FUT": bars([100, 101, 102, 103, 104])}, instruments={"FUT": fut})
@@ -334,7 +336,8 @@ class TestCharges:
         cfg = priced(sched, "NFO-FUT")
         fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0, multiplier=10.0)
         r = run_strategy_backtest(
-            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=cfg, instrument=fut
+            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=cfg, instrument=fut,
+            bar_stamp="close",
         )
         (t,) = r.trades()
         assert t.exit_reason == "Settlement"
@@ -349,7 +352,8 @@ class TestCharges:
         fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0)
         fut.settlement_fee = 0.001
         r = run_strategy_backtest(
-            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=cfg, instrument=fut
+            holder_cls('FUT'), **bars([100, 101, 102, 103]), config=cfg, instrument=fut,
+            bar_stamp="close",
         )
         (t,) = r.trades()
         assert t.exit_fees == pytest.approx(0.001 * 102.0 * t.size, abs=0.01)
@@ -369,7 +373,7 @@ class TestCharges:
                     self.submit_order(orders.Market(side="sell", units=1.0))
 
         data = bars([100.0] * 6, start=day0, step=DAY)
-        r = run_strategy_backtest(RoundTrips, **data, config=cfg)
+        r = run_strategy_backtest(RoundTrips, **data, config=cfg, bar_stamp="close")
         fees = [(t.entry_time, t.entry_fees, t.exit_fees) for t in r.trades()]
         by_day = {int((et - day0) // DAY): (ef, xf) for et, ef, xf in fees}
         # day 0 and 1 fill under the old row (20 per order); the entry on day 2
@@ -415,7 +419,7 @@ class TestCharges:
                     self.submit_order(orders.Market(side=step[0], units=step[1]))
 
         data = bars([100.0] * 4, start=day0, step=3600 * 10**9)
-        r = run_strategy_backtest(TwoSellsADay, **data, config=cfg)
+        r = run_strategy_backtest(TwoSellsADay, **data, config=cfg, bar_stamp="close")
         exits = sorted(r.trades(), key=lambda t: t.exit_time)
         assert [t.exit_fees for t in exits[:2]] == [pytest.approx(13.0), pytest.approx(0.0)]
 
@@ -651,7 +655,8 @@ class TestRunnersAgree:
         fut = InstrumentSpec.futures_contract("FUT", expiration_ns=3, lot_size=1.0, multiplier=5.0)
         data = bars([100, 101, 102, 103, 104])
         single = run_strategy_backtest(
-            holder_cls("FUT"), **data, config=config(), instrument=fut
+            holder_cls("FUT"), **data, config=config(), instrument=fut,
+            bar_stamp="close",
         )
         port = run_portfolio_strategy(
             holder("FUT"), {"FUT": data}, config=config(), instruments={"FUT": fut},

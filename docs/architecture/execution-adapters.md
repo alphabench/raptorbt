@@ -36,6 +36,15 @@ class ExecutionAdapter(Protocol):
 
 * **Fire and forget.** A method returns when the request is handed over, not
   when the venue acts. `Ok` means "sent". Outcomes come back only as reports.
+* **A namespace.** An adapter exposes a non-empty `namespace` string that marks the
+  orders of one node; a node refuses an adapter without one (`journal-and-recovery.md`).
+* **Optional capabilities.** `open_orders()`, `positions()` and `balances()` let a
+  recovery ask the venue what it holds (shapes in `journal-and-recovery.md`);
+  `fence(epoch)` raises `Fenced` when another node owns the account, and a node given
+  `epoch=` refuses an adapter without it. `place_exit_rule(request)` holds an exit rule at
+  the venue: the node calls it through its fence, journal and replay (never during a replay
+  or muted warm-up), and registers the rule's `exit_client_ids` as orders, so the fills of
+  the exits the venue fires are booked.
 * **One way in.** Reports enter through `LiveNode.push_report(client_order_id,
   report, *, arrival_ns)`, applied at once as an event in the node's stream
   (`event-semantics.md`, "Execution reports in the stream"). An adapter never
@@ -180,12 +189,11 @@ targets, schedules and square-off are venue-managed like the strategy's book
 (the runtime sends the orders); a position it still changes on its own raises
 `paper_unsolicited_position_change`.
 
-## Not done here
+## Recovery, the journal and fencing
 
-Recovery, the journal and reconciliation (what to do with a venue order the
-book does not know, or the reverse) belong to the journal work; this layer
-gives them deterministic ids, a record of every request in tags and ids, and a
-`Submitted` order that stays `Submitted` when a request may be lost. A fill the
-book cannot take (`venue_fill_not_booked`) leaves the order with the fill and
-the position without it: that is a divergence to reconcile, and it is
-raised, not hidden.
+Written in `journal-and-recovery.md`: every request is journaled before the adapter
+is called, a request with no answer is reconciled and never blindly resent, an
+adapter may offer `open_orders()`, `positions()`, `balances()` and `fence(epoch)`, and
+corrections and busts are applied to the book. A fill the book cannot take
+(`venue_fill_not_booked`) leaves the order with the fill and the position without it:
+that is a divergence to reconcile, and it is raised, not hidden.

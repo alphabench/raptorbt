@@ -290,6 +290,50 @@ impl PositionLedger {
         Some(new_avg)
     }
 
+    /// Take back an entry slice that never happened (the venue busted or
+    /// restated the execution): the inverse of [`Self::add_to_position`]. The
+    /// booked `cost` and `entry_fees` of the slice come off exactly, and the
+    /// average entry is recomputed from what is left. No trade is made: the
+    /// slice was never closed, it was never held.
+    pub fn unadd_from_position(
+        &mut self,
+        id: u64,
+        price: Price,
+        size: f64,
+        cost: Money,
+        entry_fees: Money,
+        shift_protective: bool,
+    ) -> Option<()> {
+        let scale = self.scale;
+        let managed = self.get_mut(id)?;
+        let pos = &mut managed.position;
+        let left = pos.size - size;
+        if left <= 0.0 {
+            return None;
+        }
+        managed.cost -= cost;
+        managed.entry_fees_money -= entry_fees;
+        let old_avg = pos.entry_price;
+        let new_avg = (pos.entry_price * pos.size - price * size) / left;
+        pos.entry_price = new_avg;
+        pos.size = left;
+        pos.entry_fees = scale.to_f64(managed.entry_fees_money);
+        if shift_protective {
+            let shift = new_avg - old_avg;
+            pos.stop_price = pos.stop_price.map(|s| s + shift);
+            pos.target_price = pos.target_price.map(|t| t + shift);
+        }
+        managed.entry_breakdown = None;
+        Some(())
+    }
+
+    /// Drop an open position that never existed (see
+    /// [`Self::unadd_from_position`]): no trade, no counter moved.
+    pub fn discard_position(&mut self, id: u64) -> Option<ManagedPosition> {
+        let index = self.open.iter().position(|p| p.id == id)?;
+        Some(self.open.remove(index))
+    }
+
     /// Close part of a position: a trade record for the `qty` slice (at the
     /// position's average entry, entry fees prorated) and the remainder
     /// stays open. `qty >= size` closes it whole via

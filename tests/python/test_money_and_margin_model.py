@@ -70,6 +70,7 @@ def _run(model=None, direction=1, spec=None, leverage=5.0, account="margin", clo
         instruments={SYM: spec or _fut()},
         account_type=account,
         leverage=leverage,
+        bar_stamp="close",
     )
     return result, strategy
 
@@ -85,7 +86,7 @@ def test_the_built_in_rule_is_the_from_spec_model_and_unset_is_unchanged():
 
 
 def test_a_percent_of_notional_model_sizes_and_locks_by_its_own_figure():
-    result, _ = _run(MarginModel.percent_of_notional(50))
+    result, _ = _run(MarginModel.fraction_of_notional(0.5))
     assert result.result.trades()[0].size == pytest.approx(CAPITAL / 50.0)
 
 
@@ -138,6 +139,7 @@ def _run_fees():
         config=config,
         directions={SYM: 1},
         instruments={SYM: _fut()},
+        bar_stamp="close",
     )
     return result, None
 
@@ -150,6 +152,7 @@ def test_money_decimals_is_a_scale_per_currency_and_bounded():
         config=config,
         directions={SYM: 1},
         instruments={SYM: _fut()},
+        bar_stamp="close",
     )
     for t in result.result.trades():
         assert t.money_decimals == 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -22,6 +23,46 @@ class Bar(NamedTuple):
     def timeframe(self) -> None:
         """``None``: a primary bar. Composite bars carry their timeframe."""
         return None
+
+
+class _Positions:
+    """``ctx.positions`` in a single-instrument run: call it, as in a portfolio run.
+
+    ``ctx.positions()`` is the one form, in every runner. Using the attribute itself as a
+    list (iterating, ``len``, indexing, truth) still works and warns: it was a property
+    here and a method elsewhere, and the method is the form that survives.
+    """
+
+    __slots__ = ("_session",)
+
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def __call__(self, symbol: str | None = None) -> list:
+        """Open positions in opening order. ``symbol`` is accepted for parity with portfolio
+        runs and ignored: a single-instrument run has one."""
+        return self._session.positions()
+
+    def _list(self) -> list:
+        warnings.warn(
+            "ctx.positions used as a list is deprecated; call ctx.positions(), which is the "
+            "form in portfolio runs too",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return self._session.positions()
+
+    def __iter__(self):
+        return iter(self._list())
+
+    def __len__(self) -> int:
+        return len(self._list())
+
+    def __bool__(self) -> bool:
+        return bool(self._list())
+
+    def __getitem__(self, index):
+        return self._list()[index]
 
 
 class StrategyContext:
@@ -119,9 +160,10 @@ class StrategyContext:
         return self._session.position()
 
     @property
-    def positions(self):
-        """All open positions, in opening order (hedging holds several)."""
-        return self._session.positions()
+    def positions(self) -> _Positions:
+        """All open positions, in opening order (hedging holds several): call it,
+        ``ctx.positions()``. Using the attribute as a list is deprecated."""
+        return _Positions(self._session)
 
     def set_underlying_price(self, price: float | None) -> None:
         """Price an option settles against at expiry.

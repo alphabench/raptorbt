@@ -178,7 +178,7 @@ def test_engine_accepts_data(ds):
     syms = [i.symbol for i in ds.instruments[:3]]
     data = {s: {k: ds.bars["1m"][s][k]
                 for k in ("timestamps", "open", "high", "low", "close", "volume")} for s in syms}
-    res = raptorbt.run_portfolio_strategy(NoOp(), data)
+    res = raptorbt.run_portfolio_strategy(NoOp(), data, bar_stamp="close")
     assert res is not None
 
     class NoOpTick(raptorbt.Strategy):

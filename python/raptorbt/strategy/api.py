@@ -331,6 +331,16 @@ class _Run:
         self.quotes: dict[str, Any] = {}
         self.books: dict[str, Any] = {}
 
+    # -- the instrument set of a running node -------------------------------------
+
+    def add_symbol(self, symbol: str) -> None:
+        if self.symbols is not None and symbol not in self.symbols:
+            self.symbols = (*self.symbols, symbol)
+
+    def drop_symbol(self, symbol: str) -> None:
+        if self.symbols is not None:
+            self.symbols = tuple(s for s in self.symbols if s != symbol)
+
     # -- declaration -----------------------------------------------------
 
     def open(self, what: str) -> None:
@@ -430,11 +440,13 @@ def _run_of(strategy) -> _Run:
 # ---------------------------------------------------------------------------
 
 
-def begin(strategy, ctx, symbols=None, default=None) -> None:
+def begin(strategy, ctx, symbols=None, default=None, host=None) -> None:
     """Start a run's API state, attach the views to ``ctx`` and call ``on_init``.
 
     ``symbols`` are the run's instruments (``None``: unchecked); ``default`` is
-    the symbol a single-instrument run reports for ``ctx``.
+    the symbol a single-instrument run reports for ``ctx``. ``host`` is the
+    run's :class:`~raptorbt.strategy.context_host.ContextHost`, behind
+    ``ctx.instrument`` / ``option_chain`` / ``role``.
     """
     _unbind(strategy)
     run = _Run(strategy, ctx, symbols, default)
@@ -442,6 +454,9 @@ def begin(strategy, ctx, symbols=None, default=None) -> None:
     ctx.data = DataView(run)
     ctx.indicators = IndicatorsView(run)
     ctx.portfolio = PortfolioView(run)
+    from raptorbt.strategy.context_host import ContextHost
+
+    (host or ContextHost(None, None)).attach(ctx, strategy)
     strategy.on_init(ctx)
 
 
@@ -897,10 +912,10 @@ class PortfolioView:
     def positions(self) -> dict:
         """Open positions by instrument: ``{symbol: (PositionSnapshot, ...)}``."""
         ctx = self._run.ctx
-        if hasattr(ctx, "positions") and callable(ctx.positions):
+        if hasattr(ctx, "symbols"):
             out = {s: tuple(ctx.positions(s)) for s in ctx.symbols}
         else:
-            out = {self._run.default: tuple(ctx.positions)}
+            out = {self._run.default: tuple(ctx.positions())}
         return {s: p for s, p in out.items() if p}
 
     @property

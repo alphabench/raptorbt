@@ -6,198 +6,35 @@
 //! - Iron Condors and Iron Butterflies
 //! - Calendar and Diagonal spreads
 //!
-//! Key features:
-//! - Single-pass O(n) algorithm
-//! - Coordinated entry/exit across all legs
-//! - Net premium P&L calculation
-//! - Combined Greeks tracking
+//! Each leg is an option instrument of one [`PortfolioBook`] with its own
+//! premium series, so the legs trade in one account and follow the kernel's
+//! fill, fee, margin, expiry and risk rules. This module decides what is
+//! particular to a structure: the legs open and close together, a structure
+//! that cannot be funded whole does not open, and the legs of one entry are
+//! reported as one trade.
 
-use crate::core::types::{BacktestMetrics, BacktestResult, Direction, ExitReason, Trade};
-use crate::execution::{indian_costs::FeeBreakdown, FeeModel};
-use crate::metrics::streaming::StreamingMetrics;
+use std::collections::HashMap;
+
+use crate::core::types::{
+    BacktestMetrics, BacktestResult, Direction, ExitReason, InstrumentConfig, Trade,
+};
+use crate::execution::indian_costs::FeeBreakdown;
+use crate::instruments::lifecycle::{SettlementPrice, SettlementStyle, SettlementTerms};
+use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
+use crate::portfolio::book::PortfolioBook;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
+use crate::portfolio::kernel::{KernelBar, StepInput};
+use crate::portfolio::ledger::PositionPolicy;
+use crate::strategies::legs::{account_mode, bar_entry};
 
 pub use super::spreads_config::{
     create_iron_condor_config, create_straddle_config, create_strangle_config,
     create_vertical_spread_config, LegConfig, OptionType, SpreadConfig, SpreadType,
 };
 
-/// State for a single leg position.
-#[derive(Debug, Clone)]
-struct LegPosition {
-    /// Entry premium price.
-    pub entry_premium: f64,
-    /// Entry index.
-    #[allow(dead_code)]
-    pub entry_idx: usize,
-    /// Current premium price.
-    pub current_premium: f64,
-    /// Leg configuration.
-    pub config: LegConfig,
-    /// Bar index at which this leg settled at its own expiry, once it has.
-    /// `None` while the leg is still live.
-    pub settled_idx: Option<usize>,
-}
-
-impl LegPosition {
-    fn new(config: LegConfig, entry_premium: f64, entry_idx: usize) -> Self {
-        Self { entry_premium, entry_idx, current_premium: entry_premium, config, settled_idx: None }
-    }
-
-    /// Whether this leg has reached its own expiry and been settled.
-    fn is_settled(&self) -> bool {
-        self.settled_idx.is_some()
-    }
-
-    /// P&L this leg still contributes to a mark-to-market reading.
-    ///
-    /// Zero once the leg has settled. The settled amount was credited to
-    /// cash on its expiry bar, and cash is the other half of the equity
-    /// line -- counting it here too would bank the same rupees twice.
-    fn open_pnl(&self) -> f64 {
-        if self.is_settled() {
-            0.0
-        } else {
-            self.unrealized_pnl()
-        }
-    }
-
-    /// Calculate unrealized P&L for this leg.
-    fn unrealized_pnl(&self) -> f64 {
-        // No negation here, deliberately. `LegConfig.quantity` is ALREADY
-        // signed (+1 long, -1 short -- see its doc comment, and `is_short()`,
-        // which is literally `quantity < 0`), so the direction convention is
-        // applied exactly once, by that sign:
-        //
-        //   short (-1) + premium falls (-30) -> (-1) * (-30) * 75 = +2250 gain
-        //   long  (+1) + premium falls (-30) -> (+1) * (-30) * 75 = -2250 loss
-        //
-        // A leading minus applies the same convention a second time and
-        // negates every result. It shipped through 0.6.3 and inverted `pnl`,
-        // the equity curve, and -- worse -- the `max_loss` / `target_profit`
-        // triggers, which closed winning structures on a stop.
-        let premium_change = self.current_premium - self.entry_premium;
-        let quantity = self.config.quantity as f64;
-        let lot_size = self.config.lot_size as f64;
-        quantity * premium_change * lot_size
-    }
-}
-
-/// Spread position state.
-#[derive(Debug, Clone)]
-struct SpreadPosition {
-    /// Individual leg positions.
-    pub legs: Vec<LegPosition>,
-    /// Entry bar index.
-    pub entry_idx: usize,
-    /// Entry net premium (positive = credit, negative = debit).
-    pub entry_net_premium: f64,
-    /// Entry timestamp.
-    pub entry_time: i64,
-    /// Whether position is open.
-    pub is_open: bool,
-    /// Costs charged when this position was opened.
-    ///
-    /// Retained rather than recomputed at exit: the entry is charged against
-    /// entry premiums, and re-deriving it from exit premiums would both bill a
-    /// different amount and leave the trade record disagreeing with the cash
-    /// that actually left the account.
-    pub entry_fees: f64,
-    /// Itemized entry costs, when an itemized fee model is configured.
-    pub entry_breakdown: Option<FeeBreakdown>,
-    /// P&L from legs that reached their own expiry before the structure
-    /// closed, and which has already been credited to cash.
-    ///
-    /// Held apart from the mark-to-market so a settled leg is counted once,
-    /// and added back when the trade is reported so the record covers the
-    /// whole structure rather than only the legs that outlived it.
-    pub realized_pnl: f64,
-}
-
-impl SpreadPosition {
-    fn new(legs: Vec<LegPosition>, entry_idx: usize, entry_time: i64) -> Self {
-        let entry_net_premium: f64 = legs
-            .iter()
-            .map(|leg| leg.entry_premium * leg.config.quantity as f64 * leg.config.lot_size as f64)
-            .sum();
-
-        Self {
-            legs,
-            entry_idx,
-            entry_net_premium,
-            entry_time,
-            is_open: true,
-            entry_fees: 0.0,
-            entry_breakdown: None,
-            realized_pnl: 0.0,
-        }
-    }
-
-    /// Mark-to-market P&L across the legs that are still live.
-    fn total_unrealized_pnl(&self) -> f64 {
-        self.legs.iter().map(|leg| leg.open_pnl()).sum()
-    }
-
-    /// P&L of the whole structure, settled legs included. What a trade
-    /// reports, as against what is still owed to cash.
-    fn lifetime_pnl(&self) -> f64 {
-        self.realized_pnl + self.total_unrealized_pnl()
-    }
-
-    /// Update leg premiums.
-    ///
-    /// A settled leg keeps the premium it settled at. Its contract no longer
-    /// exists, so whatever the series carries past that bar is not a price
-    /// -- a stale quote there must not reach the exit price or the P&L.
-    fn update_premiums(&mut self, leg_premiums: &[f64]) {
-        for (leg, &premium) in self.legs.iter_mut().zip(leg_premiums.iter()) {
-            if leg.is_settled() {
-                continue;
-            }
-            leg.current_premium = premium;
-        }
-    }
-
-    /// Settle every leg whose own expiry has now passed, returning the cash
-    /// to credit for them.
-    ///
-    /// A leg settles once, at whatever premium its series carries on the
-    /// settlement bar -- the engine does not compute intrinsic value, and
-    /// the contract on `SpreadConfig::leg_expiry_timestamps` says so. Its
-    /// P&L moves out of the mark-to-market and into `realized_pnl`, so the
-    /// caller can credit it to cash without the equity line double-counting.
-    fn settle_expired_legs(&mut self, idx: usize, timestamp: i64, expiries: &[i64]) -> f64 {
-        let mut credited = 0.0;
-        for (leg, &expiry) in self.legs.iter_mut().zip(expiries.iter()) {
-            if leg.is_settled() || timestamp < expiry {
-                continue;
-            }
-            credited += leg.unrealized_pnl();
-            leg.settled_idx = Some(idx);
-        }
-        self.realized_pnl += credited;
-        credited
-    }
-
-    /// Whether every leg has reached its own expiry.
-    fn all_legs_settled(&self) -> bool {
-        self.legs.iter().all(|leg| leg.is_settled())
-    }
-
-    /// Close the position and return the P&L still owed to cash.
-    ///
-    /// Live legs only: anything already settled was credited on its own
-    /// expiry bar.
-    fn close(&mut self) -> f64 {
-        self.is_open = false;
-        self.total_unrealized_pnl()
-    }
-}
-
 /// Spread backtest runner.
 pub struct SpreadBacktest {
     config: SpreadConfig,
-    fee_model: FeeModel,
 }
 
 impl SpreadBacktest {
@@ -207,8 +44,7 @@ impl SpreadBacktest {
     /// `fee_segment` charges the itemized regulatory schedule -- per-order
     /// brokerage included -- and leaving it unset keeps the flat `fees` rate.
     pub fn new(config: SpreadConfig) -> Self {
-        let fee_model = config.base.fee_model();
-        Self { config, fee_model }
+        Self { config }
     }
 
     /// Run the spread backtest.
@@ -237,13 +73,20 @@ impl SpreadBacktest {
     ///
     /// Under [`FillTiming::NextBarOpen`] a signal fill lands on the bar
     /// after the decision; with `legs_open_premiums` present it prices the
-    /// legs at that bar's OPEN premiums — real quotes the caller observed —
+    /// legs at that bar's OPEN premiums -- real quotes the caller observed --
     /// instead of the bar's (later) settled values. Nothing is synthesized:
     /// without the series, the next bar's value remains the honest causal
-    /// fill. Only signal entries and exits use the opens; expiry
-    /// settlement, squareoff, max-loss and target-profit closes are forced
-    /// or protective exits against current marks and keep pricing there.
-    /// The opens are ignored outside `NextBarOpen`.
+    /// fill. The opens are ignored outside `NextBarOpen`.
+    ///
+    /// A structure is opened whole or not at all: when its legs together cost
+    /// more than the account has free, no leg opens. Each leg fills, pays
+    /// costs and slips as any order does, and a leg left to expire settles at
+    /// its series' value on that bar and owes no exit costs. The structure
+    /// closes on an exit signal, the session square-off, `max_loss`,
+    /// `target_profit`, or once its last leg has expired. A close that is not
+    /// a signal -- `max_loss`, `target_profit`, the square-off -- fills when a
+    /// signal exit would: on the bar's premiums, or the next bar's under
+    /// `NextBarOpen`.
     ///
     /// [`FillTiming::NextBarOpen`]: crate::core::types::FillTiming::NextBarOpen
     pub fn run_with_opens(
@@ -286,463 +129,235 @@ impl SpreadBacktest {
             }
         }
 
-        // Execution timing. Leg premiums carry one value per bar — there is
-        // no open to fill at — so under NextBarOpen a bar-i decision
-        // executes at bar i+1's premiums: the signal streams shift one bar
-        // forward (a last-bar decision never trades) and the loop prices the
-        // legs off the bar after the decision, re-checking that bar's own
-        // gates (expiry, squareoff, position state) before opening. Only the
-        // SIGNAL entry and exit shift: expiry settlement, squareoff,
-        // max-loss and target-profit closes are forced or protective exits
-        // whose triggers are current marks, already causal, and keep filling
-        // on their own bar. SameBarClose is the historical behavior,
-        // byte-identical; SameBarOpenLookahead has no distinct history in
-        // this runner and behaves the same.
-        let next_open =
-            self.config.base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
-        let shifted: (Vec<bool>, Vec<bool>);
-        let (entries, exits): (&[bool], &[bool]) = if next_open {
-            let shift = crate::signals::processor::shift_signals;
-            shifted = (shift(entries, 1), shift(exits, 1));
-            (&shifted.0, &shifted.1)
-        } else {
-            (entries, exits)
-        };
-
-        let mut metrics = StreamingMetrics::with_initial_capital(self.config.base.initial_capital);
-        let mut equity_curve = Vec::with_capacity(n);
-        let mut drawdown_curve = Vec::with_capacity(n);
-        let mut returns = Vec::with_capacity(n);
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut trade_id: u64 = 0;
-
-        let mut cash = self.config.base.initial_capital;
-        let mut position: Option<SpreadPosition> = None;
-        let mut prev_equity = cash;
+        let base = &self.config.base;
+        let next_open = base.resolved_fill_timing() == crate::core::types::FillTiming::NextBarOpen;
+        let expiries = self.config.leg_expiry_timestamps.as_deref();
 
         // Session squareoff. Computed once up front rather than per bar: the
         // day boundary depends only on the timestamps, not on position state.
-        // Empty (all-false) when squareoff is disabled, so the hot loop reads
-        // one bool either way.
-        let squareoff: Vec<bool> = match self.config.base.squareoff_time_minutes {
+        let squareoff: Vec<bool> = match base.squareoff_time_minutes {
             Some(minutes) => crate::core::session::squareoff_flags(
                 timestamps,
                 minutes,
-                self.config.base.session_tz_offset_ns,
+                base.session_tz_offset_ns,
             ),
             None => vec![false; n],
         };
 
-        // Single-pass O(n) algorithm
+        let legs = &self.config.leg_configs;
+        // This runner flattens on its own flags above; the book's kernels must not
+        // square off a second time from the same setting.
+        let mut book_config = base.clone();
+        book_config.squareoff_time_minutes = None;
+        let mut book = PortfolioBook::new(book_config, account_mode(base));
+        for (k, leg) in legs.iter().enumerate() {
+            book.add_instrument(
+                format!("SPREAD_LEG{k}"),
+                if leg.is_long() { Direction::Long } else { Direction::Short },
+                Some(leg_spec(k, leg, expiries.map(|e| e[k]))),
+                Some(&InstrumentConfig::default()),
+                PositionPolicy::Net,
+            );
+        }
+        // Contracts per leg: quantity in lots times the lot size. A leg of no
+        // quantity places no order.
+        let units: Vec<f64> =
+            legs.iter().map(|l| l.quantity.unsigned_abs() as f64 * l.lot_size as f64).collect();
+        let traded: Vec<usize> = (0..legs.len()).filter(|&k| units[k] > 0.0).collect();
+
+        // Why a structure closed when the kernel cannot say: the exit it was
+        // asked for is a signal exit to the kernel. Keyed by entry bar.
+        let mut forced: HashMap<usize, ExitReason> = HashMap::new();
+        let mut unwind = false;
+
+        let specs: Vec<InstrumentSpec> = legs
+            .iter()
+            .enumerate()
+            .map(|(k, leg)| leg_spec(k, leg, expiries.map(|e| e[k])))
+            .collect();
+        let mut order: Vec<usize> = (0..legs.len()).collect();
         for i in 0..n {
-            // Get current leg premiums
-            let current_premiums: Vec<f64> = legs_premiums.iter().map(|p| p[i]).collect();
+            let ts = timestamps[i];
 
-            // Update position premiums if open
-            if let Some(ref mut pos) = position {
-                pos.update_premiums(&current_premiums);
-            }
-
-            // Settle any leg that reached its own expiry at this bar, before
-            // anything reads the position's P&L.
-            //
-            // Each leg dies on its own date. Closing the whole structure when
-            // the FIRST one expires is what 0.7.4 did, and it made a calendar
-            // spread -- sell the near expiry, buy the far one -- unmeasurable:
-            // the engine closed before the far leg had done anything, so the
-            // result was not merely optimistic, it was unrelated to the trade.
-            if let (Some(pos), Some(expiries)) =
-                (position.as_mut(), self.config.leg_expiry_timestamps.as_ref())
-            {
-                // No exit fee: an option left to expire is never sold, so no
-                // order is placed and no brokerage or transaction tax is owed.
-                cash += pos.settle_expired_legs(i, timestamps[i], expiries);
-            }
-
-            // Calculate unrealized P&L for exit checks
-            let unrealized_pnl = position.as_ref().map(|p| p.total_unrealized_pnl()).unwrap_or(0.0);
-
-            // The structure is finished only once its LAST leg has expired.
-            let is_expiry = position.as_ref().is_some_and(|p| p.all_legs_settled());
-
-            // Check for exit signals or conditions
-            let should_exit = position.is_some()
-                && (exits[i]
-                    || is_expiry
-                    || squareoff[i]
-                    || self.check_max_loss(&position, unrealized_pnl)
-                    || self.check_target_profit(&position, unrealized_pnl));
-
-            if should_exit {
-                if let Some(mut pos) = position.take() {
-                    // A SIGNAL exit fills at the bar's open premiums when the
-                    // caller supplied them (reason precedence puts expiry
-                    // settlement first, so an expiry bar is untouched).
-                    // Forced exits keep the current marks.
-                    if next_open && !is_expiry && exits[i] {
-                        if let Some(opens) = legs_open_premiums {
-                            let open_row: Vec<f64> = opens.iter().map(|o| o[i]).collect();
-                            pos.update_premiums(&open_row);
+            // The structure's decisions, taken once per bar on the state
+            // before any leg steps.
+            let held: Vec<usize> =
+                traded.iter().copied().filter(|&j| book.kernel(j).is_in_position()).collect();
+            let waiting = traded.iter().any(|&j| book.kernel(j).has_pending_entry());
+            let mut exiting = false;
+            if !held.is_empty() {
+                // A leg not yet expired and not held, beside one that is: an
+                // entry the kernel refused part of.
+                let partial = !waiting
+                    && traded
+                        .iter()
+                        .any(|&j| !held.contains(&j) && expiries.is_none_or(|e| ts < e[j]));
+                let live_pnl: f64 = held
+                    .iter()
+                    .filter(|&&j| expiries.is_none_or(|e| ts < e[j]))
+                    .map(|&j| {
+                        book.kernel(j).position_snapshot().map_or(0.0, |s| {
+                            s.direction.multiplier()
+                                * (legs_premiums[j][i] - s.entry_price)
+                                * s.size
+                        })
+                    })
+                    .sum();
+                let reason = if exits[i] || unwind || partial {
+                    Some(ExitReason::Signal)
+                } else if squareoff[i] {
+                    Some(ExitReason::Squareoff)
+                } else if self.config.max_loss.is_some_and(|m| live_pnl < -m) {
+                    Some(ExitReason::StopLoss)
+                } else if self.config.target_profit.is_some_and(|t| live_pnl > t) {
+                    Some(ExitReason::TakeProfit)
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    exiting = true;
+                    if reason != ExitReason::Signal {
+                        if let Some(s) = book.kernel(held[0]).position_snapshot() {
+                            forced.entry(s.entry_idx).or_insert(reason);
                         }
                     }
-                    let pnl = pos.close();
-
-                    // Resolved before costs are charged: settlement pays no
-                    // exit-side fee, so the reason decides the bill.
-                    let exit_reason = if is_expiry {
-                        ExitReason::Settlement
-                    } else if exits[i] {
-                        ExitReason::Signal
-                    } else if squareoff[i] {
-                        ExitReason::Squareoff
-                    } else if self.check_max_loss(&Some(pos.clone()), pnl) {
-                        ExitReason::StopLoss
-                    } else {
-                        ExitReason::TakeProfit
-                    };
-
-                    trade_id += 1;
-                    let trade = self.emit_trade(&pos, trade_id, i, timestamps[i], exit_reason);
-                    cash += pnl - trade.exit_fees;
-                    Self::record_trade(&mut metrics, &trade, &pos);
-                    trades.push(trade);
                 }
             }
+            unwind = false;
 
-            // Check for entry signals.
-            //
-            // One dead leg is enough to block re-entry, not all of them: a
-            // structure containing an expired contract is not one anybody can
-            // open, and entering it would price that leg off a series that is
-            // no longer quoting anything. Identical to the old all-expired
-            // test for a same-expiry structure, where the two coincide.
-            let any_expired = self
-                .config
-                .leg_expiry_timestamps
-                .as_ref()
-                .is_some_and(|expiries| expiries.iter().any(|&exp_ts| timestamps[i] >= exp_ts));
-            if position.is_none() && entries[i] && !any_expired && !squareoff[i] {
-                let entry_premiums: Vec<f64> = match (next_open, legs_open_premiums) {
-                    (true, Some(opens)) => opens.iter().map(|o| o[i]).collect(),
-                    _ => current_premiums.clone(),
+            // One dead leg is enough to block re-entry: a structure
+            // containing an expired contract is not one anybody can open.
+            let any_expired = expiries.is_some_and(|e| e.iter().any(|&x| ts >= x));
+            let flat_after = held.is_empty() || exiting;
+            let mut entering = flat_after
+                && !waiting
+                && entries[i]
+                && !any_expired
+                && !squareoff[i]
+                && !traded.is_empty();
+            if entering {
+                let rows =
+                    LegRows { premiums: legs_premiums, opens: legs_open_premiums, next_open };
+                entering = self.fits(&book, &traded, &units, &specs, &rows, i, ts);
+            }
+
+            // A leg that is expiring on this bar steps first, on its own bar:
+            // the book settles a contract that expired before it has been
+            // shown that bar at the last price it saw instead. Entering,
+            // bought legs go before sold ones, so a sold leg is funded with
+            // its hedge already open.
+            order.sort_by_key(|&k| {
+                let expiring =
+                    expiries.is_some_and(|e| ts >= e[k]) && book.kernel(k).is_in_position();
+                (!expiring, entering && !legs[k].is_long(), k)
+            });
+            for &k in &order {
+                let premium = legs_premiums[k][i];
+                let open = match (next_open, legs_open_premiums) {
+                    (true, Some(opens)) => opens[k][i],
+                    _ => premium,
                 };
-                let legs: Vec<LegPosition> = self
-                    .config
-                    .leg_configs
-                    .iter()
-                    .zip(entry_premiums.iter())
-                    .map(|(cfg, &premium)| LegPosition::new(cfg.clone(), premium, i))
-                    .collect();
-
-                let mut new_position = SpreadPosition::new(legs, i, timestamps[i]);
-
-                let (entry_fees, entry_breakdown) = self.calculate_side(&new_position, true);
-                new_position.entry_fees = entry_fees;
-                new_position.entry_breakdown = entry_breakdown;
-                cash -= entry_fees;
-
-                position = Some(new_position);
-            }
-
-            // Update equity tracking
-            let equity = cash + position.as_ref().map(|p| p.total_unrealized_pnl()).unwrap_or(0.0);
-            equity_curve.push(equity);
-
-            let daily_return =
-                if prev_equity > 0.0 { (equity - prev_equity) / prev_equity } else { 0.0 };
-            returns.push(daily_return);
-            prev_equity = equity;
-
-            // Update drawdown
-            metrics.update_equity(equity);
-            drawdown_curve.push(metrics.current_drawdown_pct());
-        }
-
-        // Close any remaining open position at end.
-        //
-        // This MUST record a Trade, not merely settle into `cash`. Until
-        // 0.7.2 it did the latter: the position's P&L reached `end_value`
-        // and the equity curve, while `trades()` stayed empty and
-        // `total_open_trades` read 0. A caller auditing trade-by-trade saw
-        // a clean, empty book for a run whose return was driven entirely by
-        // a position that never closed -- the worst shape for a defect,
-        // because every trade-level check passes.
-        if let Some(mut pos) = position.take() {
-            let last = n - 1;
-            let pnl = pos.close();
-
-            trade_id += 1;
-            let trade =
-                self.emit_trade(&pos, trade_id, last, timestamps[last], ExitReason::EndOfData);
-            cash += pnl - trade.exit_fees;
-            Self::record_trade(&mut metrics, &trade, &pos);
-            trades.push(trade);
-
-            // The last equity sample was pushed before this close, so it does
-            // not carry the exit costs this trade just paid -- it said the
-            // account held 99,954.93 where the account actually held
-            // 99,953.68. The final value was previously passed to the metrics
-            // separately as `cash`, so the REPORTED return was right while the
-            // curve backing it was not; anyone integrating the curve got a
-            // different answer from `total_return_pct`.
-            //
-            // Overwriting the last sample rather than appending one keeps the
-            // curve the same length as the bar series, which every consumer
-            // indexes against.
-            if let Some(final_equity) = equity_curve.last_mut() {
-                *final_equity = cash;
-            }
-            // Recomputed against the running peak directly rather than through
-            // `update_equity`, which would advance `bars_since_peak` a second
-            // time for this same bar and lengthen the reported drawdown by one.
-            if let Some(final_dd) = drawdown_curve.last_mut() {
-                let peak = metrics.peak_equity().max(cash);
-                *final_dd = if peak > 0.0 { (peak - cash) / peak * 100.0 } else { 0.0 };
+                let bar = KernelBar {
+                    timestamp: ts,
+                    open,
+                    high: premium.max(open),
+                    low: premium.min(open),
+                    close: premium,
+                    volume: 0.0,
+                };
+                let trades_leg = entering && units[k] > 0.0;
+                let input = StepInput {
+                    entry: trades_leg,
+                    exit: exiting,
+                    units: trades_leg.then_some(units[k]),
+                    ..StepInput::default()
+                };
+                let events = book.apply(&bar_entry(k, i, bar), None, input);
+                // A leg refused after its siblings opened leaves a structure
+                // nobody asked for; it is closed on the next decision.
+                if entering
+                    && events.iter().any(|e| {
+                        matches!(e, crate::portfolio::kernel::EngineEvent::EntryRejected { .. })
+                    })
+                {
+                    unwind = true;
+                }
             }
         }
 
-        // Metrics come from the shared estimator, the same one every other
-        // runner uses, and are fed the curves and trades this function has
-        // already built.
-        //
-        // Until 0.13.2 this path called `StreamingMetrics::finalize`, which
-        // takes only the return series -- while this very expression handed a
-        // real `drawdown_curve` and a real `trades` vector to the result. The
-        // consequence was a result that contradicted itself: 250 of 300
-        // samples underwater in its own drawdown curve, with
-        // `time_under_water_pct` reporting 0.0, and seven trades with
-        // `total_turnover` and `exposure_pct` reporting 0.0. Those were not
-        // "not measured"; they were computable from data sitting in the same
-        // struct.
-        //
-        // This also fixes annualization. The accumulator hardcodes 252
-        // periods/year, which assumes one bar is one trading day; a spread on
-        // minute bars was therefore annualized as if each minute were a day.
-        // The shared path resolves periods/year from the timestamps.
-        let final_metrics = compute_backtest_metrics_with_config(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
+        let outcome = book.finish();
+        let mut result = outcome.result;
+        let trades = aggregate(&result.trades, &forced);
+        result.metrics = compute_backtest_metrics_with_config(
+            &result.equity_curve,
+            &result.drawdown_curve,
+            &result.returns,
             &trades,
             timestamps,
             &self.config.base,
         );
-
-        // A spread result is synthesised from leg P&L; this path runs no
-        // order book, so there are no orders to report.
-        BacktestResult {
-            metrics: final_metrics,
-            equity_curve,
-            drawdown_curve,
-            trades,
-            returns,
-            orders: Vec::new(),
-            halted: false,
-            halted_at: None,
-        }
+        result.trades = trades;
+        result
     }
 
-    /// Check if max loss threshold is hit.
-    fn check_max_loss(&self, _position: &Option<SpreadPosition>, unrealized_pnl: f64) -> bool {
-        if let Some(max_loss) = self.config.max_loss {
-            if unrealized_pnl < -max_loss {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if target profit threshold is hit.
-    fn check_target_profit(&self, _position: &Option<SpreadPosition>, unrealized_pnl: f64) -> bool {
-        if let Some(target) = self.config.target_profit {
-            if unrealized_pnl > target {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Costs for one side of a spread, charged leg by leg.
+    /// Whether the legs together fit in the capital free now.
     ///
-    /// Each leg is a separate exchange order, so a flat per-order charge is
-    /// levied once per leg -- an N-leg structure pays it N times per side, and
-    /// summing the legs' premiums first would collect it only once.
-    ///
-    /// A leg's direction is the sign of its quantity, and `is_entry` decides
-    /// which way that points: a short leg is sold to open and bought to close,
-    /// so side-specific charges (transaction tax on the sell, stamp duty on the
-    /// buy) land on the leg and side that actually owes them.
-    ///
-    /// Returns the total and, for itemized models, the component breakdown.
-    fn calculate_side(
+    /// Each leg's funding and costs as the kernel would take them, summed. When
+    /// the account margins option lines together the structure's requirement
+    /// is the model's for the legs as a group, not the sum of each leg alone.
+    #[allow(clippy::too_many_arguments)]
+    fn fits(
         &self,
-        position: &SpreadPosition,
-        is_entry: bool,
-    ) -> (f64, Option<FeeBreakdown>) {
-        let mut total = 0.0;
-        let mut breakdown: Option<FeeBreakdown> = None;
-
-        for leg in &position.legs {
-            // A leg holding nothing places no order, so it owes no per-order
-            // charge. Without this a zero-quantity leg would be billed full
-            // brokerage for a trade that never happened.
-            if leg.config.quantity == 0 {
-                continue;
+        book: &PortfolioBook,
+        traded: &[usize],
+        units: &[f64],
+        specs: &[InstrumentSpec],
+        rows: &LegRows<'_>,
+        i: usize,
+        ts: i64,
+    ) -> bool {
+        use crate::accounts::LineView;
+        let mut needed = 0.0;
+        let mut lines: Vec<LineView<'_>> = Vec::new();
+        for &k in traded {
+            let premium = rows.premiums[k][i];
+            let open = match (rows.next_open, rows.opens) {
+                (true, Some(opens)) => opens[k][i],
+                _ => premium,
+            };
+            let bar = KernelBar {
+                timestamp: ts,
+                open,
+                high: premium.max(open),
+                low: premium.min(open),
+                close: premium,
+                volume: 0.0,
+            };
+            match book.kernel(k).entry_outlay(&bar, units[k]) {
+                Some((funded, fees)) => needed += funded + fees,
+                // A refusal of the funding itself is the kernel's to report.
+                None => return true,
             }
-
-            // A leg left to expire is never traded out, so it owes nothing on
-            // the way out. Only on the exit side: the order that opened it was
-            // real regardless of how it ended, and entry costs must not change
-            // retroactively.
-            if !is_entry && leg.is_settled() {
-                continue;
-            }
-
-            let premium = if is_entry { leg.entry_premium } else { leg.current_premium };
-            // Contract count, not lots: a two-lot leg trades twice the
-            // contracts of a one-lot leg and owes proportionally more.
-            let size = (leg.config.quantity.unsigned_abs() as f64) * leg.config.lot_size as f64;
-            let direction = if leg.config.is_long() { Direction::Long } else { Direction::Short };
-
-            match self.fee_model.breakdown(premium.abs(), size, direction, is_entry) {
-                Some(leg_breakdown) => {
-                    total += leg_breakdown.total();
-                    breakdown.get_or_insert_with(FeeBreakdown::default).add(&leg_breakdown);
-                }
-                None => total += self.fee_model.calculate(premium.abs(), size, direction),
-            }
+            let sign = if self.config.leg_configs[k].is_long() { 1.0 } else { -1.0 };
+            lines.push(LineView::new(&specs[k], sign * units[k], open));
         }
-
-        (total, breakdown)
-    }
-
-    /// Costs for closing a position, and the round-trip breakdown to report.
-    ///
-    /// An option left to expire is never traded out: no order is placed, so no
-    /// brokerage and no transaction tax are owed. Charging a full exit there
-    /// would overstate the cost of every structure held to expiry, so
-    /// settlement pays nothing on the way out. Entry costs still stand.
-    fn calculate_exit(
-        &self,
-        position: &SpreadPosition,
-        exit_reason: ExitReason,
-    ) -> (f64, Option<FeeBreakdown>) {
-        let (exit_fees, exit_breakdown) = if exit_reason == ExitReason::Settlement {
-            (0.0, None)
-        } else {
-            self.calculate_side(position, false)
-        };
-
-        // Entry components plus exit components, so the itemized total equals
-        // the fees actually deducted from the equity curve.
-        let combined = match (position.entry_breakdown, exit_breakdown) {
-            (Some(entry), Some(exit)) => {
-                let mut total = entry;
-                total.add(&exit);
-                Some(total)
-            }
-            (entry, exit) => entry.or(exit),
-        };
-
-        (exit_fees, combined)
-    }
-
-    /// Build the trade record for a position that has just closed.
-    ///
-    /// Both exit paths -- the in-loop exit and the end-of-data sweep -- route
-    /// through here. They were duplicated blocks until 0.8.0, differing only
-    /// in whether they guarded a division; keeping one body is what stops the
-    /// two from drifting apart on how a closed position is reported.
-    ///
-    /// The reported `pnl` covers the whole structure. What the caller credits
-    /// to cash is narrower -- the live legs' P&L less the exit fee -- because
-    /// a settled leg was credited on its own expiry bar and the entry side
-    /// left cash when the position opened.
-    fn emit_trade(
-        &self,
-        position: &SpreadPosition,
-        trade_id: u64,
-        exit_idx: usize,
-        exit_time: i64,
-        exit_reason: ExitReason,
-    ) -> Trade {
-        let (exit_fees, fee_breakdown) = self.calculate_exit(position, exit_reason);
-        let entry_fees = position.entry_fees;
-        let fees = entry_fees + exit_fees;
-        // The whole structure, legs that settled early included -- not just
-        // the ones that were still alive at the close.
-        let net_pnl = position.lifetime_pnl() - fees;
-
-        let entry_premium = position.entry_net_premium;
-        // From the position's own legs, not the bar row: a settled leg is
-        // frozen at what it settled for, and the series past its expiry is
-        // a quote on a contract that no longer exists.
-        let exit_premium: f64 = position
-            .legs
-            .iter()
-            .map(|leg| {
-                leg.current_premium * leg.config.quantity as f64 * leg.config.lot_size as f64
-            })
-            .sum();
-
-        Trade {
-            id: trade_id,
-            symbol: "SPREAD".to_string(),
-            entry_idx: position.entry_idx,
-            exit_idx,
-            entry_price: entry_premium,
-            exit_price: exit_premium,
-            size: 1.0,
-            direction: Direction::Long, // Spreads are treated as "long spread"
-            pnl: net_pnl,
-            return_pct: Self::return_pct(net_pnl, entry_premium),
-            entry_time: position.entry_time,
-            exit_time,
-            fees,
-            entry_fees,
-            exit_fees,
-            fee_breakdown,
-            exit_reason,
-            // This path synthesises the trade record rather than closing a
-            // tracked Position, so no bar-by-bar extremes exist for it.
-            // None means "not measured", never a zero excursion.
-            mae_price: None,
-            mfe_price: None,
-            mae_pnl: None,
-            mfe_pnl: None,
-            money: None,
+        let grouped = self
+            .config
+            .base
+            .margin_model
+            .as_deref()
+            .filter(|model| model.groups_options())
+            .and_then(|model| model.group_required(&lines, ts).ok());
+        if let Some(required) = grouped {
+            // The group's requirement replaces the deposits; the costs stay.
+            let fees: f64 = traded
+                .iter()
+                .filter_map(|&k| book.kernel(k).entry_outlay(&leg_bar(rows, k, i, ts), units[k]))
+                .map(|(_, fees)| fees)
+                .sum();
+            return required + fees <= book.free_capital();
         }
-    }
-
-    /// Return as a percentage of the capital the structure opened with.
-    ///
-    /// Zero when the structure cost nothing to open. A spread whose legs
-    /// finance each other exactly -- a calendar entered at equal premiums is
-    /// the everyday case -- has no denominator to divide by, and the answer
-    /// is not infinity, it is undefined. Reporting 0.0 keeps the metric
-    /// finite; the P&L in rupees is the honest figure there.
-    fn return_pct(net_pnl: f64, entry_premium: f64) -> f64 {
-        if entry_premium.abs() > 0.0 {
-            net_pnl / entry_premium.abs() * 100.0
-        } else {
-            0.0
-        }
-    }
-
-    /// Fold a closed trade into the running metrics.
-    ///
-    /// A structure opened for nothing is skipped rather than recorded with a
-    /// zero return, so it cannot drag the average return toward zero on a
-    /// figure that was never measurable.
-    fn record_trade(metrics: &mut StreamingMetrics, trade: &Trade, position: &SpreadPosition) {
-        if trade.entry_price.abs() > 0.0 {
-            metrics.record_fees(trade.fees);
-            metrics.record_trade(
-                trade.pnl,
-                Self::return_pct(trade.pnl, trade.entry_price),
-                trade.exit_idx - position.entry_idx,
-            );
-        }
+        needed <= book.free_capital()
     }
 
     /// Create an empty result (used for validation failures).
@@ -759,6 +374,149 @@ impl SpreadBacktest {
             halted: false,
             halted_at: None,
         }
+    }
+}
+
+/// The premium rows a bar's entry is priced from.
+struct LegRows<'a> {
+    premiums: &'a [Vec<f64>],
+    opens: Option<&'a [Vec<f64>]>,
+    next_open: bool,
+}
+
+/// Leg `k`'s bar `i` as the kernel takes it.
+fn leg_bar(rows: &LegRows<'_>, k: usize, i: usize, ts: i64) -> KernelBar {
+    let premium = rows.premiums[k][i];
+    let open = match (rows.next_open, rows.opens) {
+        (true, Some(opens)) => opens[k][i],
+        _ => premium,
+    };
+    KernelBar {
+        timestamp: ts,
+        open,
+        high: premium.max(open),
+        low: premium.min(open),
+        close: premium,
+        volume: 0.0,
+    }
+}
+
+/// The instrument one leg trades: an option on its premium series, one
+/// contract to the unit, that settles at the series' value on its expiry.
+fn leg_spec(k: usize, leg: &LegConfig, expiry: Option<i64>) -> InstrumentSpec {
+    let right = match leg.option_type {
+        OptionType::Call => OptionRight::Call,
+        OptionType::Put => OptionRight::Put,
+    };
+    let mut spec = InstrumentSpec::new(
+        format!("SPREAD_LEG{k}"),
+        InstrumentKind::Option {
+            strike: leg.strike,
+            right,
+            // One underlying, so the legs hedge each other under a margin
+            // model that groups option lines.
+            underlying: Some("SPREAD".to_string()),
+            binary: false,
+        },
+    );
+    spec.expiration_ns = expiry;
+    // The engine does not compute intrinsic value here: the series carries
+    // the leg's settlement value at and after its expiry.
+    spec.settlement =
+        SettlementTerms { style: SettlementStyle::Cash, price: SettlementPrice::LastPrice };
+    spec
+}
+
+/// One trade per structure from the trades of its legs.
+///
+/// Legs that opened together share an entry bar. The structure's prices are
+/// its net premium, a debit positive and a credit negative; its profit and
+/// costs are the legs' summed, so the record is the money the account saw.
+fn aggregate(leg_trades: &[Trade], forced: &HashMap<usize, ExitReason>) -> Vec<Trade> {
+    let mut by_entry: Vec<(usize, Vec<&Trade>)> = Vec::new();
+    for trade in leg_trades {
+        match by_entry.iter_mut().find(|(idx, _)| *idx == trade.entry_idx) {
+            Some((_, group)) => group.push(trade),
+            None => by_entry.push((trade.entry_idx, vec![trade])),
+        }
+    }
+    by_entry.sort_by_key(|(idx, _)| *idx);
+
+    by_entry
+        .into_iter()
+        .enumerate()
+        .map(|(n, (entry_idx, group))| {
+            let signed = |trade: &Trade, price: f64| {
+                let sign = if trade.direction == Direction::Long { 1.0 } else { -1.0 };
+                sign * price * trade.size
+            };
+            let entry_premium: f64 = group.iter().map(|t| signed(t, t.entry_price)).sum();
+            let exit_premium: f64 = group.iter().map(|t| signed(t, t.exit_price)).sum();
+            let pnl: f64 = group.iter().map(|t| t.pnl).sum();
+            let entry_fees: f64 = group.iter().map(|t| t.entry_fees).sum();
+            let exit_fees: f64 = group.iter().map(|t| t.exit_fees).sum();
+            let last = group.iter().max_by_key(|t| t.exit_idx).expect("a group has a trade");
+            let mut breakdown: Option<FeeBreakdown> = None;
+            for trade in &group {
+                if let Some(b) = trade.fee_breakdown {
+                    breakdown.get_or_insert_with(FeeBreakdown::default).add(&b);
+                }
+            }
+            // Whole-structure money, when every leg booked its own.
+            let money =
+                group.iter().map(|t| t.money).collect::<Option<Vec<_>>>().and_then(|moneys| {
+                    let first = *moneys.first()?;
+                    Some(moneys.iter().skip(1).fold(first, |mut acc, m| {
+                        acc.entry_notional += m.entry_notional;
+                        acc.exit_notional += m.exit_notional;
+                        acc.entry_fees += m.entry_fees;
+                        acc.exit_fees += m.exit_fees;
+                        acc.pnl += m.pnl;
+                        acc
+                    }))
+                });
+            Trade {
+                id: n as u64 + 1,
+                symbol: "SPREAD".to_string(),
+                entry_idx,
+                exit_idx: last.exit_idx,
+                entry_price: entry_premium,
+                exit_price: exit_premium,
+                size: 1.0,
+                direction: Direction::Long, // Spreads are treated as "long spread"
+                pnl,
+                return_pct: return_pct(pnl, entry_premium),
+                entry_time: group.iter().map(|t| t.entry_time).min().unwrap_or(0),
+                exit_time: last.exit_time,
+                fees: entry_fees + exit_fees,
+                entry_fees,
+                exit_fees,
+                fee_breakdown: breakdown,
+                exit_reason: forced.get(&entry_idx).copied().unwrap_or(last.exit_reason),
+                // The structure is synthesised from its legs, which are not
+                // measured as one position. None means "not measured".
+                mae_price: None,
+                mfe_price: None,
+                mae_pnl: None,
+                mfe_pnl: None,
+                money,
+            }
+        })
+        .collect()
+}
+
+/// Return as a percentage of the capital the structure opened with.
+///
+/// Zero when the structure cost nothing to open. A spread whose legs
+/// finance each other exactly -- a calendar entered at equal premiums is
+/// the everyday case -- has no denominator to divide by, and the answer
+/// is not infinity, it is undefined. Reporting 0.0 keeps the metric
+/// finite; the P&L in rupees is the honest figure there.
+fn return_pct(net_pnl: f64, entry_premium: f64) -> f64 {
+    if entry_premium.abs() > 0.0 {
+        net_pnl / entry_premium.abs() * 100.0
+    } else {
+        0.0
     }
 }
 

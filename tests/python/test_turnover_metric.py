@@ -67,7 +67,7 @@ class HoldToEnd(Strategy):
 def test_turnover_matches_the_trade_list():
     rng = np.random.default_rng(11)
     close = 100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, size=300)))
-    result = run_strategy_backtest(Churn, **_ohlcv(close))
+    result = run_strategy_backtest(Churn, **_ohlcv(close), bar_stamp="close")
 
     trades = result.trades()
     assert trades, "churn produced no trades"
@@ -79,7 +79,7 @@ def test_turnover_matches_the_trade_list():
 
 def test_end_of_data_exit_counts_entry_leg_only():
     close = np.linspace(100.0, 120.0, 50)
-    result = run_strategy_backtest(HoldToEnd, **_ohlcv(close))
+    result = run_strategy_backtest(HoldToEnd, **_ohlcv(close), bar_stamp="close")
 
     trades = result.trades()
     assert len(trades) == 1
@@ -91,6 +91,6 @@ def test_end_of_data_exit_counts_entry_leg_only():
 
 def test_turnover_appears_in_to_dict():
     close = np.linspace(100.0, 110.0, 40)
-    result = run_strategy_backtest(Churn, **_ohlcv(close))
+    result = run_strategy_backtest(Churn, **_ohlcv(close), bar_stamp="close")
     d = result.metrics.to_dict()
     assert d["Total Turnover"] == result.metrics.total_turnover

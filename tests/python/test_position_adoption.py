@@ -66,7 +66,7 @@ class Passive(Strategy):
     def on_bar(self, ctx):
         pass
 
-    def on_trade_tick(self, ctx, tick):
+    def on_trade(self, ctx, tick):
         pass
 
 
@@ -444,7 +444,7 @@ def test_stream_adoption_survives_pushes_without_becoming_an_entry():
     ],
 )
 def test_stream_refuses_a_malformed_seed(seed):
-    with pytest.raises(ValueError, match="positive quantity and avg_price"):
+    with pytest.raises(ValueError, match="non-zero quantity and a positive avg_price"):
         TickStrategyStream(
             Passive(),
             symbols=[SYMBOL],
