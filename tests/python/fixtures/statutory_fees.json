@@ -1,0 +1,826 @@
+{
+ "description": "Dated statutory exchange schedule FeeSchedule.exchange_presets() must equal, in rupees per crore of the row's base. Components are separate: exchange transaction charge, IPFT, SEBI turnover fee, transaction tax (STT/CTT, on the side shown), stamp duty (buy side). GST is 18% of exchange + IPFT + SEBI (IPFT included conservatively). `status` is `confirmed` where the figure is matched to an official circular or statute and `unverified` otherwise (a result lists the unverified rows it used). An unverified row whose source publishes no IPFT charges none; that is stated in its source, not defaulted silently. No brokerage and no depository charge. Dates are IST; a row applies from effective_from (inclusive) to effective_until (exclusive).",
+ "gst_percent": "18",
+ "rows": [
+  {
+   "venue": "NSE",
+   "segment": "DELIVERY",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-03-01",
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 10000,
+    "exchange": 297,
+    "ipft": 10,
+    "sebi": 10,
+    "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "NSE",
+   "segment": "DELIVERY",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-03-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 10000,
+    "exchange": 306.99,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "NSE",
+   "segment": "INTRADAY",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-03-01",
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2500,
+    "tax_buy": 0,
+    "exchange": 297,
+    "ipft": 10,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "NSE",
+   "segment": "INTRADAY",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-03-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2500,
+    "tax_buy": 0,
+    "exchange": 306.99,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BSE",
+   "segment": "DELIVERY",
+   "underlying": "group:A",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE equity notice 20221109-7 (group A/B); the current group-wise schedule was not confirmed; IPFT not published in the sources and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 10000,
+    "exchange": 375,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "BSE",
+   "segment": "INTRADAY",
+   "underlying": "group:A",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE equity notice 20221109-7 (group A/B); the current group-wise schedule was not confirmed; IPFT not published in the sources and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2500,
+    "tax_buy": 0,
+    "exchange": 375,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BSE",
+   "segment": "DELIVERY",
+   "underlying": "group:B",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE equity notice 20221109-7 (group A/B); the current group-wise schedule was not confirmed; IPFT not published in the sources and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 10000,
+    "exchange": 375,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "BSE",
+   "segment": "INTRADAY",
+   "underlying": "group:B",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE equity notice 20221109-7 (group A/B); the current group-wise schedule was not confirmed; IPFT not published in the sources and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2500,
+    "tax_buy": 0,
+    "exchange": 375,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-03-01",
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2000,
+    "tax_buy": 0,
+    "exchange": 173,
+    "ipft": 10,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-03-01",
+   "base": "premium",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 3503,
+    "ipft": 50,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-03-01",
+   "effective_until": "2026-04-01",
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2000,
+    "tax_buy": 0,
+    "exchange": 182.99,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-03-01",
+   "effective_until": "2026-04-01",
+   "base": "premium",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 3552,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 5000,
+    "tax_buy": 0,
+    "exchange": 182.99,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "confirmed",
+   "source": "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI true-to-label structure from 2024-10-01",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 3552,
+    "ipft": 0.01,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "SETTLEMENT",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "intrinsic_value",
+   "status": "confirmed",
+   "source": "Finance Act 2026 (rates from 2026-04-01; Finance (No. 2) Act 2024 before) - https://www.incometaxindia.gov.in",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 12500,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 0,
+    "stamp_buy": 0
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "SETTLEMENT",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "intrinsic_value",
+   "status": "confirmed",
+   "source": "Finance Act 2026 (rates from 2026-04-01; Finance (No. 2) Act 2024 before) - https://www.incometaxindia.gov.in",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 0,
+    "stamp_buy": 0
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "SETTLEMENT",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "intrinsic_value",
+   "status": "confirmed",
+   "source": "Finance Act 2026 (rates from 2026-04-01; Finance (No. 2) Act 2024 before) - https://www.incometaxindia.gov.in",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 12500,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 0,
+    "stamp_buy": 0
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "SETTLEMENT",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "intrinsic_value",
+   "status": "confirmed",
+   "source": "Finance Act 2026 (rates from 2026-04-01; Finance (No. 2) Act 2024 before) - https://www.incometaxindia.gov.in",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 0,
+    "stamp_buy": 0
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2000,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 500,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "SENSEX",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 3250,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "BANKEX",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 3250,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "SENSEX50",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": "2026-04-01",
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 0,
+    "exchange": 500,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 5000,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 500,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "SENSEX",
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 3250,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "BANKEX",
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 3250,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "BFO",
+   "segment": "OPTIONS",
+   "underlying": "SENSEX50",
+   "event": "TRADE",
+   "effective_from": "2026-04-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "BSE notice 20240927-37 as reported by a secondary source (Sensex and Bankex options Rs 3,250/crore of premium, Sensex 50 and stock options Rs 500, futures nil); not confirmed to the notice; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 15000,
+    "tax_buy": 0,
+    "exchange": 500,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "CDS",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "NSE currency-derivatives true-to-label circular (Sep 2024) as reported (futures 0.00035%, options 0.0311% of premium); not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 35,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 10
+   }
+  },
+  {
+   "venue": "CDS",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "NSE currency-derivatives true-to-label circular (Sep 2024) as reported (futures 0.00035%, options 0.0311% of premium); not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 3110,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 10
+   }
+  },
+  {
+   "venue": "BCD",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "confirmed",
+   "source": "BSE Notice 20240927-36 (effective 2024-10-01)",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 45,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 10
+   }
+  },
+  {
+   "venue": "BCD",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "confirmed",
+   "source": "BSE Notice 20240927-36 (effective 2024-10-01)",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 100,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 10
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "CTT",
+    "tax_sell": 1000,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "CASTORSEED",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "COTTONCNDY",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "CPO",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "KAPAS",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "MENTHAOIL",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "FUTURES",
+   "underlying": "RUBBER",
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "turnover",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "NONE",
+    "tax_sell": 0,
+    "tax_buy": 0,
+    "exchange": 210,
+    "ipft": 0,
+    "sebi": 1,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "premium",
+   "status": "unverified",
+   "source": "MCX/F&A/631/2024 (2024-09-24) as reported (futures Rs 2.10 per lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not published and not charged",
+   "per_crore": {
+    "tax_kind": "CTT",
+    "tax_sell": 5000,
+    "tax_buy": 0,
+    "exchange": 4180,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
+   }
+  },
+  {
+   "venue": "MCX",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "SETTLEMENT",
+   "effective_from": "2024-10-01",
+   "effective_until": null,
+   "base": "intrinsic_value",
+   "status": "confirmed",
+   "source": "Commodities transaction tax, Finance Act 2013 section 117, agricultural commodities excluded - https://www.incometaxindia.gov.in",
+   "per_crore": {
+    "tax_kind": "CTT",
+    "tax_sell": 10,
+    "tax_buy": 0,
+    "exchange": 0,
+    "ipft": 0,
+    "sebi": 0,
+    "stamp_buy": 0
+   }
+  }
+ ]
+}

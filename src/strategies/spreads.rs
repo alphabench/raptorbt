@@ -42,7 +42,7 @@ impl SpreadBacktest {
     ///
     /// The fee model comes from `BacktestConfig::fee_model`, so setting
     /// `fee_segment` charges the itemized regulatory schedule -- per-order
-    /// brokerage included -- and leaving it unset keeps the flat `fees` rate.
+    /// brokerage excluded -- and leaving it unset keeps the flat `fees` rate.
     pub fn new(config: SpreadConfig) -> Self {
         Self { config }
     }
@@ -363,6 +363,7 @@ impl SpreadBacktest {
     /// Create an empty result (used for validation failures).
     fn empty_result(&self, n: usize) -> BacktestResult {
         BacktestResult {
+            unverified_fee_rows: Vec::new(),
             metrics: BacktestMetrics::default(),
             equity_curve: vec![self.config.base.initial_capital; n],
             drawdown_curve: vec![0.0; n],
@@ -373,6 +374,8 @@ impl SpreadBacktest {
             orders: Vec::new(),
             halted: false,
             halted_at: None,
+            rejected_entries: 0,
+            unfunded_entries: 0,
         }
     }
 }

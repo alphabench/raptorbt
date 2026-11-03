@@ -106,6 +106,8 @@ pub struct InstrumentOutcome {
     pub trades: usize,
     pub pnl: f64,
     pub rejected_entries: usize,
+    /// Entries the account could not fund (see `RejectReason::is_unfunded`).
+    pub unfunded_entries: usize,
 }
 
 /// Everything a finished session reports.
@@ -115,6 +117,10 @@ pub struct SessionOutcome {
     pub instruments: Vec<InstrumentOutcome>,
     /// Entries refused across all instruments, summed over their risk gates.
     pub rejected_entries: usize,
+    /// Entries refused for want of capital or margin, or sized to nothing,
+    /// across all instruments. Not in `rejected_entries`, which counts risk
+    /// limits.
+    pub unfunded_entries: usize,
     /// Whether a margin call or a drawdown kill-switch latched.
     pub halted: bool,
     /// Where the halt latched, as a **schedule-event ordinal** — the session
@@ -495,6 +501,12 @@ impl EventSession {
         policy: crate::instruments::AdjustmentPolicy,
     ) -> crate::core::Result<()> {
         self.book.set_corporate_actions(actions, policy)
+    }
+
+    /// Link working orders on distinct instruments into one atomic group:
+    /// they fill together or not at all; see [`PortfolioBook::link_group`].
+    pub fn link_group(&mut self, legs: &[(usize, u64)]) -> Result<u64, String> {
+        self.book.link_group(legs)
     }
 
     /// The registered symbols, in instrument order.

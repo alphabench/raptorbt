@@ -25,36 +25,52 @@ pub const LEGACY_CALMAR_DAYS: f64 = 365.25;
 /// series rather than a continuous one.
 const TRADING_DAYS: f64 = 252.0;
 
-/// Default session length in minutes: NSE equity, 09:15-15:30.
-///
-/// Only a default. MCX runs 09:00-23:30 (870 minutes), so a hardcoded NSE
-/// session would understate MCX intraday Sharpe by roughly sqrt(870/375) ~ 1.5x.
-/// Callers pass the real session length via [`SessionSpec`].
-pub const DEFAULT_SESSION_MINUTES: f64 = 375.0;
-
 /// How an intraday series maps onto trading time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SessionSpec {
     /// Session-based market: `minutes` of trading per session, 252 sessions/year.
     Session { minutes: f64 },
-    /// Continuously traded market (24x7): annualize on calendar time.
+    /// Continuously traded market (24x7), named as such: annualize on calendar time.
     Continuous,
+    /// No session named: the trading day is what the data shows. Periods per
+    /// year are the median number of observations per local day (the day cut at
+    /// `tz_offset_ns`) times 252 sessions. Nights and weekends add no periods.
+    Inferred { tz_offset_ns: i64 },
 }
 
+/// No session is assumed: the data says how many observations a trading day has.
 impl Default for SessionSpec {
     fn default() -> Self {
-        SessionSpec::Session { minutes: DEFAULT_SESSION_MINUTES }
+        SessionSpec::Inferred { tz_offset_ns: 0 }
     }
 }
 
-impl SessionSpec {
-    /// Session length in nanoseconds, or `None` when continuous.
-    fn session_nanos(&self) -> Option<f64> {
-        match self {
-            SessionSpec::Session { minutes } if *minutes > 0.0 => Some(minutes * 60.0 * 1e9),
-            _ => None,
+/// Median number of observations per local day over the days that have any.
+fn median_observations_per_day(timestamps: &[i64], tz_offset_ns: i64) -> Option<f64> {
+    const DAY_NANOS: i64 = 24 * 60 * 60 * 1_000_000_000;
+    let mut counts: Vec<u32> = Vec::new();
+    let mut current: Option<i64> = None;
+    for &t in timestamps {
+        let day = (t + tz_offset_ns).div_euclid(DAY_NANOS);
+        if current == Some(day) {
+            if let Some(last) = counts.last_mut() {
+                *last += 1;
+            }
+        } else {
+            current = Some(day);
+            counts.push(1);
         }
     }
+    if counts.is_empty() {
+        return None;
+    }
+    counts.sort_unstable();
+    let mid = counts.len() / 2;
+    Some(if counts.len().is_multiple_of(2) {
+        (f64::from(counts[mid - 1]) + f64::from(counts[mid])) / 2.0
+    } else {
+        f64::from(counts[mid])
+    })
 }
 
 /// Median spacing between consecutive timestamps, in nanoseconds.
@@ -84,7 +100,8 @@ pub fn median_spacing_nanos(timestamps: &[i64]) -> Option<f64> {
     Some(median)
 }
 
-/// Infer periods per year from bar timestamps, assuming the default NSE session.
+/// Infer periods per year from bar timestamps, assuming no session: the data's
+/// own trading day (see [`SessionSpec::Inferred`]).
 pub fn infer_periods_per_year(timestamps: &[i64]) -> Option<f64> {
     infer_periods_per_year_with_session(timestamps, SessionSpec::default())
 }
@@ -113,14 +130,18 @@ pub fn infer_periods_per_year_with_session(
         return Some(NANOS_PER_YEAR / spacing);
     }
 
-    match session.session_nanos() {
+    match session {
         // Intraday on a session market: bars per session times sessions per year.
-        Some(session_nanos) => {
-            let bars_per_session = (session_nanos / spacing).max(1.0);
+        SessionSpec::Session { minutes } if minutes > 0.0 => {
+            let bars_per_session = (minutes * 60.0 * 1e9 / spacing).max(1.0);
             Some(bars_per_session * TRADING_DAYS)
         }
-        // Continuous market: every bar counts against calendar time.
-        None => Some(NANOS_PER_YEAR / spacing),
+        // The data's own trading day: observations per day times sessions per year.
+        SessionSpec::Inferred { tz_offset_ns } => {
+            median_observations_per_day(timestamps, tz_offset_ns).map(|n| n * TRADING_DAYS)
+        }
+        // Continuous market, named: every bar counts against calendar time.
+        SessionSpec::Session { .. } | SessionSpec::Continuous => Some(NANOS_PER_YEAR / spacing),
     }
 }
 
@@ -184,8 +205,30 @@ mod tests {
     fn one_minute_bars_use_session_count() {
         // NSE: 375 bars/session * 252 sessions = 94_500.
         let ts: Vec<i64> = (0..1000).map(|i| i * MIN).collect();
-        let ppy = infer_periods_per_year(&ts).unwrap();
+        let ppy = infer_periods_per_year_with_session(&ts, SessionSpec::Session { minutes: 375.0 })
+            .unwrap();
         assert!((ppy - 94_500.0).abs() < 100.0, "expected ~94500, got {ppy}");
+    }
+
+    #[test]
+    fn with_no_session_given_the_trading_day_is_what_the_data_shows() {
+        // Five days of 375 one-minute bars, with nights and a weekend between them:
+        // 375 observations a day times 252 days, as a 375-minute session would give.
+        let mut ts = Vec::new();
+        for day in [0, 1, 2, 3, 6] {
+            ts.extend((0..375).map(|i| day * DAY + 9 * 60 * MIN + i * MIN));
+        }
+        let ppy = infer_periods_per_year(&ts).unwrap();
+        assert_eq!(ppy, 375.0 * 252.0);
+        assert_eq!(SessionSpec::default(), SessionSpec::Inferred { tz_offset_ns: 0 });
+        // The same bars named as an NSE session, or as the data's own day, agree.
+        let named =
+            infer_periods_per_year_with_session(&ts, SessionSpec::Session { minutes: 375.0 })
+                .unwrap();
+        assert_eq!(named, ppy);
+        // Only a market named continuous counts nights and weekends.
+        let continuous = infer_periods_per_year_with_session(&ts, SessionSpec::Continuous).unwrap();
+        assert_eq!(continuous, 525_600.0);
     }
 
     #[test]

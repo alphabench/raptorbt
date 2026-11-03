@@ -150,7 +150,8 @@ def _exits(res):
 @pytest.mark.parametrize("runner", ["single", "shared", "portfolio", "array"])
 def test_squareoff_time_closes_the_position_in_every_runner(runner):
     d = _session_day()
-    config = BacktestConfig(fees=0.0, squareoff_time="15:25")
+    # The day is UTC clock time: name the zone, as a squareoff_time needs one.
+    config = BacktestConfig(fees=0.0, squareoff_time="15:25", session_tz_offset_ns=0)
     if runner == "single":
         res = run_strategy_backtest(BuysAt(2), **d, symbol="S", config=config, bar_stamp="close")
     elif runner == "shared":
@@ -171,7 +172,8 @@ def test_squareoff_time_closes_the_position_in_every_runner(runner):
 def test_squareoff_time_refuses_a_second_entry_the_same_day():
     s = BuysAt(2, 30)
     run_strategy_backtest(
-        s, **_session_day(), symbol="S", config=BacktestConfig(fees=0.0, squareoff_time="15:25"),
+        s, **_session_day(), symbol="S",
+        config=BacktestConfig(fees=0.0, squareoff_time="15:25", session_tz_offset_ns=0),
         bar_stamp="close",
     )
     assert s.rejected == [(30, "squareoff")]

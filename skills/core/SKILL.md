@@ -59,10 +59,11 @@ The settings you will touch most (all keyword arguments of `BacktestConfig`):
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `initial_capital` | `100000.0` | Starting cash, in your account currency. |
-| `fees` | `0.001` | Flat fee as a fraction of traded value. Use `fee_segment` or `fee_schedule` for itemized exchange charges (execution skill). |
+| `fees` | `0.001` | Flat fee as a fraction of traded value. Use `fee_schedule` (priced per instrument) or `fee_segment` (one row for all) for itemized statutory charges (backtesting skill). |
 | `slippage` | `0.0` | Fraction of price, applied when `apply_slippage` is true. |
 | `fill_timing` | `None` (means `same_bar_close`) | `"same_bar_close"`, `"next_bar_open"`; `"same_bar_open_lookahead"` exists only to reproduce old results and is not causally valid. |
-| `session_minutes` | `None` (NSE) | Trading minutes per session, for annualising intraday statistics. |
+| `session_minutes` | `None` (no session) | Trading minutes per session, for annualising intraday statistics. With none, intraday bars count against calendar time; name the session of a session market (`SESSION_NSE`, `SESSION_MCX`, ...). |
+| `session_tz_offset_ns` | `None` (no zone named) | UTC offset of the session's local time: the zone of a trading day, DAY expiry and `squareoff_time`. `IST_OFFSET_NS`, or `0` for UTC. |
 | `periods_per_year` | `None` | Explicit annualisation factor; `None` infers it from bar spacing. |
 | `max_positions`, `max_drawdown_pct` | `None` | Optional limits; `None` is off. See the risk skill. |
 

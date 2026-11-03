@@ -35,6 +35,8 @@ pub struct OrderSpec {
     pub limit_offset: f64,
     pub post_only: bool,
     pub reduce_only: bool,
+    /// Under hedging, the position the order closes (see `OrderRequest::position_id`).
+    pub position_id: Option<u64>,
     /// Labels the strategy put on the order; they reach the venue request's
     /// `tags` (bounded, see [`MAX_TAGS`]). The engine's own `client_id` tag
     /// is reserved.
@@ -192,6 +194,10 @@ pub trait Target {
         client_id: &str,
         parent: Option<u64>,
     ) -> Result<u64, Self::Error>;
+    /// Refuse an order whose terms are off the instrument's lot or tick grid.
+    /// Run over every command of a batch before any is sent, so a bracket
+    /// whose legs are off the grid never leaves its entry working.
+    fn check_terms(&mut self, instrument: usize, spec: &OrderSpec) -> Result<(), Self::Error>;
     fn submit_twap(
         &mut self,
         instrument: usize,
@@ -307,6 +313,14 @@ impl CommandState {
         idx: usize,
         ts: i64,
     ) -> Result<(), T::Error> {
+        for command in &commands {
+            if let Command::Submit { order, symbol, .. } = command {
+                if let Order::Plain(spec) = &**order {
+                    let instrument = target.instrument_of(symbol.as_deref(), current)?;
+                    target.check_terms(instrument, spec)?;
+                }
+            }
+        }
         for command in commands {
             match command {
                 Command::Submit { client_id, order, parent, symbol } => {
@@ -541,6 +555,9 @@ mod tests {
             self.log.push(format!("submit {client_id} on {instrument} @{idx} parent={parent:?}"));
             Ok(self.next)
         }
+        fn check_terms(&mut self, _instrument: usize, _spec: &OrderSpec) -> Result<(), String> {
+            Ok(())
+        }
         fn submit_twap(
             &mut self,
             instrument: usize,
@@ -608,7 +625,7 @@ mod tests {
             size_frac: None,
             limit_price: None,
             trigger_price: None,
-            tif: "gtc".into(),
+            tif: "auto".into(),
             expire_ns: None,
             stop_price: None,
             target_price: None,
@@ -617,6 +634,7 @@ mod tests {
             limit_offset: 0.0,
             post_only: false,
             reduce_only: false,
+            position_id: None,
             tags: Default::default(),
         }
     }

@@ -30,7 +30,7 @@
 use serde_json::{json, Map, Value};
 
 use super::rates::{BrokeragePer, DayFee, DaySide, FeeRates, GstBase, Rounding, TaxKind};
-use super::schedule::{FeeRow, FeeSchedule, FeeSegment};
+use super::schedule::{FeeRow, FeeSchedule, FeeSegment, RowMeta};
 use crate::core::error::{RaptorError, Result};
 
 const MINUTE_NS: i64 = 60_000_000_000;
@@ -385,7 +385,15 @@ impl RateCard {
             day_fee,
             rounding,
         };
-        Ok(FeeRow { venue, segment, underlying, settlement, effective_from: effective_ns, rates })
+        Ok(FeeRow {
+            venue,
+            segment,
+            underlying,
+            settlement,
+            effective_from: effective_ns,
+            rates,
+            meta: RowMeta::default(),
+        })
     }
 
     /// The card as a schedule, named after it.
@@ -415,9 +423,24 @@ impl RateCard {
 
 impl FeeSchedule {
     /// The schedule as a rate card document, for rows that share one
-    /// effective date text.
+    /// effective date text. A schedule with several dated rows for one venue
+    /// and segment cannot be one card (the dates would be lost and the rows
+    /// would tie): write it as the cards [`FeeSchedule::in_force_at`] gives
+    /// for each date.
     pub fn to_card_json(&self, effective_from: &str) -> Result<String> {
         let effective_ns = parse_rfc3339_ns(effective_from)?;
+        let mut keys: Vec<_> =
+            self.rows.iter().map(|r| (&r.venue, r.segment, &r.underlying, r.settlement)).collect();
+        keys.sort();
+        let total = keys.len();
+        keys.dedup();
+        if keys.len() < total {
+            return Err(refuse(format!(
+                "schedule {:?} has several rows (different dates) for one venue and segment, \
+                 which one card cannot carry: write FeeSchedule.in_force_at(date) for each date",
+                self.name
+            )));
+        }
         let rows = self
             .rows
             .iter()

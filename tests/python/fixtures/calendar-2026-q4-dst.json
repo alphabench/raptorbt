@@ -1,0 +1,74 @@
+{
+ "name": "calendar-2026-q4-dst",
+ "utc_offset": "+05:30",
+ "valid_from": "2026-09-28",
+ "valid_to": "2026-11-01",
+ "source": "Commodity close at 23:30 from 2026-03-09 until US daylight saving ends on 2026-11-01 (exchange circular MCX/TRD/068/2026); the later-loaded document answers for the dates it covers.",
+ "sessions": {
+  "NSE": {
+   "open": "09:15",
+   "close": "15:30"
+  },
+  "BSE": {
+   "open": "09:15",
+   "close": "15:30"
+  },
+  "NFO": {
+   "open": "09:15",
+   "close": "15:40"
+  },
+  "BFO": {
+   "open": "09:15",
+   "close": "15:40"
+  },
+  "CDS": {
+   "open": "09:00",
+   "close": "17:00"
+  },
+  "BCD": {
+   "open": "09:00",
+   "close": "17:00"
+  },
+  "MCX": {
+   "open": "09:00",
+   "close": "23:30"
+  }
+ },
+ "holidays": [
+  {
+   "date": "2026-10-02",
+   "name": "Mahatma Gandhi Jayanti",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  },
+  {
+   "date": "2026-10-20",
+   "name": "Dussehra",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  }
+ ],
+ "overrides": [
+  {
+   "venue": "MCX",
+   "date": "2026-10-20",
+   "name": "Dussehra evening session",
+   "open": "17:00",
+   "close": "23:30"
+  }
+ ]
+}

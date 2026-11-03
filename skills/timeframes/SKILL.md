@@ -223,7 +223,11 @@ assert right["close"].tolist() == [101.0, 102.0]        # the edge print closes 
 - Daily and longer bars follow a symbol's calendar when you give
   `BarAggregator(..., session=SessionSchedule)`; the schedule's holidays and
   weekends are skipped and the day is cut at the schedule's own midnight:
-  [instruments](../instruments/SKILL.md).
+  [instruments](../instruments/SKILL.md). Intraday bars of an instrument that
+  has a schedule start at its session open, as a venue's own candles do (30
+  minute bars of 09:15 are 09:15-09:45, ...) and the last bar of a window ends
+  at its close (the 15:15 hourly bar is cut at 15:30); without a schedule they
+  are cut on the clock grid of the zone given.
 - Bars from ticks with signed flow: `raptorbt.bars_from_ticks`
   ([market-data](../market-data/SKILL.md)).
 

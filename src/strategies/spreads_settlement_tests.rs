@@ -144,9 +144,8 @@ fn settling_a_leg_does_not_move_equity() {
 /// A dead leg is never sold, so it owes nothing on the way out.
 ///
 /// The near leg expired; the far leg was genuinely traded out on a signal
-/// and owes real brokerage. With the itemized schedule at 20 per order,
-/// that is two entry orders and one exit order -- 60, not the 80 a
-/// whole-position exit would bill.
+/// and owes the exit-side tax; the settled leg owes none. (Brokerage per
+/// order comes from a broker's card and is proved in the Python tests.)
 #[test]
 fn a_settled_leg_pays_no_exit_cost_when_the_survivor_is_traded_out() {
     let result = calendar(&[near_leg(0.0), far_leg(100.0)], Some(25), Some("NFO-OPT"));
@@ -156,11 +155,8 @@ fn a_settled_leg_pays_no_exit_cost_when_the_survivor_is_traded_out() {
     assert!(trade.exit_fees > 0.0, "the surviving leg placed a real order");
 
     let breakdown = trade.fee_breakdown.expect("itemized schedule was configured");
-    assert!(
-        (breakdown.brokerage - 60.0).abs() < 1e-9,
-        "two entry orders and one exit order at 20 each; got {}",
-        breakdown.brokerage
-    );
+    assert_eq!(breakdown.brokerage, 0.0, "a built-in row carries no brokerage");
+    assert!(breakdown.stt > 0.0, "the traded-out leg pays the transaction tax");
 }
 
 /// The reported costs still add up after a leg has settled.

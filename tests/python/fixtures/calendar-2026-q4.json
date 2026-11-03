@@ -1,0 +1,127 @@
+{
+ "name": "calendar-2026-q4",
+ "utc_offset": "+05:30",
+ "valid_from": "2026-09-28",
+ "valid_to": "2026-12-31",
+ "source": "Sessions from the exchanges' notified hours (closing auction session live since 2026-08-03; equity derivatives to 15:40; currency 09:00-17:00; commodities 09:00-23:55). Holidays and evening-session overrides are the caller's own data; the crate ships none.",
+ "sessions": {
+  "NSE": {
+   "open": "09:15",
+   "close": "15:30"
+  },
+  "BSE": {
+   "open": "09:15",
+   "close": "15:30"
+  },
+  "NFO": {
+   "open": "09:15",
+   "close": "15:40"
+  },
+  "BFO": {
+   "open": "09:15",
+   "close": "15:40"
+  },
+  "CDS": {
+   "open": "09:00",
+   "close": "17:00"
+  },
+  "BCD": {
+   "open": "09:00",
+   "close": "17:00"
+  },
+  "MCX": {
+   "open": "09:00",
+   "close": "23:55"
+  }
+ },
+ "holidays": [
+  {
+   "date": "2026-10-02",
+   "name": "Mahatma Gandhi Jayanti",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  },
+  {
+   "date": "2026-10-20",
+   "name": "Dussehra",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  },
+  {
+   "date": "2026-11-10",
+   "name": "Diwali-Balipratipada",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  },
+  {
+   "date": "2026-11-24",
+   "name": "Prakash Gurpurb Sri Guru Nanak Dev",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  },
+  {
+   "date": "2026-12-25",
+   "name": "Christmas",
+   "venues": [
+    "NSE",
+    "BSE",
+    "NFO",
+    "BFO",
+    "CDS",
+    "BCD",
+    "MCX"
+   ]
+  }
+ ],
+ "overrides": [
+  {
+   "venue": "MCX",
+   "date": "2026-10-20",
+   "name": "Dussehra evening session",
+   "open": "17:00",
+   "close": "23:55"
+  },
+  {
+   "venue": "MCX",
+   "date": "2026-11-10",
+   "name": "Diwali-Balipratipada evening session",
+   "open": "17:00",
+   "close": "23:55"
+  },
+  {
+   "venue": "MCX",
+   "date": "2026-11-24",
+   "name": "Guru Nanak Jayanti evening session",
+   "open": "17:00",
+   "close": "23:55"
+  }
+ ]
+}

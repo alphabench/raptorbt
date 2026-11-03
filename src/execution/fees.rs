@@ -1,24 +1,112 @@
 //! Fee calculation models.
 
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::core::types::{Direction, Price};
 use crate::execution::costs::{FeeBreakdown, FeeRates, FeeSchedule, FeeSegment};
 use crate::execution::indian_costs::Segment;
+use crate::instruments::{InstrumentKind, InstrumentSpec};
 
 /// No trading date has paid the per-day fee yet.
 const NO_DAY: i64 = i64::MIN;
 
 const DAY_NS: i64 = 86_400_000_000_000;
 
-/// The schedule, venue and segment a run is priced on; the kernels each build
-/// their [`DatedFees`] from it.
+/// The schedule a run is priced on, and optionally the one row family that
+/// prices every instrument; the kernels each build their [`DatedFees`] from
+/// it.
+///
+/// With `fixed` set, every instrument is priced on that venue and segment
+/// (an explicit override). Without it each instrument picks its own row from
+/// its venue and kind ([`fee_row_for`]): a future is never charged the
+/// option row.
 #[derive(Debug, Clone)]
 pub struct FeeBinding {
     pub schedule: Arc<FeeSchedule>,
-    pub venue: String,
-    pub segment: FeeSegment,
+    pub fixed: Option<(String, FeeSegment)>,
+}
+
+impl FeeBinding {
+    /// The unverified rows of the fixed venue and segment whose dates overlap
+    /// `first_ts..=last_ts` (UTC ns), for runners that price one row and keep
+    /// no per-fill record of which rows they used.
+    pub fn unverified_between(&self, first_ts: i64, last_ts: i64) -> Vec<String> {
+        let Some((venue, segment)) = &self.fixed else { return Vec::new() };
+        let mut out: Vec<String> = self
+            .schedule
+            .rows
+            .iter()
+            .filter(|r| {
+                &r.venue == venue
+                    && r.segment == *segment
+                    && !r.settlement
+                    && r.meta.status == crate::execution::costs::RowStatus::Unverified
+                    && r.effective_from <= last_ts
+                    && r.meta.effective_until.is_none_or(|u| u > first_ts)
+            })
+            .map(|r| r.label())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// The venue and fee segment an instrument is priced on: its venue, and by
+/// kind a future (a contract), an option, or cash equity. Cash is priced as
+/// delivery unless `intraday`, which a run sets when its positions are
+/// squared off the same day. Errors name what the instrument lacks.
+pub fn fee_row_for(
+    spec: &InstrumentSpec,
+    intraday: bool,
+    schedule: &FeeSchedule,
+) -> Result<(String, FeeSegment, Option<String>), String> {
+    let venue = spec.venue.clone().ok_or_else(|| {
+        format!(
+            "instrument {:?} has no venue, so no fee row can be chosen for it: give the \
+             InstrumentSpec a venue (\"NSE\", \"NFO\", \"MCX\", ...) or set fee_segment",
+            spec.symbol
+        )
+    })?;
+    let venue = venue.to_ascii_uppercase();
+    let segment = match &spec.kind {
+        InstrumentKind::Option { .. } => FeeSegment::Options,
+        InstrumentKind::Contract { .. } => FeeSegment::Futures,
+        InstrumentKind::Cash | InstrumentKind::CurrencyPair if intraday => FeeSegment::Intraday,
+        InstrumentKind::Cash | InstrumentKind::CurrencyPair => FeeSegment::Delivery,
+        InstrumentKind::Index => {
+            return Err(format!("instrument {:?} is an index and is not traded", spec.symbol))
+        }
+    };
+    // Rows keyed by scrip group (BSE cash) need the instrument's group, never an assumed one.
+    let groups: Vec<&str> = schedule
+        .rows
+        .iter()
+        .filter(|r| r.venue == venue && r.segment == segment)
+        .filter_map(|r| r.underlying.as_deref()?.strip_prefix("group:"))
+        .collect();
+    if groups.is_empty() {
+        return Ok((venue, segment, None));
+    }
+    let mut groups = groups;
+    groups.sort_unstable();
+    groups.dedup();
+    match spec.scrip_group.as_deref().map(str::to_ascii_uppercase) {
+        Some(g) if groups.contains(&g.as_str()) => Ok((venue, segment, Some(format!("group:{g}")))),
+        Some(g) => Err(format!(
+            "instrument {:?}: {venue} charges are not known for scrip group {g:?}; the groups priced are {}",
+            spec.symbol,
+            groups.join(", ")
+        )),
+        None => Err(format!(
+            "instrument {:?}: {venue} charges depend on the scrip group; set the InstrumentSpec \
+             scrip_group to one of {}",
+            spec.symbol,
+            groups.join(", ")
+        )),
+    }
 }
 
 /// A fee schedule bound to the venue, segment and underlying of one
@@ -39,12 +127,35 @@ pub struct DatedFees {
     pub underlying: Option<String>,
     /// UTC offset (ns) that puts a timestamp on the venue's trading date.
     pub tz_offset_ns: i64,
+    /// The row family is chosen from the instrument, not fixed by the run.
+    per_instrument: bool,
+    /// Why no row could be chosen for the instrument, when none could.
+    unresolved: Option<String>,
+    /// The row key of the instrument's scrip group (`group:A`), for the delivery of
+    /// the stock a BSE stock derivative settles in.
+    scrip_group: Option<String>,
     current: FeeRates,
     /// Trading date of the step in progress.
     day: i64,
     /// Trading date that last paid the per-day fee.
     paid_day: AtomicI64,
+    /// The order whose fills are being booked (id + 1; 0 for none), so a
+    /// brokerage a card charges per order is charged once over its fills.
+    order_key: AtomicU64,
+    /// What the fills of each order booked so far, by order id.
+    order_turnover: Mutex<HashMap<u64, f64>>,
+    /// The value of the charge computed last, which booking adds to the order.
+    last_value: AtomicU64,
+    /// For the most recent booked fills of an order: what its earlier fills
+    /// had traded when this one was booked, kept (up to [`RECENT_SLICES`]) so a
+    /// venue simulation pricing the same fill afterwards charges it the same.
+    slices: Mutex<VecDeque<(u64, f64)>>,
+    /// Labels of the rows without an official source this model priced fills on.
+    unverified: Mutex<BTreeSet<String>>,
 }
+
+/// How many booked fills' order context is kept for [`FeeModel::take_slice_before`].
+const RECENT_SLICES: usize = 4096;
 
 impl Clone for DatedFees {
     fn clone(&self) -> Self {
@@ -54,9 +165,17 @@ impl Clone for DatedFees {
             segment: self.segment,
             underlying: self.underlying.clone(),
             tz_offset_ns: self.tz_offset_ns,
+            per_instrument: self.per_instrument,
+            unresolved: self.unresolved.clone(),
+            scrip_group: self.scrip_group.clone(),
             current: self.current,
             day: self.day,
             paid_day: AtomicI64::new(self.paid_day.load(Ordering::Relaxed)),
+            order_key: AtomicU64::new(self.order_key.load(Ordering::Relaxed)),
+            order_turnover: Mutex::new(self.turnover_map().clone()),
+            last_value: AtomicU64::new(self.last_value.load(Ordering::Relaxed)),
+            slices: Mutex::new(self.slice_log().clone()),
+            unverified: Mutex::new(self.unverified_set().clone()),
         }
     }
 }
@@ -77,10 +196,95 @@ impl DatedFees {
             segment,
             underlying: None,
             tz_offset_ns,
+            per_instrument: false,
+            unresolved: None,
+            scrip_group: None,
             current,
             day: NO_DAY,
             paid_day: AtomicI64::new(NO_DAY),
+            order_key: AtomicU64::new(0),
+            order_turnover: Mutex::new(HashMap::new()),
+            last_value: AtomicU64::new(0),
+            slices: Mutex::new(VecDeque::new()),
+            unverified: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    /// A schedule whose row is chosen from each instrument it prices (see
+    /// [`DatedFees::bind_instrument`]). Charging before an instrument is
+    /// bound is a bug, not a free fill.
+    pub fn per_instrument(schedule: Arc<FeeSchedule>, tz_offset_ns: i64) -> Self {
+        Self {
+            schedule,
+            venue: String::new(),
+            segment: FeeSegment::Futures,
+            underlying: None,
+            tz_offset_ns,
+            per_instrument: true,
+            unresolved: Some("no instrument has been attached to the kernel".to_string()),
+            scrip_group: None,
+            current: FeeRates::ZERO,
+            day: NO_DAY,
+            paid_day: AtomicI64::new(NO_DAY),
+            order_key: AtomicU64::new(0),
+            order_turnover: Mutex::new(HashMap::new()),
+            last_value: AtomicU64::new(0),
+            slices: Mutex::new(VecDeque::new()),
+            unverified: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Choose the row family from the instrument (when the run did not fix
+    /// one), and the underlying for rows that name one. The error says why
+    /// no row fits; the model then refuses to charge.
+    pub fn bind_instrument(&mut self, spec: &InstrumentSpec, intraday: bool) -> Result<(), String> {
+        self.underlying = spec.underlying().map(str::to_owned);
+        self.scrip_group =
+            spec.scrip_group.as_ref().map(|g| format!("group:{}", g.to_ascii_uppercase()));
+        self.day = NO_DAY;
+        // A fill's row is the one in force on the venue's own trading date.
+        if let Some(session) = &spec.session {
+            self.tz_offset_ns = session.tz_offset_ns();
+        }
+        if !self.per_instrument {
+            if let Some(r) = self.rates_at(i64::MAX) {
+                self.current = r;
+            }
+            return Ok(());
+        }
+        let resolved =
+            fee_row_for(spec, intraday, &self.schedule).and_then(|(venue, segment, group)| {
+                if group.is_some() {
+                    self.underlying = group;
+                }
+                self.schedule
+                    .row_for(&venue, segment, self.underlying.as_deref(), i64::MAX, false)
+                    .map(|row| (venue, segment, row.rates))
+                    .map_err(|e| format!("instrument {:?}: {e}", spec.symbol))
+            });
+        match resolved {
+            Ok((venue, segment, rates)) => {
+                self.venue = venue;
+                self.segment = segment;
+                self.current = rates;
+                self.unresolved = None;
+                Ok(())
+            }
+            Err(why) => {
+                self.unresolved = Some(why.clone());
+                Err(why)
+            }
+        }
+    }
+
+    /// The charging rates; an unbound per-instrument model is a bug in the
+    /// caller (the bindings check each instrument when it is registered), so
+    /// it stops with the reason instead of charging nothing.
+    fn rates(&self) -> &FeeRates {
+        if let Some(why) = &self.unresolved {
+            panic!("fee schedule {:?} cannot price this instrument: {why}", self.schedule.name);
+        }
+        &self.current
     }
 
     /// The row in force at `ts` (UTC ns), for the bound underlying.
@@ -89,6 +293,23 @@ impl DatedFees {
             .row_for(&self.venue, self.segment, self.underlying.as_deref(), ts, false)
             .ok()
             .map(|r| r.rates)
+    }
+
+    /// [`DatedFees::rates_at`] for a trading date being priced: a row without
+    /// an official source is remembered as used.
+    fn rates_used_at(&self, ts: i64) -> Option<FeeRates> {
+        let row = self
+            .schedule
+            .row_for(&self.venue, self.segment, self.underlying.as_deref(), ts, false)
+            .ok()?;
+        self.note_used(row);
+        Some(row.rates)
+    }
+
+    fn note_used(&self, row: &crate::execution::costs::FeeRow) {
+        if row.meta.status == crate::execution::costs::RowStatus::Unverified {
+            self.unverified_set().insert(row.label());
+        }
     }
 
     /// The start of the venue's trading date containing `ts`, in UTC ns:
@@ -105,10 +326,36 @@ impl DatedFees {
         if day == self.day {
             return;
         }
-        if let Some(r) = self.rates_at(self.day_start(ts)) {
-            self.current = r;
+        if self.unresolved.is_none() {
+            if let Some(r) = self.rates_used_at(self.day_start(ts)) {
+                self.current = r;
+            }
         }
         self.day = day;
+    }
+
+    /// What earlier fills of the order in progress traded.
+    fn order_before(&self) -> f64 {
+        match self.order_key.load(Ordering::Relaxed) {
+            0 => 0.0,
+            key => self.turnover_map().get(&key).copied().unwrap_or(0.0),
+        }
+    }
+
+    fn unverified_set(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.unverified.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn slice_log(&self) -> std::sync::MutexGuard<'_, VecDeque<(u64, f64)>> {
+        self.slices.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn turnover_map(&self) -> std::sync::MutexGuard<'_, HashMap<u64, f64>> {
+        self.order_turnover.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn remember(&self, value: f64) {
+        self.last_value.store(value.abs().to_bits(), Ordering::Relaxed);
     }
 
     fn day_fee_owed(&self) -> bool {
@@ -207,10 +454,17 @@ impl FeeModel {
                 segment.rates().charge(is_buy(_direction, true), trade_value).total()
             }
             FeeModel::Rates(rates) => rates.charge(is_buy(_direction, true), trade_value).total(),
-            FeeModel::Dated(d) => d
-                .current
-                .charge_fill(is_buy(_direction, true), trade_value, 0.0, d.day_fee_owed())
-                .total(),
+            FeeModel::Dated(d) => {
+                d.remember(trade_value);
+                d.rates()
+                    .charge_fill(
+                        is_buy(_direction, true),
+                        trade_value,
+                        d.order_before(),
+                        d.day_fee_owed(),
+                    )
+                    .total()
+            }
         }
     }
 
@@ -234,12 +488,15 @@ impl FeeModel {
             FeeModel::Rates(rates) => {
                 Some(rates.charge(is_buy(direction, is_entry), price * size.abs()))
             }
-            FeeModel::Dated(d) => Some(d.current.charge_fill(
-                is_buy(direction, is_entry),
-                (price * size).abs(),
-                0.0,
-                d.day_fee_owed(),
-            )),
+            FeeModel::Dated(d) => {
+                d.remember(price * size);
+                Some(d.rates().charge_fill(
+                    is_buy(direction, is_entry),
+                    (price * size).abs(),
+                    d.order_before(),
+                    d.day_fee_owed(),
+                ))
+            }
             _ => None,
         }
     }
@@ -252,15 +509,14 @@ impl FeeModel {
         }
     }
 
-    /// Name the underlying a dated model's rows are looked up for.
-    pub fn bind_underlying(&mut self, underlying: Option<&str>) {
-        if let FeeModel::Dated(d) = self {
-            d.underlying = underlying.map(str::to_owned);
-            if let Some(r) = d.rates_at(i64::MAX) {
-                d.current = r;
-            }
-            // the next step reads the row of its date for this underlying
-            d.day = NO_DAY;
+    /// Attach the instrument a dated model prices: its underlying for rows
+    /// that name one, and, when the run did not fix a row family, its venue
+    /// and kind. `intraday` says positions are squared off the same day (cash
+    /// equity is then priced as intraday). Other models ignore it.
+    pub fn bind_instrument(&mut self, spec: &InstrumentSpec, intraday: bool) -> Result<(), String> {
+        match self {
+            FeeModel::Dated(d) => d.bind_instrument(spec, intraday),
+            _ => Ok(()),
         }
     }
 
@@ -271,6 +527,89 @@ impl FeeModel {
             if b.dp_charge > 0.0 {
                 d.paid_day.store(d.day, Ordering::Relaxed);
             }
+            let key = d.order_key.load(Ordering::Relaxed);
+            if key != 0 {
+                let value = f64::from_bits(d.last_value.load(Ordering::Relaxed));
+                let mut map = d.turnover_map();
+                let before = map.get(&key).copied().unwrap_or(0.0);
+                map.insert(key, before + value);
+                let mut log = d.slice_log();
+                if log.len() >= RECENT_SLICES {
+                    log.pop_front();
+                }
+                log.push_back((key - 1, before));
+            }
+        }
+    }
+
+    /// The fills about to be booked belong to order `id`: a brokerage the
+    /// schedule charges per order is charged once over all of them. Call
+    /// [`FeeModel::end_order`] when they are booked. Other models ignore it.
+    pub fn begin_order(&self, id: u64) {
+        if let FeeModel::Dated(d) = self {
+            d.order_key.store(id + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// The fills of the order are booked. `live` says which orders can still
+    /// fill; the turnover kept for any other order is dropped, so the memory
+    /// held is bounded by the orders working with a partial fill.
+    pub fn end_order(&self, live: impl Fn(u64) -> bool) {
+        if let FeeModel::Dated(d) = self {
+            d.order_key.store(0, Ordering::Relaxed);
+            d.turnover_map().retain(|key, _| live(key - 1));
+        }
+    }
+
+    /// What the earlier fills of `id` had traded when its oldest unpriced
+    /// booked fill was booked (0 for none), consumed. A venue simulation that
+    /// prices a fill after the kernel booked it uses this so its fee is the
+    /// booked one, brokerage per order and all.
+    pub fn take_slice_before(&self, id: u64) -> f64 {
+        let FeeModel::Dated(d) = self else { return 0.0 };
+        let mut log = d.slice_log();
+        match log.iter().position(|(order, _)| *order == id) {
+            Some(at) => log.remove(at).map_or(0.0, |(_, before)| before),
+            None => 0.0,
+        }
+    }
+
+    /// Itemised costs as [`FeeModel::breakdown`], for a fill whose order had
+    /// already traded `order_before` (see [`FeeModel::take_slice_before`]).
+    pub fn breakdown_after(
+        &self,
+        order_before: f64,
+        price: Price,
+        size: f64,
+        direction: Direction,
+        is_entry: bool,
+    ) -> Option<FeeBreakdown> {
+        match self {
+            FeeModel::Dated(d) => Some(d.rates().charge_fill(
+                is_buy(direction, is_entry),
+                (price * size).abs(),
+                order_before,
+                d.day_fee_owed(),
+            )),
+            _ => self.breakdown(price, size, direction, is_entry),
+        }
+    }
+
+    /// The labels (`VENUE:SEGMENT[:KEY]`) of the unverified rows fills were
+    /// priced on, sorted.
+    pub fn unverified_rows(&self) -> Vec<String> {
+        match self {
+            FeeModel::Dated(d) => d.unverified_set().iter().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Orders whose turnover is being kept (for tests of the bound).
+    #[cfg(test)]
+    pub(crate) fn tracked_orders(&self) -> (usize, usize) {
+        match self {
+            FeeModel::Dated(d) => (d.turnover_map().len(), d.slice_log().len()),
+            _ => (0, 0),
         }
     }
 
@@ -287,9 +626,65 @@ impl FeeModel {
         ts: i64,
     ) -> Option<FeeBreakdown> {
         let FeeModel::Dated(d) = self else { return None };
+        if d.unresolved.is_some() {
+            return None;
+        }
         let row =
             d.schedule.row_for(&d.venue, d.segment, d.underlying.as_deref(), ts, true).ok()?;
+        d.note_used(row);
         Some(row.rates.charge_fill(is_buy(direction, false), (price * size).abs(), 0.0, false))
+    }
+
+    /// The charge on taking or giving physical delivery of the underlying
+    /// stock of a stock future or an exercised stock option, as the delivery
+    /// leg of its own: the cash market's delivery rates (STT on both sides,
+    /// stamp duty on the buyer), whatever segment the derivative is priced in,
+    /// so the derivative's trade STT is not stacked on it. `price` is the
+    /// delivery value per unit (times the multiplier); `receives` is true when
+    /// the stock is taken in (a buy). `None` when the model is not an exchange
+    /// schedule, in which case the caller prices the leg as any fill. A dated
+    /// schedule with no delivery row for the instrument stops with the reason. The
+    /// depository charge, owed when delivered stock is later sold, is not part
+    /// of the delivery.
+    pub fn delivery_breakdown(
+        &self,
+        price: Price,
+        size: f64,
+        receives: bool,
+        ts: i64,
+    ) -> Option<FeeBreakdown> {
+        let value = (price * size).abs();
+        match self {
+            FeeModel::Dated(d) => {
+                let cash = match d.venue.as_str() {
+                    "NFO" => "NSE",
+                    "BFO" => "BSE",
+                    other => other,
+                };
+                // BSE cash charges depend on the scrip group, which the derivative's spec carries.
+                let key = if cash == "BSE" { d.scrip_group.as_deref() } else { None };
+                // A delivery that cannot be priced is never priced as something else: the
+                // bindings refuse such an instrument when it is registered (a physical
+                // derivative whose delivery row is missing or needs a scrip group), so a
+                // failure here is a broken invariant and stops with its reason.
+                let row = d
+                    .schedule
+                    .row_for(cash, FeeSegment::Delivery, key, ts, false)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "fee schedule {:?} cannot price a delivery on {cash}: {e}",
+                            d.schedule.name
+                        )
+                    });
+                d.note_used(row);
+                Some(row.rates.charge_fill(receives, value, 0.0, false))
+            }
+            FeeModel::Indian { .. } => {
+                let rates = Segment::EquityDelivery.rates();
+                Some(rates.charge_fill(receives, value, 0.0, false))
+            }
+            _ => None,
+        }
     }
 
     /// Fee for one side, honoring entry/exit asymmetry where the model has any.
@@ -385,9 +780,10 @@ mod tests {
         assert_eq!(exit.stamp_duty, 0.0);
         assert!(exit.stt > 0.0);
 
-        // Per-order brokerage lands on both sides.
-        assert_eq!(entry.brokerage, exit.brokerage);
-        assert!(entry.brokerage > 0.0);
+        // The exchange charge lands on both sides; a built-in row has no brokerage.
+        assert_eq!(entry.exchange_txn, exit.exchange_txn);
+        assert!(entry.exchange_txn > 0.0);
+        assert_eq!((entry.brokerage, exit.brokerage), (0.0, 0.0));
     }
 
     /// `calculate_side` returns the itemized total, or the flat fee when the
@@ -404,5 +800,80 @@ mod tests {
         let flat = FeeModel::percentage(0.001);
         assert!(flat.breakdown(100.0, 75.0, Direction::Long, true).is_none());
         assert_eq!(flat.calculate_side(100.0, 75.0, Direction::Long, true), 7.5);
+    }
+
+    /// The order bookkeeping is bounded: a long run of orders leaves only the
+    /// orders still working with a partial fill, and a fixed log of recent fills.
+    #[test]
+    fn the_order_bookkeeping_stays_bounded_over_a_long_run() {
+        use crate::execution::costs::{BrokeragePer, FeeRow};
+        let rates =
+            FeeRates { brokerage_flat: 20.0, brokerage_per: BrokeragePer::Order, ..FeeRates::ZERO };
+        let row = FeeRow {
+            venue: "NFO".into(),
+            segment: FeeSegment::Options,
+            underlying: None,
+            settlement: false,
+            effective_from: i64::MIN,
+            rates,
+            meta: Default::default(),
+        };
+        let schedule = Arc::new(FeeSchedule::new("t", "t", vec![row]));
+        let dated = DatedFees::new(schedule, "NFO".into(), FeeSegment::Options, 0).unwrap();
+        let model = FeeModel::Dated(Box::new(dated));
+        for id in 1..=50_000u64 {
+            model.begin_order(id);
+            let b = model.breakdown(100.0, 1.0, Direction::Long, true).unwrap();
+            model.note_booked(Some(&b));
+            // order 1 stays working with a partial fill; every other order completes
+            model.end_order(|live| live == 1);
+        }
+        let (orders, log) = model.tracked_orders();
+        assert_eq!(orders, 1, "only the order still working is tracked");
+        assert!(log <= RECENT_SLICES, "the fill log is capped, got {log}");
+    }
+
+    /// A brokerage a card charges per order is charged once over the order's
+    /// fills, however many slices, and again for the next order.
+    #[test]
+    fn per_order_brokerage_is_charged_once_over_an_orders_slices() {
+        use crate::execution::costs::{BrokeragePer, FeeRow};
+        let rates =
+            FeeRates { brokerage_flat: 20.0, brokerage_per: BrokeragePer::Order, ..FeeRates::ZERO };
+        let row = FeeRow {
+            venue: "NFO".into(),
+            segment: FeeSegment::Options,
+            underlying: None,
+            settlement: false,
+            effective_from: i64::MIN,
+            rates,
+            meta: Default::default(),
+        };
+        let schedule = Arc::new(FeeSchedule::new("t", "t", vec![row]));
+        let dated = DatedFees::new(schedule, "NFO".into(), FeeSegment::Options, 0).unwrap();
+        let model = FeeModel::Dated(Box::new(dated));
+        let slice = |m: &FeeModel| {
+            let b = m.breakdown(100.0, 10.0, Direction::Long, true).unwrap();
+            m.note_booked(Some(&b));
+            b.brokerage
+        };
+        let working = |id: u64| id == 7;
+        model.begin_order(7);
+        assert_eq!(slice(&model), 20.0);
+        model.end_order(working);
+        model.begin_order(7);
+        assert_eq!(slice(&model), 0.0, "the second slice of the same order owes none");
+        model.end_order(|_| false);
+        model.begin_order(8);
+        assert_eq!(slice(&model), 20.0, "the next order owes its own");
+        model.end_order(|_| false);
+        // a venue simulation pricing the booked fills afterwards gets the same fees
+        let priced = |before: f64| {
+            model.breakdown_after(before, 100.0, 10.0, Direction::Long, true).unwrap().brokerage
+        };
+        assert_eq!(priced(model.take_slice_before(7)), 20.0, "the first slice of order 7");
+        assert_eq!(priced(model.take_slice_before(7)), 0.0, "the second slice of order 7");
+        assert_eq!(priced(model.take_slice_before(8)), 20.0);
+        assert_eq!(model.breakdown(100.0, 10.0, Direction::Long, true).unwrap().brokerage, 20.0);
     }
 }

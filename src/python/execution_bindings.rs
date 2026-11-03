@@ -110,6 +110,12 @@ impl PyOrderRequest {
     fn tags(&self) -> BTreeMap<String, String> {
         self.0.tags.clone()
     }
+    /// Under hedging, the engine's id of the position this order closes; `None` for an
+    /// order that opens (and always on a netting account).
+    #[getter]
+    fn position_id(&self) -> Option<u64> {
+        self.0.position_id
+    }
     /// Event time (ns) of the decision.
     #[getter]
     fn submitted_ns(&self) -> i64 {

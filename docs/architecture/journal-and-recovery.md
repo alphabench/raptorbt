@@ -48,7 +48,7 @@ journal into a fresh node that must write the same records.
 | `annotation` | host | `node.annotate(ts, kind, detail)`; a `resend` |
 | `instrument_add` `instrument_retire` | host | an instrument added to or retired from the running node (the spec as JSON); replayed by `restore` |
 | `restatement` | engine | a correction or bust the book followed |
-| `unbooked_fill` | engine | a venue fill the order took and the book could not book yet |
+| `unbooked_fill` | engine | a venue fill the order took and the book could not book yet. At most 1024 are kept at once: the next one raises `venue_fill_not_booked` instead of joining a list nobody reads. They are tried again after every booking and every restatement (a bust or correction frees cash, margin and room) |
 | `order_resized` | engine | the engine cut a working order's units (a one-cancels-other sibling of a partly filled leg): `from`, `to` |
 | `rejection` | engine | the book refused an order or entry it had accepted from the strategy (`position_open`, a limit, sizing), or booked a venue fill past a limit (`event: fill_breach`): `event`, `reason`. A venue's own refusal is its `report` record: the reason and the client order id, whose terms are in the `adapter_request` written before the send |
 | `engine_exit` | engine | a position the engine closed by a rule of its own: `stop_loss`, `take_profit`, `trailing_stop`, `liquidation`, `time_exit`, `squareoff`; on a node with a venue the decision (`squareoff`, `watch_stop`, `watch_target`, `venue: true`) comes before the close order's `adapter_request` |
@@ -172,9 +172,23 @@ whose push raised reproduces the recorded `error` and does not call the adapter.
 **Takeover.** `LiveNode.restore(..., epoch=E+1)` replays the journal under the epoch it
 was written with (the epoch is the `epoch` record after `start`, not part of what a
 replay compares), then claims the new epoch with the venue (`fence(E+1)`, so the old node
-is fenced at its next request) and journals an `epoch` record. A restore without `epoch=`
-keeps the journal's; one with an older epoch raises `stale_epoch`. Host-supplied leases
-sit behind the adapter's `fence`.
+is fenced at its next request) and journals an `epoch` record. A journal that holds an epoch
+is restored only under a newer one: a restore without `epoch=` raises `epoch_required`, and
+one with the same or an older epoch raises `stale_epoch` (two nodes would otherwise hold one
+epoch, and neither fences the other). Host-supplied leases sit behind the adapter's `fence`:
+a `BrokerAdapter` built with `lease=` runs the lease check inside `fence(epoch)`, so a node
+that lost the lease is fenced by its next request or its `heartbeat()`, and the writes it had
+queued but not sent come back as `rejected` reports with the reason `fenced` instead of
+staying journaled as sent.
+
+**Working orders after a restart.** The replay runs with the adapter muted, so an adapter
+built after the restart has never seen the orders the node holds as working. After the replay
+the node hands them to `adapter.restore_orders(...)` (a `BrokerAdapter` has it): the adapter
+registers each with the node's own fill progress, finds it in the day's book by tag and terms,
+and binds the venue's id. Fills the venue made meanwhile then arrive as the difference from
+what the node booked, and a cancel reaches the order. An adapter that cannot account for one
+(its symbol is not mapped) refuses the restore (`adapter_cannot_adopt`). A venue row the
+adapter ignores raises an `ignored_update` event once per order and status.
 
 ## The adapter's namespace
 
@@ -196,7 +210,10 @@ execution again as restated (tested against a book that was given the restated f
 to begin with). Supported: an execution that opened or added to a position that has
 not been reduced since. Refused with `correction_not_reversible`, before anything
 changes: an exit (a trade was realised), or an entry whose position has since been
-reduced or closed. The strategy hears no event for a restatement (the journal has a
+reduced or closed. A fill that **reversed** a position (it reduced one and opened the other
+way) made two bookings; taking back only the opening would leave the reduction, so a
+correction or bust of it is refused too, whatever the policy. Under hedging a fill that
+names no position opens its own, so its bust is a single entry and is applied. The strategy hears no event for a restatement (the journal has a
 `restatement` record); it sees the restated position at its next event. Protective
 orders the venue holds for the original quantity are not resized: reconcile.
 

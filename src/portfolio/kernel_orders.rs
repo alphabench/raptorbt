@@ -5,12 +5,13 @@
 //! `impl EngineKernel`, not a separate type.
 
 use crate::core::types::{Direction, ExitReason, Price};
+use crate::core::FillTiming;
 use crate::execution::algos::{AlgoError, ExecAlgorithm};
 use crate::execution::orders::{
     MatchOutcome, Order, OrderEngine, OrderKind, OrderSide, OrderStatus, QtySpec, TimeInForce,
 };
 use crate::execution::queue::QueueVerdict;
-use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
+use crate::portfolio::kernel::{EngineEvent, EngineKernel, EntryFunding, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::risk::{RejectReason, RiskGate};
 
@@ -211,6 +212,17 @@ impl EngineKernel {
         order.post_only = post_only;
         order.reduce_only = reduce_only;
         order.parent_id = parent_id;
+        if self.fill_timing == FillTiming::NextBarOpen && matches!(qty, QtySpec::CapitalFrac(_)) {
+            if self.last_step.is_some_and(|(stepped, _)| stepped == submitted_idx) {
+                // Decided on a bar this kernel has already stepped (an order
+                // routed from another instrument's event): that bar's close.
+                order.size_ref = self.last_close;
+            } else {
+                // Decided on the event about to be stepped: the step stamps
+                // the close of that bar.
+                self.size_ref_pending = true;
+            }
+        }
         let id = self.orders.submit(order);
 
         // An expired contract takes no orders: the refusal is a rejection with
@@ -275,6 +287,114 @@ impl EngineKernel {
         }
     }
 
+    /// Tag a working order as a leg of atomic group `group`: it will not fill
+    /// alone (see [`EngineKernel::take_staged`]). Returns `false` for an
+    /// order that is unknown, finished, or only closes (`reduce_only`).
+    pub(crate) fn tag_group(&mut self, id: u64, group: u64) -> bool {
+        let ok = self.orders.get(id).is_some_and(|o| !o.status.is_terminal() && !o.reduce_only);
+        if ok {
+            self.group_orders.push((id, group));
+        }
+        ok
+    }
+
+    /// Drop the group tag of an order (the group has filled or been refused).
+    pub(crate) fn untag_group(&mut self, id: u64) {
+        self.group_orders.retain(|&(order, _)| order != id);
+        self.staged.retain(|s| s.order_id != id);
+    }
+
+    /// The held-back fill of `id` if it was found marketable on the event
+    /// stamped `ts`.
+    pub(crate) fn staged_at(
+        &self,
+        id: u64,
+        ts: i64,
+    ) -> Option<crate::portfolio::kernel::StagedFill> {
+        self.staged.iter().copied().find(|s| s.order_id == id && s.bar.timestamp == ts)
+    }
+
+    /// Fill a held-back order now, through the ordinary fill path, so its
+    /// funding, limits, fees and records are the order's own. The caller has
+    /// said the whole group fits.
+    pub(crate) fn release_staged(
+        &mut self,
+        staged: crate::portfolio::kernel::StagedFill,
+    ) -> Vec<EngineEvent> {
+        self.untag_group(staged.order_id);
+        self.releasing = true;
+        let mut events = Vec::new();
+        self.apply_match_outcome(
+            staged.idx,
+            &staged.bar,
+            MatchOutcome::Fill { order_id: staged.order_id, price: staged.price },
+            &mut events,
+        );
+        self.releasing = false;
+        events.append(&mut self.pending_events);
+        events
+    }
+
+    /// What filling the held-back group order would take, as the fill would:
+    /// the funding, the entry costs, the price it is booked at and its signed
+    /// size. `None` when the order is gone or not sized in units (a group leg
+    /// must be, see `PortfolioBook::link_group`). `priceable` is `false` when
+    /// the funding model cannot price the leg alone (a sold call that only
+    /// its hedge makes affordable): the group's requirement then stands for it.
+    pub(crate) fn group_leg_calc(
+        &self,
+        staged: &crate::portfolio::kernel::StagedFill,
+    ) -> Option<GroupLegCalc> {
+        let order = self.orders.get(staged.order_id)?;
+        let QtySpec::Units(units) = order.qty else { return None };
+        let direction = match order.side {
+            OrderSide::Buy => Direction::Long,
+            OrderSide::Sell => Direction::Short,
+        };
+        let limit_priced = matches!(order.kind, OrderKind::Limit { .. });
+        let raw = if staged.price.is_nan() {
+            self.fill_price_for(&staged.bar, direction, true)
+        } else {
+            staged.price
+        };
+        let price = self.executed_price(raw, direction, true, limit_priced, &staged.bar);
+        let size = if self.booking_fact { units } else { self.quantize_units(units) };
+        if size <= 0.0 {
+            return None;
+        }
+        let contract_value = price * self.multiplier();
+        let fees = self.fee_model.breakdown(contract_value, size, direction, true).map_or_else(
+            || self.fee_model.calculate(contract_value, size, direction),
+            |breakdown| breakdown.total(),
+        );
+        let (funded, priceable) = match self.entry_funding(direction, price) {
+            Err(_) => (0.0, false),
+            Ok(None) => (contract_value * size, true),
+            Ok(Some(EntryFunding::Rate { rate, .. })) => (contract_value * size * rate, true),
+            Ok(Some(EntryFunding::Deposit { per_contract })) => (per_contract * size, true),
+            Ok(Some(EntryFunding::Unmargined)) => (0.0, true),
+        };
+        Some(GroupLegCalc { direction, price, size, funded, fees, priceable })
+    }
+
+    /// Refuse an order of a group that will not fill: it ends rejected with
+    /// `reason` and an event says so.
+    pub(crate) fn reject_group_order(
+        &mut self,
+        idx: usize,
+        id: u64,
+        reason: &'static str,
+    ) -> Vec<EngineEvent> {
+        self.untag_group(id);
+        let Some(order) = self.orders.get_mut(id) else { return Vec::new() };
+        if order.status.is_terminal() {
+            return Vec::new();
+        }
+        let client_id = order.client_id.clone();
+        let _ = order.transition(OrderStatus::Rejected);
+        vec![EngineEvent::OrderRejected { idx, order_id: id, client_id, reason }]
+    }
+
     /// Whether positions are independent (hedging) rather than netted.
     pub fn is_hedging(&self) -> bool {
         self.ledger.policy() == PositionPolicy::Independent
@@ -326,6 +446,42 @@ impl EngineKernel {
         self.spec.as_ref().map(|s| s.price_increment).unwrap_or(0.0)
     }
 
+    /// The lot, size step and tick this instrument's orders must sit on.
+    pub fn order_grid(&self) -> crate::execution::orders::OrderGrid {
+        crate::execution::orders::OrderGrid {
+            lot: self.lot_size.unwrap_or(0.0).max(0.0),
+            size_step: self.spec.as_ref().map_or(0.0, |s| s.size_increment).max(0.0),
+            tick: self.price_increment().max(0.0),
+        }
+    }
+
+    /// Match an order that arrived with the bar just stepped against the rest
+    /// of that bar, and return the events it and the acknowledgements queued
+    /// before it produced, in order.
+    ///
+    /// For a protective leg a venue is sent in answer to an entry's fill at
+    /// the bar's open: a stop or target working from that price sees the
+    /// remainder of the bar, as it does when the kernel itself activates the
+    /// leg (`next_bar_open` entry-bar protection).
+    pub fn match_arrived(&mut self, order_id: u64, arrived_ns: i64) -> Vec<EngineEvent> {
+        let mut events = std::mem::take(&mut self.pending_events);
+        // An entry fills at a bar's open only under `next_bar_open`; under any
+        // other timing it fills at the close and the bar has nothing left.
+        if self.fill_timing != FillTiming::NextBarOpen {
+            return events;
+        }
+        // Only an order that arrives with the bar just stepped sees it.
+        let Some((idx, bar)) = self.last_step.filter(|(_, b)| b.timestamp == arrived_ns) else {
+            return events;
+        };
+        let ohlcv = bar.to_ohlcv_bar();
+        let outcomes = self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &[order_id]);
+        for outcome in outcomes {
+            self.apply_match_outcome(idx, &bar, outcome, &mut events);
+        }
+        events
+    }
+
     /// All non-terminal orders, in submission order.
     pub fn open_orders(&self) -> Vec<&Order> {
         self.orders.working().collect()
@@ -372,6 +528,22 @@ impl EngineKernel {
     }
 
     pub(crate) fn apply_match_outcome(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        outcome: MatchOutcome,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        // The fills of one order share its per-order brokerage.
+        if let MatchOutcome::Fill { order_id, .. } = &outcome {
+            self.fee_model.begin_order(*order_id);
+        }
+        self.apply_match_outcome_inner(idx, bar, outcome, events);
+        let orders = &self.orders;
+        self.fee_model.end_order(|id| orders.get(id).is_some_and(|o| !o.status.is_terminal()));
+    }
+
+    fn apply_match_outcome_inner(
         &mut self,
         idx: usize,
         bar: &KernelBar,
@@ -427,6 +599,26 @@ impl EngineKernel {
         let stop_attach = order.stop_price;
         let target_attach = order.target_price;
         let reduce_only = order.reduce_only;
+        let target_position = order.position_id;
+        let size_ref = order.size_ref;
+
+        // A fill the lifecycle does not allow (an order that was never
+        // acknowledged, one already finished) is refused before anything is
+        // booked: a rejection the strategy sees, never an abort of the run.
+        if !status.can_transition_to(OrderStatus::Filled)
+            && !status.can_transition_to(OrderStatus::PartiallyFilled)
+        {
+            if let Some(order) = self.orders.get_mut(id) {
+                let _ = order.transition(OrderStatus::Rejected);
+            }
+            events.push(EngineEvent::OrderRejected {
+                idx,
+                order_id: id,
+                client_id,
+                reason: "illegal_transition",
+            });
+            return;
+        }
 
         // Stochastic fills: a marketable resting limit may be passed over
         // (queue position, exhausted liquidity); it stays working. Stop and
@@ -487,6 +679,23 @@ impl EngineKernel {
         } else {
             matched_price
         };
+
+        // An order of an atomic group is marketable here, but it fills only
+        // with its siblings: hold it for the book, which fills the group on
+        // the event where every leg is held, or not at all.
+        if !self.releasing
+            && !reduce_only
+            && self.group_orders.iter().any(|&(order, _)| order == id)
+        {
+            self.staged.retain(|s| s.order_id != id);
+            self.staged.push(crate::portfolio::kernel::StagedFill {
+                order_id: id,
+                idx,
+                bar: *bar,
+                price: matched_price,
+            });
+            return;
+        }
 
         // A refused order must always be observable. `reject` counts against
         // `rejected_entries` so a discarded order can never look like an
@@ -550,7 +759,10 @@ impl EngineKernel {
         let slice_of = |remaining: f64| if slicing { remaining.min(bar.volume) } else { remaining };
         let hedging = self.ledger.policy() == PositionPolicy::Independent;
         let held = self.ledger.first().map(|m| m.position.direction);
-        let (opens, open_direction) = if hedging {
+        let (opens, open_direction) = if target_position.is_some() {
+            // An order that names a position (a hedging close) closes it, whatever the policy.
+            (false, order_direction)
+        } else if hedging {
             (true, order_direction)
         } else if reduce_only {
             // Only an order opposing the open position reduces it. Any other
@@ -730,6 +942,7 @@ impl EngineKernel {
                     return;
                 }
             }
+            self.sizing_ref = size_ref.filter(|_| size_mult.is_some() && !is_limit_fill);
             match self.open_at(
                 idx,
                 bar,
@@ -793,7 +1006,11 @@ impl EngineKernel {
                 ),
             }
         } else {
-            let Some(first) = self.ledger.first() else {
+            let target = match target_position {
+                Some(position_id) => self.ledger.get(position_id),
+                None => self.ledger.first(),
+            };
+            let Some(first) = target else {
                 // Nothing to close. Closing is only chosen when a position is
                 // held, so this is a defensive refusal, counted like any other.
                 reject(
@@ -807,6 +1024,19 @@ impl EngineKernel {
                 );
                 return;
             };
+            if target_position.is_some() && first.position.direction == order_direction {
+                // A named position is closed by the opposite side only.
+                reject(
+                    &mut self.orders,
+                    &mut self.risk,
+                    events,
+                    idx,
+                    id,
+                    &client_id,
+                    "reduce_only",
+                );
+                return;
+            }
             let position_id = first.id;
             let direction = first.position.direction;
             let held = first.position.size;
@@ -1003,4 +1233,16 @@ impl EngineKernel {
             }
         }
     }
+}
+
+/// What one leg of an atomic group would take at its fill; see
+/// [`EngineKernel::group_leg_calc`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GroupLegCalc {
+    pub direction: Direction,
+    pub price: Price,
+    pub size: f64,
+    pub funded: f64,
+    pub fees: f64,
+    pub priceable: bool,
 }

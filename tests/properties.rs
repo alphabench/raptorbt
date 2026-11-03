@@ -825,6 +825,20 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
                                 signed += dir_sign(*direction) * size;
                                 entered = true;
                             }
+                            // The position's own stop or target, hit on the bar its
+                            // entry filled at the open of, is a separate event of that
+                            // bar, not a consequence of the fill (the outer loop books it).
+                            EngineEvent::Exited { trade, .. }
+                                if entered
+                                    && matches!(
+                                        trade.exit_reason,
+                                        ExitReason::StopLoss
+                                            | ExitReason::TakeProfit
+                                            | ExitReason::TrailingStop
+                                    ) =>
+                            {
+                                break
+                            }
                             EngineEvent::Exited { trade, .. } => {
                                 signed -= dir_sign(trade.direction) * trade.size;
                                 exited = true;
@@ -966,6 +980,22 @@ fn check_submission_bar(env: &Env, scn: &Scenario) -> Result<(), TestCaseError> 
         let order = run.kernel.order(fill.order_id).expect("order exists");
         let resting = !matches!(order.kind, OrderKind::Market)
             || matches!(order.tif, TimeInForce::AtOpen | TimeInForce::AtClose);
+        // The one exception: a plain limit strictly through the decision bar's
+        // close trades there under same_bar_close, like a market order placed
+        // on that bar. A limit at the price itself rests.
+        let marketable_on_decision = env.timing == FillTiming::SameBarClose
+            && fill.idx == order.submitted_idx
+            && order.parent_id.is_none()
+            && !order.post_only
+            && !matches!(order.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
+            && match (order.kind, order.side) {
+                (OrderKind::Limit { price }, OrderSide::Buy) => price > run.bars[fill.idx].close,
+                (OrderKind::Limit { price }, OrderSide::Sell) => price < run.bars[fill.idx].close,
+                _ => false,
+            };
+        if marketable_on_decision {
+            continue;
+        }
         if resting || env.timing == FillTiming::NextBarOpen {
             prop_assert!(
                 fill.idx > order.submitted_idx,

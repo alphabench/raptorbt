@@ -29,7 +29,18 @@ from raptorbt._raptorbt import full_report as _full_report
 
 __all__ = ["full_report"]
 
-full_report = _full_report
+def full_report(
+    *args: Any, unverified_fee_rows: Sequence[str] | None = None, **kwargs: Any
+) -> dict[str, Any]:
+    """``raptorbt._raptorbt.full_report`` plus ``unverified_fee_rows``: the fee rows the costs
+    were priced on whose rates are not matched to an official publication (a result carries them
+    as ``result.unverified_fee_rows``, which ``result.full_report`` passes). Left out, the
+    key is absent. The costs of a run that lists any are not
+    exchange-accurate."""
+    out = _full_report(*args, **kwargs)
+    if unverified_fee_rows is not None:
+        out["unverified_fee_rows"] = list(unverified_fee_rows)
+    return out
 
 
 def _result_full_report(
@@ -48,7 +59,8 @@ def _result_full_report(
     if len(ts) != len(equity):
         raise ValueError(f"{len(ts)} timestamps for an equity curve of {len(equity)} samples")
     kwargs.setdefault("attribution", True)
-    return _full_report(ts, equity, self.trades(), self.orders(), **kwargs)
+    kwargs.setdefault("unverified_fee_rows", self.unverified_fee_rows)
+    return full_report(ts, equity, self.trades(), self.orders(), **kwargs)
 
 
 def _portfolio_full_report(

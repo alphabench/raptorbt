@@ -117,6 +117,30 @@ Fills are read from the order cache as whole-order fills. With `partial_fills` o
 has filled in part reads as filled; its close is sent for the planned quantity and is
 `reduce_only`, so it cannot open the opposite position.
 
+### Atomic groups
+
+`PortfolioSession.link_group([(instrument, order_id), ...])` makes working orders on distinct
+instruments one group (units-sized, opening orders; two legs on one instrument, a reduce-only or
+unknown order and a venue-managed instrument raise `invalid_order_group`). A linked leg never
+fills alone:
+
+* the matcher finds a leg marketable and its kernel holds it back;
+* on the event where every leg is held back at the same instant, the group is funded as a whole:
+  with a margin model that groups option lines (`defined_risk`, `spread_credit`, `from_spec`) the
+  requirement of the legs and the lines already open, less what that group already locks, plus the
+  entry costs, against the free capital; with no such model, each leg's own funding summed;
+* if it fits, the legs fill through the ordinary fill path, bought legs first and then by instrument
+  index, so the order of the request changes nothing and a sold leg is funded with its hedge held;
+* if it does not, every leg is rejected as `group_unfunded` (counted once in `unfunded_entries`)
+  and no position opens;
+* a leg that ends unfilled (cancelled, expired, rejected) rejects the rest as `group_leg_failed`.
+
+Legs whose bars do not share a timestamp never fill together: a leg held back at an earlier
+instant is not carried forward. **Venue runs:** legs are separate venue orders, which a venue
+cannot fill atomically, and hedge-first placement would still leave a naked sold leg if the hedge's
+partner is refused; `link_group` refuses a venue-managed instrument instead. `submit_structure`
+does not link its legs yet; it still sends independent orders (see above).
+
 ### Group exits
 
 `Exit(stop_loss, take_profit, premium_at_or_above, premium_at_or_below, close_at_ns,

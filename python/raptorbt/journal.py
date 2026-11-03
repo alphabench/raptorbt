@@ -144,6 +144,12 @@ class Discrepancy:
         both know the order and disagree on how much of it has filled.
     ``position_mismatch``
         the net position in a symbol differs.
+    ``unmapped_position``
+        the venue holds a position under a key that is no symbol of the node
+        (the broker's own key an adapter could not map); ``symbol`` is that key.
+    ``exit_rule_unconfirmed``
+        an exit rule was handed to the venue and its answer is unknown; the
+        order it would fire is ``client_order_id``.
     ``cash_mismatch``
         the cash differs.
     """

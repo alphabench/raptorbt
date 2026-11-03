@@ -78,6 +78,11 @@ struct Ledger {
     watchers: Vec<Watch>,
     /// One-cancels-other groups the engine keeps, for a venue with no link.
     oco: Vec<Vec<String>>,
+    /// `(strategy, local instrument)` whose exit was decided while its entry
+    /// was still working: the position does not exist to close yet. The exit
+    /// is sent the moment the entry's fill is booked, so it meets the venue on
+    /// the event the batch would stash it on.
+    held_exits: std::collections::HashSet<(usize, usize)>,
 }
 
 /// A protective level the engine watches (`protective="local"`).
@@ -90,6 +95,8 @@ struct Watch {
     qty: f64,
     stop: Option<f64>,
     target: Option<f64>,
+    /// Under hedging, the position the level protects.
+    position_id: Option<u64>,
 }
 
 /// The venue a node sends its orders to, and what it has sent.
@@ -323,6 +330,24 @@ impl VenueRoute {
         let global = sh.global_of(sid, local)?;
         let symbol = sh.symbol_text(global.index());
         let tick = sh.with_book(sid, |b, _| Ok(b.kernel(local).price_increment()))?;
+        // An order that names no time in force takes its instrument's default.
+        let resolved;
+        let spec = if spec.tif == super::super::strategy_bindings::TIF_AUTO {
+            let tif = sh.with_book(sid, |b, _| Ok(b.kernel(local).default_tif()))?;
+            resolved = OrderSpec { tif: tif.to_string(), ..spec.clone() };
+            &resolved
+        } else {
+            spec
+        };
+        if let Err(why) =
+            sh.with_book(sid, |b, _| Ok(b.kernel(local).check_validity(&spec.tif, spec.expire_ns)))?
+        {
+            return Err(Fail::new("order_validity_unsupported", why)
+                .param("tif")
+                .value(spec.tif.as_str())
+                .valid(["day", "ioc", "fok"])
+                .into());
+        }
 
         // The same id again with the same terms is the same order: it is not
         // sent twice. A repeated order with no size keeps the size it had.
@@ -382,6 +407,20 @@ impl VenueRoute {
                 .into())
             };
         }
+
+        // The terms go to the venue as written, so they must already sit on
+        // the instrument's grid: the simulation refuses the same orders.
+        let grid = sh.with_book(sid, |b, _| Ok(b.kernel(local).order_grid()))?;
+        crate::python::strategy_bindings::check_grid(
+            &grid,
+            spec.units,
+            &[
+                ("limit_price", spec.limit_price),
+                ("trigger_price", spec.trigger_price),
+                ("stop_price", spec.stop_price),
+                ("target_price", spec.target_price),
+            ],
+        )?;
 
         // An order that names no units is sized now, from the book on this
         // event: a fraction of the capital on hand, or the whole position.
@@ -449,6 +488,9 @@ impl VenueRoute {
                 spec.stop_price,
                 spec.target_price,
             );
+            if spec.position_id.is_some() {
+                book.kernel_mut(local).set_order_position(id, spec.position_id);
+            }
             Ok((id, sub_idx))
         })?;
         if let Some(code) = refusal {
@@ -513,6 +555,7 @@ impl VenueRoute {
             submitted_ns: ts,
             submitted_idx: sub_idx,
             size_frac: spec.size_frac,
+            position_id: spec.position_id,
         };
         {
             let mut ledger = self.ledger.borrow_mut();
@@ -791,6 +834,10 @@ impl VenueRoute {
                 .map(|p| (p.size, p.direction)))
         })?;
         let Some((size, direction)) = held else { return Ok(()) };
+        // A hedging account closes a position by naming it: the order carries the position's id,
+        // and a venue that keeps positions apart closes exactly that one. (A venue that nets
+        // refuses a hedging node when it is built.)
+        let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(local).is_hedging()))?;
         let n = {
             let mut ledger = self.ledger.borrow_mut();
             let n = ledger.closes[sid.index()];
@@ -814,6 +861,7 @@ impl VenueRoute {
             limit_offset: 0.0,
             post_only: false,
             reduce_only: true,
+            position_id: if hedging { Some(position_id) } else { None },
             tags: Default::default(),
         };
         self.submit(sh, sid, local, &spec, idx, ts, &format!("close-{n}"), None).map(|_| ())
@@ -857,9 +905,11 @@ impl VenueRoute {
             venue.on_market_event(st.sid.index(), &entry, depth, atr, &mut out).map_err(|e| {
                 PyErr::from(Fail::new("paper_unsolicited_position_change", e.to_string()))
             })?;
+            out.extend(venue.take_same_event());
         }
         let mut heard = false;
-        for (venue_id, report) in out {
+        let mut out: std::collections::VecDeque<_> = out.into();
+        while let Some((venue_id, report)) = out.pop_front() {
             // The simulated venue's answer is its own decision, not an input
             // the host pushed: it is on the record, with its reason, before
             // the book takes it.
@@ -868,6 +918,11 @@ impl VenueRoute {
             })?;
             heard |= self.deliver(py, sh, st, &venue_id, &report, entry.local_idx, ev.event.ts)?
                 != ReportOutcome::Duplicate;
+            // Booking a fill sends the position's protective legs, which meet
+            // the rest of this same bar: their reports belong to this event.
+            let mut adapter = self.adapter.borrow_mut();
+            let venue = adapter.as_simulation().expect("checked when the route was built");
+            out.extend(venue.take_same_event());
         }
         Ok(heard)
     }
@@ -1008,6 +1063,7 @@ impl VenueRoute {
             limit_offset: 0.0,
             post_only: false,
             reduce_only,
+            position_id: None,
             tags: Default::default(),
         }
     }
@@ -1029,9 +1085,16 @@ impl VenueRoute {
                 Ok(b.kernel(local).open_orders().iter().any(|o| o.client_id.starts_with("close-")))
             })?;
             if !working_close {
-                let ids: Vec<u64> = sh.with_book(sid, |b, _| {
-                    Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
+                let (ids, entering): (Vec<u64>, bool) = sh.with_book(sid, |b, _| {
+                    let k = b.kernel(local);
+                    Ok((
+                        k.position_snapshots().iter().map(|p| p.position_id).collect(),
+                        k.open_orders().iter().any(|o| o.client_id.starts_with("enter-")),
+                    ))
                 })?;
+                if ids.is_empty() && entering {
+                    self.ledger.borrow_mut().held_exits.insert((sid.index(), local));
+                }
                 for id in ids {
                     self.close(sh, sid, local, idx, ts, id)?;
                 }
@@ -1068,24 +1131,26 @@ impl VenueRoute {
                 })?,
                 None => Err("zero_size"),
             };
-            let units = match sized {
-                Ok(units) => units,
-                Err(why) => {
-                    // Sized to nothing: the entry is refused as it is in-process.
-                    let reason = match why {
-                        "insufficient_margin" => RejectReason::InsufficientMargin,
-                        "insufficient_capital" => RejectReason::InsufficientCapital,
-                        _ => RejectReason::ZeroSize,
-                    };
-                    return sh.with_book_mut(sid, |b, _| {
-                        b.kernel_mut(local).pending_events.push(
-                            crate::portfolio::kernel::EngineEvent::EntryRejected { idx, reason },
-                        );
-                        Ok(())
-                    });
-                }
-            };
-            let mut spec = Self::spec(side, "market", Some(units), false);
+            if let Err(why) = sized {
+                // Sized to nothing: the entry is refused as it is in-process.
+                let reason = match why {
+                    "insufficient_margin" => RejectReason::InsufficientMargin,
+                    "insufficient_capital" => RejectReason::InsufficientCapital,
+                    _ => RejectReason::ZeroSize,
+                };
+                return sh.with_book_mut(sid, |b, _| {
+                    b.kernel_mut(local)
+                        .pending_events
+                        .push(crate::portfolio::kernel::EngineEvent::EntryRejected { idx, reason });
+                    Ok(())
+                });
+            }
+            // The entry is a share of the capital, sized when it fills (as a
+            // capital-fraction order is); the check above only decided that
+            // there is something to trade. At a venue the quantity sent is
+            // the estimate of that moment.
+            let mut spec = Self::spec(side, "market", None, false);
+            spec.size_frac = Some(input.size_mult.unwrap_or(1.0));
             spec.stop_price = input.stop_price_override;
             spec.target_price = input.target_price_override;
             let n = self.next_prot(sid);
@@ -1159,14 +1224,19 @@ impl VenueRoute {
                 let target =
                     w.target.is_some_and(|p| if sell { bar.high >= p } else { bar.low <= p });
                 if stop || target {
-                    hit.push((w.exit, w.qty, if stop { "watch_stop" } else { "watch_target" }));
+                    hit.push((
+                        w.exit,
+                        w.qty,
+                        w.position_id,
+                        if stop { "watch_stop" } else { "watch_target" },
+                    ));
                     false
                 } else {
                     true
                 }
             });
         }
-        for (exit, qty, why) in hit {
+        for (exit, qty, position_id, why) in hit {
             sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
                 JV::map([
                     ("strategy", JV::Int(sid.index() as i64)),
@@ -1176,7 +1246,8 @@ impl VenueRoute {
                 ])
             })?;
             let n = self.next_prot(sid);
-            let spec = Self::spec(exit, "market", Some(qty), true);
+            let mut spec = Self::spec(exit, "market", Some(qty), true);
+            spec.position_id = position_id;
             self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
         }
         Ok(())
@@ -1197,6 +1268,54 @@ impl VenueRoute {
         })?;
         for r in &requests {
             self.protect(sh, sid, local, r, idx, ts)?;
+        }
+        // Under hedging a position's protection ends with that position, while others stay
+        // open: cancel the protective orders (and drop the watched levels) of positions that
+        // are gone, so none is left to be refused for a position it names.
+        let (live, orders): (Vec<u64>, Vec<(u64, u64)>) = sh.with_book(sid, |b, _| {
+            let k = b.kernel(local);
+            Ok((
+                k.position_snapshots().iter().map(|p| p.position_id).collect(),
+                k.open_orders()
+                    .iter()
+                    .filter(|o| {
+                        o.client_id.starts_with("prot-") && o.status != OrderStatus::PendingCancel
+                    })
+                    .filter_map(|o| o.position_id.map(|p| (o.id, p)))
+                    .collect(),
+            ))
+        })?;
+        self.ledger.borrow_mut().watchers.retain(|w| {
+            !(w.sid == sid.index()
+                && w.local == local
+                && w.position_id.is_some_and(|p| !live.contains(&p)))
+        });
+        for (order_id, position_id) in orders {
+            if !live.contains(&position_id) {
+                self.cancel(sh, sid, local, idx, order_id)?;
+            }
+        }
+        let held_exit = self.ledger.borrow().held_exits.contains(&(sid.index(), local));
+        if held_exit {
+            if !flat {
+                self.ledger.borrow_mut().held_exits.remove(&(sid.index(), local));
+                let ids: Vec<u64> = sh.with_book(sid, |b, _| {
+                    Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
+                })?;
+                for id in ids {
+                    self.close(sh, sid, local, idx, ts, id)?;
+                }
+            } else {
+                let entering = sh.with_book(sid, |b, _| {
+                    Ok(b.kernel(local)
+                        .open_orders()
+                        .iter()
+                        .any(|o| o.client_id.starts_with("enter-")))
+                })?;
+                if !entering {
+                    self.ledger.borrow_mut().held_exits.remove(&(sid.index(), local));
+                }
+            }
         }
         if flat && requests.is_empty() {
             self.ledger
@@ -1236,8 +1355,17 @@ impl VenueRoute {
             OrderSide::Buy
         };
         let mut legs: Vec<(Option<u64>, &str)> = Vec::new();
-        let mut watch =
-            Watch { sid: sid.index(), local, exit, qty: r.size, stop: None, target: None };
+        let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(local).is_hedging()))?;
+        let position_id = if hedging { Some(r.position_id) } else { None };
+        let mut watch = Watch {
+            sid: sid.index(),
+            local,
+            exit,
+            qty: r.size,
+            stop: None,
+            target: None,
+            position_id,
+        };
         for (level, kind) in [(r.stop, "stop"), (r.target, "target")] {
             let Some(level) = level else { continue };
             if self.protective_local {
@@ -1264,6 +1392,7 @@ impl VenueRoute {
                 spec = Self::spec(exit, "limit", Some(r.size), true);
                 spec.limit_price = Some(level);
             }
+            spec.position_id = position_id;
             let n = self.next_prot(sid);
             self.unsupported_sent.set(false);
             let id = self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
@@ -1362,6 +1491,20 @@ impl VenueRoute {
             .map(|(id, p)| (id.clone(), p.sid, p.local, p.order_id, p.request.clone()))
             .collect();
         // By strategy, then by the order's own count: an id is `s{strategy}-{seq}`.
+        out.sort_by_key(|o| {
+            (o.1, crate::execution::adapter::parse_client_order_id(&o.0).map(|p| p.1))
+        });
+        out
+    }
+
+    /// `sent`, with whether the venue made the order itself (a registered exit order).
+    pub(super) fn sent_with_origin(&self) -> Vec<(String, usize, usize, u64, OrderRequest, bool)> {
+        let ledger = self.ledger.borrow();
+        let mut out: Vec<_> = ledger
+            .by_venue
+            .iter()
+            .map(|(id, p)| (id.clone(), p.sid, p.local, p.order_id, p.request.clone(), p.external))
+            .collect();
         out.sort_by_key(|o| {
             (o.1, crate::execution::adapter::parse_client_order_id(&o.0).map(|p| p.1))
         });
@@ -1469,6 +1612,7 @@ impl VenueRoute {
             submitted_ns: ts,
             submitted_idx: sub_idx,
             size_frac: None,
+            position_id: None,
         };
         let mut ledger = self.ledger.borrow_mut();
         ledger.by_client.insert((sid.index(), venue_id.to_string()), venue_id.to_string());
@@ -1486,6 +1630,79 @@ impl VenueRoute {
             },
         );
         Ok(())
+    }
+
+    /// End registered exit orders (the venue's rule was cancelled or replaced): each is
+    /// cancelled in the book as the venue would have ended it, so none stays working for a
+    /// rule the venue no longer holds. An order that already ended is left as it is; an id
+    /// that is not a registered exit order is an error.
+    pub(super) fn end_external(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        ids: &[String],
+        ts: i64,
+    ) -> PyResult<()> {
+        for id in ids {
+            let Some(placed) = self.placed(id) else {
+                if self.is_dropped(id) {
+                    continue;
+                }
+                return Err(Fail::new(
+                    "unknown_client_order_id",
+                    format!("{id:?} is not an order this node registered"),
+                )
+                .param("client_order_id")
+                .value(id.as_str())
+                .into());
+            };
+            if !placed.external || placed.sid != sid.index() {
+                return Err(Fail::new(
+                    "invalid_execution",
+                    format!("{id:?} is not an exit order the venue holds for this strategy"),
+                )
+                .param("client_order_id")
+                .value(id.as_str())
+                .into());
+            }
+            let global = sh.global_of(sid, placed.local)?;
+            let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(global)))?;
+            self.book_silently(
+                sh,
+                sid,
+                placed.local,
+                placed.order_id,
+                idx,
+                ts,
+                &ExecutionReport::CancelAck { ts_ns: ts },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Ids of the orders the venue makes itself that are still working: an exit rule it
+    /// holds has not fired them yet, so the venue's order book does not list them.
+    pub(super) fn held_ids(&self, sh: &Shared) -> PyResult<Vec<String>> {
+        let held: Vec<(String, usize, u64, usize)> = {
+            let ledger = self.ledger.borrow();
+            ledger
+                .by_venue
+                .iter()
+                .filter(|(_, p)| p.external)
+                .map(|(id, p)| (id.clone(), p.sid, p.order_id, p.local))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (id, sid, order_id, local) in held {
+            let working = sh.with_book(StrategyId::new(sid as u32), |b, _| {
+                Ok(b.kernel(local).order(order_id).is_some_and(|o| !o.status.is_terminal()))
+            })?;
+            if working {
+                out.push(id);
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     pub(super) fn lookup(&self, venue_id: &str) -> Option<(usize, usize)> {

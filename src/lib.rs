@@ -27,9 +27,32 @@ pub mod runtime;
 pub mod signals;
 pub mod strategies;
 
+/// A money fault is a structured error in Python (`money_overflow`), raised
+/// through a panic only to unwind out of the kernel. Its panic notice would be
+/// a second, unstructured report of the same failure on stderr, so the hook
+/// skips it and leaves every other panic to the hook that was there before.
+fn silence_money_fault_notices() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied());
+            if message.is_some_and(|m| m.starts_with(accounts::money::MONEY_FAULT_PREFIX)) {
+                return;
+            }
+            previous(info);
+        }));
+    });
+}
+
 /// Python module entry point
 #[pymodule]
 fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    silence_money_fault_notices();
     // Session lengths in minutes, for BacktestConfig(session_minutes=...).
     // Intraday annualization scales with session length, so using the NSE
     // default on MCX data understates Sharpe by ~1.5x.

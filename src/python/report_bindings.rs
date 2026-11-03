@@ -4,9 +4,9 @@
 //! `Trade` and `Order` objects qualify); nothing here panics on user input. The figures are
 //! `metrics::report`'s and `metrics::attribution`'s; nothing is computed in this file.
 
+use super::errors::invalid_input;
 use std::collections::BTreeMap;
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -38,13 +38,13 @@ fn field<'py>(item: &Bound<'py, PyAny>, name: &str) -> PyResult<Option<Bound<'py
 }
 
 fn named(name: &str, e: PyErr) -> PyErr {
-    PyValueError::new_err(format!("{name}: {e}"))
+    invalid_input(format!("{name}: {e}"))
 }
 
 fn required<'py, T: FromPyObjectOwned<'py>>(item: &Bound<'py, PyAny>, name: &str) -> PyResult<T> {
     match field(item, name)? {
         Some(v) => v.extract::<T>().map_err(|e| named(name, e.into())),
-        None => Err(PyValueError::new_err(format!("each item needs `{name}`"))),
+        None => Err(invalid_input(format!("each item needs `{name}`"))),
     }
 }
 
@@ -77,8 +77,7 @@ fn component(name: &str) -> &str {
 }
 
 fn add_components(into: &mut BTreeMap<String, f64>, parts: &Bound<'_, PyAny>) -> PyResult<()> {
-    let parts =
-        parts.cast::<PyDict>().map_err(|_| PyValueError::new_err("fees by component is a dict"))?;
+    let parts = parts.cast::<PyDict>().map_err(|_| invalid_input("fees by component is a dict"))?;
     for (k, v) in parts.iter() {
         let k: String = k.extract()?;
         let v: f64 = v.extract()?;
@@ -129,7 +128,7 @@ fn order_from(
 fn period_day(x: &Bound<'_, PyAny>) -> PyResult<i64> {
     if let Ok(s) = x.extract::<String>() {
         let parts: Vec<&str> = s.get(..10).unwrap_or(&s).split('-').collect();
-        let bad = || PyValueError::new_err(format!("period bound {s:?} is not YYYY-MM-DD"));
+        let bad = || invalid_input(format!("period bound {s:?} is not YYYY-MM-DD"));
         if parts.len() != 3 {
             return Err(bad());
         }
@@ -378,7 +377,9 @@ fn full_report<'py>(
     };
     let session = match session_minutes {
         Some(minutes) if minutes > 0.0 => SessionSpec::Session { minutes },
-        _ => SessionSpec::Continuous,
+        // An explicit 0 names a market that never closes; none named leaves the data's own day.
+        Some(_) => SessionSpec::Continuous,
+        None => SessionSpec::Inferred { tz_offset_ns },
     };
     let ppy = resolve_periods_per_year_with_session(periods_per_year, &equity_ts, session, 252.0);
     let exposure = exposure.unwrap_or_default();

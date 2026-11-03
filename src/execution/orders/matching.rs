@@ -317,7 +317,22 @@ impl OrderEngine {
         bar: &OhlcvBar,
         fill_model: &FillModel,
     ) -> Vec<MatchOutcome> {
-        self.match_events(idx, bar, fill_model, MatchMode::Bar)
+        self.match_events(idx, bar, fill_model, MatchMode::Bar, None)
+    }
+
+    /// Evaluate only the orders `ids` against `bar`, which the kernel has
+    /// already matched once. For the protective legs a position's entry
+    /// activated while the bar was being filled (or that were sent in answer
+    /// to its fill): they are working from the entry's price, so the rest of
+    /// that bar is theirs to trade through.
+    pub fn match_bar_among(
+        &mut self,
+        idx: usize,
+        bar: &OhlcvBar,
+        fill_model: &FillModel,
+        ids: &[u64],
+    ) -> Vec<MatchOutcome> {
+        self.match_events(idx, bar, fill_model, MatchMode::Bar, Some(ids))
     }
 
     /// Evaluate all working orders against one trade print.
@@ -339,7 +354,7 @@ impl OrderEngine {
         tick: &OhlcvBar,
         fill_model: &FillModel,
     ) -> Vec<MatchOutcome> {
-        self.match_events(idx, tick, fill_model, MatchMode::Trade)
+        self.match_events(idx, tick, fill_model, MatchMode::Trade, None)
     }
 
     fn match_events(
@@ -348,6 +363,7 @@ impl OrderEngine {
         bar: &OhlcvBar,
         fill_model: &FillModel,
         mode: MatchMode,
+        only: Option<&[u64]>,
     ) -> Vec<MatchOutcome> {
         let mut expiries = Vec::new();
         let mut actions = Vec::new();
@@ -382,7 +398,14 @@ impl OrderEngine {
         let first_live = self.orders.len() - self.live().len();
         for order in &mut self.orders[first_live..] {
             // A venue-driven order is matched by its venue, never here.
-            if order.status.is_terminal() || order.submitted_idx >= idx || order.is_venue_driven() {
+            // An explicit set is the caller's word that its orders are eligible
+            // for this bar (legs that arrived with it); otherwise only orders
+            // placed on an earlier bar are.
+            let eligible = match only {
+                Some(ids) => ids.contains(&order.id),
+                None => order.submitted_idx < idx,
+            };
+            if order.status.is_terminal() || !eligible || order.is_venue_driven() {
                 continue;
             }
             // Still in flight to the venue: this print cannot see it, so it

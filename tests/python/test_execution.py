@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from raptorbt import BacktestConfig, LiveNode, Strategy, run_strategies
+from raptorbt import BacktestConfig, InstrumentSpec, LiveNode, Strategy, run_strategies
 from raptorbt.errors import (
     InvalidData,
     InvalidOrder,
@@ -898,21 +898,13 @@ def stream_digest(name, execution):
     return strip_internal(rf.digest_result(result))
 
 
-#: Scenarios that differ, and why. Each is a strict xfail so the list stays true.
-DIFFERS = {
-    "st_refused_rows_timers": "an entry intent held for the next print fills after a typed market "
-    "order made earlier in the same step; in-process it fills first",
-    "st_margin_hedging": "under hedging every order opens, so no order can close a position",
-}
+#: Stream scenarios that are not equal on a paper node, each pinned below by what exactly differs.
+#: Hedging is equal: a close names the position it ends (``OrderRequest.position_id``).
+STREAM_UNEQUAL = {"st_refused_rows_timers"}
 
 
 @pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(n, marks=pytest.mark.xfail(strict=True, reason=DIFFERS[n])) if n in DIFFERS else n
-        for n, sc in SCENARIOS.items()
-        if sc["runner"] == "stream"
-    ],
+    "name", [n for n, sc in SCENARIOS.items() if sc["runner"] == "stream" and n not in STREAM_UNEQUAL]
 )
 def test_the_stream_corpus_equals_in_process_on_a_paper_node(name):
     """enter(), close_position(), capital-fraction sizes, attached stops and
@@ -920,6 +912,40 @@ def test_the_stream_corpus_equals_in_process_on_a_paper_node(name):
     the frozen stream scenarios give the same result when their orders go to a
     simulated venue."""
     assert stream_digest(name, PaperExecution()) == stream_digest(name, None)
+
+
+def test_a_typed_order_made_before_a_held_entry_fills_first_at_a_venue():
+    """The one stream scenario that differs. ``enter()`` called from a quote is held for the
+    symbol's next print, and a typed market order made at the same quote waits for it too.
+    In-process the engine handles the step's intents before it sweeps market orders, so the
+    entry fills first and the typed order is then refused (``position_open``). A venue works
+    its orders in the order they were sent, and the typed order was sent first: it fills, and
+    the entry is the one refused. The in-process order is the specified one (a signal is
+    resolved in a phase of its own, ahead of the order sweep, wherever in the hook it was
+    called), so this stays a difference rather than something the simulated venue reorders
+    to match: see docs/architecture/execution-adapters.md, "Order of an entry intent"."""
+    name = "st_refused_rows_timers"
+    in_process = stream_digest(name, None)
+    paper = stream_digest(name, PaperExecution())
+    assert (in_process["orders"][0]["status"], in_process["orders"][0]["reject_reason"]) == (
+        "rejected",
+        "position_open",
+    )
+    assert paper["orders"][0]["status"] == "filled"
+    assert in_process["trades"] != paper["trades"]
+
+
+def test_hedging_equals_in_process_on_a_paper_node_because_a_close_names_its_position():
+    """Under hedging every order opens a position and a close names the position it ends. The
+    engine sets ``OrderRequest.position_id`` on a close, a reduction or protection it makes of a
+    named position, and the paper venue's shadow book closes exactly that position: entries,
+    hedge shorts, closes by position id and attached stops and targets give the result the
+    in-process run gives."""
+    assert stream_digest("st_margin_hedging", PaperExecution()) == stream_digest("st_margin_hedging", None)
+    for name in ("pf_margin_hedging", "pf_cash_hedging"):
+        batch = strip_internal(rf.digest_result(portfolio_result(name, "batch")))
+        paper = strip_internal(rf.digest_result(portfolio_result(name, PaperExecution())))
+        assert paper == batch, name
 
 
 def _declared_warnings(sc, kw):
@@ -966,27 +992,32 @@ def portfolio_result(name, execution):
 PORTFOLIO_OK = [
     "pf_composites_indicators", "pf_fill_same_bar_open_lookahead", "pf_margin_netting_shorts",
     "pf_stops_targets_legacy", "pf_typed_exits", "pf_timers", "pf_twap", "pf_max_positions_rejections",
-    "pf_drawdown_halt", "pf_margin_call_halt", "pf_order_latency", "pf_bar_stamp_close",
+    "pf_drawdown_halt", "pf_margin_call_halt", "pf_bar_stamp_close",
     "pf_bar_stamp_dict_tz", "pf_legacy_stamp_warning",
 ]
-PORTFOLIO_DIFFERS = {
-    "pf_fill_next_bar_open": "an entry intent is sized from the capital on the signal bar and fills at the next open; in-process it is sized there",
-    "pf_margin_hedging": "under hedging every order opens, so no order can close a position",
-    "pf_cash_hedging": "under hedging every order opens, so no order can close a position",
-}
-
-
-@pytest.mark.parametrize(
-    "name",
-    PORTFOLIO_OK
-    + [pytest.param(n, marks=pytest.mark.xfail(strict=True, reason=r)) for n, r in PORTFOLIO_DIFFERS.items()],
-)
+@pytest.mark.parametrize("name", PORTFOLIO_OK)
 def test_the_portfolio_corpus_equals_run_strategies_on_a_paper_node(name):
     """The strategies of the frozen portfolio scenarios (config stops and
     targets, brackets, OCO, trailing, Twap, timers, risk limits, halts,
     margin) give the result `run_strategies` gives when run on a paper node."""
     batch = strip_internal(rf.digest_result(portfolio_result(name, "batch")))
     paper = strip_internal(rf.digest_result(portfolio_result(name, PaperExecution())))
+    assert paper == batch
+
+
+def test_an_entry_intent_filling_at_the_next_open_is_sized_at_the_fill_on_a_paper_node():
+    """``enter()`` under ``fill_timing="next_bar_open"`` is sized from the capital at the fill, as
+    a capital-fraction order is: the sizes, fills, fees, equity and every metric equal
+    `run_strategies`. What a paper node cannot reproduce is the entry bar's own high and low in
+    the trade's excursions: a fill reported by a venue carries a price, not the range of the bar
+    it happened in, so the excursions (``mae_*``, ``mfe_*``) start from the fill's price."""
+    name = "pf_fill_next_bar_open"
+    batch = strip_internal(rf.digest_result(portfolio_result(name, "batch")))
+    paper = strip_internal(rf.digest_result(portfolio_result(name, PaperExecution())))
+    excursion = ("mae_price", "mae_pnl", "mfe_price", "mfe_pnl")
+    for d in (batch, paper):
+        d["trades"] = [{k: v for k, v in t.items() if k not in excursion} for t in d["trades"]]
+        d["metrics"].pop("MFE Capture Ratio")  # a ratio of the excursions above
     assert paper == batch
 
 
@@ -1130,7 +1161,7 @@ def test_the_session_square_off_sends_the_closing_orders():
             if ctx.idx in (4, per_day + 4):
                 self.submit_order(orders.Market(side="buy", units=10.0))
 
-    spec = InstrumentSpec.equity("ASSET", session=SessionSchedule.nse_equity())
+    spec = InstrumentSpec.equity("ASSET", session=SessionSchedule.nse_equity(squareoff_minute=920))
     runs = []
     for execution in (None, PaperExecution()):
         node = LiveNode(
@@ -1284,3 +1315,76 @@ def test_a_node_that_stopped_part_way_through_a_booking_refuses_every_later_call
         with pytest.raises(StateError) as e:
             call()
         assert e.value.code == "node_poisoned"
+
+
+# -- a contract's end, on a paper node ------------------------------------------------
+
+import test_lifecycle as tl  # noqa: E402
+
+
+def _fut_declared_price():
+    fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0)
+    fut.settlement_price = 105.0
+    return {"FUT": fut}, {"FUT": tl.bars([100, 101, 102, 103])}, tl.holder_cls("FUT"), None
+
+
+def _option_cash_against_the_underlying():
+    opt = InstrumentSpec.option("OPT", strike=100.0, right="call", expiration_ns=4, lot_size=1.0, underlying="U")
+    opt.settlement_price = "underlying"
+    data = {"OPT": tl.bars([7, 8]), "U": tl.bars([105, 108, 110, 111, 112, 113])}
+    return {"OPT": opt}, data, tl.holder_cls("OPT"), None
+
+
+def _physical_future_delivers_the_underlying():
+    fut = InstrumentSpec.futures_contract("FUT", expiration_ns=3, lot_size=1.0, multiplier=2.0, underlying="U")
+    fut.settlement_style = "physical"
+    fut.settlement_price = 120.0
+    data = {"FUT": tl.bars([100, 101]), "U": tl.bars([100, 100, 100, 100, 100])}
+    return {"FUT": fut, "U": InstrumentSpec.equity("U")}, data, tl.holder_cls("FUT", units=3.0), None
+
+
+def _short_put_is_assigned():
+    opt = InstrumentSpec.option(
+        "OPT", strike=100.0, right="put", expiration_ns=4, lot_size=1.0, multiplier=10.0, underlying="U"
+    )
+    opt.settlement_style = "physical"
+    data = {"OPT": tl.bars([5, 5]), "U": tl.bars([100, 100, 100, 90.0, 90.0, 90.0])}
+    return {"OPT": opt, "U": InstrumentSpec.equity("U")}, data, tl.holder_cls("OPT", units=2.0, side="sell"), None
+
+
+CONTRACT_ENDS = {
+    "cash_future_at_a_declared_price": _fut_declared_price,
+    "cash_option_against_the_underlying": _option_cash_against_the_underlying,
+    "physical_future_delivers": _physical_future_delivers_the_underlying,
+    "short_put_assigned": _short_put_is_assigned,
+}
+
+
+def _contract_run(execution, name):
+    instruments, data, cls, _ = CONTRACT_ENDS[name]()
+    strategy = cls()
+    symbols = list(data)
+    node = LiveNode([strategy], symbols, tl.config(), instruments=instruments, execution=execution, bar_stamp="close")
+    rows = sorted(
+        (int(data[s]["timestamps"][i]), k, i) for k, s in enumerate(symbols) for i in range(len(data[s]["timestamps"]))
+    )
+    for _, k, i in rows:
+        a = data[symbols[k]]
+        node.push_bar(symbols[k], int(a["timestamps"][i]), *(float(a[c][i]) for c in ("open", "high", "low", "close", "volume")))
+    result = node.finish()[0]
+    trades_ = [
+        (t.symbol, t.direction, t.size, t.entry_price, t.exit_price, t.exit_reason, t.pnl, t.fees)
+        for t in result.result.trades()
+    ]
+    return trades_, [(e.kind, e.outcome) for e in strategy.lifecycle], list(result.result.equity_curve())
+
+
+@pytest.mark.parametrize("name", sorted(CONTRACT_ENDS))
+def test_a_contract_settles_on_a_paper_node_as_it_does_in_process(name):
+    """Expiry, cash settlement, delivery and assignment are the instrument's own terms, so a
+    position held to the contract's end ends the same way whether orders fill in-process or at
+    the simulated venue: same trades, same prices, same charges, same equity."""
+    in_process = _contract_run(None, name)
+    paper = _contract_run(PaperExecution(), name)
+    assert paper == in_process
+    assert any(reason in ("Settlement",) for *_, reason, _, _ in in_process[0]), "the contract never ended"

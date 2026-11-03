@@ -71,15 +71,23 @@ def test_a_successor_restored_with_a_newer_epoch_takes_the_account_and_fences_th
     assert third.epoch == 3 and venue.epoch == 3
 
 
-def test_restore_without_an_epoch_keeps_the_epoch_the_journal_holds():
+def test_restore_of_a_journal_that_holds_an_epoch_needs_a_newer_one():
+    """It used to keep the journal's epoch, so the node that wrote it and the one that restored it
+    held the same epoch and neither fenced the other (see also test_venue_correctness)."""
     venue = MockVenue()
     store = []
     node = build(venue, rj.Journal(HEADER, sink=lambda r: store.append(r.canonical())), epoch=4)
     for step in script(4):
         run_step(node, venue, step)
-    again = restore(store, venue)
-    assert again.epoch == 4
-    assert [r.kind for r in again.journal.since(0)].count("epoch") == 1
+    with pytest.raises(StateError) as e:
+        restore(store, venue)
+    assert e.value.code == "epoch_required"
+    with pytest.raises(StateError) as e:
+        restore(store, venue, epoch=4)
+    assert e.value.code == "stale_epoch"
+    again = restore(store, venue, epoch=5)
+    assert again.epoch == 5
+    assert [r.kind for r in again.journal.since(0)].count("epoch") == 2
 
 
 def test_an_epoch_on_an_adapter_with_no_fence_is_refused_not_ignored():
@@ -434,8 +442,8 @@ def test_a_replay_does_not_place_the_exit_rule_again_and_reaches_the_same_state(
     restored = LiveNode.restore(
         None, [Holder()], ["A"], BacktestConfig(initial_capital=1_000_000.0, fees=0.0),
         journal=rj.Journal(HEADER, memory=True), records=list(store), execution=venue, bar_stamp="close",
-        reconcile="skip",
-    )
+    )  # reconciles: the rule's exit order is held at the venue, not missing from its open orders
+    assert restored.state == "live"
     assert len(venue.rules) == 1, "the venue was not asked again"
     assert restored.state_digest() == digest
     cid = venue.rules[0].exit_client_ids[0]
@@ -534,6 +542,7 @@ class Carry(RollEvents, Strategy):
         timeframes=["1m"], holding=Holding.overnight(), data=["bar"],
     )
     auto_roll = True
+    roll_sizing = "lots"
 
     def __init__(self):
         super().__init__()

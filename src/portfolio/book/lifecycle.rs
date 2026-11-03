@@ -21,6 +21,21 @@ use crate::instruments::lifecycle::{
 };
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 
+/// Whether the contract's settlement is priced from its underlying: physical
+/// delivery, the `"underlying"` policy, or `"auto"` on an option (an index
+/// option cash-settles at intrinsic value against the underlying's settlement
+/// price, not at its own last trade).
+fn wants_underlying_price(spec: &crate::instruments::InstrumentSpec) -> bool {
+    spec.settlement.style == SettlementStyle::Physical
+        || match spec.settlement.price {
+            SettlementPrice::Underlying => true,
+            SettlementPrice::Auto => {
+                matches!(spec.kind, crate::instruments::InstrumentKind::Option { .. })
+            }
+            _ => false,
+        }
+}
+
 /// Corporate actions a book was given and where it is in them.
 #[derive(Debug, Default)]
 pub(super) struct Lifecycle {
@@ -174,18 +189,20 @@ impl PortfolioBook {
         if !self.kernels[i].expired_at(ts) {
             return;
         }
-        let terms = self.kernels[i]
+        let wanted = self.kernels[i]
             .spec
             .as_ref()
-            .map(|s| (s.settlement, s.underlying().map(str::to_owned)));
-        let Some((terms, underlying)) = terms else { return };
+            .map(|s| (wants_underlying_price(s), s.underlying().map(str::to_owned)));
+        let Some((wants_underlying, underlying)) = wanted else { return };
         let u = underlying.as_deref().and_then(|name| self.index_of_symbol(name));
         let held = self.waits_for_underlying(i, ts);
         self.kernels[i].hold_settlement(held);
         self.kernels[i].set_delivers(u.is_some());
-        let wants_underlying = terms.style == SettlementStyle::Physical
-            || matches!(terms.price, SettlementPrice::Underlying);
-        if wants_underlying && !self.kernels[i].has_underlying_price() {
+        // A held settlement takes no price yet: the underlying's last close is
+        // the print BEFORE the expiry instant, and a price taken now would
+        // outlive the wait and settle the contract on it (it depended on which
+        // of the two instruments the run listed first).
+        if wants_underlying && !held && !self.kernels[i].has_underlying_price() {
             if let Some(price) = u.and_then(|u| self.last_close[u]) {
                 self.kernels[i].set_underlying_price(Some(price));
             }
@@ -199,8 +216,7 @@ impl PortfolioBook {
     /// and settles on the underlying's last price at the next later event.
     fn waits_for_underlying(&mut self, i: usize, ts: Timestamp) -> bool {
         let Some(spec) = self.kernels[i].spec.as_ref() else { return false };
-        let wants = spec.settlement.style == SettlementStyle::Physical
-            || matches!(spec.settlement.price, SettlementPrice::Underlying);
+        let wants = wants_underlying_price(spec);
         let Some(u) = spec.underlying().and_then(|n| self.index_of_symbol(n)) else {
             return false;
         };
@@ -244,7 +260,7 @@ impl PortfolioBook {
 
     /// Step kernel `i` with `f` under the book's pool discipline: lend it
     /// the account's cash, take the movement back, fold it into the account.
-    fn with_pool<R>(&mut self, i: usize, f: impl FnOnce(&mut EngineKernel) -> R) -> R {
+    pub(super) fn with_pool<R>(&mut self, i: usize, f: impl FnOnce(&mut EngineKernel) -> R) -> R {
         let kernel = &mut self.kernels[i];
         let locked_before = kernel.locked_margin();
         let injected = match self.account.mode() {
@@ -339,7 +355,7 @@ impl PortfolioBook {
         events
     }
 
-    fn regroup_option_margin_if_alone(&mut self) {
+    pub(super) fn regroup_option_margin_if_alone(&mut self) {
         if self.grouped.is_none() {
             self.regroup_option_margin();
         }

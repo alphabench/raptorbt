@@ -95,6 +95,18 @@ impl RejectReason {
         )
     }
 
+    /// Whether the account could not fund the entry: it sized to nothing, or
+    /// capital or margin fell short. Such a refusal is not a risk limit, and
+    /// the run reports it separately (`unfunded_entries`).
+    pub fn is_unfunded(&self) -> bool {
+        matches!(
+            self,
+            RejectReason::ZeroSize
+                | RejectReason::InsufficientCapital
+                | RejectReason::InsufficientMargin
+        )
+    }
+
     /// [`RejectReason::is_risk_limit`] for a stable identifier string.
     pub fn is_risk_limit_str(reason: &str) -> bool {
         matches!(reason, "order_size" | "max_position" | "max_exposure" | "daily_loss" | "killed")

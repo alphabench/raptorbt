@@ -21,4 +21,4 @@ pub use events::{tick_data_to_events, DepthRef, EventPayload, MarketEvent, Quote
 pub use feed::{ensure_prices_finite, ensure_series_finite, ensure_time_sorted, EventFeed};
 pub use flow_bars::{FlowBarBuilder, FlowMagnitude, FlowRule};
 pub use renko::RenkoBarBuilder;
-pub use session_bars::{builder_for_session, follows_calendar};
+pub use session_bars::{builder_for_session, follows_calendar, uses_calendar};

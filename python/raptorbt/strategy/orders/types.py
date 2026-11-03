@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from raptorbt.errors import InvalidOrder
 
 _VALID_SIDES = ("buy", "sell")
-_VALID_TIFS = ("gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close")
+_VALID_TIFS = ("auto", "gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close")
 _VALID_OFFSET_KINDS = ("price", "bps", "ticks")
 
 
@@ -49,7 +49,10 @@ class _OrderBase:
     #: Deprecated spelling of ``quantity``; kept silent so existing code is quiet.
     units: float | None = None
     size_frac: float | None = None
-    tif: str = "gtc"
+    #: ``"auto"`` (the default) is DAY on an instrument with an exchange session
+    #: (cancelled at that session's close) and GTC on one without; ``"gtc"``
+    #: carries the order across sessions, where the venue allows it.
+    tif: str = "auto"
     expire_ns: int | None = None
     stop_price: float | None = None
     target_price: float | None = None

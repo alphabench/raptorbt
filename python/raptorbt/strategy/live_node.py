@@ -58,8 +58,14 @@ from raptorbt.strategy.accounts import (
     check_group_sizes,
     unpack_entries,
 )
-from raptorbt.strategy._validate import ensure_prices_finite, ensure_pushed_finite
-from raptorbt.strategy._commands import dispatch_events, reject_atr_stops, session_tz_offset_ns
+from raptorbt.strategy._validate import SessionCoverage, ensure_prices_finite, ensure_pushed_finite
+from raptorbt.strategy._commands import (
+    config_for_holding,
+    dispatch_events,
+    reject_atr_stops,
+    reject_bar_only_settings,
+    session_tz_offset_ns,
+)
 from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy import context_host
 from raptorbt.strategy import order_check as order_check_mod
@@ -313,6 +319,19 @@ class LiveNode:
             )
         primary_bars = _primary_bars(primary_bars)
         execution_kind = _execution_kind(execution, name)
+        if oms_type == "hedging" and execution_kind == "adapter" and getattr(execution, "supports_hedging", True) is False:
+            raise InvalidParameter(
+                f"oms_type='hedging' keeps several positions per instrument, and {type(execution).__name__} "
+                "sends its orders to a venue that nets them: a close that names a position would "
+                "reduce the net one instead, and the node's book and the venue's would disagree. "
+                "Use oms_type='netting' with this adapter, or an adapter whose venue keeps "
+                "positions apart (supports_hedging = True)",
+                code="hedging_unsupported_by_venue",
+                operation=name,
+                parameter="oms_type",
+                value=oms_type,
+                valid=["netting"],
+            )
         if isinstance(processing_latency_ns, bool) or not isinstance(processing_latency_ns, int) or processing_latency_ns < 0:
             raise InvalidParameter(
                 f"processing_latency_ns must be a non-negative integer, got {processing_latency_ns!r}",
@@ -334,11 +353,12 @@ class LiveNode:
         self._init_recovery(journal, epoch, execution, execution_kind, entries, strategy_states, _replay)
         seeds = _seeds(initial_positions, entries)
         reject_atr_stops(config, instrument_configs, symbols)
-        # Pushed events cannot be put on one later basis, so every symbol counts
-        # as a tick symbol: only the policy 'raw' (prices as traded, positions
-        # rescaled at the ex-date) is open to a live node.
+        self._bar_config = config
+        # Pushed events cannot be put on one later basis (docs/architecture/lifecycle.md,
+        # "Live nodes"), so every symbol counts as a tick symbol: only the policy 'raw'
+        # (prices as traded, positions rescaled at the ex-date) is open to a live node.
         corporate_actions, adjustment_policy = _lifecycle(
-            corporate_actions, adjustment_policy, set(symbols), set(symbols), name
+            corporate_actions, adjustment_policy, set(symbols), set(symbols), name, live=True
         )
 
         if warmup not in (None, "live", "muted"):
@@ -353,6 +373,12 @@ class LiveNode:
         self._warmup_muted = (warmup == "muted") or (warmup is None and execution_kind == "adapter")
         self._host = context_host.build(instruments, bindings, entries, symbols, name)
         self._muted_now = False
+        if execution_kind == "adapter":
+            # The adapter learns which broker key is which of this node's symbols, so a position
+            # the broker reports under its own key reads as the engine's symbol after a restart.
+            know = getattr(execution, "know_symbols", None)
+            if callable(know):
+                know(symbols)
         if execution_kind == "adapter" and callable(getattr(execution, "place_exit_rule", None)):
             self._host.venue = _VenueExits(self, execution)
             self._host.index_of = lambda strategy: next(
@@ -363,6 +389,12 @@ class LiveNode:
         self._requests = self._host.pending
         self._protective = protective
         self._symbols = symbols
+        #: Per symbol, the check that a pushed bar falls on a date its session schedule covers.
+        self._coverage = {
+            s: c
+            for s in symbols
+            if (c := SessionCoverage.of(s, (instruments or {}).get(s), f"{name}.push_bar"))
+        }
         self._index_of = {s: i for i, s in enumerate(symbols)}
         self._retired: dict[str, int] = {}
         self._holders: dict[str, list[int]] = {}
@@ -373,6 +405,7 @@ class LiveNode:
         warmup = _warmup(warmup_bars, self._index_of, self._stamps)
 
         market = MarketData.live(symbols, [self._stamps.offset(s) for s in symbols], history)
+        config = config_for_holding(config, [strategy for strategy, _ in entries], name)
         rt = Runtime(
             market,
             [(directions or {}).get(s, 1) for s in symbols],
@@ -517,7 +550,7 @@ class LiveNode:
         self._check_open(push=True)
         ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
         return self._rt.push_tick(
-            self._index_of[symbol],
+            self._index(symbol, "push_tick"),
             timestamp,
             ltp,
             bid,
@@ -548,12 +581,16 @@ class LiveNode:
         ``timestamp`` is stamped as the node's ``bar_stamp`` declares.
         """
         self._check_open(push=True)
+        reject_bar_only_settings(self._bar_config, [symbol], f"{self._name}.push_bar")
         ensure_pushed_finite(
             symbol, f"{self._name}.push_bar", open=open, high=high, low=low, close=close
         )
+        covered = self._coverage.get(symbol)
+        if covered is not None:
+            covered.check(timestamp)
         self._stamps.warn_missing(f"{self._name}.push_bar", stacklevel=3 + self._extra)
         self._rt.push_bar(
-            self._index_of[symbol], timestamp, open, high, low, close, volume, arrival_ns
+            self._index(symbol, "push_bar"), timestamp, open, high, low, close, volume, arrival_ns
         )
 
     def warm_up(self, bars: dict[str, dict]) -> None:
@@ -595,7 +632,7 @@ class LiveNode:
             f"{self._name}.push_depth",
             **{f"{side}[{i}]": price for side, levels in (("bids", bids), ("asks", asks)) for i, (price, _) in enumerate(levels)},
         )
-        self._rt.push_depth(self._index_of[symbol], timestamp, bids, asks, arrival_ns)
+        self._rt.push_depth(self._index(symbol, "push_depth"), timestamp, bids, asks, arrival_ns)
 
     def advance_time(self, timestamp: int) -> None:
         """Move time to ``timestamp`` with no data.
@@ -1256,6 +1293,20 @@ class LiveNode:
                 operation=self._name,
             )
 
+    def _index(self, symbol: str, call: str) -> int:
+        """The node's index of ``symbol``; a symbol it does not trade is a structured error."""
+        try:
+            return self._index_of[symbol]
+        except KeyError:
+            raise UnknownSymbol(
+                f"{self._name}.{call}: unknown symbol {symbol!r}",
+                code="unknown_symbol",
+                operation=f"{self._name}.{call}",
+                parameter="symbol",
+                value=symbol,
+                valid=list(self._index_of),
+            ) from None
+
     def _check_open(self, push: bool = False) -> None:
         if self._finished:
             what = "stream" if self._extra else "node"
@@ -1271,21 +1322,93 @@ class LiveNode:
 
 
 class _VenueExits:
-    """The adapter's optional ``place_exit_rule`` as a node offers it to a strategy's exit
-    rules: through the node's fence, its journal and its replay.
+    """The adapter's optional exit-rule calls (``place_exit_rule``, ``cancel_exit_rule``,
+    ``replace_exit_rule``) as a node offers them to a strategy's exit rules: through the node's
+    fence, its journal and its replay.
 
-    The request and what became of it are journaled like any adapter call (the request before
+    Each request and what became of it are journaled like any adapter call (the request before
     the adapter is called). While a journal is replayed, or warm-up bars are replayed muted, the
     adapter is not called: a replay answers with the result the journal holds. A rule the venue
     takes gets its exit orders registered at the node, so the fills of the exits the venue fires
-    are booked as the orders they are."""
+    are booked as the orders they are; a rule it drops or changes ends them.
+
+    An answer that is neither yes nor no (an error after the request left, or a request whose
+    result was never written) is *unconfirmed*: the rule may be held. Its exit orders are
+    registered anyway, so a fill is booked rather than refused as unknown, and the order ids are
+    marked unconfirmed for the next reconciliation."""
 
     def __init__(self, node, adapter) -> None:
         self._node = node
         self._adapter = adapter
 
-    def place_exit_rule(self, request) -> None:
-        from raptorbt.execution import AdapterError, OrderRefused, Unsupported
+    # -- the three calls ----------------------------------------------------------------
+
+    def place_exit_rule(self, request) -> str:
+        """Returns ``"held"`` or ``"unconfirmed"``; raises ``Unsupported``/``OrderRefused`` when
+        the venue will not hold it (the engine then watches the rule)."""
+        from raptorbt.strategy.exits import ExitRuleUnconfirmed
+
+        try:
+            status = self._call(
+                "place_exit_rule", _exit_request_value(request), request.rule_id,
+                lambda: self._adapter.place_exit_rule(request),
+            )  # fmt: skip
+        except ExitRuleUnconfirmed:
+            self._register_unconfirmed(request)  # a fill of the exit it may hold must be booked
+            raise
+        if status == "ok":
+            self._node._register_exit_orders(request)
+            return "held"
+        self._register_unconfirmed(request)
+        return "unconfirmed"
+
+    def _needs(self, name: str) -> None:
+        from raptorbt.execution import Unsupported
+
+        if not callable(getattr(self._adapter, name, None)):
+            raise Unsupported(f"{type(self._adapter).__name__} has no {name}: a held exit rule cannot be changed through it")
+
+    def cancel_exit_rule(self, request) -> None:
+        self._needs("cancel_exit_rule")
+        self._call(
+            "cancel_exit_rule", {"rule_id": request.rule_id, "exit_client_ids": list(request.exit_client_ids)},
+            request.rule_id, lambda: self._adapter.cancel_exit_rule(request),
+        )  # fmt: skip
+        self._end_orders(request)
+
+    def replace_exit_rule(self, old, new) -> None:
+        from raptorbt.strategy.exits import ExitRuleUnconfirmed
+
+        self._needs("replace_exit_rule")
+
+        try:
+            status = self._call(
+                "replace_exit_rule",
+                {"old": _exit_request_value(old), "new": _exit_request_value(new)},
+                new.rule_id, lambda: self._adapter.replace_exit_rule(old, new),
+            )  # fmt: skip
+        except ExitRuleUnconfirmed:
+            # Either rule may be the one the venue holds: both stay registered, both unconfirmed.
+            self._register_unconfirmed(new)
+            self._node._rt.mark_unconfirmed(list(old.exit_client_ids))
+            raise
+        self._end_orders(old)
+        if status == "ok":
+            self._node._register_exit_orders(new)
+        else:
+            self._register_unconfirmed(new)
+
+    # -- the journaled call ------------------------------------------------------------
+
+    def _call(self, op: str, value: dict, rule_id: str, call) -> str:
+        """Fence, journal the request, call (or replay) the adapter, journal the result.
+
+        Returns ``"ok"``, or ``"unconfirmed"`` when a replay cannot say how a request ended.
+        Raises ``Unsupported``/``OrderRefused`` for a definite no, and
+        :class:`~raptorbt.strategy.exits.ExitRuleUnconfirmed` when a live call failed in a way
+        that leaves the venue's state unknown."""
+        from raptorbt.execution import OrderRefused, Unsupported
+        from raptorbt.strategy.exits import ExitRuleUnconfirmed
 
         node = self._node
         if node._muted_now:
@@ -1296,43 +1419,55 @@ class _VenueExits:
         ts = node._rt.clock()[0]
         if j is not None:
             j.append(
-                "adapter_request", ts,
-                {"op": "place_exit_rule", "request": _exit_request_value(request)},
-                source="engine", client_order_id=request.rule_id,
-            )
-        raised = None
+                "adapter_request", ts, {"op": op, "request": value},
+                source="engine", client_order_id=rule_id,
+            )  # fmt: skip
+        error = None
         if node._replaying:
             status, message = _replayed_result(j)
         else:
             try:
-                self._adapter.place_exit_rule(request)
+                call()
                 status, message = "ok", ""
             except Unsupported as e:
                 status, message = "unsupported", str(e)
             except OrderRefused as e:
                 status, message = "refused", str(e)
-            except Exception as e:  # the venue could not be asked: the strategy sees it
-                status, message, raised = "error", str(e), e
+            except Exception as e:  # noqa: BLE001 - the venue could not be asked, or did not say
+                status, message, error = "error", str(e), e
         if j is not None:
             j.append(
-                "adapter_result", ts,
-                {"op": "place_exit_rule", "status": status, "message": message},
-                source="engine", client_order_id=request.rule_id,
-            )
+                "adapter_result", ts, {"op": op, "status": status, "message": message},
+                source="engine", client_order_id=rule_id,
+            )  # fmt: skip
         if status == "ok":
-            node._register_exit_orders(request)
-            return
-        if raised is not None:
-            raise raised
+            return "ok"
         if status == "unsupported":
             raise Unsupported(message)
         if status == "refused":
             raise OrderRefused(message)
-        raise AdapterError(message or "the venue could not take the exit rule")
+        # error, or a result that was never written: the venue may have acted
+        if node._replaying:
+            return "unconfirmed"
+        raise ExitRuleUnconfirmed(message or "the venue did not answer") from error
+
+    def _register_unconfirmed(self, request) -> None:
+        node = self._node
+        node._register_exit_orders(request)
+        node._rt.mark_unconfirmed(list(request.exit_client_ids))
+
+    def _end_orders(self, request) -> None:
+        """The venue no longer holds ``request``: the orders it would have fired are over."""
+        node = self._node
+        k = request.strategy_index
+        if k is not None and request.exit_client_ids:
+            node._rt.end_venue_orders(k, list(request.exit_client_ids))
+            for cid in request.exit_client_ids:
+                node._rt.confirm(cid)
 
 
 def _exit_request_value(request) -> dict:
-    return {
+    value = {
         "rule_id": request.rule_id,
         "kind": request.kind,
         "legs": [[sym, side, float(qty)] for sym, side, qty in request.legs],
@@ -1340,17 +1475,26 @@ def _exit_request_value(request) -> dict:
         "exit_client_ids": list(request.exit_client_ids),
         "strategy_index": request.strategy_index,
     }
+    if request.generation:
+        value["generation"] = request.generation  # written only for a replaced rule: older journals replay
+    return value
 
 
 def _replayed_result(journal):
-    """The result the journal holds for the request just replayed; a request whose result
-    was never written has an outcome nobody knows, and is not held at the venue as far as the
-    node can tell (the engine watches the rule; reconcile settles the rest)."""
+    """The result the journal holds for the request just replayed. A request whose result was
+    never written (the process died between the call and the record) has an outcome nobody
+    knows: ``unknown_outcome``, which the venue may have acted on."""
     nxt = journal.peek() if journal is not None else None
     if nxt is not None and nxt.kind == "adapter_result":
         payload = nxt.payload
-        return payload.get("status", "error"), payload.get("message", "")
-    return "unsupported", "the request was written; its result was not"
+        status = payload.get("status")
+        if not isinstance(status, str):
+            raise InvalidData(
+                "the journal holds an adapter result with no status",
+                code="invalid_checkpoint", operation="LiveNode.restore", parameter="records",
+            )
+        return status, payload.get("message", "")
+    return "unknown_outcome", "the request was written; its result was not"
 
 
 def _execution_kind(execution, name):

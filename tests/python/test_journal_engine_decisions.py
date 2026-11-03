@@ -76,7 +76,7 @@ def test_a_session_square_off_on_a_venue_node_is_a_decision_then_the_close_order
             venue.fill_all()
             venue.deliver(node, int(b["timestamps"][i]) + 1)
 
-    kw = dict(instruments={"A": InstrumentSpec.equity("A", session=SessionSchedule.nse_equity())})
+    kw = dict(instruments={"A": InstrumentSpec.equity("A", session=SessionSchedule.nse_equity(squareoff_minute=920))})
     wrote = _venue_run(venue, lambda: [Holder("A", intent=True)], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), drive, **kw)
     kinds = [r.kind for r in wrote]
     (exit_,) = of(wrote, "engine_exit", reason="squareoff")

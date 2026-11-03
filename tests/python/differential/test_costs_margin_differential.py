@@ -146,6 +146,45 @@ def _outcome(call):
         return "refused"
 
 
+def _exact_defined_risk(legs):
+    """The worst loss of ``[(spec dict, quantity, price)]`` over every underlying price, by brute force.
+
+    The reference engine evaluated a bounded grid (an uncovered short call looked like a finite loss,
+    a calendar was priced at intrinsic value, futures legs were ignored); 2.0 is exact. This is
+    the independent check: a dense grid from zero, and the slope far above the highest strike.
+    """
+    import numpy as np
+
+    options = [(d, q, p) for d, q, p in legs if d["kind"] == "option"]
+    if not options:
+        return "refused"
+    if len({d["expiry"] for d, _, _ in options}) > 1:
+        return "refused"
+
+    def pnl(s):
+        total = np.zeros_like(s)
+        for d, q, p in legs:
+            units = q * d["mult"]
+            if d["kind"] == "option":
+                intrinsic = np.maximum(s - d["strike"], 0.0) if d["right"].lower() == "call" else np.maximum(d["strike"] - s, 0.0)
+                total += (intrinsic - p) * units
+            else:
+                total += (s - p) * units
+        return total
+
+    top = max(d["strike"] for d, _, _ in options)
+    grid = np.arange(0.0, 3 * top + 1.0, 1.0)
+    worst = max(0.0, float(-pnl(grid).min()))
+    far = pnl(np.array([1e9, 2e9]))
+    if far[1] < far[0] - 1e-6:
+        return "inf"
+    return worst
+
+
+def _is_defined_risk(model_name):
+    return MARGIN["models"][model_name]["kind"] == "defined_risk"
+
+
 def test_single_line_margin_matches():
     cols = MARGIN["line_columns"]
     bad = []
@@ -153,6 +192,8 @@ def test_single_line_margin_matches():
         c = dict(zip(cols, case))
         got = _outcome(lambda: MODELS[c["model"]].required(SPECS[c["spec"]], c["quantity"], c["price"]))
         want = c["required"]
+        if _is_defined_risk(c["model"]):
+            want = _exact_defined_risk([(MARGIN["specs"][c["spec"]], c["quantity"], c["price"])])
         if want == "refused" or got == "refused":
             ok = want == got
         else:
@@ -191,6 +232,8 @@ def test_multi_leg_margin_matches():
             lambda: model.required_legs(legs, c["now"]) if c["now"] is not None else model.required_legs(legs)
         )
         want = c["required"]
+        if _is_defined_risk(c["model"]):
+            want = _exact_defined_risk([(MARGIN["specs"][k], q, p) for k, q, p in structures[c["structure"]]])
         ok = (want == got) if "refused" in (want, got) else _close(got, want)
         if not ok:
             bad.append((case, got))

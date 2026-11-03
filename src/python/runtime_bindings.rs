@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::exceptions::{PyAttributeError, PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyAttributeError, PyKeyError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -142,6 +142,14 @@ fn poisoned() -> PyErr {
          discard it and rebuild it from the venue's positions",
     )
     .into()
+}
+
+/// A symbol the run has no data for.
+fn unknown_symbol(symbol: &str) -> PyErr {
+    Fail::new("unknown_symbol", format!("unknown symbol {symbol:?}: the run has no data for it"))
+        .param("symbol")
+        .value(symbol)
+        .into()
 }
 
 fn not_ready(message: &str) -> PyErr {
@@ -329,6 +337,8 @@ impl<T> Table<T> {
 
 struct Shared {
     inner: RefCell<Inner>,
+    /// The run's config, for the checks an instrument added later must pass.
+    config: BacktestConfig,
     /// Interned symbols by instrument id.
     symbols: Table<Py<PyString>>,
     sym_ids: RefCell<HashMap<String, InstrumentId>>,
@@ -549,6 +559,8 @@ impl Shared {
 
 /// `(client_order_id, strategy, symbol, side, quantity, filled_qty, status)`.
 type VenueOrderRow = (String, usize, String, &'static str, f64, f64, String);
+type WorkingRequestRow =
+    (crate::python::execution_bindings::PyOrderRequest, String, f64, Option<f64>);
 
 /// The venue a node was told to use.
 struct ExecChoice {
@@ -945,7 +957,7 @@ impl PyRuntimeContext {
                 .borrow()
                 .get(name)
                 .and_then(|&g| self.shared.local_of(self.sid, g))
-                .ok_or_else(|| PyKeyError::new_err(name.to_string())),
+                .ok_or_else(|| unknown_symbol(name)),
         }
     }
 
@@ -1066,9 +1078,10 @@ impl PyRuntimeContext {
         }
         let g = self.shared.global_of(self.sid, local)?;
         let tick = self.shared.depth_at(g, row).ok_or_else(|| {
-            PyRuntimeError::new_err(
+            PyErr::from(Fail::new(
+                "history_exhausted",
                 "the book's depth row is gone: it was overwritten in the live depth history",
-            )
+            ))
         })?;
         let object = book_object(py, &self.shared, g, &tick)?;
         if let Some(slot) = self.books.borrow_mut()[local].as_mut() {
@@ -1176,7 +1189,11 @@ impl PyRuntimeContext {
     #[pyo3(signature = (rows, symbol=None))]
     fn keep_history(&self, rows: u64, symbol: Option<&str>) -> PyResult<()> {
         if rows == 0 {
-            return Err(PyValueError::new_err("keep_history needs at least one row"));
+            return Err(Fail::new("invalid_history", "keep_history needs at least one row")
+                .op("keep_history")
+                .param("rows")
+                .value(0_i64)
+                .into());
         }
         let g = self.shared.global_of(self.sid, self.index_of(symbol)?)?;
         if self.shared.live_history.is_none() {
@@ -1340,7 +1357,7 @@ impl PyStrategyView {
     #[pyo3(signature = (
         instrument, side, kind, submitted_idx, submitted_ts, client_id,
         units=None, size_frac=None, limit_price=None, trigger_price=None,
-        tif="gtc", expire_ns=None, stop_price=None, target_price=None,
+        tif="auto", expire_ns=None, stop_price=None, target_price=None,
         offset=None, offset_kind="price", limit_offset=0.0,
         post_only=false, reduce_only=false, parent_id=None,
     ))]
@@ -1576,6 +1593,7 @@ fn order_spec(order: &Bound<'_, PyAny>) -> PyResult<OrderSpec> {
         limit_offset: order_attr(order, "limit_offset")?.unwrap_or(0.0),
         post_only: order_attr(order, "post_only")?.unwrap_or(false),
         reduce_only: order.getattr("reduce_only")?.extract()?,
+        position_id: None,
         tags: order_tags(order)?,
     })
 }
@@ -1878,7 +1896,13 @@ fn optional_field<'py, T: numpy::Element>(
         None => Ok(None),
         Some(v) if v.is_none() => Ok(None),
         Some(v) => v.extract().map(Some).map_err(|e| {
-            PyValueError::new_err(format!("{kind}['{symbol}']: '{key}' is not a usable array: {e}"))
+            PyErr::from(
+                Fail::new(
+                    "invalid_array",
+                    format!("{kind}['{symbol}']: '{key}' is not a usable array: {e}"),
+                )
+                .param(key),
+            )
         }),
     }
 }
@@ -1922,7 +1946,13 @@ fn depth_columns(symbol: &str, dict: &Bound<'_, PyDict>) -> PyResult<DepthColumn
             })?
             .extract()
             .map_err(|e| {
-                PyValueError::new_err(format!("{label}: '{key}' must be a 2-D float array: {e}"))
+                PyErr::from(
+                    Fail::new(
+                        "invalid_array",
+                        format!("{label}: '{key}' must be a 2-D float array: {e}"),
+                    )
+                    .param(key),
+                )
             })
     };
     let (bp, bs) = (matrix("bid_prices")?, matrix("bid_sizes")?);
@@ -2082,7 +2112,10 @@ impl PyMarketData {
             );
         }
         if history == 0 {
-            return Err(PyValueError::new_err("history must be at least 1 row"));
+            return Err(Fail::new("invalid_history", "history must be at least 1 row")
+                .param("history")
+                .value(0_i64)
+                .into());
         }
         let mut store = MarketStore::new();
         for symbol in &symbols {
@@ -2152,7 +2185,7 @@ impl PyRuntime {
                 Fail::new("length_mismatch", "per-instrument lists must share one length").into()
             );
         }
-        let rust_config: BacktestConfig =
+        let mut rust_config: BacktestConfig =
             config.as_deref().map(BacktestConfig::from).unwrap_or_default();
         let mode: AccountMode = parse_account_mode(account_type, leverage)?;
         super::strategy_bindings::check_margin_model(&rust_config, mode)?;
@@ -2171,6 +2204,7 @@ impl PyRuntime {
             let (direction, p, spec) =
                 parse_instrument_args(directions[i], instruments[i].as_deref(), oms_type)?;
             policy = Some(p);
+            super::strategy_bindings::check_market(&rust_config, &symbols[i], spec.as_ref())?;
             let inst_cfg: Option<InstrumentConfig> =
                 instrument_configs[i].as_deref().map(InstrumentConfig::from);
             params.push(InstrumentParams {
@@ -2180,10 +2214,17 @@ impl PyRuntime {
                 config: inst_cfg,
             });
         }
+        // The session length annualisation counts per day: the instruments' own schedule when the
+        // config names none (the first instrument that has one), else the data's trading day.
+        if rust_config.session_minutes.is_none() {
+            rust_config.session_minutes = params
+                .iter()
+                .find_map(|p| p.spec.as_ref()?.session.as_ref().map(|s| s.trading_minutes()));
+        }
         let builder = RuntimeBuilder::new(
             market.store.clone(),
             params,
-            rust_config,
+            rust_config.clone(),
             mode,
             policy.unwrap_or(crate::portfolio::ledger::PositionPolicy::Net),
         )
@@ -2191,6 +2232,7 @@ impl PyRuntime {
 
         let shared = Shared {
             inner: RefCell::new(Inner::Building(Box::new(builder))),
+            config: rust_config,
             symbols: Table::new(symbols.iter().map(|s| PyString::intern(py, s).unbind()).collect()),
             sym_ids: RefCell::new(sym_ids),
             store: market.store.clone(),
@@ -2268,14 +2310,7 @@ impl PyRuntime {
     ) -> PyResult<(usize, Py<PyRuntimeContext>, Py<PyStrategyView>)> {
         let ids = symbols
             .iter()
-            .map(|s| {
-                self.shared
-                    .sym_ids
-                    .borrow()
-                    .get(s)
-                    .copied()
-                    .ok_or_else(|| PyKeyError::new_err(s.clone()))
-            })
+            .map(|s| self.shared.sym_ids.borrow().get(s).copied().ok_or_else(|| unknown_symbol(s)))
             .collect::<PyResult<Vec<_>>>()?;
         let sid = match &mut *self.shared.inner.borrow_mut() {
             Inner::Building(b) => {
@@ -2409,12 +2444,20 @@ impl PyRuntime {
         let sid = StrategyId::new(sid as u32);
         let locals = self.shared.locals(sid);
         if clocks.len() != locals {
-            return Err(PyValueError::new_err("one clock per symbol is required"));
+            return Err(Fail::new("length_mismatch", "one clock per symbol is required")
+                .param("clocks")
+                .value(clocks.len())
+                .into());
         }
         let clock_cls = py.import("raptorbt.strategy.clock")?.getattr("Clock")?;
         let pristine = match clocks.first() {
             Some(first) => first.bind(py).call_method0("clone_schedule")?.unbind(),
-            None => return Err(PyValueError::new_err("one clock per symbol is required")),
+            None => {
+                return Err(Fail::new("length_mismatch", "one clock per symbol is required")
+                    .param("clocks")
+                    .value(0)
+                    .into())
+            }
         };
         let mut clock_slots = Vec::with_capacity(locals);
         for clock in clocks {
@@ -3044,6 +3087,76 @@ impl PyRuntime {
         Ok(())
     }
 
+    /// Mark orders as having an outcome nobody knows: a reconciliation reports them until the
+    /// venue is asked (`confirm`).
+    fn mark_unconfirmed(&self, ids: Vec<String>) {
+        self.shared.control.unconfirmed.borrow_mut().extend(ids);
+    }
+
+    /// End registered exit orders: the venue's exit rule was cancelled or replaced, so the
+    /// orders it would have fired are cancelled in the book. See `register_venue_orders`.
+    fn end_venue_orders(&self, strategy: usize, ids: Vec<String>) -> PyResult<()> {
+        let sh = &*self.shared;
+        let venue = sh.venue.borrow().clone().ok_or_else(|| {
+            PyErr::from(Fail::new("invalid_execution", "this node has no venue to end orders at"))
+        })?;
+        let sid = sh
+            .strats
+            .borrow()
+            .iter()
+            .find(|s| s.sid.index() == strategy)
+            .map(|s| s.sid)
+            .ok_or_else(|| PyKeyError::new_err(strategy))?;
+        let ts = sh.control.now.get().0;
+        venue.end_external(sh, sid, &ids, ts)
+    }
+
+    /// Ids of the orders a venue-held exit rule would fire that are still waiting: the
+    /// venue lists them only once the rule fires, so a reconciliation does not look for them.
+    fn venue_held_orders(&self) -> PyResult<Vec<String>> {
+        let sh = &*self.shared;
+        match sh.venue.borrow().clone() {
+            Some(venue) => venue.held_ids(sh),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The orders the node holds as working at the venue, as requests with their current
+    /// terms: `(request, status, filled_qty, average_fill_price)`. A restarted adapter that
+    /// has no record of them is taught from this (see `BrokerAdapter.restore_orders`).
+    /// Orders the venue makes itself are not listed.
+    fn working_requests(&self) -> PyResult<Vec<WorkingRequestRow>> {
+        let sh = &*self.shared;
+        let Some(venue) = sh.venue.borrow().clone() else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for (_, sid, local, order_id, request, external) in venue.sent_with_origin() {
+            if external {
+                continue;
+            }
+            let state = sh.with_book(StrategyId::new(sid as u32), |b, _| {
+                Ok(b.kernel(local)
+                    .order(order_id)
+                    .map(|o| (o.status, o.qty, o.kind, o.filled_qty, o.avg_fill_price())))
+            })?;
+            let Some((status, qty, kind, filled, avg)) = state else { continue };
+            if status.is_terminal() {
+                continue;
+            }
+            let mut request = request;
+            if let crate::execution::orders::QtySpec::Units(units) = qty {
+                request.quantity = units;
+            }
+            request.kind = kind;
+            out.push((
+                crate::python::execution_bindings::PyOrderRequest(request),
+                format!("{status:?}").to_lowercase(),
+                filled,
+                avg,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Every order sent to the venue: `(client_order_id, strategy, symbol, side,
     /// quantity, filled_qty, status)`.
     fn venue_orders(&self) -> PyResult<Vec<VenueOrderRow>> {
@@ -3322,7 +3435,14 @@ impl PyRuntime {
             }
             Inner::Gone => return Err(finished()),
         };
-        adopted.map_err(PyValueError::new_err)
+        adopted.map_err(|e| {
+            PyErr::from(
+                Fail::new("adoption_refused", e)
+                    .op("adopt_position")
+                    .param("quantity")
+                    .value(quantity),
+            )
+        })
     }
 
     /// Feed one tick row to a live node. Returns the events it appended
@@ -3619,7 +3739,7 @@ impl PyRuntime {
     fn memory_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let inner = self.shared.inner.borrow();
         let Inner::Running(core) = &*inner else {
-            return Err(PyRuntimeError::new_err("the runtime is not built"));
+            return Err(not_ready("the runtime is not built"));
         };
         let r: MemoryReport = core.memory_report();
         let d = PyDict::new(py);
@@ -3656,7 +3776,7 @@ impl PyRuntime {
             return Err(poisoned());
         }
         if self.shared.live_history.is_none() {
-            return Err(PyRuntimeError::new_err("this runtime is not a live node"));
+            return Err(PyErr::from(Fail::new("not_live_node", "this runtime is not a live node")));
         }
         let guard = self
             .live_state
@@ -3755,6 +3875,9 @@ impl PyRuntime {
         }
 
         // The record is written before the engine acts on it.
+        // A setting the run was given (a fee schedule that picks its row by venue, a
+        // squareoff_time that needs a zone) must be carriable out on the new instrument too.
+        super::strategy_bindings::check_market(&sh.config, &symbol, spec.as_ref())?;
         let ts = sh.control.now.get().0;
         let spec_json = match &spec {
             Some(s) => Some(serde_json::to_string(s).map_err(|e| {
@@ -4066,7 +4189,9 @@ fn store_row<R>(
     kind: RingKind,
     f: impl FnOnce(&mut LiveFeed) -> Result<R, RingError>,
 ) -> PyResult<R> {
-    with_feed(sh, |feed| f(feed).map_err(|e| PyRuntimeError::new_err(feed.explain(g, kind, &e))))
+    with_feed(sh, |feed| {
+        f(feed).map_err(|e| PyErr::from(Fail::new("history_exhausted", feed.explain(g, kind, &e))))
+    })
 }
 
 fn builder_locals(builder: &RuntimeBuilder, sid: StrategyId) -> usize {
@@ -4202,7 +4327,9 @@ fn dispatch(
                 Inner::Running(c) => c.depth_of(event),
                 _ => return Err(finished()),
             }
-            .ok_or_else(|| PyRuntimeError::new_err("a book event has no depth row"))?;
+            .ok_or_else(|| {
+                PyErr::from(Fail::new("history_exhausted", "a book event has no depth row"))
+            })?;
             let book = (mask & HOOK_BOOK != 0)
                 .then(|| book_object(py, sh, event.instrument, &tick).map(|o| o.into_bound(py)))
                 .transpose()?;
@@ -4587,7 +4714,7 @@ impl Target for RuntimeTarget<'_> {
                 .borrow()
                 .get(name)
                 .and_then(|&g| self.sh.local_of(self.sid, g))
-                .ok_or_else(|| PyKeyError::new_err(name.to_string())),
+                .ok_or_else(|| unknown_symbol(name)),
         }
     }
 
@@ -4630,6 +4757,20 @@ impl Target for RuntimeTarget<'_> {
                 refusal,
             )
         })
+    }
+
+    fn check_terms(&mut self, instrument: usize, spec: &OrderSpec) -> PyResult<()> {
+        let grid = self.sh.with_book(self.sid, |b, _| Ok(b.kernel(instrument).order_grid()))?;
+        crate::python::strategy_bindings::check_grid(
+            &grid,
+            spec.units,
+            &[
+                ("limit_price", spec.limit_price),
+                ("trigger_price", spec.trigger_price),
+                ("stop_price", spec.stop_price),
+                ("target_price", spec.target_price),
+            ],
+        )
     }
 
     fn submit_twap(
@@ -4718,6 +4859,12 @@ impl Target for RuntimeTarget<'_> {
         limit_price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
+        let grid = self.sh.with_book(self.sid, |b, _| Ok(b.kernel(instrument).order_grid()))?;
+        crate::python::strategy_bindings::check_grid(
+            &grid,
+            units,
+            &[("limit_price", limit_price), ("trigger_price", trigger_price)],
+        )?;
         if let Some(venue) = self.venue() {
             return venue.modify(
                 self.sh,
@@ -4841,6 +4988,19 @@ impl Target for SessionTarget<'_> {
         )
     }
 
+    fn check_terms(&mut self, _instrument: usize, spec: &OrderSpec) -> PyResult<()> {
+        crate::python::strategy_bindings::check_grid(
+            &self.0.runner_ref()?.kernel().order_grid(),
+            spec.units,
+            &[
+                ("limit_price", spec.limit_price),
+                ("trigger_price", spec.trigger_price),
+                ("stop_price", spec.stop_price),
+                ("target_price", spec.target_price),
+            ],
+        )
+    }
+
     fn submit_twap(
         &mut self,
         _instrument: usize,
@@ -4908,6 +5068,11 @@ impl Target for SessionTarget<'_> {
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
         let qty = parse_qty_spec(units, size_frac)?;
+        crate::python::strategy_bindings::check_grid(
+            &self.0.runner_ref()?.kernel().order_grid(),
+            units,
+            &[("limit_price", limit_price), ("trigger_price", trigger_price)],
+        )?;
         self.0.runner_mut()?.kernel_mut().modify_order(order_id, qty, limit_price, trigger_price);
         Ok(())
     }
@@ -5461,6 +5626,26 @@ fn deliver(
 /// steps with none, and what its hooks queued is held for the symbol's next
 /// step. `hooked` says whether a hook that could have queued work ran, so an
 /// event nobody handles skips the queue checks.
+/// Refuse an entry whose explicit stop or target is off the instrument's tick
+/// grid (the same rule as an order's prices). Levels derived from a configured
+/// percentage or ATR multiple are rounded conservatively by the engine instead.
+fn check_intent_grid(
+    sh: &Shared,
+    sid: StrategyId,
+    local: usize,
+    input: &StepInput,
+) -> PyResult<()> {
+    if input.stop_price_override.is_none() && input.target_price_override.is_none() {
+        return Ok(());
+    }
+    let grid = sh.with_book(sid, |b, _| Ok(b.kernel(local).order_grid()))?;
+    crate::python::strategy_bindings::check_grid(
+        &grid,
+        None,
+        &[("stop_price", input.stop_price_override), ("target_price", input.target_price_override)],
+    )
+}
+
 fn step(
     py: Python<'_>,
     sh: &Shared,
@@ -5489,6 +5674,7 @@ fn step(
         };
         let input = fold_step(py, st, symbol, local, local_idx, atr)?;
         refuse_intents(sh, &input)?;
+        check_intent_grid(sh, sid, local, &input)?;
         let venue = sh.venue.borrow().clone();
         if let Some(venue) = venue {
             venue.intents(sh, st, local, &input, local_idx, ts)?;
@@ -5515,6 +5701,7 @@ fn step(
     let input = if venue_intents.is_none() && fold && (has_intents(py, st) || any_held) {
         let input = fold_step(py, st, symbol, local, local_idx, atr)?;
         refuse_intents(sh, &input)?;
+        check_intent_grid(sh, sid, local, &input)?;
         input
     } else {
         StepInput { atr, ..StepInput::default() }

@@ -15,13 +15,17 @@
 //! exercises is the code paper trading exercises.
 //!
 //! The venue speaks only in reports. A position the shadow book closes on its
-//! own (a configured stop, a session square-off, a margin liquidation) has no
-//! order to report against, so it is refused up front rather than hidden:
-//! see [`PaperError::Unsolicited`].
+//! own (a configured stop, a margin liquidation) has no order to report
+//! against, so it is refused up front rather than hidden: see
+//! [`PaperError::Unsolicited`]. The session square-off is sent as closing
+//! orders by the runtime, and a contract's expiry, settlement or delivery is
+//! the instrument's declared terms, applied alike by the strategy's book and
+//! the shadow's copy.
 
 use std::collections::HashMap;
 
 use super::{AdapterError, ExecutionAdapter, OrderChange, OrderRequest};
+use crate::core::types::ExitReason;
 use crate::data::DepthTick;
 use crate::execution::orders::{ExecutionReport, OrderStatus, QtySpec};
 use crate::portfolio::kernel::{EngineEvent, StepInput};
@@ -53,8 +57,7 @@ pub enum PaperError {
     /// report to say it with. Nothing is hidden: the run stops.
     #[error(
         "the paper venue changed a position without an order ({0}); positions in a venue-driven \
-         run move only on orders: remove position-level stops/targets and the session square-off, \
-         or send an exit order"
+         run move only on orders: remove position-level stops/targets, or send an exit order"
     )]
     Unsolicited(String),
     /// A fill the shadow book made could not be priced for its report.
@@ -82,6 +85,9 @@ pub struct PaperVenue {
     /// Answers to requests that have no market event of their own (a refused
     /// cancel, an acknowledged change), delivered with the next event.
     queued: Vec<Report>,
+    /// Reports for protective legs that met the rest of the bar their
+    /// position was entered on: they belong to the event being processed.
+    same_event: Vec<Report>,
     /// Time of the latest event, for the answers above.
     now_ns: i64,
 }
@@ -105,6 +111,7 @@ impl PaperVenue {
             quantity: HashMap::new(),
             ended: std::collections::VecDeque::new(),
             queued: Vec::new(),
+            same_event: Vec::new(),
             now_ns: 0,
         }
     }
@@ -174,9 +181,26 @@ impl PaperVenue {
         managed.take_protect_requests();
         managed.take_slices();
         managed.take_squareoff();
-        let kernel = shadow.book.kernel(entry.instrument);
-        let ts = entry.timestamp();
+        self.report(strategy, entry.instrument, &events, entry.timestamp(), out)
+    }
+
+    /// Turn what the shadow book did into the venue's reports.
+    fn report(
+        &mut self,
+        strategy: usize,
+        instrument: usize,
+        events: &[EngineEvent],
+        ts: i64,
+        out: &mut Vec<Report>,
+    ) -> Result<(), PaperError> {
+        let Some(shadow) = self.shadows.get_mut(strategy).and_then(Option::as_mut) else {
+            return Ok(());
+        };
+        let kernel = shadow.book.kernel(instrument);
         let mut ended_now: Vec<String> = Vec::new();
+        let delivery_in_batch = events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Settled { deliver, .. } if *deliver != 0.0));
         let mut i = 0;
         while i < events.len() {
             match &events[i] {
@@ -194,11 +218,15 @@ impl PaperVenue {
                     // it traded and so what it cost.
                     let fee = match events.get(i + 1) {
                         Some(EngineEvent::Entered { direction, .. }) => {
-                            kernel.venue_fee(*price, *size, *direction, true)
+                            kernel.venue_fee(*order_id, *price, *size, *direction, true)
                         }
-                        Some(EngineEvent::Exited { trade, .. }) => {
-                            kernel.venue_fee(trade.exit_price, trade.size, trade.direction, false)
-                        }
+                        Some(EngineEvent::Exited { trade, .. }) => kernel.venue_fee(
+                            *order_id,
+                            trade.exit_price,
+                            trade.size,
+                            trade.direction,
+                            false,
+                        ),
                         // The matcher follows every fill with its position
                         // event; one without cannot be priced.
                         other => {
@@ -302,6 +330,20 @@ impl PaperVenue {
                 EngineEvent::Settled { .. }
                 | EngineEvent::CorporateAction { .. }
                 | EngineEvent::LifecycleRefused { .. } => {}
+                // A contract's end is the exchange's act, not an order's: the
+                // position settles (or is delivered against, or has its odd
+                // fraction of a split paid out) on the instrument's declared
+                // terms. The strategy's book reaches the same end from the
+                // same terms and the same events, so the shadow keeps its
+                // copy in step and reports nothing. A delivery that opens a
+                // line in the underlying is the `Entered` of a batch that
+                // also carries the contract's `Settled`.
+                EngineEvent::Exited { trade, .. }
+                    if matches!(
+                        trade.exit_reason,
+                        ExitReason::Settlement | ExitReason::Delivery | ExitReason::CorporateAction
+                    ) => {}
+                EngineEvent::Entered { .. } if delivery_in_batch => {}
                 other @ (EngineEvent::Entered { .. }
                 | EngineEvent::Exited { .. }
                 | EngineEvent::AlgoStarted { .. }
@@ -315,6 +357,12 @@ impl PaperVenue {
             self.retire(id);
         }
         Ok(())
+    }
+
+    /// The reports protective legs produced on the bar they were sent on,
+    /// to be delivered with the event that is being processed.
+    pub fn take_same_event(&mut self) -> Vec<Report> {
+        std::mem::take(&mut self.same_event)
     }
 
     /// Note that an order ended; drop the entries of the oldest ended orders
@@ -372,11 +420,26 @@ impl ExecutionAdapter for PaperVenue {
             req.reduce_only,
             parent,
         );
+        if req.position_id.is_some() {
+            shadow.book.kernel_mut(instrument).set_order_position(order_id, req.position_id);
+        }
         self.now_ns = self.now_ns.max(req.submitted_ns);
         if req.size_frac.is_some() {
             self.quantity.insert(req.client_order_id.clone(), req.quantity);
         }
         self.placed.insert(req.client_order_id.clone(), Placed { strategy, instrument, order_id });
+        // A protective leg sent in answer to an entry's fill meets the rest of
+        // the bar the entry filled in (see `EngineKernel::match_arrived`); its
+        // reports leave with the next event.
+        let protective = req.tags.get("client_id").is_some_and(|c| c.starts_with("prot-"));
+        if req.reduce_only && protective {
+            let kernel = self.shadow(strategy)?.book.kernel_mut(instrument);
+            let events = kernel.match_arrived(order_id, req.submitted_ns);
+            let mut reports = Vec::new();
+            self.report(strategy, instrument, &events, req.submitted_ns, &mut reports)
+                .map_err(|e| AdapterError::Refused(e.to_string()))?;
+            self.same_event.append(&mut reports);
+        }
         Ok(())
     }
 

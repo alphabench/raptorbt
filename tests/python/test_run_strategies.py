@@ -421,7 +421,7 @@ def _case(i):
     if rng.random() < 0.3:
         cfg.set_atr_target(float(rng.uniform(2.0, 5.0)), int(rng.integers(5, 15)))
     if rng.random() < 0.2:
-        cfg.set_fixed_stop(float(rng.uniform(0.5, 3.0)))
+        cfg.set_fixed_stop(float(rng.uniform(0.005, 0.03)))
     kw = {
         "config": cfg,
         "oms_type": "hedging" if hedging else "netting",

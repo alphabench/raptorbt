@@ -253,13 +253,13 @@ class TestTickPositionSize:
         assert trade.fees == pytest.approx(0.20), "price * rate, both sides, one unit"
 
     def test_fee_segment_reaches_the_tick_path(self):
-        """Brokerage is flat per order, so no percentage rate can express it."""
+        """The transaction tax is on the sell only, so no percentage rate can express it."""
         flat = r.run_tick_backtest(**self._flat_tape(), fees=0.001, lot_size=75, quantity=1)
         itemized = r.run_tick_backtest(
             **self._flat_tape(), fees=0.001, lot_size=75, quantity=1, fee_segment="NFO-OPT")
 
         assert itemized.trades()[0].fees > flat.trades()[0].fees, (
-            "the real schedule adds 2 x Rs 20 brokerage plus GST")
+            "the real schedule adds the sell-side tax and the exchange charges")
         entry = itemized.trades()[0].entry_fees
         exit_ = itemized.trades()[0].exit_fees
         assert entry != exit_, "stamp duty falls on the buy, transaction tax on the sell"

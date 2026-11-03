@@ -5,10 +5,9 @@
 //! (bars → coarser bars) and `bars_from_ticks` (raw tick arrays → bars).
 
 use numpy::{PyArray1, PyReadonlyArray1};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::errors::Fail;
+use super::errors::{invalid_input, Fail};
 use super::schedule_bindings::PySessionSchedule;
 use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::{OhlcvBar, TickData};
@@ -46,7 +45,7 @@ fn make_builder_with(
 ) -> PyResult<Box<dyn BarBuilder + Send + Sync>> {
     let params = crate::data::BuilderParams { brick_size };
     builder_for_session(parse_spec(step, unit)?, tz_offset_ns, params, session)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        .map_err(invalid_input)
 }
 
 /// Streaming bar aggregator.

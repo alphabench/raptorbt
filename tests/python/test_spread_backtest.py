@@ -415,19 +415,22 @@ def test_fee_segment_reaches_the_spread_path():
 
     The spread path held no fee model, so ``fee_segment`` was silently
     ignored and the flat proportional rate was all that ever applied.
-    Brokerage is flat per order, so a proportional model never charges it at
-    any premium -- and a four-leg round trip is eight orders.
+    The built-in schedule is the statutory one: transaction tax on the sells,
+    stamp duty on the buys, exchange charge on all eight orders, and no
+    brokerage (that is a broker's rate card).
     """
     result = _costed([100.0] * 6, 1, fee_segment="NFO-OPT", legs=[1, -1, 1, -1])
     trade = result.trades()[0]
 
     assert trade.fee_breakdown is not None
-    assert trade.fee_breakdown["brokerage"] == pytest.approx(160.0)
+    assert trade.fee_breakdown["brokerage"] == 0.0
     assert trade.fee_breakdown["total"] == pytest.approx(trade.fees, abs=1e-9)
     assert trade.fees == pytest.approx(trade.entry_fees + trade.exit_fees)
 
-    # The flat rate bills 4 legs x 7.50 x 2 sides = 60.00 and no brokerage.
-    assert trade.fees > 200.0
+    # The flat rate bills 4 legs x 7.50 x 2 sides = 60.00; the schedule's
+    # four sells at 0.15% alone are 45.00, with the exchange charges on top.
+    assert trade.fee_breakdown["stt"] == pytest.approx(45.0)
+    assert trade.fees > 60.0
 
 
 # ---------------------------------------------------------------------

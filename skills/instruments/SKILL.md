@@ -31,7 +31,10 @@ timestamp, one unit at a time, and never expires. A spec turns on, per symbol:
 - **Lot floor.** Order size is rounded down to a whole number of lots.
 - **Multiplier.** Notional is `price * units * multiplier`.
 - **Tick grid.** Stops and targets derived from a percentage land on the
-  `price_increment` grid.
+  `price_increment` grid. The tick comes from the spec, which the host loads from
+  the exchange's contract master: NSE stock-option ticks are 0.01 below an
+  underlying price of 250 and 0.05 at or above it (NSE/FAOP/70382, reviewed
+  monthly), so reload the master each month; do not hardcode 0.05.
 - **Expiry.** An order after `expiration_ns` is rejected (`expired`); an open
   position is settled on the first bar at or after expiry (exit reason
   `Settlement`). Before `activation_ns` entries are rejected.
@@ -61,7 +64,10 @@ and is the bar's open when the run says `bar_stamp="open"`.
 | `InstrumentSpec.currency_pair(symbol, ...)` | A currency pair. |
 | `InstrumentSpec.index(symbol, ...)` | A reference series. It is **not tradable**: ordering it raises. |
 | `SessionSchedule(windows, tz_offset_ns=, holidays=, squareoff_minute=)` | Weekday windows in local minutes from midnight, half-open (`open <= t < close`), plus holiday dates as `yyyymmdd` ints. |
-| `SessionSchedule.nse_equity()`, `.nse_fo()`, `.bse_equity()` | Presets: Monday to Friday, 09:15 to 15:30 IST (minutes 555 to 930). They carry **no holiday calendar**; pass the exchange's dates in `holidays=`. |
+| `SessionSchedule.nse_equity()`, `.bse_equity()`, `.nse_fo()`, `.bse_fo()`, `.mcx()`, `.mcx_select_agri()`, `.cds()`, `.cds_cross()`, `.bcd()` | Presets, in IST. Cash equities Monday to Friday 09:15 to 15:30 (minutes 555 to 930); equity derivatives the same until 2026-07-31 and 09:15 to 15:40 from 2026-08-03; MCX a day session 09:00 to 17:00 and an evening session closing 23:55 or 23:30 on the exchange's dated periods (2024-11-04, 2025-03-10, 2025-11-03, 2026-03-09, 2026-11-02; earlier dates are closed and need a calendar document), `mcx_select_agri()` closing 21:00; NSE currency 09:00 to 17:00 on INR pairs (`cds()`) and to 19:30 on cross pairs (`cds_cross()`). The equity-derivatives 15:40 start date (2026-08-03) has a single source. Muhurat trading on 2026-11-08 has no preset: add its times with `with_session_override`. They carry **no holiday calendar and no square-off**; pass the exchange's dates in `holidays=` and a `squareoff_minute=` only if you want one. |
+| `schedule.with_session_override(date, windows)`, `.with_window_change(from_date, windows, to_date=)`, `.windows_on(date)` | A special session, a half day or a closure (empty windows) on one `yyyymmdd` date beats the weekday and the holidays (Muhurat trading is an override); a dated window change moves a venue's hours between two dates. |
+| `SessionSchedule.from_calendars(venue, [json_text, ...])` | A venue's schedule from dated calendar documents (`utc_offset`, `valid_from`, `valid_to`, `sessions`, and your own `holidays` and `overrides`); the later document answers for the dates it covers, and a date no document covers is closed. Format: `SessionSchedule.from_calendars` docstring in the Rust sources, `docs/architecture/lifecycle.md`. |
+| `spec.scrip_group = "A"` | The exchange's scrip group where charges depend on it. BSE cash fees are priced by group (A and B are priced); a BSE equity without one, or with another, is refused by a fee schedule (`fee_schedule_gap`). |
 | `schedule.is_open(ts_ns)`, `.session_date(ts_ns)`, `.next_open_ns(ts_ns)`, `.session_close_ns(date)` | Ask the schedule. |
 | `OptionChain(specs)` | Build once from every contract and expiry you know. |
 | `chain.expiries / strikes / contract / contracts` | List what is visible at `now_ns`. |
@@ -334,7 +340,7 @@ pricing.implied_vol(1.0, "call", 24_040.0, 24_000.0, 7 / 365)  # ImpliedVolError
   floors orders to whole lots; compute lots, then multiply.
 - Reading `vega` as per volatility point. It is per 1.00; divide by 100.
 - Forgetting `underlying=` on an option spec.
-- Expecting `nse_equity()` to skip exchange holidays.
+- Expecting `nse_equity()` to skip exchange holidays, or to square positions off at 15:20. Pass `holidays=`, and a square-off in `squareoff_time` or the strategy's `requirements.holding`.
 
 ## 9. Validation
 

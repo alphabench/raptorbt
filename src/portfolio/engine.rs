@@ -6,6 +6,7 @@ use crate::core::types::{
 };
 use crate::execution::{FeeModel, FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
+use crate::instruments::{AdjustmentPolicy, CorporateAction};
 use crate::metrics::annualization;
 use crate::metrics::streaming::StreamingMetrics;
 use crate::portfolio::kernel::{KernelBar, StepInput};
@@ -103,6 +104,22 @@ impl PortfolioEngine {
         signals: &CompiledSignals,
         inst_config: Option<&InstrumentConfig>,
     ) -> BacktestResult {
+        self.run_single_with_lifecycle(ohlcv, signals, inst_config, &[], AdjustmentPolicy::AsGiven)
+            .expect("no corporate actions, so nothing to refuse")
+    }
+
+    /// [`PortfolioEngine::run_single_with_instrument_config`] with the
+    /// corporate actions of the run and the policy its bars are on (see
+    /// [`PortfolioBook::set_corporate_actions`]). Under `Adjusted` the caller
+    /// has put the bars on the final basis already.
+    pub fn run_single_with_lifecycle(
+        &self,
+        ohlcv: &OhlcvData,
+        signals: &CompiledSignals,
+        inst_config: Option<&InstrumentConfig>,
+        actions: &[CorporateAction],
+        policy: AdjustmentPolicy,
+    ) -> crate::core::Result<BacktestResult> {
         let n = ohlcv.len();
         assert_eq!(n, signals.len(), "OHLCV and signals must have same length");
 
@@ -120,6 +137,7 @@ impl PortfolioEngine {
             signals.direction,
             inst_config,
         );
+        runner.set_corporate_actions(actions, policy)?;
 
         // Determine effective stop/target configs (per-instrument overrides take precedence)
         let effective_stop =
@@ -177,7 +195,7 @@ impl PortfolioEngine {
             runner.step(i, &bar, input);
         }
 
-        runner.finish()
+        Ok(runner.finish())
     }
 
     /// Calculate backtest metrics.

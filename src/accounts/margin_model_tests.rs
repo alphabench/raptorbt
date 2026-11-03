@@ -89,6 +89,52 @@ fn defined_risk_is_the_worst_expiry_loss_of_the_spread() {
     assert!(defined_risk(&[LineView::new(&e, 1.0, 1.0)]).is_err());
 }
 
+#[test]
+fn defined_risk_has_no_bound_on_an_uncovered_short_call_and_includes_the_underlying_legs() {
+    let k = 25000.0;
+    let call = option("NFO:NIFTY25000CE", k, OptionRight::Call);
+    let put = option("NFO:NIFTY25000PE", k, OptionRight::Put);
+    let f = fut();
+    // A naked short call loses without bound as the underlying rises.
+    assert_eq!(defined_risk(&[LineView::new(&call, -75.0, 100.0)]).unwrap(), f64::INFINITY);
+    // A naked short straddle likewise.
+    let straddle = [LineView::new(&call, -75.0, 100.0), LineView::new(&put, -75.0, 90.0)];
+    assert_eq!(defined_risk(&straddle).unwrap(), f64::INFINITY);
+    // A naked short put is bounded by the underlying reaching zero: (K - premium) per unit.
+    assert_eq!(defined_risk(&[LineView::new(&put, -75.0, 100.0)]).unwrap(), (k - 100.0) * 75.0);
+    // A long option risks its premium.
+    assert_eq!(defined_risk(&[LineView::new(&call, 75.0, 100.0)]).unwrap(), 100.0 * 75.0);
+    // A covered call: the long future cancels the slope above the strike, so the worst
+    // loss is the future falling to zero, less the premium kept.
+    let covered = [LineView::new(&call, -75.0, 100.0), LineView::new(&f, 75.0, 25000.0)];
+    assert_eq!(defined_risk(&covered).unwrap(), (25000.0 - 100.0) * 75.0);
+    // Short futures against a short call are doubly unbounded.
+    let both = [LineView::new(&call, -75.0, 100.0), LineView::new(&f, -75.0, 25000.0)];
+    assert_eq!(defined_risk(&both).unwrap(), f64::INFINITY);
+    // An unbounded group shares an unbounded requirement over every line.
+    let shares = MarginModel::DefinedRisk.group_shares(&straddle, 0).unwrap();
+    assert!(shares.iter().all(|x| x.is_infinite()));
+}
+
+#[test]
+fn defined_risk_refuses_legs_of_different_expiries_and_binary_options() {
+    let near = option_at("NFO:N25000CE-E1", 25000.0, OptionRight::Call, 10);
+    let far = option_at("NFO:N25000CE-E2", 25000.0, OptionRight::Call, 20);
+    let calendar = [LineView::new(&near, -75.0, 100.0), LineView::new(&far, 75.0, 300.0)];
+    assert!(defined_risk(&calendar).unwrap_err().to_string().contains("one expiry"));
+    let mut binary = option("NFO:B", 25000.0, OptionRight::Call);
+    binary.kind = InstrumentKind::Option {
+        strike: 25000.0,
+        right: OptionRight::Call,
+        underlying: None,
+        binary: true,
+    };
+    assert!(defined_risk(&[LineView::new(&binary, 1.0, 1.0)])
+        .unwrap_err()
+        .to_string()
+        .contains("binary"));
+}
+
 const E1: i64 = 20_000 * DAY_NS + 10 * 3_600_000_000_000; // 15:30 IST on an expiry day
 const E2: i64 = E1 + 7 * DAY_NS;
 

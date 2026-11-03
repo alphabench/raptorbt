@@ -268,6 +268,20 @@ CODES: dict[str, Code] = {
     "invalid_curve_samples": _c(
         InvalidParameter, "live-trading", "curve_samples is not a positive integer or None."
     ),
+    "invalid_input": _c(
+        InvalidParameter, "core", "An argument or array was refused by the computation it was passed to."
+    ),
+    "adoption_refused": _c(
+        InvalidParameter, "live-trading",
+        "A position cannot be adopted as given: a short on a cash account, a posted margin on a cash account or a cost basis on a margin account.",
+    ),
+    "history_exhausted": _c(
+        StateError, "live-trading",
+        "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten.",
+    ),
+    "not_live_node": _c(
+        UnsupportedOperation, "live-trading", "A live-node call was made on a runtime that is not a live node."
+    ),
     "invalid_initial_positions": _c(
         InvalidParameter, "live-trading", "initial_positions names a strategy or position that does not fit the node."
     ),
@@ -350,7 +364,12 @@ CODES: dict[str, Code] = {
     ),
     "invalid_time_in_force": _c(
         InvalidOrder, "orders", "Time in force is not recognised.",
-        ["gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close"],
+        ["auto", "gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close"],
+    ),
+    "order_validity_unsupported": _c(
+        InvalidOrder, "orders",
+        "A gtc or gtd order on an instrument whose exchange segment holds only day orders (NSE equity derivatives, currency, BSE, MCX), or a gtd dated past the contract's maturity where the segment holds them.",
+        ["day", "ioc", "fok"],
     ),
     "invalid_order_kind": _c(
         InvalidOrder, "orders", "Order kind is not recognised.",
@@ -376,6 +395,25 @@ CODES: dict[str, Code] = {
     ),
     "invalid_order_link": _c(
         InvalidOrder, "orders", "A parent or one-cancels-other link cannot be made."
+    ),
+    "invalid_roll_sizing": _c(
+        InvalidParameter, "instruments", "roll_sizing is not 'notional' or 'lots'.", ["notional", "lots"]
+    ),
+    "roll_price_missing": _c(
+        StateError, "instruments",
+        "An auto-roll sized by notional could not price the new contract: it has no bar yet.",
+    ),
+    "off_lot_quantity": _c(
+        InvalidOrder, "orders",
+        "An order's quantity is not a whole number of the instrument's lots (or size steps). It is "
+        "refused in every mode so the simulation and a venue see the same terms; `valid` lists the "
+        "nearest valid quantities.",
+    ),
+    "off_tick_price": _c(
+        InvalidOrder, "orders",
+        "A limit, trigger, stop or target price is not a whole number of the instrument's ticks. It "
+        "is refused in every mode so the simulation and a venue see the same terms; `valid` lists "
+        "the nearest valid prices.",
     ),
     "unknown_order": _c(
         InvalidOrder, "orders",
@@ -450,17 +488,42 @@ CODES: dict[str, Code] = {
         InvalidParameter, "execution",
         "Corporate actions were given without an adjustment_policy, or the policy is not raw or adjusted.",
     ),
+    "invalid_order_group": _c(
+        InvalidOrder, "orders",
+        "An atomic order group cannot be formed: fewer than two legs, two legs on one instrument, an order that is unknown, finished, reduce-only or not sized in units, or a venue-managed instrument.",
+    ),
+    "unsupported_corporate_actions": _c(
+        UnsupportedOperation, "execution",
+        "corporate_actions were given to a runner that cannot apply them; they are refused, never ignored.",
+        ["run_single_backtest", "run_strategy_backtest", "run_strategies"],
+    ),
     "invalid_settlement": _c(
         InvalidParameter, "instruments",
         "An instrument's settlement style or settlement price is invalid.",
     ),
     "invalid_fee_schedule": _c(
         InvalidParameter, "execution",
-        "A fee schedule or rate card document is invalid, or fee_schedule is set without a fee_segment.",
+        "A fee schedule or rate card document is invalid, or fee_segment names a row the schedule does not have.",
     ),
     "fee_schedule_gap": _c(
         InvalidParameter, "execution",
-        "A fee schedule has no row for the fill's venue and segment; the run is refused rather than charged nothing.",
+        "A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from; the run is refused rather than charged nothing.",
+    ),
+    "squareoff_needs_timezone": _c(
+        InvalidParameter, "execution",
+        "config.squareoff_time is a local time of day but the instrument has no session schedule and the config names no session_tz_offset_ns.",
+    ),
+    "mixed_holding": _c(
+        InvalidParameter, "execution",
+        "Strategies in one run declare different holding requirements (intraday with different flatten times, or intraday beside overnight), so no single square-off time can be derived; set config.squareoff_time or run them apart.",
+    ),
+    "session_not_covered": _c(
+        InvalidData, "instruments",
+        "A bar falls on a date outside those a session schedule covers (the MCX preset, or a schedule loaded from calendar documents), so whether the market traded is unknown, not closed; the date and the covered ranges are named.",
+    ),
+    "invalid_calendar": _c(
+        InvalidParameter, "instruments",
+        "A calendar document given to SessionSchedule.from_calendars is not valid JSON in the documented format, names no entry for the venue, or has overlapping or out-of-range windows or dates.",
     ),
     "invalid_margin_model": _c(
         InvalidParameter, "risk",
@@ -573,6 +636,11 @@ CODES: dict[str, Code] = {
         InvalidParameter, "live-trading",
         "execution is not an execution adapter, or the run cannot send its orders to one.",
     ),
+    "unsupported_on_bars": _c(
+        UnsupportedOperation, "core",
+        "A setting that only the tick path implements (order_latency_ns, partial_fills) was given "
+        "to a run that has bars; on bars it would change nothing.",
+    ),
     "unsupported_in_venue_run": _c(
         UnsupportedOperation, "live-trading",
         "The request has no equivalent when orders go to an execution adapter.",
@@ -645,7 +713,31 @@ CODES: dict[str, Code] = {
     ),
     "stale_epoch": _c(
         StateError, "live-trading",
-        "restore() was given an epoch older than the one the journal already holds.",
+        "restore() was given an epoch that is not newer than the one the journal already holds.",
+    ),
+    "epoch_required": _c(
+        StateError, "live-trading",
+        "restore() of a journal that holds an epoch was given none: the node that wrote it would not be fenced.",
+    ),
+    "adapter_cannot_adopt": _c(
+        StateError, "live-trading",
+        "restore() was given an adapter that cannot account for an order the node holds as working.",
+    ),
+    "hedging_unsupported_by_venue": _c(
+        InvalidParameter, "live-trading",
+        "oms_type='hedging' was given with an adapter whose venue nets positions.",
+    ),
+    "exit_rule_unconfirmed": _c(
+        StateError, "live-trading",
+        "The venue did not say whether it holds, changed or dropped an exit rule.",
+    ),
+    "exit_rule_not_cancellable": _c(
+        StateError, "live-trading",
+        "An exit rule the venue holds cannot be taken back; it stays held.",
+    ),
+    "exit_close_failed": _c(
+        StateError, "live-trading",
+        "The closes of an exit rule were refused or cancelled the allowed number of times and the position is still open.",
     ),
     "adapter_namespace_missing": _c(
         InvalidParameter, "live-trading",
@@ -658,6 +750,10 @@ CODES: dict[str, Code] = {
     "roll_close_failed": _c(
         StateError, "live-trading",
         "The close of an auto-roll ended without filling, so the open in the new contract was not sent.",
+    ),
+    "roll_open_failed": _c(
+        StateError, "live-trading",
+        "The open of an auto-roll ended without filling: the position is closed in the old contract and open in neither.",
     ),
     "no_reconcile": _c(
         UnsupportedOperation, "live-trading",

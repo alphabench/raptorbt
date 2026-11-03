@@ -186,7 +186,27 @@ fn row_dict<'py>(py: Python<'py>, row: &FeeRow) -> PyResult<Bound<'py, PyDict>> 
     d.set_item("underlying", &row.underlying)?;
     d.set_item("settlement", row.settlement)?;
     d.set_item("effective_from", row.effective_from)?;
+    d.set_item("effective_until", row.meta.effective_until)?;
+    d.set_item("status", row.meta.status.as_str())?;
+    d.set_item("base", row.meta.base.as_str())?;
+    d.set_item("source", &row.meta.source)?;
+    d.set_item("label", row.label())?;
     d.set_item("rates", rates_dict(py, &row.rates)?)?;
+    // The same rates in rupees per crore of the base, which is how they are stored
+    // and published (a fraction would carry the conversion's rounding).
+    let per_crore = PyDict::new(py);
+    let r = &row.rates;
+    for (name, value) in [
+        ("tax_sell", r.tax_sell_rate),
+        ("tax_buy", r.tax_buy_rate),
+        ("exchange", r.exchange_rate),
+        ("ipft", r.investor_fund_rate),
+        ("sebi", r.regulatory_rate),
+        ("stamp_buy", r.stamp_buy_rate),
+    ] {
+        per_crore.set_item(name, (value * 1.0e7 * 1.0e6).round() / 1.0e6)?;
+    }
+    d.set_item("per_crore", per_crore)?;
     Ok(d)
 }
 
@@ -293,8 +313,14 @@ impl PyFeeSchedule {
         Ok(breakdown_dict(&b))
     }
 
+    /// The rows in force at `at` (UTC ns): the schedule as it stood that day.
+    fn in_force_at(&self, at: i64) -> Self {
+        Self { inner: Arc::new(self.inner.in_force_at(at)) }
+    }
+
     /// The schedule as a rate card document (JSON text), every row dated
-    /// `effective_from` (RFC 3339).
+    /// `effective_from` (RFC 3339). A schedule whose rows take effect on
+    /// several dates is refused; write `in_force_at(date)` for each.
     #[pyo3(signature = (effective_from="1970-01-01T00:00:00Z"))]
     fn to_json(&self, effective_from: &str) -> PyResult<String> {
         self.inner.to_card_json(effective_from).map_err(schedule_err)

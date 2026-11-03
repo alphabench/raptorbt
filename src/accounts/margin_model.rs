@@ -26,13 +26,18 @@ use crate::core::types::{Direction, Timestamp};
 use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 
-/// India Standard Time, UTC+05:30, in nanoseconds.
-const IST_OFFSET_NS: i64 = 19_800_000_000_000;
 const DAY_NS: i64 = 86_400_000_000_000;
 
-/// The IST calendar day of a timestamp, as days since the epoch.
-fn local_day(ts: Timestamp) -> i64 {
-    (ts + IST_OFFSET_NS).div_euclid(DAY_NS)
+/// The calendar day of a timestamp in the zone `tz_offset_ns` ahead of UTC,
+/// as days since the epoch.
+fn local_day(ts: Timestamp, tz_offset_ns: i64) -> i64 {
+    (ts + tz_offset_ns).div_euclid(DAY_NS)
+}
+
+/// The zone an instrument's days are read in: its session schedule's, else
+/// UTC. No market's zone is assumed.
+fn zone_of(spec: &InstrumentSpec) -> i64 {
+    spec.session.as_ref().map_or(0, |s| s.tz_offset_ns())
 }
 
 /// The rate of initial margin on notional the engine uses when an account
@@ -345,9 +350,24 @@ impl MarginModel {
             Some(m @ MarginModel::FromSpec { .. }) => from_spec_shares(m, legs),
             Some(_) => {
                 let total = defined_risk(legs)?;
+                if total.is_infinite() {
+                    // No bound on the loss: every line of the group is refused.
+                    return Ok(vec![f64::INFINITY; legs.len()]);
+                }
+                // Each line's weight in the shared figure is its own worst
+                // loss; a line with no bound alone (a short call covered by
+                // another leg) weighs its strike notional instead.
                 let naked: Vec<f64> = legs
                     .iter()
-                    .map(|v| defined_risk(std::slice::from_ref(v)).unwrap_or(0.0).max(0.0))
+                    .map(|v| {
+                        let alone = defined_risk(std::slice::from_ref(v)).unwrap_or(0.0).max(0.0);
+                        match v.instrument.kind {
+                            InstrumentKind::Option { strike, .. } if alone.is_infinite() => {
+                                strike * v.quantity.abs() * v.instrument.multiplier
+                            }
+                            _ => alone,
+                        }
+                    })
                     .collect();
                 let sum: f64 = naked.iter().sum();
                 Ok((0..legs.len())
@@ -572,11 +592,15 @@ fn spread_credit_shares(
     }
 
     // (c), (d)
-    let today = local_day(now);
     let expiry = |i: usize| legs[i].instrument.expiration_ns;
     let mut shorts: Vec<usize> = (0..legs.len())
         .filter(|&i| {
-            legs[i].quantity < 0.0 && !spent[i] && expiry(i).is_some_and(|e| local_day(e) > today)
+            legs[i].quantity < 0.0
+                && !spent[i]
+                && expiry(i).is_some_and(|e| {
+                    let tz = zone_of(legs[i].instrument);
+                    local_day(e, tz) > local_day(now, tz)
+                })
         })
         .collect();
     shorts.sort_by_key(|&i| (expiry(i), i));
@@ -617,37 +641,89 @@ fn spread_credit_shares(
     Ok(shares)
 }
 
-/// The maximum loss of a set of option legs at expiry, as the margin a
-/// defined-risk spread needs. Evaluated on the
-/// strike grid plus far ends (half the lowest strike, twice the highest).
+/// The maximum loss of a set of legs at the option expiry, as the margin a
+/// defined-risk position needs.
+///
+/// The legs' payoff against the underlying's price `S >= 0` at that instant
+/// is piecewise linear: each option leg is `(intrinsic(S) - price)` per unit
+/// and each future or cash leg is `(S - price)` per unit, times its signed
+/// quantity and multiplier. So the worst loss is exact on the kinks (`S = 0`
+/// and every strike) plus the slope beyond the highest strike: a position
+/// that keeps losing as `S` rises (more short calls and short underlying than
+/// long) has no bound and needs an infinite margin, which the account then
+/// refuses. All option legs must share one expiry (the payoff of a longer
+/// option at an earlier expiry is a pricing question, not intrinsic value:
+/// use `SpreadCredit` for calendars); the future and cash legs are marked at
+/// their price whatever their own expiry. Binary options have a stepped
+/// payoff and are refused.
 pub fn defined_risk(legs: &[LineView<'_>]) -> Result<f64> {
-    let mut strikes: Vec<f64> = legs
-        .iter()
-        .filter_map(|l| match l.instrument.kind {
-            InstrumentKind::Option { strike, .. } => Some(strike),
-            _ => None,
-        })
-        .collect();
+    let mut strikes: Vec<f64> = Vec::new();
+    let mut expiry: Option<Option<Timestamp>> = None;
+    for leg in legs {
+        if let InstrumentKind::Option { strike, binary, .. } = leg.instrument.kind {
+            if binary {
+                return Err(invalid(format!(
+                    "{}: defined_risk does not price a binary option's stepped payoff",
+                    leg.instrument.symbol
+                )));
+            }
+            match expiry {
+                None => expiry = Some(leg.instrument.expiration_ns),
+                Some(first) if first != leg.instrument.expiration_ns => {
+                    return Err(invalid(format!(
+                        "{}: defined_risk needs option legs of one expiry; margin a calendar \
+                         with spread_credit",
+                        leg.instrument.symbol
+                    )))
+                }
+                Some(_) => {}
+            }
+            strikes.push(strike);
+        }
+    }
     if strikes.is_empty() {
         return Err(invalid("defined_risk needs option legs with strikes".to_string()));
     }
     strikes.sort_by(f64::total_cmp);
     strikes.dedup();
-    let (lo, hi) = (strikes[0] / 2.0, strikes[strikes.len() - 1] * 2.0);
+
+    // Payoff of the whole set if the underlying settles at `s`.
+    let payoff = |s: f64| -> f64 {
+        legs.iter()
+            .map(|leg| {
+                let units = leg.quantity * leg.instrument.multiplier;
+                match leg.instrument.kind {
+                    InstrumentKind::Option { strike: k, right, .. } => {
+                        let intrinsic = match right {
+                            OptionRight::Call => (s - k).max(0.0),
+                            OptionRight::Put => (k - s).max(0.0),
+                        };
+                        (intrinsic - leg.price) * units
+                    }
+                    InstrumentKind::Index => 0.0,
+                    _ => (s - leg.price) * units,
+                }
+            })
+            .sum()
+    };
+    // Beyond the highest strike only calls and the linear legs still move.
+    let slope: f64 = legs
+        .iter()
+        .filter(|leg| {
+            !matches!(
+                leg.instrument.kind,
+                InstrumentKind::Option { right: OptionRight::Put, .. } | InstrumentKind::Index
+            )
+        })
+        .map(|leg| leg.quantity * leg.instrument.multiplier)
+        .sum();
+    let scale: f64 = legs.iter().map(|leg| (leg.quantity * leg.instrument.multiplier).abs()).sum();
+    if slope < -1e-12 * scale.max(1.0) {
+        return Ok(f64::INFINITY);
+    }
     let mut worst = 0.0f64;
-    for s in std::iter::once(lo).chain(strikes.iter().copied()).chain(std::iter::once(hi)) {
-        let mut pnl = 0.0;
-        for leg in legs {
-            let InstrumentKind::Option { strike: k, right, .. } = leg.instrument.kind else {
-                continue;
-            };
-            let intrinsic = match right {
-                OptionRight::Call => (s - k).max(0.0),
-                OptionRight::Put => (k - s).max(0.0),
-            };
-            pnl += (intrinsic - leg.price) * leg.quantity * leg.instrument.multiplier;
-        }
-        worst = worst.min(pnl);
+    for s in std::iter::once(0.0).chain(strikes.iter().copied()) {
+        worst = worst.min(payoff(s));
     }
     Ok(0.0 - worst)
 }

@@ -15,13 +15,11 @@ they say, so the conventions are pinned here rather than left to the reader:
 
 import numpy as np
 import pytest
+import scipy.stats as scipy_stats  # conventions are pinned against scipy
 
 import raptorbt
 from raptorbt import BacktestConfig
 
-scipy_stats = pytest.importorskip(
-    "scipy.stats", reason="conventions are pinned against scipy"
-)
 
 
 def _series(n=800, seed=7, drift=0.0004, vol=0.013):

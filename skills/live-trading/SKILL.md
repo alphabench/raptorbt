@@ -333,7 +333,7 @@ del node                                                   # the process is gone
 
 journal, records = rj.open_for_recovery(path, fsync="orders", memory=True)
 restored = LiveNode.restore(None, [Trader()], ["AAA"], CONFIG, journal=journal, records=records,
-                            execution=venue, bar_stamp="close", epoch=1)
+                            execution=venue, bar_stamp="close", epoch=2)   # a newer epoch: the old node is fenced
 assert restored.state == "live" and restored.state_digest() == want
 assert venue.sent == ["s0-0", "s0-1", "s0-2"]              # recovery sent nothing
 
@@ -759,7 +759,8 @@ assert carry.first_spec.symbol == "FA"
 (roll,) = carry.rolls
 assert (roll.role, roll.from_symbol, roll.to_symbol, roll.ts_ns) == ("fut", "FA", "FB", EXPIRY_A - 5 * MIN)
 positions = node.positions(0)
-assert positions["FA"] == [] and positions["FB"][0].size == 3.0  # moved by real orders, not by assumption
+# the roll keeps the notional, not the lot count: 3 x 105 = 315 buys floor(315 / 110) = 2 of FB
+assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real orders, not by assumption
 ```
 
 ## 6. Composition
@@ -809,10 +810,12 @@ assert positions["FA"] == [] and positions["FB"][0].size == 3.0  # moved by real
   are refused at construction.
 - **Percent exits** measure percent of the covered positions' entry value; a
   rule fires once and its orders pass `order_check`. A venue that defines
-  `place_exit_rule(request)` is offered the rule first; `Unsupported` or
-  `OrderRefused` leaves it with the engine. The node refuses a report for an
-  order it did not send, so the fills of an exit the venue fires itself cannot
-  be booked: hand a rule to a venue only if your host reconciles those fills.
+  `place_exit_rule(request)` is offered the rule first, for positions that
+  exist; `Unsupported` or `OrderRefused` leaves it with the engine. The orders
+  the venue fires are registered, so their fills are booked. A held rule is
+  replaced (`replace_exit_rule`) or cancelled (`cancel_exit_rule`) when the
+  position changes or goes, and a venue that cannot take it back is an error
+  (`exit_rule_not_cancellable`), never a rule reported gone.
 - **Continuous futures.** The old and the new contract must both be among the
   node's symbols; a roll switches which one a role names and does not add a
   contract to a running node (`roll_target_not_subscribed`).
@@ -831,7 +834,7 @@ silently):
 | market, limit, stop-limit, stop-market | yes | yes | yes |
 | trailing, if-touched, market-to-limit | no | no | no |
 | time in force | day, ioc | day, ioc | day, ioc |
-| `gtc` (engine default) | only with `gtc="day"` | only with `gtc="day"` | only with `gtc="day"` |
+| `gtc` (the default only for an instrument with no session; with one the default is `day`) | only with `gtc="day"` | only with `gtc="day"` | only with `gtc="day"` |
 | gtd, fok, at-open, at-close, `post_only` | no | no | no |
 | `reduce_only` | only with `reduce_only="best_effort"` | same | same |
 | client id field | `tag` (20, letters and digits) | `tag` (40) | `correlationId` (30) |

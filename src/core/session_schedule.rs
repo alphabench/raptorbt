@@ -21,7 +21,7 @@
 //! * Dates are `yyyymmdd` integers (`20260115`).
 //! * Weekday windows are indexed Monday = 0 through Sunday = 6.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,9 @@ const IST_OFFSET_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
 /// How many days `next_open_ns` looks ahead before giving up, so a schedule
 /// whose every day is a holiday ends the search instead of looping.
 const NEXT_OPEN_HORIZON_DAYS: i64 = 400;
+
+/// The first date (`yyyymmdd`) the equity-derivatives segments close at 15:40.
+pub const NFO_CLOSE_1540_FROM: i32 = 20260803;
 
 /// Days since 1970-01-01 for a proleptic Gregorian date.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
@@ -87,7 +90,24 @@ fn weekday_of(day: i64) -> usize {
     (day + 3).rem_euclid(7) as usize
 }
 
+/// Trading windows that replace the base ones from one local day to another
+/// (a venue moving its close, as the equity-derivatives segment did on
+/// 2026-08-03).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Era {
+    /// First local day number the windows apply to.
+    from: i64,
+    /// Last local day number the windows apply to.
+    to: i64,
+    windows: [Vec<(u32, u32)>; 7],
+}
+
 /// One venue's trading calendar.
+///
+/// What trades on a local date is decided in this order: a per-date
+/// override (a special session, a half day, Muhurat trading; an empty
+/// override closes the date), then the holiday set, then the latest dated
+/// window change that covers the date, then the base weekday windows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSchedule {
     tz_offset_ns: i64,
@@ -95,6 +115,19 @@ pub struct SessionSchedule {
     windows: [Vec<(u32, u32)>; 7],
     holidays: BTreeSet<i32>,
     squareoff_minute: Option<u32>,
+    /// Dated window changes, in the order they were added; the last one that
+    /// covers a date answers for it.
+    #[serde(default)]
+    eras: Vec<Era>,
+    /// Windows of single dates (`yyyymmdd`), which beat holidays and eras.
+    #[serde(default)]
+    overrides: BTreeMap<i32, Vec<(u32, u32)>>,
+    /// Local day ranges (inclusive) the schedule answers for. Empty means
+    /// every date; a schedule loaded from calendar documents answers only for
+    /// the dates the documents cover and treats any other date as closed
+    /// rather than guessing.
+    #[serde(default)]
+    covered: Vec<(i64, i64)>,
 }
 
 impl SessionSchedule {
@@ -115,41 +148,57 @@ impl SessionSchedule {
                 "tz_offset_ns must be within +-24 hours, got {tz_offset_ns}"
             )));
         }
-        const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
         let mut windows = windows;
-        for (weekday, day_windows) in windows.iter_mut().enumerate() {
-            day_windows.sort_unstable();
-            let mut previous_close = 0;
-            for &(open, close) in day_windows.iter() {
-                if close > MINUTES_PER_DAY {
-                    return Err(RaptorError::invalid_parameter(format!(
-                        "{} window ({open}, {close}): close minute must be <= {MINUTES_PER_DAY}",
-                        NAMES[weekday]
-                    )));
-                }
-                if open >= close {
-                    return Err(RaptorError::invalid_parameter(format!(
-                        "{} window ({open}, {close}): open minute must be before close minute",
-                        NAMES[weekday]
-                    )));
-                }
-                if open < previous_close {
-                    return Err(RaptorError::invalid_parameter(format!(
-                        "{} windows overlap at minute {open}",
-                        NAMES[weekday]
-                    )));
-                }
-                previous_close = close;
-            }
-        }
+        Self::check_windows(&mut windows)?;
         if windows.iter().all(Vec::is_empty) {
             return Err(RaptorError::invalid_parameter(
                 "a session schedule needs at least one trading window",
             ));
         }
         let holidays = Self::checked_holidays(holidays)?;
-        let schedule = Self { tz_offset_ns, windows, holidays, squareoff_minute: None };
+        let schedule = Self {
+            tz_offset_ns,
+            windows,
+            holidays,
+            squareoff_minute: None,
+            eras: Vec::new(),
+            overrides: BTreeMap::new(),
+            covered: Vec::new(),
+        };
         schedule.with_squareoff_minute(squareoff_minute)
+    }
+
+    /// Sort and validate one set of weekday windows.
+    fn check_windows(windows: &mut [Vec<(u32, u32)>; 7]) -> Result<()> {
+        const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        for (weekday, day_windows) in windows.iter_mut().enumerate() {
+            Self::check_day(NAMES[weekday], day_windows)?;
+        }
+        Ok(())
+    }
+
+    fn check_day(name: &str, day_windows: &mut [(u32, u32)]) -> Result<()> {
+        day_windows.sort_unstable();
+        let mut previous_close = 0;
+        for &(open, close) in day_windows.iter() {
+            if close > MINUTES_PER_DAY {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "{name} window ({open}, {close}): close minute must be <= {MINUTES_PER_DAY}"
+                )));
+            }
+            if open >= close {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "{name} window ({open}, {close}): open minute must be before close minute"
+                )));
+            }
+            if open < previous_close {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "{name} windows overlap at minute {open}"
+                )));
+            }
+            previous_close = close;
+        }
+        Ok(())
     }
 
     fn checked_holidays(dates: impl IntoIterator<Item = i32>) -> Result<BTreeSet<i32>> {
@@ -178,8 +227,13 @@ impl SessionSchedule {
     /// square-off that can never be reached is a typo, not a setting.
     pub fn with_squareoff_minute(mut self, minute: Option<u32>) -> Result<Self> {
         if let Some(m) = minute {
-            let reachable =
-                self.windows.iter().flatten().any(|&(open, close)| open <= m && m <= close);
+            let reachable = self
+                .windows
+                .iter()
+                .chain(self.eras.iter().flat_map(|e| e.windows.iter()))
+                .flatten()
+                .chain(self.overrides.values().flatten())
+                .any(|&(open, close)| open <= m && m <= close);
             if !reachable {
                 return Err(RaptorError::invalid_parameter(format!(
                     "squareoff_minute {m} is outside every trading window"
@@ -197,34 +251,171 @@ impl SessionSchedule {
         close: u32,
         squareoff_minute: Option<u32>,
     ) -> Result<Self> {
-        let day = vec![(open, close)];
-        Self::new(
-            tz_offset_ns,
-            [day.clone(), day.clone(), day.clone(), day.clone(), day, vec![], vec![]],
-            [],
-            squareoff_minute,
-        )
+        Self::weekdays_of(tz_offset_ns, vec![(open, close)], squareoff_minute)
     }
 
-    /// NSE cash equities: Mon-Fri 09:15-15:30 IST, square-off 15:20.
+    /// Monday-to-Friday with the same windows every day.
+    fn weekdays_of(
+        tz_offset_ns: i64,
+        day: Vec<(u32, u32)>,
+        squareoff_minute: Option<u32>,
+    ) -> Result<Self> {
+        Self::new(tz_offset_ns, Self::monday_to_friday(day), [], squareoff_minute)
+    }
+
+    fn monday_to_friday(day: Vec<(u32, u32)>) -> [Vec<(u32, u32)>; 7] {
+        [day.clone(), day.clone(), day.clone(), day.clone(), day, vec![], vec![]]
+    }
+
+    /// NSE cash equities: Mon-Fri 09:15-15:30 IST.
     ///
     /// The regular session only; the pre-open and post-close auctions are not
-    /// modelled. 15:20 is a typical broker cut-off for intraday (MIS)
-    /// positions, not an exchange rule: it varies by broker and product, so
-    /// override it with [`SessionSchedule::with_squareoff_minute`].
+    /// modelled. No square-off minute: a position is squared off only when the
+    /// strategy declares intraday holding or the run asks for it (see
+    /// [`SessionSchedule::with_squareoff_minute`]). No holiday list ships.
     pub fn nse_equity() -> Self {
-        Self::weekdays(IST_OFFSET_NS, 9 * 60 + 15, 15 * 60 + 30, Some(15 * 60 + 20))
+        Self::weekdays(IST_OFFSET_NS, 9 * 60 + 15, 15 * 60 + 30, None).expect("preset is valid")
+    }
+
+    /// NSE equity derivatives: Mon-Fri 09:15-15:40 IST (the NSE market-timings
+    /// page), 09:15-15:30 before 2026-08-03. That start date has a single source
+    /// (not matched to the original circular, NSE/FAOP/74467), so treat the
+    /// 15:30 close of earlier dates as unverified.
+    pub fn nse_fo() -> Self {
+        Self::nse_equity()
+            .with_window_change(
+                NFO_CLOSE_1540_FROM,
+                None,
+                Self::monday_to_friday(vec![(9 * 60 + 15, 15 * 60 + 40)]),
+            )
             .expect("preset is valid")
     }
 
-    /// NSE futures and options: Mon-Fri 09:15-15:30 IST, square-off 15:20.
-    pub fn nse_fo() -> Self {
+    /// BSE cash equities: Mon-Fri 09:15-15:30 IST.
+    pub fn bse_equity() -> Self {
         Self::nse_equity()
     }
 
-    /// BSE cash equities: Mon-Fri 09:15-15:30 IST, square-off 15:20.
-    pub fn bse_equity() -> Self {
-        Self::nse_equity()
+    /// BSE equity derivatives: as [`SessionSchedule::nse_fo`].
+    pub fn bse_fo() -> Self {
+        Self::nse_fo()
+    }
+
+    /// MCX non-agricultural contracts: Mon-Fri, a day session 09:00-17:00 and
+    /// an evening session from 17:00 that closes at 23:55 IST while the US is
+    /// on standard time and at 23:30 while it is on daylight saving.
+    ///
+    /// The close moves on dates the exchange names, not on a rule computed
+    /// here: 2024-11-04 (23:55), 2025-03-10 (23:30), 2025-11-03 (23:55),
+    /// 2026-03-09 (23:30), 2026-11-02 (23:55). The first two are in the original
+    /// exchange circulars (NSE/COM/64245, NSE/COM/66555); the last three were
+    /// not matched to a circular and follow the same seasonal pattern. Dates
+    /// before 2024-11-04 are closed, not guessed: load a calendar document.
+    /// These are normal-session periods, not a holiday calendar.
+    pub fn mcx() -> Self {
+        Self::mcx_closing(23 * 60 + 55, 23 * 60 + 30)
+    }
+
+    /// MCX internationally referenceable agricultural contracts (cotton and
+    /// similar): the same periods, closing at 21:00 whatever the US clocks do.
+    pub fn mcx_select_agri() -> Self {
+        Self::mcx_closing(21 * 60, 21 * 60)
+    }
+
+    fn mcx_closing(winter: u32, summer: u32) -> Self {
+        let evening =
+            |close: u32| Self::monday_to_friday(vec![(9 * 60, 17 * 60), (17 * 60, close)]);
+        Self::new(IST_OFFSET_NS, evening(winter), [], None)
+            .and_then(|s| s.with_window_change(20250310, Some(20251031), evening(summer)))
+            .and_then(|s| s.with_window_change(20260309, Some(20261030), evening(summer)))
+            .and_then(|s| s.with_coverage(20241104, 21991231))
+            .expect("preset is valid")
+    }
+
+    /// Trading minutes in a regular session: the longest weekday of the base
+    /// windows (what annualisation counts per day).
+    pub fn trading_minutes(&self) -> f64 {
+        self.windows
+            .iter()
+            .map(|day| day.iter().map(|&(o, c)| f64::from(c - o)).sum::<f64>())
+            .fold(0.0, f64::max)
+    }
+
+    /// The same schedule answering only for local dates `from` to `to`
+    /// (`yyyymmdd`, inclusive); every other date is closed.
+    pub fn with_coverage(mut self, from: i32, to: i32) -> Result<Self> {
+        let bad = |d: i32| {
+            RaptorError::invalid_parameter(format!(
+                "{d} is not a yyyymmdd date between 1900 and 2200"
+            ))
+        };
+        let (a, b) = (
+            day_from_yyyymmdd(from).ok_or_else(|| bad(from))?,
+            day_from_yyyymmdd(to).ok_or_else(|| bad(to))?,
+        );
+        if b < a {
+            return Err(RaptorError::invalid_parameter(format!(
+                "coverage {from}..{to} ends before it starts"
+            )));
+        }
+        self.covered = vec![(a, b)];
+        Ok(self)
+    }
+
+    /// The local date ranges (`yyyymmdd`, inclusive) the schedule answers
+    /// for; empty means every date.
+    pub fn coverage(&self) -> Vec<(i32, i32)> {
+        self.covered.iter().map(|&(a, b)| (yyyymmdd_from_day(a), yyyymmdd_from_day(b))).collect()
+    }
+
+    /// NSE currency derivatives on INR pairs: Mon-Fri 09:00-17:00 IST.
+    pub fn cds() -> Self {
+        Self::weekdays(IST_OFFSET_NS, 9 * 60, 17 * 60, None).expect("preset is valid")
+    }
+
+    /// NSE currency derivatives on cross-currency pairs: Mon-Fri 09:00-19:30 IST.
+    pub fn cds_cross() -> Self {
+        Self::weekdays(IST_OFFSET_NS, 9 * 60, 19 * 60 + 30, None).expect("preset is valid")
+    }
+
+    /// Currency derivatives on the BSE: as [`SessionSchedule::cds`].
+    pub fn bcd() -> Self {
+        Self::cds()
+    }
+
+    /// A schedule for one venue from dated calendar documents.
+    ///
+    /// Each document is JSON:
+    ///
+    /// ```json
+    /// {
+    ///   "name": "calendar-2026-q4",
+    ///   "utc_offset": "+05:30",
+    ///   "valid_from": "2026-09-28",
+    ///   "valid_to": "2026-12-31",
+    ///   "sessions": {
+    ///     "NSE": {"open": "09:15", "close": "15:30"},
+    ///     "MCX": {"windows": [["09:00", "17:00"], ["17:00", "23:55"]]}
+    ///   },
+    ///   "holidays": [{"date": "2026-10-02", "venues": ["NSE", "MCX"]}],
+    ///   "overrides": [
+    ///     {"venue": "MCX", "date": "2026-10-20", "open": "17:00", "close": "23:55"},
+    ///     {"venue": "NSE", "date": "2026-11-08", "windows": [["18:00", "19:00"]]}
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// `sessions` windows apply Monday to Friday (add `"weekdays": ["mon",
+    /// ..]` to change that). `holidays` and `overrides` are optional and
+    /// supplied by the caller: the crate ships no holiday list. An override
+    /// opens a date whatever the weekday or holiday set says; `"closed":
+    /// true` closes it. The venue named in `sessions` must exist in every
+    /// document. Later documents answer for the dates they cover; a date no
+    /// document covers is closed, not guessed. All documents must share one
+    /// `utc_offset`. `venues` and `venue` also read as `exchanges` and
+    /// `exchange`.
+    pub fn from_calendars(venue: &str, documents: &[&str]) -> Result<Self> {
+        calendar::from_calendars(venue, documents)
     }
 
     pub fn tz_offset_ns(&self) -> i64 {
@@ -253,11 +444,103 @@ impl SessionSchedule {
 
     /// Windows of a local day, or `None` when it is a holiday or has none.
     fn trading_windows(&self, day: i64) -> Option<&[(u32, u32)]> {
-        let windows = &self.windows[weekday_of(day)];
-        if windows.is_empty() || self.holidays.contains(&yyyymmdd_from_day(day)) {
+        if !self.covered.is_empty() && !self.covered.iter().any(|&(a, b)| a <= day && day <= b) {
             return None;
         }
-        Some(windows)
+        let date = yyyymmdd_from_day(day);
+        if let Some(special) = self.overrides.get(&date) {
+            return (!special.is_empty()).then_some(special.as_slice());
+        }
+        if self.holidays.contains(&date) {
+            return None;
+        }
+        let weekday = weekday_of(day);
+        let windows = self
+            .eras
+            .iter()
+            .rev()
+            .find(|e| e.from <= day && day <= e.to)
+            .map_or(&self.windows[weekday], |e| &e.windows[weekday]);
+        (!windows.is_empty()).then_some(windows.as_slice())
+    }
+
+    /// The windows `(open_minute, close_minute)` of a local `yyyymmdd` date
+    /// after overrides, holidays and dated changes; empty when it does not
+    /// trade.
+    pub fn windows_on(&self, date: i32) -> Vec<(u32, u32)> {
+        day_from_yyyymmdd(date)
+            .and_then(|day| self.trading_windows(day))
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    /// The trading windows of the local day of `ts_ns` as UTC nanoseconds
+    /// `(open, close)`, in order; empty when the day does not trade.
+    pub fn windows_ns_on_day_of(&self, ts_ns: i64) -> Vec<(i64, i64)> {
+        let (day, _) = self.local(ts_ns);
+        self.trading_windows(day)
+            .map(|ws| {
+                ws.iter()
+                    .map(|&(o, c)| {
+                        let base = day * NS_PER_DAY - self.tz_offset_ns;
+                        (base + o as i64 * NS_PER_MINUTE, base + c as i64 * NS_PER_MINUTE)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The same schedule with other weekday windows from one local date to
+    /// another (both `yyyymmdd`, inclusive; `to` of `None` is open-ended). A
+    /// later change beats an earlier one where they overlap.
+    pub fn with_window_change(
+        mut self,
+        from: i32,
+        to: Option<i32>,
+        windows: [Vec<(u32, u32)>; 7],
+    ) -> Result<Self> {
+        let bad = |d: i32| {
+            RaptorError::invalid_parameter(format!(
+                "{d} is not a yyyymmdd date between 1900 and 2200"
+            ))
+        };
+        let from_day = day_from_yyyymmdd(from).ok_or_else(|| bad(from))?;
+        let to_day = match to {
+            Some(t) => day_from_yyyymmdd(t).ok_or_else(|| bad(t))?,
+            None => i64::MAX,
+        };
+        if to_day < from_day {
+            return Err(RaptorError::invalid_parameter(format!(
+                "window change from {from} ends before it starts"
+            )));
+        }
+        let mut windows = windows;
+        Self::check_windows(&mut windows)?;
+        self.eras.push(Era { from: from_day, to: to_day, windows });
+        Ok(self)
+    }
+
+    /// The same schedule with these windows on one local date (`yyyymmdd`),
+    /// whatever the weekday or holiday set says: a special session, a half
+    /// day, Muhurat trading. Empty windows close the date.
+    pub fn with_session_override(
+        mut self,
+        date: i32,
+        mut windows: Vec<(u32, u32)>,
+    ) -> Result<Self> {
+        if day_from_yyyymmdd(date).is_none() {
+            return Err(RaptorError::invalid_parameter(format!(
+                "override date {date} is not a yyyymmdd date between 1900 and 2200"
+            )));
+        }
+        Self::check_day(&date.to_string(), &mut windows)?;
+        self.overrides.insert(date, windows);
+        Ok(self)
+    }
+
+    /// Per-date overrides, as `(yyyymmdd, windows)` in date order.
+    pub fn session_overrides(&self) -> impl Iterator<Item = (i32, &[(u32, u32)])> + '_ {
+        self.overrides.iter().map(|(d, w)| (*d, w.as_slice()))
     }
 
     /// Whether `ts_ns` falls inside a trading window (`open <= t < close`).
@@ -332,7 +615,17 @@ impl SessionSchedule {
     /// makes the answer fire once per day, which is the contract of
     /// `squareoff_flags` applied to a calendar with holidays and weekends.
     pub(crate) fn squareoff_due(&self, ts_ns: i64, last_done: Option<i64>) -> Option<i64> {
-        let minute = self.squareoff_minute?;
+        self.squareoff_due_at(self.squareoff_minute?, ts_ns, last_done)
+    }
+
+    /// [`SessionSchedule::squareoff_due`] at a local minute the caller names
+    /// (a run's `squareoff_time`), read in this schedule's time zone.
+    pub(crate) fn squareoff_due_at(
+        &self,
+        minute: u32,
+        ts_ns: i64,
+        last_done: Option<i64>,
+    ) -> Option<i64> {
         let (day, tod) = self.local(ts_ns);
         if tod < minute as i64 * NS_PER_MINUTE || last_done == Some(day) {
             return None;
@@ -340,6 +633,8 @@ impl SessionSchedule {
         self.trading_windows(day).map(|_| day)
     }
 }
+
+mod calendar;
 
 #[cfg(test)]
 mod tests {
@@ -466,7 +761,7 @@ mod tests {
                 assert_eq!(s.windows(weekday), &[(555, 930)]);
             }
             assert!(s.windows(5).is_empty() && s.windows(6).is_empty());
-            assert_eq!(s.squareoff_minute(), Some(920));
+            assert_eq!(s.squareoff_minute(), None, "square-off is the run's choice");
             assert_eq!(s.holidays().count(), 0);
         }
     }
@@ -502,7 +797,7 @@ mod tests {
 
     #[test]
     fn squareoff_fires_once_per_trading_day_and_agrees_with_squareoff_flags() {
-        let s = SessionSchedule::nse_equity();
+        let s = SessionSchedule::nse_equity().with_squareoff_minute(Some(15 * 60 + 20)).unwrap();
         let sq = s.squareoff_minute().unwrap();
         assert_eq!(sq, 15 * 60 + 20);
         let stamps: Vec<i64> = [
@@ -531,10 +826,159 @@ mod tests {
 
     #[test]
     fn squareoff_skips_holidays_and_weekends() {
-        let s = SessionSchedule::nse_equity().with_holidays([20260126]).unwrap();
+        let s = SessionSchedule::nse_equity()
+            .with_squareoff_minute(Some(15 * 60 + 20))
+            .unwrap()
+            .with_holidays([20260126])
+            .unwrap();
         assert_eq!(s.squareoff_due(ist(20260126, 15, 21), None), None);
         assert_eq!(s.squareoff_due(ist(20260117, 15, 21), None), None);
+        assert!(s.squareoff_due(ist(20260115, 15, 21), None).is_some());
         let no_squareoff = SessionSchedule::nse_equity().with_squareoff_minute(None).unwrap();
         assert_eq!(no_squareoff.squareoff_due(ist(20260115, 15, 21), None), None);
+    }
+
+    #[test]
+    fn the_equity_derivatives_close_moves_to_1540_on_2026_08_03() {
+        let s = SessionSchedule::nse_fo();
+        // Friday 2026-07-31: 15:30 close. Monday 2026-08-03: 15:40.
+        assert!(s.is_open(ist(20260731, 15, 29)));
+        assert!(!s.is_open(ist(20260731, 15, 30)));
+        assert!(s.is_open(ist(20260803, 15, 39)));
+        assert!(!s.is_open(ist(20260803, 15, 40)));
+        assert_eq!(s.session_close_ns(20260731), Some(ist(20260731, 15, 30)));
+        assert_eq!(s.session_close_ns(20260803), Some(ist(20260803, 15, 40)));
+        assert_eq!(s.windows_on(20260803), vec![(555, 940)]);
+        // The cash segment kept 15:30.
+        assert!(!SessionSchedule::nse_equity().is_open(ist(20260803, 15, 31)));
+    }
+
+    #[test]
+    fn mcx_follows_the_exchanges_dated_closes_and_refuses_dates_before_them() {
+        let s = SessionSchedule::mcx();
+        // Winter 2024-25 (from 2024-11-04), summer 2025 (from 2025-03-10), winter, summer 2026, winter.
+        assert!(s.is_open(ist(20241105, 23, 54)) && !s.is_open(ist(20241105, 23, 55)));
+        assert!(s.is_open(ist(20250611, 23, 29)) && !s.is_open(ist(20250611, 23, 30)));
+        assert!(s.is_open(ist(20251201, 23, 54)) && !s.is_open(ist(20251201, 23, 55)));
+        assert!(s.is_open(ist(20260615, 23, 29)) && !s.is_open(ist(20260615, 23, 30)));
+        assert!(s.is_open(ist(20261102, 23, 54)) && !s.is_open(ist(20261102, 23, 55)));
+        assert_eq!(s.session_close_ns(20251201), Some(ist(20251201, 23, 55)));
+        assert!(!s.is_open(ist(20251206, 12, 0)), "Saturday");
+        // Before the first confirmed period nothing is guessed.
+        assert!(!s.is_open(ist(20241101, 12, 0)));
+        assert_eq!(s.coverage(), vec![(20241104, 21991231)]);
+        // Internationally referenceable agricultural contracts close at 21:00 all year.
+        let agri = SessionSchedule::mcx_select_agri();
+        assert!(agri.is_open(ist(20251201, 20, 59)) && !agri.is_open(ist(20251201, 21, 0)));
+        assert!(agri.is_open(ist(20260615, 20, 59)) && !agri.is_open(ist(20260615, 21, 0)));
+    }
+
+    #[test]
+    fn currency_sessions_differ_between_inr_and_cross_pairs() {
+        assert!(SessionSchedule::cds().is_open(ist(20260615, 16, 59)));
+        assert!(!SessionSchedule::cds().is_open(ist(20260615, 17, 0)));
+        assert!(SessionSchedule::cds_cross().is_open(ist(20260615, 19, 29)));
+        assert!(!SessionSchedule::cds_cross().is_open(ist(20260615, 19, 30)));
+        assert_eq!(SessionSchedule::nse_equity().trading_minutes(), 375.0);
+        assert_eq!(
+            SessionSchedule::nse_fo().trading_minutes(),
+            375.0,
+            "the base windows; 385 from 2026-08-03"
+        );
+    }
+
+    #[test]
+    fn a_date_override_beats_the_weekday_and_the_holiday_set() {
+        // Muhurat trading on a Sunday that is also listed as a holiday.
+        let s = SessionSchedule::nse_equity()
+            .with_holidays([20261108])
+            .unwrap()
+            .with_session_override(20261108, vec![(18 * 60, 19 * 60)])
+            .unwrap()
+            .with_session_override(20260126, vec![])
+            .unwrap();
+        assert!(!s.is_open(ist(20261108, 12, 0)));
+        assert!(s.is_open(ist(20261108, 18, 30)));
+        assert!(!s.is_open(ist(20261108, 19, 0)));
+        assert_eq!(s.session_close_ns(20261108), Some(ist(20261108, 19, 0)));
+        // An empty override closes a weekday; a half day shortens one.
+        assert!(!s.is_open(ist(20260126, 10, 0)));
+        let half = s.with_session_override(20260115, vec![(9 * 60 + 15, 12 * 60)]).unwrap();
+        assert!(half.is_open(ist(20260115, 11, 59)) && !half.is_open(ist(20260115, 12, 0)));
+        assert_eq!(half.day_order_expiry_ns(ist(20260115, 10, 0)), Some(ist(20260115, 12, 0)));
+        // Overrides are validated like windows.
+        assert!(SessionSchedule::nse_equity()
+            .with_session_override(20260115, vec![(900, 540)])
+            .is_err());
+        assert!(SessionSchedule::nse_equity().with_session_override(20260231, vec![]).is_err());
+    }
+
+    const DOC_Q4: &str = r#"{
+        "name": "q4", "utc_offset": "+05:30", "valid_from": "2026-09-28", "valid_to": "2026-12-31",
+        "sessions": {"NSE": {"open": "09:15", "close": "15:30"},
+                     "NFO": {"open": "09:15", "close": "15:40"},
+                     "MCX": {"windows": [["09:00", "17:00"], ["17:00", "23:55"]]}},
+        "holidays": [{"date": "2026-10-02", "venues": ["NSE", "NFO", "MCX"]},
+                     {"date": "2026-10-20", "venues": ["NSE"]}],
+        "overrides": [{"venue": "MCX", "date": "2026-10-20", "open": "17:00", "close": "23:55"},
+                      {"venue": "NSE", "date": "2026-11-08", "windows": [["18:15", "19:15"]]}]
+    }"#;
+
+    const DOC_DST: &str = r#"{
+        "name": "q4-dst", "utc_offset": "+05:30", "valid_from": "2026-09-28", "valid_to": "2026-11-01",
+        "sessions": {"MCX": {"windows": [["09:00", "17:00"], ["17:00", "23:30"]]}}
+    }"#;
+
+    #[test]
+    fn a_calendar_document_gives_sessions_holidays_and_overrides() {
+        let nse = SessionSchedule::from_calendars("NSE", &[DOC_Q4]).unwrap();
+        assert!(nse.is_open(ist(20261015, 10, 0)));
+        assert!(!nse.is_open(ist(20261002, 10, 0)), "holiday");
+        assert!(!nse.is_open(ist(20261020, 10, 0)), "holiday for NSE");
+        assert!(nse.is_open(ist(20261108, 18, 30)), "Muhurat on a Sunday");
+        assert!(!nse.is_open(ist(20261108, 19, 15)));
+        let nfo = SessionSchedule::from_calendars("NFO", &[DOC_Q4]).unwrap();
+        assert!(nfo.is_open(ist(20261015, 15, 39)));
+        assert!(nfo.is_open(ist(20261020, 10, 0)), "not a holiday for NFO");
+        let mcx = SessionSchedule::from_calendars("MCX", &[DOC_Q4]).unwrap();
+        assert!(!mcx.is_open(ist(20261020, 10, 0)), "the override opens only the evening");
+        assert!(mcx.is_open(ist(20261020, 17, 0)) && mcx.is_open(ist(20261020, 23, 54)));
+        assert!(!mcx.is_open(ist(20261002, 12, 0)));
+        // A date no document covers is closed, not guessed.
+        assert!(!nse.is_open(ist(20260915, 10, 0)));
+        assert!(!nse.is_open(ist(20270105, 10, 0)));
+    }
+
+    #[test]
+    fn the_latest_document_answers_for_the_dates_it_covers() {
+        let mcx = SessionSchedule::from_calendars("MCX", &[DOC_Q4, DOC_DST]).unwrap();
+        assert!(!mcx.is_open(ist(20261015, 23, 40)), "23:30 close in the DST weeks");
+        assert!(mcx.is_open(ist(20261015, 23, 29)));
+        assert!(mcx.is_open(ist(20261102, 23, 40)), "winter hours after the DST document ends");
+        assert!(mcx.is_open(ist(20261120, 23, 54)));
+    }
+
+    #[test]
+    fn a_bad_calendar_document_is_refused_with_its_name() {
+        let msg =
+            |docs: &[&str]| SessionSchedule::from_calendars("NSE", docs).unwrap_err().to_string();
+        assert!(msg(&["{"]).contains("not JSON"));
+        assert!(msg(&[r#"{"name":"x"}"#]).contains("utc_offset"));
+        assert!(SessionSchedule::from_calendars("BSE", &[DOC_Q4])
+            .unwrap_err()
+            .to_string()
+            .contains("no entry for venue \"BSE\""));
+        let bad_time = DOC_Q4.replace("15:30", "25:30");
+        assert!(msg(&[&bad_time]).contains("not an HH:MM time"));
+        let bad_date = DOC_Q4.replace("2026-12-31", "2026-02-30");
+        assert!(msg(&[&bad_date]).contains("valid_to"));
+        let outside = DOC_Q4.replace("2026-10-02", "2027-10-02");
+        assert!(msg(&[&outside]).contains("outside valid_from"));
+        let other_zone = DOC_DST.replace("+05:30", "+00:00");
+        assert!(SessionSchedule::from_calendars("MCX", &[DOC_Q4, &other_zone])
+            .unwrap_err()
+            .to_string()
+            .contains("utc_offset differs"));
+        assert!(SessionSchedule::from_calendars("NSE", &[]).is_err());
     }
 }

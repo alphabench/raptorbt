@@ -120,6 +120,11 @@ class Log(Strategy):
 # ---------------------------------------------------------------------------
 # SessionSchedule
 # ---------------------------------------------------------------------------
+def nse_with_squareoff(**kw):
+    """The NSE equity preset with the 15:20 square-off most tests here are about (it has none of its own)."""
+    return SessionSchedule.nse_equity(**{"squareoff_minute": 15 * 60 + 20, **kw})
+
+
 class TestScheduleMaths:
     def test_nse_window_is_half_open_and_weekday_only(self):
         s = SessionSchedule.nse_equity()
@@ -139,7 +144,7 @@ class TestScheduleMaths:
             assert s.tz_offset_ns == IST_NS
             assert s.windows == {d: [(9 * 60 + 15, 15 * 60 + 30)] for d in
                                  ("mon", "tue", "wed", "thu", "fri")}
-            assert s.squareoff_minute == 15 * 60 + 20
+            assert s.squareoff_minute is None, "square-off is the run's choice, not the preset's"
             assert s.holidays == []
 
     def test_preset_arguments(self):
@@ -220,12 +225,15 @@ class TestScheduleMaths:
         assert s.next_open_ns(ist(THU, 10, 0)) is None
 
     def test_square_off_minute_can_be_changed_or_removed(self):
-        s = SessionSchedule.nse_equity()
+        s = nse_with_squareoff()
+        assert s.squareoff_minute == 920
         assert s.with_squareoff_minute(900).squareoff_minute == 900
         assert s.with_squareoff_minute(None).squareoff_minute is None
 
     def test_equality_and_repr(self):
-        assert SessionSchedule.nse_equity() == SessionSchedule.nse_fo()
+        assert SessionSchedule.nse_equity() == SessionSchedule.bse_equity()
+        assert SessionSchedule.nse_fo() == SessionSchedule.bse_fo()
+        assert SessionSchedule.nse_equity() != SessionSchedule.nse_fo(), "the derivatives close later from 2026-08-03"
         assert SessionSchedule.nse_equity() != SessionSchedule.nse_equity().with_holidays([20260126])
         assert "SessionSchedule" in repr(SessionSchedule.nse_equity())
 
@@ -254,7 +262,7 @@ class TestScheduleValidation:
             SessionSchedule(**kwargs)
 
     def test_with_methods_validate_too(self):
-        s = SessionSchedule.nse_equity()
+        s = nse_with_squareoff()
         with pytest.raises(ValueError, match="holiday"):
             s.with_holidays([20261340])
         with pytest.raises(ValueError, match="squareoff_minute"):
@@ -262,7 +270,7 @@ class TestScheduleValidation:
 
     def test_session_close_ns_rejects_a_non_date(self):
         with pytest.raises(ValueError, match="yyyymmdd"):
-            SessionSchedule.nse_equity().session_close_ns(20260231)
+            nse_with_squareoff().session_close_ns(20260231)
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +289,7 @@ FACTORIES = {
 class TestInstrumentMetadata:
     @pytest.mark.parametrize("name", FACTORIES)
     def test_every_factory_takes_venue_currency_and_session(self, name):
-        schedule = SessionSchedule.nse_equity()
+        schedule = nse_with_squareoff()
         made = FACTORIES[name](venue="NSE", currency="INR", session=schedule)
         assert (made.venue, made.currency) == ("NSE", "INR")
         assert made.session == schedule
@@ -410,7 +418,7 @@ class TestClosedMarket:
         # 08:00-09:10 bars precede the open; the first is bar 0.
         data = bars((THU, (7, 55), (9, 10)), regular_day(THU))
         s = self._submit_at(2, ORDER_KINDS[kind])
-        result = run(s, data, spec(SessionSchedule.nse_equity()))
+        result = run(s, data, spec(nse_with_squareoff()))
         assert s.reasons() == ["market_closed"], kind
         assert len(result.trades()) == 0
 
@@ -419,7 +427,7 @@ class TestClosedMarket:
         data = bars((THU, (7, 55), (9, 10)), regular_day(THU))
         n_before = 16  # bars before the open
         s = self._submit_at(n_before + 3, ORDER_KINDS[kind])
-        run(s, data, spec(SessionSchedule.nse_equity()))
+        run(s, data, spec(nse_with_squareoff()))
         assert s.reasons() == [], kind
         assert "order_accepted" in s.kinds() or "order_filled" in s.kinds()
 
@@ -435,7 +443,7 @@ class TestClosedMarket:
                 seen.append((event.kind, event.reject_reason))
 
         data = bars((THU, (7, 55), (9, 10)))
-        run(S(), data, spec(SessionSchedule.nse_equity()))
+        run(S(), data, spec(nse_with_squareoff()))
         assert seen == [("order_rejected", "market_closed")]
 
     def test_entry_intents_are_rejected_when_closed(self):
@@ -446,7 +454,7 @@ class TestClosedMarket:
 
         data = bars((THU, (7, 55), (9, 10)))
         s = S()
-        result = run(s, data, spec(SessionSchedule.nse_equity()))
+        result = run(s, data, spec(nse_with_squareoff()))
         assert s.reasons() == ["market_closed"]
         assert len(result.trades()) == 0
 
@@ -456,7 +464,7 @@ class TestClosedMarket:
                 if ctx.idx == 5:
                     self.enter()
 
-        result = run(S(), bars(regular_day(THU)), spec(SessionSchedule.nse_equity()))
+        result = run(S(), bars(regular_day(THU)), spec(nse_with_squareoff()))
         assert len(result.trades()) == 1
 
     def test_holidays_and_weekends_are_closed(self):
@@ -465,7 +473,7 @@ class TestClosedMarket:
                 if ctx.idx in (2, 30, 60):
                     self.submit_order(orders.Market(side="buy", units=1.0))
 
-        schedule = SessionSchedule.nse_equity(holidays=[FRI], squareoff_minute=None)
+        schedule = nse_with_squareoff(holidays=[FRI], squareoff_minute=None)
         data = bars((THU, (15, 0), (15, 25)), regular_day(FRI), regular_day(SAT), regular_day(MON))
         # idx 2 is Thursday 15:15 (open); 30 is Friday (holiday); 60 is Saturday.
         s = S()
@@ -481,7 +489,7 @@ class TestClosedMarket:
         # Bar 3 is the one closing at exactly 15:30.
         data = bars((THU, (15, 10), (15, 30)))
         s = S()
-        run(s, data, spec(SessionSchedule.nse_equity().with_squareoff_minute(None)))
+        run(s, data, spec(nse_with_squareoff().with_squareoff_minute(None)))
         assert data["timestamps"][3] == ist(THU, 15, 30)
         assert s.reasons() == ["market_closed"]
 
@@ -494,7 +502,8 @@ class TestResting:
         class S(Log):
             def on_bar(self, ctx):
                 if ctx.idx == 2:
-                    self.submit_order(orders.Limit(side="buy", price=95.0, units=1.0))
+                    # GTC on purpose: a DAY order would lapse at Thursday's close
+                    self.submit_order(orders.Limit(side="buy", price=95.0, units=1.0, tif="gtc"))
 
         # Thursday's session, then a post-close bar that trades through the
         # limit, then Friday's session where the limit is touched again.
@@ -503,7 +512,7 @@ class TestResting:
         fri = bars((FRI, (9, 15), (9, 30)), low_gap=10.0)
         merged = {k: np.concatenate([data[k], post[k], fri[k]]) for k in data}
         s = S()
-        result = run(s, merged, spec(SessionSchedule.nse_equity(squareoff_minute=None)))
+        result = run(s, merged, spec(nse_with_squareoff(squareoff_minute=None)))
         filled_at = [idx for kind, idx, _ in s.events if kind == "order_filled"]
         first_friday_bar = len(data["timestamps"]) + len(post["timestamps"])
         assert filled_at == [first_friday_bar]
@@ -540,7 +549,7 @@ class TestSquareoff:
                 if ctx.idx in (4, per_day + 4):
                     self.submit_order(orders.Market(side=side, units=10.0))
 
-        result = run(S(), self._two_days(), spec(SessionSchedule.nse_equity()),
+        result = run(S(), self._two_days(), spec(nse_with_squareoff()),
                      direction=direction)
         trades = result.trades()
         assert [t.exit_reason for t in trades] == ["Squareoff", "Squareoff"]
@@ -554,7 +563,7 @@ class TestSquareoff:
                 if ctx.idx == 4:
                     self.enter()
 
-        schedule = SessionSchedule.nse_equity(squareoff_minute=None)
+        schedule = nse_with_squareoff(squareoff_minute=None)
         result = run(S(), self._two_days(), spec(schedule))
         assert [t.exit_reason for t in result.trades()] == ["EndOfData"]
 
@@ -577,7 +586,7 @@ class TestSquareoff:
                     self.enter()
 
         s = S()
-        result = run(s, data, spec(SessionSchedule.nse_equity()))
+        result = run(s, data, spec(nse_with_squareoff()))
         assert s.reasons() == ["squareoff"]
         assert len(result.trades()) == 0
 
@@ -589,7 +598,7 @@ class TestSquareoff:
                 if ctx.idx == per_day + 4:
                     self.submit_order(orders.Market(side="buy", units=10.0))
 
-        schedule = SessionSchedule.nse_equity(holidays=[FRI])
+        schedule = nse_with_squareoff(holidays=[FRI])
         # Friday is a holiday, so the entry is refused and nothing trades.
         result = run(S(), self._two_days(), spec(schedule))
         assert len(result.trades()) == 0
@@ -606,7 +615,7 @@ class TestSquareoff:
                     self.enter()
 
         s = Eager()
-        result = run(s, data, spec(SessionSchedule.nse_equity()))
+        result = run(s, data, spec(nse_with_squareoff()))
         trades = result.trades()
         # Thursday's trade is squared off; nothing re-opens on Thursday after
         # that (every later bar is refused); Friday trades again from 09:20.
@@ -631,7 +640,7 @@ class TestSquareoff:
                 self.events.append(("canceled", ctx.idx, event.client_order_id))
 
         s = S()
-        run(s, data, spec(SessionSchedule.nse_equity()))
+        run(s, data, spec(nse_with_squareoff()))
         assert [(i, c) for k, i, c in s.events if k == "canceled"] == [(sq_idx, "entry")]
 
     def test_the_block_is_the_same_in_every_runner(self):
@@ -652,7 +661,7 @@ class TestSquareoff:
                     if ctx.idx < per_day + 4 and not self.holding:
                         self.enter()
 
-        schedule = SessionSchedule.nse_equity()
+        schedule = nse_with_squareoff()
         a = Eager()
         r1 = run(a, data, spec(schedule))
         b = Eager()
@@ -692,13 +701,13 @@ class TestDayOrders:
         data = bars((THU, (15, 0), (15, 30)))
         post = bars((THU, (15, 40), (15, 45)))
         merged = {k: np.concatenate([data[k], post[k]]) for k in data}
-        s, merged = self._run(SessionSchedule.nse_equity(squareoff_minute=None), merged)
+        s, merged = self._run(nse_with_squareoff(squareoff_minute=None), merged)
         expired = [i for k, i, _ in s.events if k == "order_expired"]
         assert expired == [len(data["timestamps"])]
 
     def test_the_last_bar_of_the_session_is_still_inside_it(self):
         data = bars((THU, (15, 0), (15, 30)))
-        s, _ = self._run(SessionSchedule.nse_equity(squareoff_minute=None), data)
+        s, _ = self._run(nse_with_squareoff(squareoff_minute=None), data)
         assert "order_expired" not in s.kinds()
 
     def test_without_a_schedule_it_expires_at_the_local_date_rollover(self):
@@ -738,7 +747,7 @@ class TestDailyBars:
         return s.daily
 
     def test_holidays_and_weekends_make_no_bar(self):
-        daily = self._run(SessionSchedule.nse_equity(holidays=[FRI]))
+        daily = self._run(nse_with_squareoff(holidays=[FRI]))
         # Bars close at the following local midnight; only Thursday and Monday trade.
         closes = [b.timestamp for b in daily]
         assert closes == [ist(FRI, 0, 0), ist(TUE, 0, 0)]
@@ -751,7 +760,7 @@ class TestDailyBars:
         # Even with a UTC tz_offset_ns in the config, bars cut at IST midnight.
         s = DailyBars()
         config = _zero_fee_config()
-        run(s, self._data(), spec(SessionSchedule.nse_equity()), config=config)
+        run(s, self._data(), spec(nse_with_squareoff()), config=config)
         assert all((b.timestamp + IST_NS) % NS_DAY == 0 for b in s.daily)
 
 
@@ -776,7 +785,7 @@ class TestRunners:
         return {k: np.concatenate([pre[k], main[k]]) for k in pre}
 
     def _schedule(self):
-        return SessionSchedule.nse_equity()
+        return nse_with_squareoff()
 
     def test_closed_hours_entry_is_rejected_the_same_way_in_every_runner(self):
         # Bar 2 and 3 fall before the open in this data, so both orders are
@@ -830,7 +839,7 @@ class TestRunners:
     def test_daily_bars_agree_across_runners(self):
         data = bars(regular_day(THU), regular_day(FRI), regular_day(SAT), regular_day(MON),
                     regular_day(TUE), step=30)
-        schedule = SessionSchedule.nse_equity(holidays=[FRI])
+        schedule = nse_with_squareoff(holidays=[FRI])
 
         a = DailyBars()
         run(a, data, spec(schedule))
@@ -893,7 +902,7 @@ class TestLiveNode:
         return node, strategy
 
     def test_prints_outside_the_session_are_refused_and_inside_it_trade(self):
-        node, strategy = self._node(SessionSchedule.nse_equity())
+        node, strategy = self._node(nse_with_squareoff())
         node.push_tick("ASSET", ist(THU, 8, 0), 100.0, ltq=1.0)
         node.push_tick("ASSET", ist(THU, 8, 1), 100.0, ltq=1.0)
         assert strategy.reasons() == ["market_closed"] * 2
@@ -905,7 +914,7 @@ class TestLiveNode:
         assert len(result.result.trades()) == 1
 
     def test_square_off_closes_the_position_on_a_print_at_the_cutoff(self):
-        node, strategy = self._node(SessionSchedule.nse_equity())
+        node, strategy = self._node(nse_with_squareoff())
         node.push_tick("ASSET", ist(THU, 10, 0), 100.0, ltq=1.0)
         node.push_tick("ASSET", ist(THU, 10, 1), 100.0, ltq=1.0)
         node.push_tick("ASSET", ist(THU, 15, 20), 102.0, ltq=1.0)
@@ -938,7 +947,7 @@ class TestNextBarOpen:
                     self.enter()
 
         s = S()
-        schedule = SessionSchedule.nse_equity(squareoff_minute=None)
+        schedule = nse_with_squareoff(squareoff_minute=None)
         result = run(s, data, spec(schedule), config=self._config())
         assert s.reasons() == ["market_closed"]
         assert len(result.trades()) == 0
@@ -951,7 +960,7 @@ class TestNextBarOpen:
                 if ctx.idx == 3:
                     self.enter()
 
-        schedule = SessionSchedule.nse_equity(squareoff_minute=None)
+        schedule = nse_with_squareoff(squareoff_minute=None)
         result = run(S(), data, spec(schedule), config=self._config())
         assert [t.entry_idx for t in result.trades()] == [4]
 
@@ -978,7 +987,7 @@ class TestTickRunners:
         )
 
     def test_run_tick_strategy_and_the_stream_agree_with_the_live_node(self):
-        schedule = SessionSchedule.nse_equity()
+        schedule = nse_with_squareoff()
         instruments = {"ASSET": spec(schedule)}
 
         batch = TickBuyer()
@@ -1004,7 +1013,7 @@ class TestTickRunners:
         ticks = {"ASSET": {"timestamps": np.array(stamps, dtype=np.int64),
                            "ltp": np.full(len(stamps), 100.0)}}
         seen = {}
-        for name, schedule in (("with", SessionSchedule.nse_equity(holidays=[FRI])),
+        for name, schedule in (("with", nse_with_squareoff(holidays=[FRI])),
                                ("without", None)):
             s = DailyBars()
             raptorbt.run_tick_strategy(

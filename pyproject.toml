@@ -47,6 +47,10 @@ kite = []
 upstox = []
 dhan = []
 
+[dependency-groups]
+# What the test suite needs beyond the package itself; CI installs the same list.
+test = ["pytest", "numpy", "scipy"]
+
 [project.urls]
 Homepage = "https://www.alphabench.in/raptorbt"
 Repository = "https://github.com/alphabench/raptorbt"

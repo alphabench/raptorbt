@@ -142,3 +142,32 @@ impl From<Fail> for PyErr {
         Python::attach(|py| f.build(py).unwrap_or_else(|e| e))
     }
 }
+
+/// Run `f`, turning a money fault (an amount that cannot be booked) into the
+/// structured `money_overflow` error. The kernel signals it by panicking; a
+/// constructor cannot rely on the Python-side guard, which wraps methods and
+/// functions but not `__new__`. Any other panic keeps unwinding.
+pub fn guard_money<T>(operation: &str, f: impl FnOnce() -> T) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied());
+        match message.and_then(|m| m.strip_prefix(crate::accounts::money::MONEY_FAULT_PREFIX)) {
+            Some(detail) => PyErr::from(
+                Fail::new(
+                    "money_overflow",
+                    format!("a booked amount cannot be represented: {}", detail.trim()),
+                )
+                .op(operation),
+            ),
+            None => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
+/// An argument or array that a computation refuses; the message is the
+/// computation's own.
+pub fn invalid_input(message: impl std::fmt::Display) -> PyErr {
+    Fail::new("invalid_input", message.to_string()).into()
+}

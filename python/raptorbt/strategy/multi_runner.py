@@ -52,7 +52,9 @@ from raptorbt.strategy._commands import (
     PortfolioTarget,
     dispatch_events,
     reject_atr_stops,
+    reject_bar_only_settings,
     session_tz_offset_ns,
+    config_for_holding,
 )
 from raptorbt.strategy import api
 from raptorbt.strategy import context_host
@@ -65,7 +67,7 @@ from raptorbt.strategy.accounts import (
     unpack_entries,
 )
 from raptorbt.strategy._stamps import BarStamps
-from raptorbt.strategy._validate import ensure_prices_finite
+from raptorbt.strategy._validate import ensure_prices_finite, ensure_sessions_cover
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
@@ -396,6 +398,7 @@ def _run_group(
     the specs; every strategy of an account is in ``entries``. The
     ``strategies`` of an account result are positions in ``entries``.
     """
+    config = config_for_holding(config, [strategy for strategy, _ in entries], "run_strategies")
     rt = Runtime(
         market,
         [(directions or {}).get(s, 1) for s in used],
@@ -457,7 +460,7 @@ def _run_group(
         rt.close()
 
 
-def _lifecycle(actions, policy, universe, tick_symbols, call):
+def _lifecycle(actions, policy, universe, tick_symbols, call, live=False):
     """The declared corporate actions and policy, checked against the data."""
     actions = list(actions or ())
     if policy is not None and policy not in ("raw", "adjusted"):
@@ -500,9 +503,18 @@ def _lifecycle(actions, policy, universe, tick_symbols, call):
     if policy == "adjusted":
         for action in actions:
             if action.instrument in tick_symbols:
+                why = (
+                    "bars already pushed, and the indicator state, composite bars and orders "
+                    "built on them, are on the old basis when the ex-date arrives; restating "
+                    "them would mean replaying the whole feed. Use 'raw' (positions are "
+                    "rescaled at the ex-date), or push history already adjusted and declare "
+                    "no action inside it"
+                    if live
+                    else "cannot put the ticks on one basis; use 'raw'"
+                )
                 raise InvalidParameter(
-                    f"{call}: adjustment_policy='adjusted' cannot put the ticks of "
-                    f"{action.instrument!r} on one basis; use 'raw'",
+                    f"{call}: adjustment_policy='adjusted' is refused for "
+                    f"{action.instrument!r}: {why}",
                     code="invalid_adjustment_policy",
                     operation=call,
                     parameter="adjustment_policy",
@@ -753,10 +765,12 @@ def run_strategies(
     tick_symbols = [s for s in used if s in ticks]
     reject_atr_stops(config, instrument_configs, tick_symbols)
     bar_symbols = [s for s in used if s in data]
+    reject_bar_only_settings(config, [s for s in bar_symbols if s not in ticks], call)
     stamps = BarStamps.resolve(
         bar_stamp, bar_ns, bar_symbols, call, warn=bool(bar_symbols), stacklevel=4 + extra
     )
     arrays = {s: _as_arrays(data[s], s, call) for s in bar_symbols}
+    ensure_sessions_cover(arrays, instruments, call)
     corporate_actions, adjustment_policy = _lifecycle(
         corporate_actions, adjustment_policy, universe, tick_symbols, call
     )

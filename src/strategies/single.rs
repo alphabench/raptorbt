@@ -48,6 +48,19 @@ impl SingleBacktest {
         self.engine.run_single_with_instrument_config(ohlcv, signals, inst_config)
     }
 
+    /// Run the backtest with per-instrument configuration and the run's
+    /// corporate actions; see [`PortfolioEngine::run_single_with_lifecycle`].
+    pub fn run_with_lifecycle(
+        &self,
+        ohlcv: &OhlcvData,
+        signals: &CompiledSignals,
+        inst_config: Option<&InstrumentConfig>,
+        actions: &[crate::instruments::CorporateAction],
+        policy: crate::instruments::AdjustmentPolicy,
+    ) -> crate::core::Result<BacktestResult> {
+        self.engine.run_single_with_lifecycle(ohlcv, signals, inst_config, actions, policy)
+    }
+
     /// Run backtest from raw arrays.
     ///
     /// # Arguments

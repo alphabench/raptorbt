@@ -30,7 +30,7 @@ use crate::core::session_schedule::SessionSchedule;
 use crate::core::types::OhlcvBar;
 use crate::core::Result;
 use crate::data::{
-    builder_for_session, builder_for_with, follows_calendar, BarBuilder, BarSpec, BarStamp,
+    builder_for_session, builder_for_with, uses_calendar, BarBuilder, BarSpec, BarStamp,
     BuilderParams, SourceRecord,
 };
 use crate::portfolio::kernel::KernelBar;
@@ -170,7 +170,8 @@ impl AggregatorHubBuilder {
 
     /// [`AggregatorHubBuilder::register`] for an instrument that has a
     /// trading calendar. Daily and longer aggregations then cut at the
-    /// calendar's own midnight and skip non-trading days; the key's
+    /// calendar's own midnight and skip non-trading days, and intraday time
+    /// aggregations anchor at the session open; the key's
     /// `tz_offset_ns` is replaced accordingly so two subscriptions still
     /// share an aggregator exactly when their output is identical.
     pub fn register_with_session(
@@ -179,7 +180,7 @@ impl AggregatorHubBuilder {
         key: AggKey,
         session: Option<&SessionSchedule>,
     ) -> Result<(AggId, u16)> {
-        let session = session.filter(|_| follows_calendar(key.spec.unit));
+        let session = session.filter(|_| uses_calendar(key.spec.unit));
         let key = match session {
             Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..key },
             None => key,
@@ -338,7 +339,7 @@ impl AggregatorHub {
         key: AggKey,
         session: Option<&SessionSchedule>,
     ) -> Result<(AggId, u16)> {
-        let session = session.filter(|_| follows_calendar(key.spec.unit));
+        let session = session.filter(|_| uses_calendar(key.spec.unit));
         let key = match session {
             Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..key },
             None => key,
@@ -442,7 +443,7 @@ impl AggregatorHub {
             (0..self.keys.len()).filter(|&a| self.keys[a].instrument == instrument).collect();
         for &a in &mine {
             let key = self.keys[a];
-            let session = session.filter(|_| follows_calendar(key.spec.unit));
+            let session = session.filter(|_| uses_calendar(key.spec.unit));
             self.builders[a] =
                 builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
                     .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;

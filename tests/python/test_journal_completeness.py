@@ -304,7 +304,7 @@ def test_an_exit_the_engine_makes_on_its_own_leaves_a_record(case):
         # The entry fills on the second bar; the third is past the 15:20 square-off.
         ts = [ist(THU, 9, 20), ist(THU, 9, 25), ist(THU, 15, 25), ist(THU, 15, 30)]
         data = {"A": {**_bars([100.0, 101.0, 102.0, 103.0]), "timestamps": np.array(ts, dtype=np.int64)}}
-        kw["instruments"] = {"A": InstrumentSpec.equity("A", session=SessionSchedule.nse_equity())}
+        kw["instruments"] = {"A": InstrumentSpec.equity("A", session=SessionSchedule.nse_equity(squareoff_minute=920))}
     elif case == "settlement":
         fut = InstrumentSpec.futures_contract("A", expiration_ns=4 * MIN, lot_size=1.0, underlying="U")
         symbols, data = ["A", "U"], {"A": _bars([100.0, 101.0, 102.0, 103.0, 104.0]), "U": _bars([50.0] * 5)}

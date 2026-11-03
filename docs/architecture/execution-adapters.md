@@ -127,29 +127,52 @@ the stops and targets:
 ### What still differs from `run_strategies`, and the tests that pin it
 
 `tests/python/test_execution.py` runs the frozen stream and portfolio scenario
-corpus and the option-structure tests through a paper node and compares the
-whole result digest with `run_strategies` (or the in-process node). Equal:
-legacy intents, config stops and targets, attached levels, brackets, OCO,
-trailing orders, `Twap`, timers, risk limits, drawdown and margin halts,
-adopted positions, warmup, order latency, the session square-off and
-structures. Not equal, each a strict `xfail` naming its reason:
+corpus and the option-structure and contract-end tests through a paper node and
+compares the whole result digest with `run_strategies` (or the in-process
+node). Equal: legacy intents, config stops and targets, attached levels,
+brackets, OCO, trailing orders, `Twap`, timers, risk limits, drawdown and
+margin halts, adopted positions, warmup, order latency, the session
+square-off, structures, and a contract's expiry, cash settlement, physical
+delivery and assignment. `enter()` under `fill_timing="next_bar_open"` is sized
+at the fill, as a capital-fraction order is (the simulated venue amends the
+order's quantity with a replace acknowledgement; a real adapter works the
+quantity estimated when the order was sent). Hedging (`oms_type="hedging"`) is
+equal too: a close the engine makes names the position it ends
+(`OrderRequest.position_id`, below). Two differences remain, each
+pinned by a test that asserts exactly what differs:
 
-1. **Sizing time of an entry intent.** `enter()` under `fill_timing="next_bar_open"`
-   is sized from the capital on the signal bar and fills at the next open;
-   in-process it is sized there (`pf_fill_next_bar_open`). (A capital-fraction
-   *order* is sized by the simulated venue as it fills, which amends the
-   order's quantity with a replace acknowledgement, so resting and sliced
-   fraction orders equal in-process; a real adapter works the quantity
-   estimated when the order was sent.)
-2. **Hedging.** Under `oms_type="hedging"` every order opens, so no order can
-   close one position: closes, protection and flattening by order are not
-   representable (`pf_margin_hedging`, `pf_cash_hedging`, `st_margin_hedging`).
-3. **Order of an entry intent.** An `enter()` held for the next print and a
-   typed market order made earlier in the same step: in-process the entry fills
-   first; at a venue they fill in the order they were sent
-   (`st_refused_rows_timers`).
-4. Closes and protection exit with reason `Order`, not `Signal`, `StopLoss` or
-   `TakeProfit`; the engine's own orders are extra order records.
+1. **Excursions of an entry intent filled at the next open.** The trade's
+   `mae_*` and `mfe_*` (and the metric derived from them, `MFE Capture Ratio`)
+   start from the fill's price on a paper node; in-process they include the
+   entry bar's own high and low. A fill a venue reports carries a price, not
+   the range of the bar it happened in (`pf_fill_next_bar_open`).
+2. **Order of an entry intent.** An `enter()` held for the next print and a
+   typed market order made in the same step: in-process the engine handles a
+   step's intents (signals) before it sweeps orders, so the entry fills first;
+   at a venue they fill in the order they were sent, and the typed order was
+   sent first (`st_refused_rows_timers`). The in-process order is the specified
+   one: `enter()` and `close_position()` are signals the engine resolves in a
+   phase of their own, before any order in the sweep, in every mode and on every
+   data cadence, and the result does not depend on where in the hook the call
+   sits. A venue cannot reproduce that, because it only sees orders in the order
+   they were sent. The two agree unless one step mixes a signal and a typed order
+   for one instrument that fill at the same moment; a strategy that does so asks
+   for an ordering it has not stated. State the order by using one form.
+
+**Hedging on a venue.** Under `oms_type="hedging"` every order opens a position
+and a close names the position it ends. The engine sets
+`OrderRequest.position_id` on a close, a reduction or a protective order it
+makes of a named position; the kernel, `PaperExecution` and a `BrokerAdapter`
+honour it, and an order without it opens (reduce-only, it takes the oldest
+position). A venue that nets positions per instrument cannot close one by name:
+a `BrokerAdapter` says so with `supports_hedging = False` (all the broker
+mappings do), and a `LiveNode` with `oms_type="hedging"` on such an adapter is
+refused when it is built (`hedging_unsupported_by_venue`). Nothing is sent that
+the venue would read as a different book. A custom adapter that keeps positions
+apart is hedging-capable unless it sets `supports_hedging = False`.
+
+Closes and protection exit with reason `Order`, not `Signal`, `StopLoss` or
+`TakeProfit`; the engine's own orders are extra order records.
 
 Refused up front: ATR-based stops on a live node (it has no bar series, with
 or without a venue), `liquidate_on_margin_call`, and **shared account groups.**
@@ -187,7 +210,10 @@ that remain are all about what a venue can say:
 The shadow book may never change a position without an order. Its stops,
 targets, schedules and square-off are venue-managed like the strategy's book
 (the runtime sends the orders); a position it still changes on its own raises
-`paper_unsolicited_position_change`.
+`paper_unsolicited_position_change`. A contract's end is not an order's doing
+but the instrument's declared terms: a position settled at expiry, delivered
+against or assigned is settled alike by the strategy's book and the shadow's
+copy, from the same events, and is not a change without an order.
 
 ## Recovery, the journal and fencing
 

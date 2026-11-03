@@ -6,13 +6,17 @@
 //! one local trading date, and records that fall on a holiday or weekend are
 //! ignored, so such a date produces no bar.
 //!
-//! Intraday units are untouched: a bar that opens inside a window cannot
-//! straddle a holiday, and out-of-session prints are already the caller's
-//! to filter or keep.
+//! Intraday time units are cut from the session open, not from the clock: a
+//! 30-minute bar of a 09:15 session runs 09:15-09:45, the way a venue's own
+//! candles do, and the last bar of a window ends at its close (a 60-minute
+//! bar of 09:15-15:30 ends 15:15-15:30, not at 16:15). Each trading window of
+//! a day is anchored at its own open, so a lunch break or an evening session
+//! starts a fresh grid. A print outside every window falls back to the clock
+//! grid of the schedule's zone and never joins a session bar.
 
 use crate::core::session_schedule::SessionSchedule;
-use crate::core::types::OhlcvBar;
-use crate::data::aggregate::{builder_for_with, BarBuilder, SourceRecord};
+use crate::core::types::{OhlcvBar, Timestamp};
+use crate::data::aggregate::{builder_for_with, BarBuilder, Partial, SourceRecord};
 use crate::data::bar_spec::{AggregationUnit, BarSpec, BuilderParams, SpecError};
 
 /// Whether bars of `unit` are cut at local midnights, which is where a
@@ -25,6 +29,66 @@ pub fn follows_calendar(unit: AggregationUnit) -> bool {
             | AggregationUnit::Month
             | AggregationUnit::Year
     )
+}
+
+/// Whether bars of `unit` depend on the instrument's calendar: the day and
+/// longer units cut at its midnight, the intraday time units at its session
+/// open.
+pub fn uses_calendar(unit: AggregationUnit) -> bool {
+    follows_calendar(unit) || unit.fixed_ns().is_some()
+}
+
+/// Time bars of a fixed width anchored at the open of the trading window a
+/// record falls in.
+#[derive(Debug)]
+struct SessionAnchored {
+    width_ns: i64,
+    schedule: SessionSchedule,
+    /// `[start, end)` of the bar in progress.
+    window: Option<(Timestamp, Timestamp)>,
+    partial: Option<Partial>,
+}
+
+impl SessionAnchored {
+    fn window_of(&self, ts: Timestamp) -> (Timestamp, Timestamp) {
+        for (open, close) in self.schedule.windows_ns_on_day_of(ts) {
+            if open <= ts && ts < close {
+                let start = open + (ts - open).div_euclid(self.width_ns) * self.width_ns;
+                return (start, (start + self.width_ns).min(close));
+            }
+        }
+        let offset = self.schedule.tz_offset_ns();
+        let start = (ts + offset).div_euclid(self.width_ns) * self.width_ns - offset;
+        (start, start + self.width_ns)
+    }
+}
+
+impl BarBuilder for SessionAnchored {
+    fn push(&mut self, rec: &SourceRecord) -> Option<OhlcvBar> {
+        let window = self.window_of(rec.timestamp);
+        match (self.window, &mut self.partial) {
+            (Some(current), Some(partial)) if current == window => {
+                partial.absorb(rec);
+                None
+            }
+            (Some((_, end)), slot) => {
+                let done = slot.take().map(|p| p.into_bar(end));
+                self.window = Some(window);
+                self.partial = Some(Partial::start(rec));
+                done
+            }
+            (None, _) => {
+                self.window = Some(window);
+                self.partial = Some(Partial::start(rec));
+                None
+            }
+        }
+    }
+
+    fn flush(&mut self) -> Option<OhlcvBar> {
+        let (_, end) = self.window.take()?;
+        self.partial.take().map(|p| p.into_bar(end))
+    }
 }
 
 /// Skips records on non-trading days, then defers to the wrapped builder.
@@ -49,9 +113,10 @@ impl BarBuilder for TradingDaysOnly {
     }
 }
 
-/// [`builder_for_with`] that honours a trading calendar for day-and-longer
-/// units. Any other unit, or no calendar, builds exactly as before at
-/// `align_offset_ns`.
+/// [`builder_for_with`] that honours a trading calendar: day-and-longer units
+/// cut at its midnight and skip non-trading days, intraday time units anchor
+/// at the session open. Any other unit, or no calendar, builds exactly as
+/// before at `align_offset_ns`.
 pub fn builder_for_session(
     spec: BarSpec,
     align_offset_ns: i64,
@@ -62,6 +127,15 @@ pub fn builder_for_session(
         Some(schedule) if follows_calendar(spec.unit) => {
             let inner = builder_for_with(spec, schedule.tz_offset_ns(), params)?;
             Ok(Box::new(TradingDaysOnly { inner, schedule: schedule.clone() }))
+        }
+        Some(schedule) if spec.unit.fixed_ns().is_some() => {
+            let width_ns = spec.unit.fixed_ns().unwrap_or(1) * i64::from(spec.step);
+            Ok(Box::new(SessionAnchored {
+                width_ns,
+                schedule: schedule.clone(),
+                window: None,
+                partial: None,
+            }))
         }
         _ => builder_for_with(spec, align_offset_ns, params),
     }
@@ -112,17 +186,63 @@ mod tests {
         assert!(with.iter().all(|t| without.contains(t)));
     }
 
+    const MIN: i64 = 60_000_000_000;
+
+    /// Bar end times from one-minute records opening at `open_min` (local
+    /// minutes of 2026-01-15, an IST Thursday) for `n` minutes.
+    fn ends(spec: BarSpec, schedule: &SessionSchedule, open_min: i64, n: i64) -> Vec<i64> {
+        let thursday = 20_468 * DAY - IST;
+        let mut b = builder_for_session(spec, 0, BuilderParams::default(), Some(schedule)).unwrap();
+        let mut out: Vec<i64> = (0..n)
+            .filter_map(|i| b.push(&rec(thursday + (open_min + i) * MIN, 100.0 + i as f64)))
+            .map(|bar| (bar.timestamp - thursday) / MIN)
+            .collect();
+        out.extend(b.flush().map(|bar| (bar.timestamp - thursday) / MIN));
+        out
+    }
+
     #[test]
-    fn intraday_units_ignore_the_calendar() {
-        let spec = BarSpec::new(5, AggregationUnit::Minute).unwrap();
-        let schedule = SessionSchedule::nse_equity();
-        let mut plain = builder_for_with(spec, 0, BuilderParams::default()).unwrap();
-        let mut wrapped =
-            builder_for_session(spec, 0, BuilderParams::default(), Some(&schedule)).unwrap();
-        let saturday = 20_470 * DAY;
-        for i in 0..20 {
-            let r = rec(saturday + i * 60_000_000_000, 100.0 + i as f64);
-            assert_eq!(plain.push(&r).map(|b| b.timestamp), wrapped.push(&r).map(|b| b.timestamp));
+    fn intraday_bars_are_cut_from_the_session_open_and_end_at_the_close() {
+        let nse = SessionSchedule::nse_equity();
+        let open = 9 * 60 + 15;
+        let thirty = BarSpec::new(30, AggregationUnit::Minute).unwrap();
+        let got = ends(thirty, &nse, open, 375);
+        // 09:45, 10:15, ... : twelve whole bars and the last 15 minutes.
+        assert_eq!(got.len(), 13);
+        assert_eq!(&got[..2], &[open + 30, open + 60]);
+        assert_eq!(*got.last().unwrap(), 15 * 60 + 30, "the last bar closes with the session");
+        let hour = BarSpec::new(1, AggregationUnit::Hour).unwrap();
+        let got = ends(hour, &nse, open, 375);
+        assert_eq!(got.len(), 7);
+        assert_eq!(*got.last().unwrap(), 15 * 60 + 30, "15:15-15:30, not 15:15-16:15");
+    }
+
+    #[test]
+    fn a_window_that_closes_off_the_grid_ends_its_last_bar_there() {
+        // The equity-derivatives close after 2026-08-03 is 15:40: 09:15 + 77 x 5 minutes.
+        let fo = SessionSchedule::nse_fo();
+        let thursday_after = 20_671 * DAY - IST; // a weekday after the change
+        let five = BarSpec::new(5, AggregationUnit::Minute).unwrap();
+        let mut b = builder_for_session(five, 0, BuilderParams::default(), Some(&fo)).unwrap();
+        let mut last = None;
+        for i in 0..385 {
+            if let Some(bar) = b.push(&rec(thursday_after + (555 + i) * MIN, 100.0)) {
+                last = Some(bar.timestamp);
+            }
         }
+        last = b.flush().map(|bar| bar.timestamp).or(last);
+        assert_eq!(last, Some(thursday_after + (15 * 60 + 40) * MIN));
+    }
+
+    #[test]
+    fn without_a_calendar_intraday_bars_are_cut_on_the_clock_grid() {
+        let spec = BarSpec::new(30, AggregationUnit::Minute).unwrap();
+        let mut b = builder_for_session(spec, IST, BuilderParams::default(), None).unwrap();
+        let thursday = 20_468 * DAY - IST;
+        let mut first = None;
+        for i in 0..60 {
+            first = first.or(b.push(&rec(thursday + (555 + i) * MIN, 100.0)));
+        }
+        assert_eq!((first.unwrap().timestamp - thursday) / MIN, 9 * 60 + 30);
     }
 }

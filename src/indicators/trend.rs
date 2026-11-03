@@ -98,28 +98,6 @@ pub fn ema(data: &[f64], period: usize) -> Result<Vec<f64>> {
     Ok(result)
 }
 
-/// EMA with custom smoothing factor (internal use).
-#[allow(dead_code)]
-pub(crate) fn ema_with_alpha(data: &[f64], alpha: f64, initial: f64) -> Vec<f64> {
-    let n = data.len();
-    let mut result = vec![f64::NAN; n];
-
-    if n == 0 {
-        return result;
-    }
-
-    result[0] = initial;
-    for i in 1..n {
-        if data[i].is_nan() {
-            result[i] = result[i - 1];
-        } else {
-            result[i] = alpha * data[i] + (1.0 - alpha) * result[i - 1];
-        }
-    }
-
-    result
-}
-
 /// Supertrend indicator result.
 #[derive(Debug, Clone)]
 pub struct SupertrendResult {

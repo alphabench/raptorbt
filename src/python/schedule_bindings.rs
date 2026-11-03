@@ -56,17 +56,7 @@ impl PySessionSchedule {
         holidays: Option<Vec<i32>>,
         squareoff_minute: Option<u32>,
     ) -> PyResult<Self> {
-        let mut by_day: [Vec<(u32, u32)>; 7] = Default::default();
-        for (key, value) in windows.iter() {
-            by_day[weekday_index(&key)?] = value.extract::<Vec<(u32, u32)>>().map_err(|_| {
-                Fail::new(
-                    "invalid_session_schedule",
-                    format!("windows[{key}] must be a list of (open, close) minutes"),
-                )
-                .op("SessionSchedule")
-                .param("windows")
-            })?;
-        }
+        let by_day = Self::weekday_windows(windows)?;
         let inner = SessionSchedule::new(
             tz_offset_ns,
             by_day,
@@ -77,25 +67,145 @@ impl PySessionSchedule {
         Ok(Self { inner })
     }
 
-    /// NSE cash equities: Mon-Fri 09:15-15:30 IST, square-off 15:20.
+    /// NSE cash equities: Mon-Fri 09:15-15:30 IST. No square-off unless
+    /// `squareoff_minute` is given.
     #[staticmethod]
-    #[pyo3(signature = (holidays=None, squareoff_minute=Some(920)))]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn nse_equity(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
         Self::preset(SessionSchedule::nse_equity(), holidays, squareoff_minute)
     }
 
-    /// NSE futures and options: Mon-Fri 09:15-15:30 IST, square-off 15:20.
+    /// NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from
+    /// 2026-08-03.
     #[staticmethod]
-    #[pyo3(signature = (holidays=None, squareoff_minute=Some(920)))]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn nse_fo(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
         Self::preset(SessionSchedule::nse_fo(), holidays, squareoff_minute)
     }
 
-    /// BSE cash equities: Mon-Fri 09:15-15:30 IST, square-off 15:20.
+    /// BSE cash equities: Mon-Fri 09:15-15:30 IST.
     #[staticmethod]
-    #[pyo3(signature = (holidays=None, squareoff_minute=Some(920)))]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn bse_equity(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
         Self::preset(SessionSchedule::bse_equity(), holidays, squareoff_minute)
+    }
+
+    /// BSE equity derivatives: as `nse_fo`.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn bse_fo(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::bse_fo(), holidays, squareoff_minute)
+    }
+
+    /// MCX non-agricultural contracts: a day session 09:00-17:00 and an
+    /// evening session 17:00-23:55 IST (23:30 in the US daylight-saving
+    /// periods of 2025 and 2026 the exchange notified).
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn mcx(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::mcx(), holidays, squareoff_minute)
+    }
+
+    /// MCX internationally referenceable agricultural contracts: the `mcx`
+    /// periods, closing at 21:00.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn mcx_select_agri(
+        holidays: Option<Vec<i32>>,
+        squareoff_minute: Option<u32>,
+    ) -> PyResult<Self> {
+        Self::preset(SessionSchedule::mcx_select_agri(), holidays, squareoff_minute)
+    }
+
+    /// NSE currency derivatives on cross-currency pairs: Mon-Fri 09:00-19:30 IST.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn cds_cross(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::cds_cross(), holidays, squareoff_minute)
+    }
+
+    /// NSE currency derivatives on INR pairs: Mon-Fri 09:00-17:00 IST.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn cds(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::cds(), holidays, squareoff_minute)
+    }
+
+    /// BSE currency derivatives: as `cds`.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn bcd(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::bcd(), holidays, squareoff_minute)
+    }
+
+    /// One venue's schedule from dated calendar documents (JSON text, later
+    /// documents win where they overlap); see the `SessionSchedule`
+    /// docstring for the format. A date no document covers is closed.
+    #[staticmethod]
+    fn from_calendars(venue: &str, documents: Vec<String>) -> PyResult<Self> {
+        let docs: Vec<&str> = documents.iter().map(String::as_str).collect();
+        SessionSchedule::from_calendars(venue, &docs).map(|inner| Self { inner }).map_err(|e| {
+            Fail::new("invalid_calendar", e.to_string())
+                .op("SessionSchedule.from_calendars")
+                .param("documents")
+                .into()
+        })
+    }
+
+    /// A copy with other weekday windows from `from_date` to `to_date`
+    /// (`yyyymmdd`, inclusive; `to_date=None` is open-ended). `windows` is
+    /// keyed like the constructor's; a weekday left out does not trade in
+    /// that period.
+    #[pyo3(signature = (from_date, windows, to_date=None))]
+    fn with_window_change(
+        &self,
+        from_date: i32,
+        windows: &Bound<'_, PyDict>,
+        to_date: Option<i32>,
+    ) -> PyResult<Self> {
+        let by_day = Self::weekday_windows(windows)?;
+        Ok(Self {
+            inner: self
+                .inner
+                .clone()
+                .with_window_change(from_date, to_date, by_day)
+                .map_err(value_err)?,
+        })
+    }
+
+    /// A copy that trades `windows` (`[(open_minute, close_minute), ...]`) on
+    /// the local date `date` (`yyyymmdd`) whatever the weekday or holiday
+    /// set says: Muhurat trading, a special session, a half day. Empty
+    /// windows close the date.
+    fn with_session_override(&self, date: i32, windows: Vec<(u32, u32)>) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.clone().with_session_override(date, windows).map_err(value_err)?,
+        })
+    }
+
+    /// The windows of a local `yyyymmdd` date after overrides, holidays and
+    /// dated changes; empty when it does not trade.
+    fn windows_on(&self, date: i32) -> Vec<(u32, u32)> {
+        self.inner.windows_on(date)
+    }
+
+    /// Trading minutes in a regular session (the longest weekday).
+    #[getter]
+    fn trading_minutes(&self) -> f64 {
+        self.inner.trading_minutes()
+    }
+
+    /// The `(from, to)` `yyyymmdd` ranges the schedule answers for; empty
+    /// means every date. A date outside them is closed.
+    #[getter]
+    fn coverage(&self) -> Vec<(i32, i32)> {
+        self.inner.coverage()
+    }
+
+    /// Per-date overrides as `{yyyymmdd: [(open, close), ...]}`.
+    #[getter]
+    fn overrides(&self) -> std::collections::BTreeMap<i32, Vec<(u32, u32)>> {
+        self.inner.session_overrides().map(|(d, w)| (d, w.to_vec())).collect()
     }
 
     /// A copy whose holiday set is exactly `dates` (`yyyymmdd` ints).
@@ -186,6 +296,21 @@ impl PySessionSchedule {
 }
 
 impl PySessionSchedule {
+    fn weekday_windows(windows: &Bound<'_, PyDict>) -> PyResult<[Vec<(u32, u32)>; 7]> {
+        let mut by_day: [Vec<(u32, u32)>; 7] = Default::default();
+        for (key, value) in windows.iter() {
+            by_day[weekday_index(&key)?] = value.extract::<Vec<(u32, u32)>>().map_err(|_| {
+                Fail::new(
+                    "invalid_session_schedule",
+                    format!("windows[{key}] must be a list of (open, close) minutes"),
+                )
+                .op("SessionSchedule")
+                .param("windows")
+            })?;
+        }
+        Ok(by_day)
+    }
+
     fn preset(
         base: SessionSchedule,
         holidays: Option<Vec<i32>>,

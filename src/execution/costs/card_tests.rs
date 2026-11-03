@@ -75,7 +75,14 @@ fn the_checks_refuse_in_order() {
 
 #[test]
 fn a_card_round_trips_through_its_document() {
-    let schedule = FeeSchedule::exchange_presets();
+    let dated = FeeSchedule::exchange_presets();
+    // The presets take effect on several dates, which one card cannot carry.
+    assert!(dated
+        .to_card_json("2026-09-01T00:00:00+05:30")
+        .unwrap_err()
+        .to_string()
+        .contains("different dates"));
+    let schedule = dated.in_force_at(parse_rfc3339_ns("2026-09-01T00:00:00+05:30").unwrap());
     let text = schedule.to_card_json("2026-09-01T00:00:00+05:30").unwrap();
     let back = RateCard::from_json(&text).unwrap();
     assert_eq!(back.rows.len(), schedule.rows.len());

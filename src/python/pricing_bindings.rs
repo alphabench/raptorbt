@@ -9,12 +9,11 @@
 use std::cell::RefCell;
 
 use numpy::{PyArray1, PyReadonlyArray1};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-use super::errors::Fail;
+use super::errors::{invalid_input, Fail};
 use super::instrument_bindings::PyInstrumentSpec;
 use super::numpy_bridge::{numpy_cow_f64, vec_to_numpy_f64};
 use crate::pricing::{
@@ -26,7 +25,7 @@ use crate::pricing::{
 const PARALLEL_MIN: usize = 4096;
 
 fn value_err(e: impl std::fmt::Display) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    invalid_input(e)
 }
 
 const EXPIRY_PICKS: [&str; 5] = ["nearest", "nth", "weekly", "monthly", "date"];

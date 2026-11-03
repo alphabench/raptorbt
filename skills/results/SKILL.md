@@ -155,7 +155,10 @@ assert report["report_unavailable"]["sharpe"].startswith("ZERO_VARIANCE")
 
 Annualisation. The same equity curve gives different Sharpe ratios under
 different session lengths, scaling by the square root of the periods per year.
-Intraday bars on a 24 hour market need `session_minutes`:
+Intraday bars annualise on the data's own trading day (the median observations
+per day x 252) unless you name the market's session with `session_minutes`; no
+session (NSE or any other) is assumed, and only `session_minutes=0` counts
+calendar time:
 
 ```python
 import numpy as np
@@ -177,10 +180,11 @@ def sharpe(**config):
                             config=BacktestConfig(fees=0.0, **config))
     return r.metrics.sharpe_ratio
 
-nse = sharpe()                                          # default: a 375 minute session, 252 days
+unnamed = sharpe()                                      # no session named: the data's own day, 600 bars x 252
+nse = sharpe(session_minutes=raptorbt.SESSION_NSE)      # a 375 minute session, 252 days
 day = sharpe(session_minutes=1440.0)                    # 1440 bars a day, 252 days
 around_the_clock = sharpe(session_minutes=raptorbt.SESSION_CONTINUOUS)   # 365 days
-assert not np.isclose(nse, day)
+assert np.isclose(unnamed, sharpe(periods_per_year=600 * 252.0)) and not np.isclose(nse, day)
 assert np.isclose(around_the_clock / day, np.sqrt(365 / 252))
 assert np.isclose(sharpe(periods_per_year=252.0 * 1440), day)   # the explicit form
 ```

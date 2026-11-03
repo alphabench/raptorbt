@@ -126,6 +126,7 @@ fn run_venue(
                         submitted_ns: bar.timestamp,
                         submitted_idx: i,
                         size_frac: None,
+                        position_id: None,
                     })
                     .unwrap();
             }
@@ -274,6 +275,7 @@ fn cancelling_and_changing_an_order_go_through_the_venue() {
             submitted_ns: MIN,
             submitted_idx: 0,
             size_frac: None,
+            position_id: None,
         })
         .unwrap();
     // The same id sent twice is one order.
@@ -333,6 +335,7 @@ fn sample_request() -> OrderRequest {
         submitted_ns: MIN,
         submitted_idx: 0,
         size_frac: None,
+        position_id: None,
     }
 }
 
@@ -361,6 +364,42 @@ fn a_configured_stop_is_left_to_the_runtime_not_acted_on_by_the_shadow() {
         venue.on_market_event(0, &entry(i, bar), None, 0.0, &mut out).unwrap();
         fills += out.iter().filter(|(_, r)| matches!(r, ExecutionReport::Fill { .. })).count();
     }
+    assert_eq!(fills, 1, "only the entry traded");
+}
+
+#[test]
+fn a_contract_that_expires_while_held_settles_without_the_venue_calling_it_unsolicited() {
+    // The contract's end is the instrument's own terms. The shadow settles its
+    // copy alongside the strategy's book and says nothing: no error, and no
+    // report beyond the entry's.
+    let config = fees(0.0);
+    let expiry = 10 * MIN;
+    let mut spec = crate::instruments::InstrumentSpec::new(
+        "A",
+        crate::instruments::InstrumentKind::Contract { underlying: None },
+    );
+    spec.expiration_ns = Some(expiry);
+    let mut shadow = PortfolioBook::new(config.clone(), AccountMode::Cash);
+    shadow.add_instrument("A".to_string(), Direction::Long, Some(spec), None, PositionPolicy::Net);
+    let mut venue = PaperVenue::new(vec![(vec!["A".to_string()], shadow)]);
+    venue
+        .submit(&OrderRequest {
+            client_order_id: "s0-0".into(),
+            kind: OrderKind::Market,
+            ..sample_request()
+        })
+        .unwrap();
+    let mut fills = 0;
+    let mut settled_after_expiry = false;
+    for (i, bar) in bars(15).into_iter().enumerate() {
+        let mut out = Vec::new();
+        venue
+            .on_market_event(0, &entry(i, bar), None, 0.0, &mut out)
+            .expect("settlement is not an unsolicited change");
+        fills += out.iter().filter(|(_, r)| matches!(r, ExecutionReport::Fill { .. })).count();
+        settled_after_expiry |= bar.timestamp >= expiry;
+    }
+    assert!(settled_after_expiry, "the bars never reached the expiry");
     assert_eq!(fills, 1, "only the entry traded");
 }
 

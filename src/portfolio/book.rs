@@ -33,6 +33,7 @@ use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 use crate::portfolio::runner::OrderLog;
 use crate::portfolio::session::{InstrumentOutcome, ScheduleData, ScheduleEntry, SessionOutcome};
 
+mod atomic;
 mod venue;
 
 /// Why a portfolio-wide halt latched.
@@ -74,6 +75,12 @@ pub struct PortfolioBook {
     /// Last stepped print and its ordinal, per instrument: where this book
     /// liquidates and stamps cross-instrument orders.
     last_seen: Vec<Option<(usize, KernelBar)>>,
+    /// Entries each instrument could not fund (sized to nothing, or refused
+    /// for capital or margin): a refusal that is not a risk limit and so is
+    /// not in the risk gate's count.
+    unfunded: Vec<usize>,
+    /// Whether any print, quote or depth snapshot was applied: a tick run.
+    tick_run: bool,
     equity_curve: Vec<f64>,
     drawdown_curve: Vec<f64>,
     returns: Vec<f64>,
@@ -103,6 +110,10 @@ pub struct PortfolioBook {
     /// being stepped (a group liquidation closing its positions). They are
     /// returned ahead of the next event's own, so the strategy hears of them.
     deferred: Vec<EngineEvent>,
+    /// Atomic order groups waiting to fill, see `book/atomic.rs`.
+    atomic: Vec<atomic::AtomicGroup>,
+    /// The id the next atomic group gets.
+    atomic_next: u64,
     /// Corporate actions, dividends owed and the adjustment policy.
     lifecycle: lifecycle::Lifecycle,
     /// Whether any instrument has an expiry, so the lifecycle clock runs.
@@ -152,6 +163,8 @@ impl PortfolioBook {
             account: SharedAccount::new(mode, pool, scale),
             last_close: Vec::new(),
             last_seen: Vec::new(),
+            unfunded: Vec::new(),
+            tick_run: false,
             equity_curve: Vec::new(),
             drawdown_curve: Vec::new(),
             returns: Vec::new(),
@@ -167,6 +180,8 @@ impl PortfolioBook {
             pending_halt: None,
             grouped: None,
             deferred: Vec::new(),
+            atomic: Vec::new(),
+            atomic_next: 1,
             lifecycle: lifecycle::Lifecycle::default(),
             has_expiries: false,
             noticed: Vec::new(),
@@ -186,11 +201,38 @@ impl PortfolioBook {
         policy: PositionPolicy,
     ) -> usize {
         let engine = crate::portfolio::engine::PortfolioEngine::new(self.config.clone());
+        self.add_instrument_with_models(
+            symbol,
+            direction,
+            spec,
+            inst_config,
+            policy,
+            engine.fee_model,
+            engine.slippage_model,
+            engine.fill_price,
+        )
+    }
+
+    /// [`PortfolioBook::add_instrument`] with the fee, slippage and fill
+    /// models given rather than derived from the config: the single-instrument
+    /// engine lets a caller swap them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_instrument_with_models(
+        &mut self,
+        symbol: String,
+        direction: Direction,
+        spec: Option<InstrumentSpec>,
+        inst_config: Option<&InstrumentConfig>,
+        policy: PositionPolicy,
+        fee_model: crate::execution::FeeModel,
+        slippage_model: crate::execution::SlippageModel,
+        fill_price: crate::execution::FillPrice,
+    ) -> usize {
         let mut kernel = EngineKernel::new(
             self.config.clone(),
-            engine.fee_model.clone(),
-            engine.slippage_model.clone(),
-            engine.fill_price,
+            fee_model,
+            slippage_model,
+            fill_price,
             symbol,
             direction,
             inst_config,
@@ -211,6 +253,7 @@ impl PortfolioBook {
         self.live.push(self.kernels.len() - 1);
         self.last_close.push(None);
         self.last_seen.push(None);
+        self.unfunded.push(0);
         self.kernels.len() - 1
     }
 
@@ -779,7 +822,16 @@ impl PortfolioBook {
                 self.streaming.update(trade.return_pct / 100.0);
                 self.trades.push((**trade).clone());
             }
+            if matches!(event, EngineEvent::EntryRejected { reason, .. } if reason.is_unfunded()) {
+                self.unfunded[instrument] += 1;
+            }
             self.order_logs[instrument].observe(&self.kernels[instrument], event);
+        }
+        // Atomic groups: legs held back by their kernels fill together here,
+        // or the group is refused, before the equity is sampled.
+        if !self.atomic.is_empty() {
+            let filled = self.advance_atomic(instrument, entry.timestamp());
+            events.extend(filled);
         }
         // A physically settled line the kernel just ended delivers its
         // underlying before the equity is sampled.
@@ -798,6 +850,9 @@ impl PortfolioBook {
         // A quote does not sample equity. Marking on one would append a
         // zero return per quote, inflating the period count and distorting
         // annualized metrics purely from how chatty the feed is.
+        if !matches!(entry.data, ScheduleData::Bar(_)) {
+            self.tick_run = true;
+        }
         if matches!(entry.data, ScheduleData::Quote(_) | ScheduleData::Depth(_)) {
             self.applied += 1;
             return events;
@@ -1019,14 +1074,19 @@ impl PortfolioBook {
 
         // In a group the strategy's curve starts from its share of the
         // account, which is not the account's capital the config carries.
-        let grouped_config;
-        let metrics_config = match self.grouped {
-            Some(g) => {
-                grouped_config = BacktestConfig { initial_capital: g.start, ..self.config.clone() };
-                &grouped_config
-            }
-            None => &self.config,
-        };
+        let mut run_config = self.config.clone();
+        if let Some(g) = self.grouped {
+            run_config.initial_capital = g.start;
+        }
+        // A tick run samples equity once per distinct event time, at whatever
+        // spacing the tape happens to have, so the median spacing says nothing
+        // about how many periods make a year. Without an explicit
+        // `periods_per_year` it annualizes on observations per trading day
+        // times 252 (documented in the metrics reference).
+        if self.tick_run && run_config.periods_per_year.is_none() {
+            run_config.periods_per_year = tick_periods_per_year(&self.timestamps, &self.config);
+        }
+        let metrics_config = &run_config;
         let metrics = compute_backtest_metrics_with_config(
             &self.equity_curve,
             &self.drawdown_curve,
@@ -1045,10 +1105,12 @@ impl PortfolioBook {
                 trades: self.trades.iter().filter(|t| t.symbol == symbol).count(),
                 pnl: self.trades.iter().filter(|t| t.symbol == symbol).map(|t| t.pnl).sum(),
                 rejected_entries: self.kernels[i].rejected_entries(),
+                unfunded_entries: self.unfunded[i],
             })
             .collect();
 
         let rejected_entries: usize = self.kernels.iter().map(|k| k.rejected_entries()).sum();
+        let unfunded_entries: usize = self.unfunded.iter().sum();
         let halted = self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted());
         let halted_at = self.account.halted_at();
 
@@ -1062,6 +1124,10 @@ impl PortfolioBook {
             .collect();
         order_log.sort_by_key(|o| o.submitted_ts);
 
+        let mut unverified: Vec<String> =
+            self.kernels.iter().flat_map(|k| k.unverified_fee_rows()).collect();
+        unverified.sort();
+        unverified.dedup();
         let result = BacktestResult::new(
             metrics,
             self.equity_curve,
@@ -1069,8 +1135,18 @@ impl PortfolioBook {
             self.trades,
             self.returns,
         )
-        .with_orders(order_log);
-        SessionOutcome { result, instruments: outcomes, rejected_entries, halted, halted_at }
+        .with_orders(order_log)
+        .with_unverified_fee_rows(unverified)
+        .with_halt(halted, halted_at)
+        .with_refusals(rejected_entries, unfunded_entries);
+        SessionOutcome {
+            result,
+            instruments: outcomes,
+            rejected_entries,
+            unfunded_entries,
+            halted,
+            halted_at,
+        }
     }
 }
 
@@ -1088,6 +1164,22 @@ impl crate::runtime::memory::HeapSize for PortfolioBook {
             + self.last_seen.capacity() * size_of::<Option<(usize, KernelBar)>>()
             + self.trades.capacity() * size_of::<Trade>()
     }
+}
+
+/// Periods per year of a tick run's equity series: the observations per
+/// trading day times 252. `None` for a series too short to say.
+fn tick_periods_per_year(timestamps: &[i64], config: &BacktestConfig) -> Option<f64> {
+    if timestamps.len() < 2 {
+        return None;
+    }
+    let offset = config.session_tz_offset_ns;
+    let mut days: Vec<i64> =
+        timestamps.iter().map(|&t| crate::portfolio::risk::day_of(t, offset)).collect();
+    days.dedup();
+    days.sort_unstable();
+    days.dedup();
+    let observations = (timestamps.len() - 1) as f64;
+    Some(observations / days.len() as f64 * 252.0)
 }
 
 mod group;

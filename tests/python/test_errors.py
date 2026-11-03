@@ -198,7 +198,7 @@ ROWS = [
         "bad-order-tif",
         lambda: Market(side="buy", units=1, tif="forever"),
         InvalidOrder, ValueError, "invalid_time_in_force", "tif",
-        ["gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close"], "orders",
+        ["auto", "gtc", "day", "gtd", "ioc", "fok", "at_open", "at_close"], "orders",
     ),
     (
         "length-mismatch",

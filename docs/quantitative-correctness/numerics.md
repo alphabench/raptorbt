@@ -146,8 +146,26 @@ Capital-fraction sizing is computed in fractional units, then
 applied to an already lot-aligned number. Size always rounds down, so
 quantizing can only reduce the amount spent. A result of zero rejects the entry
 (`ZeroSize`, or `InsufficientMargin` when a margin model set the requirement).
-Explicit unit counts are floored the same way and then refused, not shrunk, if
-they exceed available funds.
+A sized quantity is therefore always a whole number of lots; the engine's own
+sizing is the only place a quantity is rounded.
+
+### Terms off the grid are refused, in every mode
+
+An order you write is never rounded for you. An explicit quantity that is not a
+whole number of lots (or size steps), or a limit, trigger, `stop_price` or
+`target_price` that is not a whole number of ticks, is refused where the order
+is made, with `off_lot_quantity` or `off_tick_price`; `valid` lists the nearest
+valid values on either side (a quantity below one lot lists only the lot). The
+check is one function (`OrderGrid::check`, `src/execution/orders/grid.rs`) run
+on every path an order takes: the in-process matcher, a `LiveNode`, a paper
+node and an execution adapter, and on a modified order's new terms and on an
+entry's explicit stop and target. The simulation used to floor the quantity and
+snap the price while a venue was sent the terms as written, so a backtest and
+the venue ran different orders; now both see the one set of terms or neither
+runs. Round them yourself first if you want rounding (`floor(units / lot) *
+lot`, the nearest tick). Levels the engine derives from a configured percentage
+or ATR multiple are still rounded conservatively (see the tick grid above);
+fills still snap against the trader.
 
 ## Money: accumulation
 

@@ -95,8 +95,20 @@ See the module docs of `raptorbt.strategy.exits`. `ExitRule` has `stop_loss_pct`
 covers one symbol (`symbol=`), a named group of symbols (`symbols=`, `name=`) or a structure
 group (`group=`). A rule fires once and sends reduce-only market orders with ids `{rule}:x{n}`
 and tags `{"exit_rule", "close"}`; they pass `order_check`. A venue adapter that defines
-`place_exit_rule(request)` is offered the rule first; `Unsupported` / `OrderRefused` leaves it
-with the engine. Not yet done: the node refuses a report for an order it did not send (`unknown_client_order_id`), so the fills of an exit the venue itself fires cannot be booked; until the node can adopt them, hand a rule to a venue only if your host reconciles those fills.
+`place_exit_rule(request)` is offered the rule first, only for positions that exist (a rule set
+before its entry filled has no legs and is watched by the engine); `Unsupported` / `OrderRefused`
+leaves it with the engine. The orders a held rule will fire (`request.exit_client_ids`) are
+registered at the node, so their fills are booked, and a reconciliation does not report them
+missing while the rule waits. The venue holds the legs it was given: when the position's size
+changes the engine calls `replace_exit_rule(old, new)` (or `cancel_exit_rule(old)` and watches the
+rule itself), when the position is gone it calls `cancel_exit_rule`, and `cancel_exit(handle)`
+calls it too; all three are `Unsupported` in `BrokerAdapter` unless a mapping overrides them. A
+rule the venue cannot take back is never reported cancelled (`exit_rule_not_cancellable`). An
+answer that is neither yes nor no (`exit_rule_unconfirmed`) registers the exit orders anyway,
+stops the engine watching the rule too (no double close), and shows in the next reconciliation as
+an `exit_rule_unconfirmed` discrepancy. A refused close is retried with a backoff (1 s, doubling,
+at most 30 s) up to `MAX_CLOSE_ATTEMPTS`, then `on_exit_failed(ctx, handle)` is called (the book
+raises `exit_close_failed` if the strategy has none).
 
 ## Continuous futures
 
@@ -106,8 +118,10 @@ expiry (`roll_days=0` rolls at expiry; the time is read from the contracts' `exp
 `class S(RollEvents, Strategy)` adds `on_roll(ctx, RollEvent(role, from_symbol, to_symbol, ts_ns))`,
 called after the strategy's own `on_bar` / `on_trade` of the first event at or after the rule's
 time (a role's first event only records its contract). With `auto_roll = True` the node moves the
-strategy's positions in the old contract with a reduce-only market close and a market open of the
-same size and side in the new one (ids `{role}:roll{n}:c{k}` / `:o{k}`, tags `roll`, `from`, `to`),
+strategy's positions in the old contract with a reduce-only market close and a market open in the
+new one on the same side, sized to keep the **notional exposure** (`roll_sizing = "notional"`, the
+default: `floor(N_old * L_old * P_old / (L_new * P_new))` lots; `"lots"` keeps the lot count), with the
+residual reported on `on_roll_sized` and in the open's tags (ids `{role}:roll{n}:c{k}` / `:o{k}`, tags `roll`, `from`, `to`),
 all through `order_check`. `continuous_series(contracts, specs, roll_days=, adjust=)` builds one
 history for indicators: `"raw"` keeps traded prices, `"back"` shifts earlier bars by each roll's
 gap, `"ratio"` scales them; there is no default.

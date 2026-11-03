@@ -5,7 +5,7 @@
 //! The functions return plain dicts, which `python/raptorbt/research.py` consumes as they
 //! are. Seeds are masked to 64 bits, so a Python int of any size or sign maps the same way.
 
-use pyo3::exceptions::PyValueError;
+use super::errors::invalid_input;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyTuple};
 
@@ -19,7 +19,7 @@ use crate::research::{
 fn seed_bits(seed: &Bound<'_, PyAny>) -> PyResult<u64> {
     let masked = seed.call_method1("__and__", (u64::MAX,))?;
     if masked.is_none() || !masked.is_instance_of::<PyInt>() {
-        return Err(PyValueError::new_err("seed is an integer"));
+        return Err(invalid_input("seed is an integer"));
     }
     masked.extract::<u64>()
 }
@@ -231,7 +231,7 @@ fn design_random<'py>(
             }
         }
     }
-    let n = usize::try_from(n).map_err(|_| PyValueError::new_err("n is not negative"))?;
+    let n = usize::try_from(n).map_err(|_| invalid_input("n is not negative"))?;
     let out = PyList::empty(py);
     for point in Design::random(&spaces, n, bits)? {
         let d = PyDict::new(py);

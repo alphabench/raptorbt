@@ -55,8 +55,13 @@ raises `conflicting_order_args`. Giving neither means *close the whole
 position*: on an order that would open a position it is rejected as
 `invalid_qty`.
 
-**Time in force.** `gtc` (default; rests until filled or cancelled), `day`
-(expires at the end of the trading day in `session_tz_offset_ns`), `gtd` (needs
+**Time in force.** `auto` (the default) is `day` on an instrument that has a
+`SessionSchedule` (the order is cancelled at that session's close, as an
+exchange does) and `gtc` on one that has none. `gtc` rests until filled or
+cancelled and carries across sessions; ask for it explicitly, and only where
+the venue supports it (a live adapter refuses `gtc` unless it was told to send
+it as `day`). `day` expires at the end of the trading day in the instrument's
+session zone (`session_tz_offset_ns` without a session), `gtd` (needs
 `expire_ns`; expires at the first bar stamped at or after it), `ioc` and `fok`
 (cancelled after their first bar if not filled), `at_open` and `at_close`
 (market orders only: fill at the next bar's open, or at the next bar's close).
@@ -273,8 +278,9 @@ assert result.trades() == []
 ```
 
 The marketable-limit rule: a limit that is already marketable fills at the
-market, never at its own limit price, and under either fill timing that market
-is the next bar's open. `at_open` and `at_close` market orders fill at the next
+market, never at its own limit price. Under `same_bar_close` that market is the
+price the order was decided at (the deciding bar's close, like a market order
+placed there); under `next_bar_open` it is the next bar's open. `at_open` and `at_close` market orders fill at the next
 bar's open and close:
 
 ```python
@@ -303,8 +309,8 @@ def fill_price(order, timing="same_bar_close"):
     return r.trades()[0].entry_price
 
 
-for timing in ("same_bar_close", "next_bar_open"):
-    assert fill_price(orders.Limit(side="buy", price=200.0, quantity=10), timing) == 100.5   # the open, not 200
+assert fill_price(orders.Limit(side="buy", price=200.0, quantity=10)) == 100.0           # bar 1 close, not 200
+assert fill_price(orders.Limit(side="buy", price=200.0, quantity=10), "next_bar_open") == 100.5   # the open, not 200
 assert fill_price(orders.Market(side="buy", quantity=10, tif="at_open")) == 100.5            # bar 2 open
 assert fill_price(orders.Market(side="buy", quantity=10, tif="at_close")) == 102.0           # bar 2 close
 ```

@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use crate::accounts::Money;
 use crate::core::types::{Direction, ExitReason};
+use crate::core::FillTiming;
 use crate::execution::orders::{
     ExecutionReport, Order, OrderEventError, OrderKind, OrderSide, OrderStatus, QtySpec,
     ReportOutcome, TimeInForce,
@@ -82,7 +83,9 @@ pub(crate) const BOOKING_WINDOW: usize = 8192;
 pub(crate) struct VenueBookings {
     next: u64,
     by_seq: std::collections::BTreeMap<u64, VenueBooking>,
-    by_exec: std::collections::HashMap<(u64, String), u64>,
+    /// Every booking one execution made, oldest first: a fill that reversed a position
+    /// reduced it and opened the other way, two bookings of one execution.
+    by_exec: std::collections::HashMap<(u64, String), Vec<u64>>,
     /// The latest booking that reduced each position.
     last_reduction: std::collections::HashMap<u64, u64>,
     evicted: bool,
@@ -92,7 +95,7 @@ impl VenueBookings {
     pub(crate) fn push(&mut self, b: VenueBooking) {
         let seq = self.next;
         self.next += 1;
-        self.by_exec.insert((b.order_id, b.exec_id.clone()), seq);
+        self.by_exec.entry((b.order_id, b.exec_id.clone())).or_default().push(seq);
         if !b.entry {
             self.last_reduction.insert(b.position_id, seq);
         }
@@ -106,10 +109,12 @@ impl VenueBookings {
 
     fn remove(&mut self, seq: u64) -> Option<VenueBooking> {
         let b = self.by_seq.remove(&seq)?;
-        // An execution may have several bookings (an exit across positions);
-        // the index keeps the newest.
-        if self.by_exec.get(&(b.order_id, b.exec_id.clone())) == Some(&seq) {
-            self.by_exec.remove(&(b.order_id, b.exec_id.clone()));
+        let key = (b.order_id, b.exec_id.clone());
+        if let Some(all) = self.by_exec.get_mut(&key) {
+            all.retain(|s| *s != seq);
+            if all.is_empty() {
+                self.by_exec.remove(&key);
+            }
         }
         if self.last_reduction.get(&b.position_id) == Some(&seq) {
             self.last_reduction.remove(&b.position_id);
@@ -117,9 +122,14 @@ impl VenueBookings {
         Some(b)
     }
 
-    pub(crate) fn find(&self, order_id: u64, exec_id: &str) -> Option<(u64, &VenueBooking)> {
-        let seq = *self.by_exec.get(&(order_id, exec_id.to_string()))?;
-        self.by_seq.get(&seq).map(|b| (seq, b))
+    /// Every booking the execution made, oldest first.
+    pub(crate) fn find_all(&self, order_id: u64, exec_id: &str) -> Vec<(u64, &VenueBooking)> {
+        self.by_exec
+            .get(&(order_id, exec_id.to_string()))
+            .into_iter()
+            .flatten()
+            .filter_map(|seq| self.by_seq.get(seq).map(|b| (*seq, b)))
+            .collect()
     }
 
     /// Whether a booking after `seq` reduced `position_id`.
@@ -138,6 +148,11 @@ impl VenueBookings {
         self.by_seq.len()
     }
 }
+
+/// How many fills the book keeps unbooked at once. A book that holds this many has fallen far
+/// behind its venue (or its limits refuse everything the venue does): the next fill that cannot
+/// be booked is an error, not one more entry in a list nobody reads.
+pub const MAX_UNBOOKED_FILLS: usize = 1024;
 
 /// A venue fill the order took and the book has not booked. Kept, in arrival
 /// order, until the book can book it; see `EngineKernel::unbooked_fills`.
@@ -238,6 +253,13 @@ impl EngineKernel {
         self.orders.submit(order)
     }
 
+    /// Name the position an order closes (hedging); see `OrderRequest::position_id`.
+    pub fn set_order_position(&mut self, order_id: u64, position_id: Option<u64>) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.position_id = position_id;
+        }
+    }
+
     /// The book's own limits, applied before an order is sent to a venue
     /// that does not apply them for us: the kill-switch and halts, the
     /// drawdown and daily-loss latches, `max_positions` and the order-size
@@ -336,7 +358,16 @@ impl EngineKernel {
             }
         }
         let Some(frac) = frac else { return Err("invalid_qty") };
-        let price = ref_price.unwrap_or_else(|| self.fill_price_for(bar, direction, true));
+        // A market order is sized at the last price known: under
+        // `next_bar_open` that is the decision bar's close, the same figure
+        // the book sizes a deferred entry at, not the open the order fills at.
+        let price = ref_price.unwrap_or_else(|| {
+            if self.fill_timing == FillTiming::NextBarOpen {
+                bar.close
+            } else {
+                self.fill_price_for(bar, direction, true)
+            }
+        });
         self.planned_entry_units(bar, direction, price, Some(frac), limit_priced)
     }
 
@@ -359,19 +390,25 @@ impl EngineKernel {
         Ok(order.request_replace()?)
     }
 
-    /// The fee this book's fee model charges for trading `size` at `price`.
+    /// The fee this book's fee model charges for trading `size` at `price`,
+    /// as a fill of order `order_id` (a brokerage charged per order is owed
+    /// once over the order's fills).
     /// `direction` is the position's: the long or short side being opened
     /// (`is_entry`) or closed. Rounded to the book's money scale; an amount
     /// that cannot be booked at that scale is an error, not a raw figure.
     pub fn venue_fee(
         &self,
+        order_id: u64,
         price: f64,
         size: f64,
         direction: Direction,
         is_entry: bool,
     ) -> Result<f64, VenueError> {
         let fee_price = price * self.multiplier();
-        let fee = match self.fee_model.breakdown(fee_price, size, direction, is_entry) {
+        // The fill was booked with its order's earlier fills in mind: price it the same.
+        let before = self.fee_model.take_slice_before(order_id);
+        let fee = match self.fee_model.breakdown_after(before, fee_price, size, direction, is_entry)
+        {
             Some(b) => b.total(),
             None => self.fee_model.calculate(fee_price, size, direction),
         };
@@ -426,7 +463,7 @@ impl EngineKernel {
                 let counted = self.orders.get(order_id).and_then(|o| o.exec_effective(exec_id));
                 if let Some((qty, price, _)) = counted {
                     events.extend(
-                        self.book_or_keep_fill(idx, ts, order_id, &client_id, exec_id, qty, price),
+                        self.book_or_keep_fill(idx, ts, order_id, &client_id, exec_id, qty, price)?,
                     );
                 }
             }
@@ -508,9 +545,23 @@ impl EngineKernel {
             }
             _ => return Ok(None),
         };
-        let Some((at, b)) =
-            self.venue_bookings.find(order_id, exec_id).map(|(at, b)| (at, b.clone()))
-        else {
+        let found: Vec<(u64, VenueBooking)> = self
+            .venue_bookings
+            .find_all(order_id, exec_id)
+            .into_iter()
+            .map(|(at, b)| (at, b.clone()))
+            .collect();
+        let [(at, b)] = found.as_slice() else {
+            if found.len() > 1 {
+                // A fill that reversed a position reduced it and opened the other way. Taking
+                // back only the opening would leave the reduction booked: cash made from a
+                // fill the venue says did not happen.
+                return Err(VenueError::NotReversible {
+                    order_id,
+                    exec_id: exec_id.clone(),
+                    reason: "the execution booked more than one position change (it reversed a position)",
+                });
+            }
             if self.venue_bookings.window_starts_after(order_id) {
                 return Err(VenueError::NotReversible {
                     order_id,
@@ -520,6 +571,7 @@ impl EngineKernel {
             }
             return Ok(None);
         };
+        let (at, b) = (*at, b.clone());
         let refuse = |reason: &'static str| VenueError::NotReversible {
             order_id,
             exec_id: exec_id.clone(),
@@ -552,7 +604,7 @@ impl EngineKernel {
         if counted.is_some_and(|(q, p, _)| q == b.qty && p == b.price) {
             return Ok(Some((outcome, Vec::new())));
         }
-        self.take_back(at);
+        self.take_back(at, order_id, exec_id)?;
         let mut deferred = Vec::new();
         if let Some((qty, price, _)) = counted {
             let protect = self.protect_outbox.len();
@@ -560,19 +612,29 @@ impl EngineKernel {
             // fill the book cannot take: the order already counts it, and the
             // book must not lose it.
             let mut booked = Vec::new();
-            self.try_book(idx, ts, order_id, &client_id, exec_id, qty, price, &mut booked);
+            self.try_book(idx, ts, order_id, &client_id, exec_id, qty, price, &mut booked)?;
             deferred.extend(
                 booked.into_iter().filter(|e| matches!(e, EngineEvent::FillDeferred { .. })),
             );
             // The position's protection was sent when it first opened.
             self.protect_outbox.truncate(protect);
         }
+        // Taking the execution back (or booking it smaller) frees cash, margin and room:
+        // fills the book could not take before may book now, and the strategy hears of them.
+        self.rebook_unbooked(&mut deferred);
         Ok(Some((outcome, deferred)))
     }
 
-    /// Undo one booking (checked by [`Self::restate_execution`]).
-    fn take_back(&mut self, at: u64) {
-        let Some(b) = self.venue_bookings.remove(at) else { return };
+    /// Undo one booking (checked by [`Self::restate_execution`], which found it a moment
+    /// ago): a booking that is no longer held is an error, never a silent return.
+    fn take_back(&mut self, at: u64, order_id: u64, exec_id: &str) -> Result<(), VenueError> {
+        let Some(b) = self.venue_bookings.remove(at) else {
+            return Err(VenueError::NotReversible {
+                order_id,
+                exec_id: exec_id.to_string(),
+                reason: "the booking to take back is no longer held",
+            });
+        };
         self.set_cash_money(self.cash_money() - b.cash);
         let whole = self
             .ledger
@@ -593,6 +655,7 @@ impl EngineKernel {
             let locked = self.margin.locked_for(b.position_id);
             self.margin.set_locked(b.position_id, locked - b.locked);
         }
+        Ok(())
     }
 
     /// Venue fills the orders took that the book has not booked, oldest
@@ -616,16 +679,16 @@ impl EngineKernel {
         exec_id: &str,
         qty: f64,
         price: f64,
-    ) -> Vec<EngineEvent> {
+    ) -> Result<Vec<EngineEvent>, VenueError> {
         let mut events = Vec::new();
-        self.try_book(idx, ts, order_id, client_id, exec_id, qty, price, &mut events);
+        self.try_book(idx, ts, order_id, client_id, exec_id, qty, price, &mut events)?;
         if events
             .iter()
             .any(|e| matches!(e, EngineEvent::Entered { .. } | EngineEvent::Exited { .. }))
         {
             self.rebook_unbooked(&mut events);
         }
-        events
+        Ok(events)
     }
 
     /// One attempt; on failure the fill (or what is left of it) is kept.
@@ -640,10 +703,19 @@ impl EngineKernel {
         qty: f64,
         price: f64,
         events: &mut Vec<EngineEvent>,
-    ) {
+    ) -> Result<(), VenueError> {
         if let Err((left, reason)) =
             self.book_venue_fill(idx, ts, order_id, client_id, exec_id, qty, price, events)
         {
+            if self.unbooked_fills.len() >= MAX_UNBOOKED_FILLS {
+                return Err(VenueError::FillNotBooked {
+                    order_id,
+                    reason: format!(
+                        "{reason}; the book already holds {MAX_UNBOOKED_FILLS} fills it could not book, \
+                         so it will not keep more: reconcile the position with the venue"
+                    ),
+                });
+            }
             events.push(EngineEvent::FillDeferred {
                 idx,
                 order_id,
@@ -664,6 +736,7 @@ impl EngineKernel {
                 reason,
             });
         }
+        Ok(())
     }
 
     fn rebook_unbooked(&mut self, events: &mut Vec<EngineEvent>) {
@@ -715,7 +788,10 @@ impl EngineKernel {
         events: &mut Vec<EngineEvent>,
     ) -> Result<(), (f64, String)> {
         self.booking_fact = true;
+        self.fee_model.begin_order(order_id);
         let result = self.book_fact(idx, ts, order_id, client_id, exec_id, qty, price, events);
+        let orders = &self.orders;
+        self.fee_model.end_order(|id| orders.get(id).is_some_and(|o| !o.status.is_terminal()));
         self.booking_fact = false;
         for reason in std::mem::take(&mut self.fact_breaches) {
             if !events.iter().any(|e| {
@@ -749,6 +825,7 @@ impl EngineKernel {
             return Err((qty, "the order is not in this book".to_string()));
         };
         let (side, reduce_only) = (order.side, order.reduce_only);
+        let target_position = order.position_id;
         let (stop_attach, target_attach) = (order.stop_price, order.target_price);
         let order_direction = match side {
             OrderSide::Buy => Direction::Long,
@@ -771,19 +848,38 @@ impl EngineKernel {
             price,
             size,
         };
-        // A venue holds one net position per instrument, so a fill against the
-        // side held reduces it, oldest position first, whichever order policy
-        // the book keeps; the matcher's `hedging` opens a second position only
-        // for a fill on the side already held. Any quantity beyond what is
-        // held reverses (netting) or opens the other way.
+        // Under netting a venue holds one net position per instrument, so a fill
+        // against the side held reduces it, oldest position first; any quantity
+        // beyond what is held reverses it. Under hedging the venue keeps positions
+        // apart, as the matcher does: an order that names a position
+        // (`position_id`) reduces exactly that one, a reduce-only order that names
+        // none takes the oldest, and any other order opens a position of its own.
+        let hedging = self.ledger.policy() == PositionPolicy::Independent;
         let mut remaining = qty;
-        let held: Vec<(u64, f64)> = self
-            .ledger
-            .positions()
-            .iter()
-            .filter(|m| m.position.direction != order_direction)
-            .map(|m| (m.id, m.position.size))
-            .collect();
+        let held: Vec<(u64, f64)> = match target_position {
+            Some(position_id) => {
+                let named = self
+                    .ledger
+                    .get(position_id)
+                    .filter(|m| m.position.direction != order_direction)
+                    .map(|m| (m.id, m.position.size));
+                if named.is_none() {
+                    return Err((
+                        qty,
+                        "the position the order names is not open on the other side".to_string(),
+                    ));
+                }
+                named.into_iter().collect()
+            }
+            None if hedging && !reduce_only => Vec::new(),
+            None => self
+                .ledger
+                .positions()
+                .iter()
+                .filter(|m| m.position.direction != order_direction)
+                .map(|m| (m.id, m.position.size))
+                .collect(),
+        };
         if !held.is_empty() {
             for (position_id, held_size) in held {
                 let slice = remaining.min(held_size);
@@ -819,7 +915,7 @@ impl EngineKernel {
             // A reduce-only fill larger than the position is not a
             // reversal: part of the position it reduces was filled by an
             // order whose report has not arrived. The excess is kept.
-            if reduce_only {
+            if reduce_only || target_position.is_some() {
                 return Err((
                     remaining,
                     "a reduce-only fill is larger than the position held".to_string(),
@@ -938,6 +1034,15 @@ impl EngineKernel {
             true,
         ) {
             Some(EngineEvent::Entered { price: fill_price, size, direction, .. }) => {
+                // A fill at the bar's open under `next_bar_open` lives through the whole bar,
+                // so its range counts toward the excursions, as for an in-process fill.
+                if self.fill_timing == FillTiming::NextBarOpen {
+                    if let Some((_, stepped)) = self.last_step {
+                        if stepped.timestamp == bar.timestamp && stepped.open == price {
+                            self.ledger.update_price(stepped.high, stepped.low);
+                        }
+                    }
+                }
                 // The position just opened is the newest one.
                 let opened = self.ledger.positions().last().map(|m| m.id);
                 if let Some(position_id) = opened {

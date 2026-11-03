@@ -117,9 +117,9 @@ pub enum TimeInForce {
 /// Order lifecycle states.
 ///
 /// Transitions are enforced by [`Order::transition`] using
-/// [`OrderStatus::can_transition_to`]; anything not listed there is a logic
-/// error and panics in every build. An order driven by venue reports
-/// ([`Order::apply_report`]) returns a typed error instead of panicking.
+/// [`OrderStatus::can_transition_to`]; anything not listed there is refused
+/// (`false`, the order unchanged), never a panic. An order driven by venue
+/// reports ([`Order::apply_report`]) returns a typed error.
 /// The full diagram is in `docs/architecture/order-lifecycle.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderStatus {
@@ -358,6 +358,17 @@ pub struct Order {
     /// `docs/architecture/fill-rules.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrival_idx: Option<usize>,
+    /// Under hedging: the position this order closes or reduces. Set only for a
+    /// close the engine makes of a named position; an order without it opens a
+    /// position (or, reduce-only, takes the oldest) as the account's policy says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_id: Option<u64>,
+    /// The last price known when a capital-fraction order was placed under
+    /// `next_bar_open`: the price its quantity is sized at, so the book, a
+    /// paper run and a venue all size one figure (the fill, at the next open,
+    /// is another). `None` for every other order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_ref: Option<f64>,
 }
 
 /// What became of one order, once the run is over.
@@ -510,6 +521,8 @@ impl Order {
             filled_qty: 0.0,
             broker: None,
             arrival_idx: None,
+            position_id: None,
+            size_ref: None,
         }
     }
 
@@ -523,14 +536,16 @@ impl Order {
 
     /// Move to a new status, checking the transition is legal.
     ///
-    /// An illegal transition means the engine's own bookkeeping is wrong (no
-    /// user input can ask for one), so it panics in every build, naming the
-    /// order and both states, rather than leaving the order in a state the
-    /// order log would misreport. Always returns `true`; the return value is
-    /// kept so call sites that branch on it still read naturally.
+    /// Returns `false` and leaves the order untouched when the lifecycle does
+    /// not allow the move. It never panics: a caller that reaches an illegal
+    /// transition from user input (an order routed across instruments, a late
+    /// venue answer) must surface it as a refusal, not abort the run. The
+    /// kernel turns a refused fill into an `illegal_transition` order
+    /// rejection.
+    #[must_use = "an illegal transition leaves the order unchanged; the caller must handle `false`"]
     pub fn transition(&mut self, to: OrderStatus) -> bool {
         if !self.status.can_transition_to(to) {
-            panic!("illegal order transition: order {} {:?} -> {:?}", self.id, self.status, to);
+            return false;
         }
         self.status = to;
         true
@@ -676,9 +691,7 @@ mod tests {
                     assert!(o.transition(to));
                     assert_eq!(o.status, to);
                 } else {
-                    let r =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| o.transition(to)));
-                    assert!(r.is_err(), "{from:?} -> {to:?} should panic");
+                    assert!(!o.transition(to), "{from:?} -> {to:?} should be refused");
                     assert_eq!(o.status, from);
                 }
             }

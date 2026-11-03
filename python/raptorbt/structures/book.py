@@ -199,7 +199,7 @@ class StructureBook:
         on_leg_failure: str = "unwind",
         margin_model=None,
         available: float | None = None,
-        tif: str = "gtc",
+        tif: str = "auto",
         group_id: str | None = None,
     ) -> StructureGroup:
         if order_type not in ("market", "limit"):

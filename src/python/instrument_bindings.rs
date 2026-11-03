@@ -431,6 +431,20 @@ impl PyInstrumentSpec {
         Ok(())
     }
 
+    /// The exchange's scrip group where charges depend on it (BSE cash:
+    /// `"A"`, `"B"`), or None. A fee schedule that prices BSE equity by group
+    /// refuses an instrument without one.
+    #[getter]
+    fn scrip_group(&self) -> Option<String> {
+        self.inner.scrip_group.clone()
+    }
+
+    #[setter]
+    fn set_scrip_group(&mut self, group: Option<String>) -> PyResult<()> {
+        self.inner.scrip_group = non_empty("scrip_group", group)?;
+        Ok(())
+    }
+
     /// Quote currency, or None. Metadata only: nothing is converted.
     #[getter]
     fn currency(&self) -> Option<String> {

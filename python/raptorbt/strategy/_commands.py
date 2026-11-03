@@ -9,8 +9,8 @@ the logic is not duplicated per runner.
 
 from __future__ import annotations
 
-from raptorbt._raptorbt import atr as _atr, resolve_atr_period
-from raptorbt.errors import InvalidOrder
+from raptorbt._raptorbt import BacktestConfig, atr as _atr, resolve_atr_period
+from raptorbt.errors import InvalidOrder, InvalidParameter, UnsupportedOperation
 
 
 def atr_series(config, instrument_config, high, low, close):
@@ -31,8 +31,47 @@ def atr_series(config, instrument_config, high, low, close):
 
 
 def session_tz_offset_ns(config) -> int:
-    """The session's UTC offset in ns, 0 without a config."""
-    return config.session_tz_offset_ns if config is not None else 0
+    """The session's UTC offset in ns: UTC (0) when the config names none."""
+    if config is None or config.session_tz_offset_ns is None:
+        return 0
+    return config.session_tz_offset_ns
+
+
+def config_for_holding(config, strategies, operation: str):
+    """The config a run uses once strategies' declared holding is applied.
+
+    A strategy whose ``requirements.holding`` is intraday asks to be flat by
+    ``flatten_before``. When the config sets no ``squareoff_time`` of its own
+    the run squares off then (read in the instrument's session time zone); an
+    explicit ``squareoff_time`` always wins. Nothing declared, or only
+    overnight strategies, changes nothing: positions are carried across
+    sessions unless the run asks otherwise. Strategies that declare different
+    holdings cannot share one square-off time and are refused.
+    """
+    modes = {}
+    for strategy in strategies:
+        holding = getattr(getattr(strategy, "requirements", None), "holding", None)
+        modes[type(strategy).__name__] = (
+            "undeclared" if holding is None else holding.mode,
+            None if holding is None else holding.flatten_before,
+        )
+    if not any(m[0] == "intraday" for m in modes.values()):
+        return config
+    if config is not None and config.squareoff_time_minutes is not None:
+        return config
+    if len(set(modes.values())) > 1:
+        shown = {n: f"{m[0]} {m[1] or ''}".strip() for n, m in modes.items()}
+        raise InvalidParameter(
+            f"strategies in one run declare different holdings ({shown}); a run has one "
+            "square-off time: set config.squareoff_time, or run them apart",
+            code="mixed_holding",
+            operation=operation,
+            parameter="requirements.holding",
+            value=sorted(set(shown.values())),
+        )
+    flatten_before = next(iter(modes.values()))[1]
+    base = config if config is not None else BacktestConfig()
+    return base.with_squareoff_time(flatten_before)
 
 
 def atr_at(series, idx: int) -> float:
@@ -54,6 +93,34 @@ def reject_atr_stops(config, instrument_configs, symbols) -> None:
                 f"symbol {symbol!r}), but tick runs have no bars to compute "
                 "ATR from, so the stop would never arm. Use a fixed stop or "
                 "target, or run on bars with run_portfolio_strategy."
+            )
+
+
+def reject_bar_only_settings(config, symbols, call) -> None:
+    """Refuse settings that only the tick path implements, in a run that has bars.
+
+    ``order_latency_ns`` delays when an order can match against prints, and
+    ``partial_fills`` caps a fill at a print's size. A bar has neither an
+    arrival time inside it nor a traded size to cap against, so on bars they
+    changed nothing; accepting them silently made a run look like it modelled
+    latency or partial liquidity when it did not.
+    """
+    if config is None or not symbols:
+        return
+    for name, active in (
+        ("order_latency_ns", config.order_latency_ns != 0),
+        ("partial_fills", bool(config.partial_fills)),
+    ):
+        if active:
+            raise UnsupportedOperation(
+                f"{call}: {name} applies to tick runs only, and "
+                + ", ".join(repr(s) for s in list(symbols)[:3])
+                + " run on bars, where it would change nothing. Run on ticks, or leave "
+                f"{name} at its default.",
+                code="unsupported_on_bars",
+                operation=call,
+                parameter=name,
+                value=getattr(config, name),
             )
 
 

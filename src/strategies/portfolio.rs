@@ -64,6 +64,9 @@ pub struct InstrumentSummary {
     pub pnl: f64,
     /// Entries refused because the portfolio was already at its limit.
     pub rejected_entries: usize,
+    /// Entries the account could not fund (sized to nothing, or refused for
+    /// capital or margin); not in `rejected_entries`.
+    pub unfunded_entries: usize,
 }
 
 /// Result of a shared-capital portfolio run.
@@ -73,6 +76,8 @@ pub struct PortfolioBacktestResult {
     pub per_instrument: Vec<InstrumentSummary>,
     /// Total entries refused by the risk gate across all instruments.
     pub rejected_entries: usize,
+    /// Total entries that could not be funded, across all instruments.
+    pub unfunded_entries: usize,
     /// Whether the drawdown kill-switch tripped.
     pub halted: bool,
     /// Bar index at which the kill-switch tripped, if it did.
@@ -163,6 +168,7 @@ impl PortfolioBacktest {
         let mut per_instrument_trades = vec![0usize; n_instruments];
         let mut per_instrument_pnl = vec![0.0f64; n_instruments];
         let mut rejected = vec![0usize; n_instruments];
+        let mut unfunded = vec![0usize; n_instruments];
         let mut halted_at: Option<usize> = None;
 
         for i in 0..n_bars {
@@ -274,6 +280,9 @@ impl PortfolioBacktest {
                             risk.record_rejection();
                             rejected[idx] += 1;
                         }
+                        EngineEvent::EntryRejected { reason, .. } if reason.is_unfunded() => {
+                            unfunded[idx] += 1;
+                        }
                         _ => {}
                     }
                 }
@@ -372,6 +381,7 @@ impl PortfolioBacktest {
                 trades: per_instrument_trades[idx],
                 pnl: per_instrument_pnl[idx],
                 rejected_entries: rejected[idx],
+                unfunded_entries: unfunded[idx],
             })
             .collect();
 
@@ -379,6 +389,7 @@ impl PortfolioBacktest {
             result: BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns),
             per_instrument,
             rejected_entries: risk.rejected_entries(),
+            unfunded_entries: unfunded.iter().sum(),
             halted: risk.is_halted(),
             halted_at,
         }

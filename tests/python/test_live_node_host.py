@@ -14,7 +14,7 @@ import pytest
 
 from raptorbt import BacktestConfig, LiveNode, Strategy, run_strategies
 from raptorbt.errors import InvalidOrder, InvalidParameter
-from raptorbt.execution import PaperExecution, SimulatedExecution
+from raptorbt.execution import ExecutionReport, PaperExecution, SimulatedExecution
 from raptorbt.strategy import orders
 from raptorbt.strategy.order_check import OrderProposal, OrderRefusal
 
@@ -614,20 +614,26 @@ class HoldingVenue(Venue):
 
 def test_a_venue_that_holds_the_rule_takes_it_and_the_engine_stops_watching():
     venue = HoldingVenue()
-    s = Hooked()
+    s = Hooked(lambda s, ctx, n: s.submit_order(orders.Market(side="buy", units=5.0)) if n == 1 else None)
     node = node_with(venue, [s], symbols=("A",))
     bar(node, "A", 0)
+    # A rule with no position has no legs to give the venue: the engine watches it until there is one.
+    early = s.set_exit(node.ctx(0), ExitRule(stop_loss_pct=10), symbol="A")
+    assert early.state == "armed" and venue.rules == []
+    node.push_report(venue.requests[0].client_order_id, ExecutionReport.fill("E1", 5.0, 100.0, MIN), arrival_ns=MIN)
     handle = s.set_exit(node.ctx(0), ExitRule(stop_loss_pct=10), symbol="A")
     assert handle.state == "venue" and len(venue.rules) == 1
     assert isinstance(venue.rules[0], ExitRuleRequest) and venue.rules[0].rule == {"stop_loss_pct": 10}
+    assert venue.rules[0].legs == (("A", "sell", 5.0),)
 
 
 @pytest.mark.parametrize("why", [Unsupported("no"), OrderRefused("no")])
 def test_a_venue_that_refuses_the_rule_leaves_it_with_the_engine(why):
     venue = HoldingVenue(refuse=why)
-    s = Hooked()
+    s = Hooked(lambda s, ctx, n: s.submit_order(orders.Market(side="buy", units=5.0)) if n == 1 else None)
     node = node_with(venue, [s], symbols=("A",))
     bar(node, "A", 0)
+    node.push_report(venue.requests[0].client_order_id, ExecutionReport.fill("E1", 5.0, 100.0, MIN), arrival_ns=MIN)
     handle = s.set_exit(node.ctx(0), ExitRule(take_profit=1.0), symbol="A")
     assert handle.state == "armed" and venue.rules == []
 
@@ -678,6 +684,7 @@ class Carry(RollEvents, Strategy):
         timeframes=["1m"], holding=Holding.overnight(), data=["bar"],
     )
     auto_roll = True
+    roll_sizing = "lots"
 
     def __init__(self):
         super().__init__()

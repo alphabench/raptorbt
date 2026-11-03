@@ -510,6 +510,8 @@ assert [t.exit_reason for t in paper] == ["Order", "EndOfData"]
 
 ## 7. Constraints and correctness
 
+- **Order validity is the exchange segment's.** `tif="auto"` is `day` on an instrument with a session or on a day-only segment (NSE equity derivatives, currency, BSE, MCX), `gtc` otherwise. NSE equity cash and NSE commodity hold `gtc`/`gtd` natively (a commodity `gtd` no later than the contract's maturity); an explicit `gtc`/`gtd` anywhere else is refused (`order_validity_unsupported`). A broker that resubmits an order each day to imitate `gtc` is the host's business, not the exchange's validity.
+
 **Everything a backtest accepts becomes real orders.** Sizes given as
 `size_frac`, or no size ("the whole position"), are resolved to units when the
 order is sent, from the book on that event. `enter()` becomes a market order,
@@ -521,17 +523,20 @@ adapter answers `Unsupported` for is watched by the engine instead); `"local"`
 has the engine watch the levels and send a reduce-only market order, which fills
 at the event's price, not at the stop level.
 
-**Paper is not identical to the in-process matcher.** Five scenarios of the
-frozen corpus are pinned as strict expected failures, each for a stated reason:
+**Paper is not identical to the in-process matcher.** Where it differs, a test in
+`tests/python/test_execution.py` pins exactly what:
 
-1. `enter()` with `fill_timing="next_bar_open"`: paper and in-process size the
-   entry differently (observed: 483.09 against 487.80 units on one tape).
-2. Hedging (`oms_type="hedging"`): every order opens a position, so no order
-   can close one. Closes, protection and flattening by order are not
-   representable (three of the five scenarios).
-3. An `enter()` held for the next print and a typed market order made earlier
-   in the same step: in-process the entry fills first, at a venue they fill in
-   the order they were sent.
+1. The excursions (`mae_*`, `mfe_*`) of an entry intent filled at the next open
+   start from the fill's price on a paper node.
+2. An `enter()` held for the next print and a typed market order made in the
+   same step: in-process the entry (a signal) fills first, at a venue they fill
+   in the order they were sent. Use one form for one instrument in one step.
+
+Hedging (`oms_type="hedging"`) is equal to in-process: a close, protection or
+flatten order names the position it ends (`OrderRequest.position_id`). A venue
+that nets positions cannot do that: a `BrokerAdapter` has
+`supports_hedging = False`, and a hedging node on one is refused when it is
+built (`hedging_unsupported_by_venue`).
 
 Also: closes and protection exit with reason `Order`, not `Signal`, `StopLoss`
 or `TakeProfit`; the engine's own orders are extra order records; an order the
@@ -546,9 +551,8 @@ position without an order raises `paper_unsolicited_position_change`.
 - `quantity` in an `OrderRequest` is always units. A mapping to a venue that
   counts lots converts at its edge.
 - A report for an order the node never sent raises `unknown_client_order_id`.
-  That includes the fills of an exit rule the venue fired itself: a host that
-  hands an exit rule to the venue (`place_exit_rule`) must reconcile those
-  fills.
+  The orders an exit rule the venue holds will fire are the exception: the node
+  registers them when `place_exit_rule` succeeds, and their fills are booked.
 - Resting orders in a venue run work from the next event. A cancel asked twice
   is asked of the venue once; the same id with different terms is refused
   (`duplicate_client_order_id`).
@@ -599,7 +603,7 @@ node.push_report("s0-9", ExecutionReport.accepted("V", 0), arrival_ns=0)   # unk
 - Expecting the venue's fee to move cash. The book charges its own model; the
   reported fee is kept for reconciliation.
 - Treating `PaperExecution` results as the backtest's to the digit when the
-  strategy uses hedging or `enter()` under `next_bar_open`.
+  strategy mixes `enter()` with a typed order of the same instrument in one step.
 
 ## 9. Validation
 

@@ -604,14 +604,9 @@ fn a_short_leg_and_a_long_leg_pay_the_same_flat_rate() {
 ///
 /// Pins the ignored segment. The spread path held no fee model at all, so
 /// the itemized schedule was unreachable and only the flat proportional
-/// rate ever applied. Brokerage is flat per order, so a purely
-/// proportional model never charges it at any premium -- the error is
-/// largest exactly where cheap options live.
-///
-/// Four legs, two sides, at a flat 20 per order is 160 of brokerage that
-/// the old path could not bill however the rate was set.
+/// rate ever applied.
 #[test]
-fn an_itemized_segment_charges_per_order_brokerage_on_every_leg() {
+fn an_itemized_segment_charges_the_statutory_schedule_on_every_leg() {
     let premiums = vec![100.0; 6];
     let legs = vec![
         (premiums.clone(), 1),
@@ -624,13 +619,13 @@ fn an_itemized_segment_charges_per_order_brokerage_on_every_leg() {
     let trade = &result.trades[0];
     let breakdown = trade.fee_breakdown.expect("an itemized segment reports its components");
 
-    assert_eq!(breakdown.brokerage, 160.0, "4 legs x 2 sides x 20 per order");
+    assert_eq!(breakdown.brokerage, 0.0, "a built-in row carries no brokerage");
+    assert!(
+        breakdown.stt > 0.0 && breakdown.stamp_duty > 0.0,
+        "tax on the sells, duty on the buys"
+    );
     assert!((breakdown.total() - trade.fees).abs() < 1e-9, "itemized total is the money charged");
     assert_eq!(trade.fees, trade.entry_fees + trade.exit_fees);
-
-    // The flat rate would have billed 4 legs x 7.50 x 2 sides = 60.00 and no
-    // brokerage at all. The real schedule is multiples of that.
-    assert!(trade.fees > 200.0, "real costs dwarf the flat rate here: {}", trade.fees);
 }
 
 /// A leg left to expire pays nothing on the way out.

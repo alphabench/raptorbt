@@ -1,5 +1,6 @@
 """A limit order that is marketable when it arrives fills at the market, never
-at its own limit. One that was already resting fills at its limit, and gets no
+at its own limit: at the decision price (the deciding bar's close) under
+same_bar_close, at the next open under next_bar_open. One that was already resting fills at its limit, and gets no
 price improvement from a bar that opens past it, unless that bar opens a new
 session (an overnight gap fills at the open)."""
 
@@ -44,7 +45,8 @@ def test_marketable_buy_limit_fills_at_the_open(timing):
         [100.5, 100.9, 101.0, 101.0],
     )
     trades = _run(orders.Limit(side="buy", price=200.0, units=10.0), data, timing)
-    assert trades[0].entry_price == pytest.approx(100.6)
+    # decided on bar 0 (close 100.5); next_bar_open trades at bar 1's open
+    assert trades[0].entry_price == pytest.approx(100.5 if timing == "same_bar_close" else 100.6)
 
 
 @pytest.mark.parametrize("timing", ["next_bar_open", "same_bar_close"])

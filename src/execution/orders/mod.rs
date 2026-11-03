@@ -5,10 +5,12 @@
 //! and the kernel matches resting ones against each incoming bar. The
 //! signal-array path does not use this module and is unaffected by it.
 
+pub mod grid;
 pub mod matching;
 pub mod order;
 pub mod report;
 
+pub use grid::{OffGrid, OrderGrid};
 pub use matching::{MatchOutcome, OrderEngine};
 pub use order::{
     Order, OrderKind, OrderRecord, OrderSide, OrderStatus, QtySpec, TimeInForce, TrailOffset,

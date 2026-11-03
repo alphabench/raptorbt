@@ -281,26 +281,22 @@ class TestCostScheduleExport:
         assert s["brokerage_flat"] == 0.0
         assert s["brokerage_rate"] == 0.0
         assert s["stt_rate"] == 0.001
-        assert s["exchange_txn_rate"] == 0.0000307
+        assert s["exchange_txn_rate"] == 306.99 / 1e7  # NSE/FA/73061, 306.99 per crore
         assert s["sebi_turnover_rate"] == 0.000001
         assert s["stamp_duty_rate"] == 0.00015
         assert s["gst_rate"] == 0.18
         assert s["dp_sell_charge_per_isin_per_day"] == 15.34
 
-    def test_capped_and_flat_brokerage_export(self):
-        """Intraday/futures carry the min(Rs 20, 0.03%) cap; options stay flat."""
-        intraday = r.indian_cost_schedule("equity_intraday")
-        assert intraday["brokerage_flat"] == 20.0
-        assert intraday["brokerage_rate"] == 0.0003
-
-        fut = r.indian_cost_schedule("futures_nfo")
-        assert fut["brokerage_rate"] == 0.0003
-        assert fut["stt_rate"] == 0.0005  # 0.05% sell side, eff. 2026-04-01
-
-        opt = r.indian_cost_schedule("options_nfo")
-        assert opt["brokerage_flat"] == 20.0
-        assert opt["brokerage_rate"] == 0.0
-        assert opt["stt_rate"] == 0.0015  # 0.15% on premium, eff. 2026-04-01
+    def test_the_built_in_schedules_carry_no_brokerage(self):
+        """Brokerage is a broker's: the built-in rows are the statutory charges only."""
+        for name in (
+            "equity_intraday", "equity_delivery", "futures_nfo", "options_nfo",
+            "futures_mcx", "options_mcx", "futures_cds", "options_cds",
+        ):
+            s = r.indian_cost_schedule(name)
+            assert (s["brokerage_flat"], s["brokerage_rate"]) == (0.0, 0.0), name
+        assert r.indian_cost_schedule("futures_nfo")["stt_rate"] == 0.0005  # 0.05% sell side, eff. 2026-04-01
+        assert r.indian_cost_schedule("options_nfo")["stt_rate"] == 0.0015  # 0.15% on premium, eff. 2026-04-01
 
     def test_unknown_segment_refused_with_alternatives(self):
         with pytest.raises(ValueError, match="equity_delivery"):

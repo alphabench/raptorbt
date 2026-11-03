@@ -23,12 +23,13 @@ from raptorbt.strategy._commands import (
     atr_at,
     atr_series,
     session_tz_offset_ns,
+    config_for_holding,
     dispatch_events,
 )
 from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import StrategyContext
-from raptorbt.strategy._validate import ensure_prices_finite
+from raptorbt.strategy._validate import SessionCoverage, ensure_prices_finite
 from raptorbt.strategy.streams import StreamState
 
 
@@ -50,6 +51,8 @@ def run_strategy_backtest(
     leverage: float = 1.0,
     bar_stamp: Literal["open", "close"] | None = None,
     bar_ns: int | dict[str, int] | None = None,
+    corporate_actions=None,
+    adjustment_policy: Literal["raw", "adjusted"] | None = None,
 ) -> BacktestResult:
     """Run a class-based strategy over OHLCV arrays.
 
@@ -79,6 +82,13 @@ def run_strategy_backtest(
     close time. ``None`` keeps the pre-1.0 behaviour (composites built as if
     stamps were open stamps, event order as if they were close stamps) and
     emits a ``DeprecationWarning``; it will be required in 1.0.
+
+    ``corporate_actions`` (:class:`~raptorbt.CorporateAction` for ``symbol``)
+    are the splits, bonuses and cash dividends of the run; they need
+    ``adjustment_policy``, which says what the bars are: ``"raw"`` (as
+    traded; positions are rescaled at the ex-date) or ``"adjusted"`` (history
+    rescaled here onto the basis after the last split). The run is a
+    one-instrument book, so they apply exactly as in ``run_strategies``.
 
     Raises:
         ValueError: on an invalid ``bar_stamp``, on ``bar_stamp="open"``
@@ -151,8 +161,32 @@ def run_strategy_backtest(
         {"open": open_, "high": high, "low": low, "close": close},
     )
 
+    coverage = SessionCoverage.of(symbol, instrument, "run_strategy_backtest")
+    if coverage is not None:
+        coverage.check_all(timestamps)
+
+    from raptorbt.strategy.multi_runner import _adjusted, _lifecycle
+
+    corporate_actions, adjustment_policy = _lifecycle(
+        corporate_actions, adjustment_policy, {symbol}, set(), "run_strategy_backtest"
+    )
+    if adjustment_policy == "adjusted":
+        adjusted = _adjusted(
+            symbol,
+            corporate_actions,
+            {"timestamps": timestamps, "open": open_, "high": high, "low": low,
+             "close": close, "volume": volume},
+            "run_strategy_backtest",
+        )
+        open_, high, low, close, volume = (
+            adjusted["open"], adjusted["high"], adjusted["low"], adjusted["close"],
+            adjusted["volume"],
+        )
+
     # Everything the engine does in time runs on bar close time.
     visible = stamps.visible(symbol, timestamps)
+
+    config = config_for_holding(config, [strategy], "run_strategy_backtest")
 
     session = KernelSession(
         symbol=symbol,
@@ -164,6 +198,9 @@ def run_strategy_backtest(
         account_type=account_type,
         leverage=leverage,
     )
+
+    if adjustment_policy is not None:
+        session.set_corporate_actions(corporate_actions, adjustment_policy)
 
     # Same ATR series the array-based engine would compute for ATR-based
     # stop/target configs.

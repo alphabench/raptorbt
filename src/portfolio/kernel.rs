@@ -16,11 +16,10 @@ use crate::core::types::{
 use crate::data::{DepthTick, OrderBook, QuoteTick, TradeTick};
 use crate::execution::algos::AlgoEngine;
 use crate::execution::fill::FillRng;
-use crate::execution::orders::{MatchOutcome, OrderEngine, OrderKind, OrderStatus, TimeInForce};
-// Re-exported for `kernel_tests.rs`, which pulls this module in with `use
-// super::*`; the kernel itself does not name these types.
-#[cfg(test)]
-use crate::execution::orders::{OrderSide, QtySpec};
+use crate::execution::orders::QtySpec;
+use crate::execution::orders::{
+    MatchOutcome, OrderEngine, OrderKind, OrderSide, OrderStatus, TimeInForce,
+};
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::instruments::{InstrumentKind, InstrumentSpec};
@@ -72,7 +71,7 @@ fn with_risk_events(events: Vec<EngineEvent>) -> Vec<EngineEvent> {
 
 /// How an entry is funded under the margin account.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum EntryFunding {
+pub(crate) enum EntryFunding {
     /// The account's rate on notional — `contract_value × size × rate`,
     /// evaluated in that order so existing runs reproduce bit-for-bit.
     /// `modelled` marks a rate the instrument spec set (`margin_init`).
@@ -116,7 +115,7 @@ pub struct KernelBar {
 
 impl KernelBar {
     /// Borrow as an [`OhlcvBar`] for the execution models.
-    fn to_ohlcv_bar(self) -> OhlcvBar {
+    pub(crate) fn to_ohlcv_bar(self) -> OhlcvBar {
         OhlcvBar {
             timestamp: self.timestamp,
             open: self.open,
@@ -304,6 +303,8 @@ struct DeferredEntry {
     atr: f64,
     stop_price_override: Option<Price>,
     target_price_override: Option<Price>,
+    /// The signal bar's close: what a capital-fraction entry is sized at.
+    size_ref: Option<Price>,
 }
 
 /// Which market event is driving a step.
@@ -346,6 +347,17 @@ pub struct ProtectRequest {
     pub target: Option<Price>,
     /// The stop trails: its distance from the entry, in price.
     pub trail: Option<f64>,
+    /// The position the protection is for (what a hedging venue's protective order names).
+    pub position_id: u64,
+}
+
+/// A marketable fill of a group order the kernel has held back.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StagedFill {
+    pub order_id: u64,
+    pub idx: usize,
+    pub bar: KernelBar,
+    pub price: f64,
 }
 
 /// Stateful simulation core.
@@ -360,7 +372,7 @@ pub struct EngineKernel {
     fill_price: FillPrice,
     /// When a bar-i decision may execute. Under `NextBarOpen`, signal
     /// entries/exits stash a [`DeferredIntent`] instead of filling.
-    fill_timing: FillTiming,
+    pub(crate) fill_timing: FillTiming,
     /// Intent stashed by the previous bar's signals, consumed at the top of
     /// the next bar step. Always `None` outside `NextBarOpen`.
     deferred: Option<DeferredIntent>,
@@ -386,6 +398,17 @@ pub struct EngineKernel {
     /// open can honor an ATR stop/target config. Signal entries read
     /// `input.atr` directly.
     pub(crate) last_atr: f64,
+    /// Close of the last bar this kernel stepped: the last price known when a
+    /// decision is made between steps.
+    pub(crate) last_close: Option<Price>,
+    /// The last bar stepped and its ordinal, for an order that arrives with it.
+    pub(crate) last_step: Option<(usize, KernelBar)>,
+    /// Price the next capital-fraction open is sized at, set just before an
+    /// open and consumed by it (see `Order::size_ref`).
+    pub(crate) sizing_ref: Option<Price>,
+    /// A capital-fraction order is waiting for the close of the bar it was
+    /// decided on (stamped by the next step).
+    pub(crate) size_ref_pending: bool,
     /// Positions here move only on orders sent to a venue: stops, targets,
     /// execution schedules and the session square-off do not act in-process
     /// but leave requests for the runtime to send (see `kernel_venue.rs`).
@@ -434,7 +457,7 @@ pub struct EngineKernel {
     effective_target: TargetConfig,
     /// Per-instrument capital cap and lot rounding, if any.
     alloted_capital: Option<f64>,
-    lot_size: Option<f64>,
+    pub(crate) lot_size: Option<f64>,
     /// The option lines the account's other instruments hold in this
     /// instrument's margin group, handed over by the book before each step.
     /// `None` unless the account's model groups option lines and there are
@@ -445,6 +468,14 @@ pub struct EngineKernel {
     /// before each step. A sold leg refused for want of funding then waits
     /// for that hedge instead of being rejected.
     pub(crate) hedge_pending: bool,
+    /// Orders that belong to an atomic group (order id, group id), see
+    /// [`PortfolioBook::link_group`](crate::portfolio::book::PortfolioBook::link_group).
+    pub(crate) group_orders: Vec<(u64, u64)>,
+    /// Fills of group orders the matcher found marketable and the kernel
+    /// held back: the group fills them together or not at all.
+    pub(crate) staged: Vec<StagedFill>,
+    /// Set while the book releases a staged fill, so it is not held again.
+    pub(crate) releasing: bool,
     /// Market definition: quantization, contract multiplier, expiry.
     ///
     /// `None` reproduces pre-spec behavior exactly (multiplier 1.0, no
@@ -541,6 +572,10 @@ impl EngineKernel {
             money_scale,
             direction,
             last_atr: 0.0,
+            last_close: None,
+            last_step: None,
+            sizing_ref: None,
+            size_ref_pending: false,
             venue_managed: false,
             venue_bookings: Default::default(),
             booking_fact: false,
@@ -563,6 +598,9 @@ impl EngineKernel {
             lot_size: inst_config.and_then(|ic| ic.lot_size),
             group_context: None,
             hedge_pending: false,
+            group_orders: Vec::new(),
+            staged: Vec::new(),
+            releasing: false,
             spec: None,
             orders: OrderEngine::with_tz_offset(tz_offset_ns).with_latency(order_latency_ns),
             pending_events: Vec::new(),
@@ -667,7 +705,7 @@ impl EngineKernel {
     /// × multiplier` per contract, with the premium it collects left in the
     /// balance rather than the requirement. A BOUGHT option can lose only
     /// its premium and keeps the rate path (at leverage 1.0, the premium).
-    fn entry_funding(
+    pub(crate) fn entry_funding(
         &self,
         direction: Direction,
         price: Price,
@@ -757,8 +795,17 @@ impl EngineKernel {
         }
         self.ledger.set_contract_multiplier(spec.multiplier);
         self.orders.set_session(spec.session.clone());
-        self.fee_model.bind_underlying(spec.underlying());
+        // Squared off the same day when the run or the venue says so: cash
+        // equity is then charged the intraday row. An instrument no fee row
+        // fits stays unbound; the bindings refuse it when it is registered.
+        let intraday = self.config.intraday_for(&spec);
+        let _ = self.fee_model.bind_instrument(&spec, intraday);
         self.spec = Some(spec);
+    }
+
+    /// The unverified fee rows this kernel's fills were priced on.
+    pub fn unverified_fee_rows(&self) -> Vec<String> {
+        self.fee_model.unverified_rows()
     }
 
     /// Contract point value; `1.0` without a spec.
@@ -1663,6 +1710,10 @@ impl EngineKernel {
         self.fee_model.set_time(bar.timestamp);
         // Carried for order-path opens, which have no StepInput of their own.
         self.last_atr = input.atr;
+        self.last_close = Some(bar.close);
+        if mode == StepMode::Bar {
+            self.last_step = Some((idx, *bar));
+        }
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
@@ -1757,6 +1808,7 @@ impl EngineKernel {
                                         target_price_override: entry.target_price_override,
                                         ..StepInput::default()
                                     };
+                                    self.sizing_ref = entry.size_ref;
                                     if let Some(event) = self.try_enter(idx, bar, entry_input) {
                                         events.push(event);
                                     }
@@ -1779,6 +1831,21 @@ impl EngineKernel {
         // at the top of the next bar step. Protective stop/target exits are
         // NOT deferred — their triggers are intra-bar prices, already causal.
         let defer_signals = self.fill_timing == FillTiming::NextBarOpen && mode == StepMode::Bar;
+        if self.size_ref_pending && defer_signals {
+            self.size_ref_pending = false;
+            let waiting: Vec<u64> = self
+                .orders
+                .working()
+                .filter(|o| o.size_ref.is_none() && o.submitted_idx == idx)
+                .filter(|o| matches!(o.qty, QtySpec::CapitalFrac(_)))
+                .map(|o| o.id)
+                .collect();
+            for id in waiting {
+                if let Some(order) = self.orders.get_mut(id) {
+                    order.size_ref = Some(bar.close);
+                }
+            }
+        }
         if defer_signals && input.exit {
             self.deferred.get_or_insert_with(DeferredIntent::default).exit = true;
         }
@@ -1788,7 +1855,8 @@ impl EngineKernel {
         // holds one position, reproducing the original sequence exactly.
         let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         for position_id in open_ids {
-            if let Some(event) = self.try_exit_position(idx, bar, position_id, same_bar_exit) {
+            if let Some(event) = self.try_exit_position(idx, bar, position_id, same_bar_exit, false)
+            {
                 events.push(event);
             }
 
@@ -1879,6 +1947,7 @@ impl EngineKernel {
                 atr: input.atr,
                 stop_price_override: input.stop_price_override,
                 target_price_override: input.target_price_override,
+                size_ref: Some(bar.close),
             });
         } else if !self.ledger.is_in_position() && input.entry {
             // Not-yet-active instruments refuse entries the same way expired
@@ -1959,6 +2028,50 @@ impl EngineKernel {
                 }
             }
         }
+        // A limit that is marketable at the price its decision was made at
+        // trades there, like a market order placed on the same bar: it does
+        // not wait for a later bar to come back to it (which may never happen).
+        // Under `next_bar_open` the arrival rule already trades it at the next
+        // open.
+        if !defer_signals && mode == StepMode::Bar && gate.data_open {
+            let marketable: Vec<(u64, Price)> = self
+                .orders
+                .working()
+                .filter(|o| {
+                    matches!(o.kind, OrderKind::Limit { .. })
+                        && !o.post_only
+                        && o.parent_id.is_none()
+                        && o.algo_id.is_none()
+                        && !o.is_venue_driven()
+                        && o.submitted_idx == idx
+                        && o.status == OrderStatus::Accepted
+                        && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
+                })
+                .filter_map(|o| {
+                    let OrderKind::Limit { price } = o.kind else { return None };
+                    let (direction, is_entry) = match o.side {
+                        OrderSide::Buy => (Direction::Long, true),
+                        OrderSide::Sell => (Direction::Long, false),
+                    };
+                    let decision = self.fill_price_for(bar, direction, is_entry);
+                    let through = match o.side {
+                        // Strictly through: a limit at the price itself may
+                        // rest behind the spread, as at a venue.
+                        OrderSide::Buy => price > decision,
+                        OrderSide::Sell => price < decision,
+                    };
+                    through.then_some((o.id, decision))
+                })
+                .collect();
+            for (id, price) in marketable {
+                self.apply_match_outcome(
+                    idx,
+                    bar,
+                    MatchOutcome::Fill { order_id: id, price },
+                    &mut events,
+                );
+            }
+        }
         let market_ids: Vec<u64> = self
             .orders
             .working()
@@ -1966,7 +2079,12 @@ impl EngineKernel {
             // Nothing sweeps while the session is closed; the order waits.
             .filter(|_| gate.data_open)
             .filter(|o| match (defer_signals, mode) {
-                (true, _) => o.submitted_idx < idx,
+                // The timestamp test is what keeps an order routed here from
+                // another instrument's event off a bar that closed at or before
+                // its decision: that order carries this instrument's last
+                // stepped ordinal, which says nothing about which side of the
+                // decision the next bar falls on.
+                (true, _) => o.submitted_idx < idx && bar.timestamp > o.submitted_ts,
                 // On the tick path an order in flight (entry latency) is
                 // invisible to prints before it reaches the venue.
                 (false, StepMode::Trade) => {
@@ -1980,19 +2098,24 @@ impl EngineKernel {
             })
             .map(|o| o.id)
             .collect();
+        let held_before: Vec<u64> = if defer_signals && mode == StepMode::Bar {
+            self.ledger.positions().iter().map(|p| p.id).collect()
+        } else {
+            Vec::new()
+        };
+        let swept = market_ids.clone();
         for id in market_ids {
-            // Under deferral the order was already acknowledged (and moved
-            // to Accepted) on its submission bar.
+            // Under deferral an order of this instrument was acknowledged on
+            // its submission bar; one routed here from another instrument's
+            // event was not, and is acknowledged now, just before it fills.
             // A partially filled market order is already acknowledged and
             // simply keeps sweeping; only a fresh submission is acked here.
-            if !defer_signals {
-                if let Some(order) =
-                    self.orders.get_mut(id).filter(|o| o.status == OrderStatus::Submitted)
-                {
-                    let _ = order.transition(OrderStatus::Accepted);
-                    let client_id = order.client_id.clone();
-                    events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
-                }
+            if let Some(order) =
+                self.orders.get_mut(id).filter(|o| o.status == OrderStatus::Submitted)
+            {
+                let _ = order.transition(OrderStatus::Accepted);
+                let client_id = order.client_id.clone();
+                events.push(EngineEvent::OrderAccepted { idx, order_id: id, client_id });
             }
             self.apply_match_outcome(
                 idx,
@@ -2000,6 +2123,48 @@ impl EngineKernel {
                 MatchOutcome::Fill { order_id: id, price: f64::NAN },
                 &mut events,
             );
+        }
+
+        // Entry-bar protection (`next_bar_open`): an entry filled at this
+        // bar's open lives through the rest of the bar, so its protective
+        // levels trade against this bar too — as the working legs of a real
+        // venue would, whichever way they were attached (the position's own
+        // stop and target, a typed order's `stop_price`/`target_price`, or a
+        // bracket's child orders). Without this, a stop set on the entry bar
+        // was honoured or skipped depending on the API that set it.
+        if defer_signals && mode == StepMode::Bar && !swept.is_empty() {
+            let opened: Vec<u64> = self
+                .ledger
+                .positions()
+                .iter()
+                .map(|p| p.id)
+                .filter(|id| !held_before.contains(id))
+                .collect();
+            // The entry was at this bar's open, so the whole bar is part of the
+            // position's life: its range counts toward the excursions, as it
+            // does for a signal entry filled at the top of the step.
+            if !opened.is_empty() {
+                self.ledger.update_price(bar.high, bar.low);
+            }
+            for position_id in opened {
+                if let Some(event) = self.try_exit_position(idx, bar, position_id, false, true) {
+                    events.push(event);
+                }
+            }
+            let children: Vec<u64> = self
+                .orders
+                .working()
+                .filter(|o| o.parent_id.is_some_and(|p| swept.contains(&p)))
+                .filter(|o| o.status == OrderStatus::Accepted)
+                .map(|o| o.id)
+                .collect();
+            if !children.is_empty() {
+                let outcomes =
+                    self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &children);
+                for outcome in outcomes {
+                    self.apply_match_outcome(idx, bar, outcome, &mut events);
+                }
+            }
         }
 
         events
@@ -2012,6 +2177,7 @@ impl EngineKernel {
         bar: &KernelBar,
         position_id: u64,
         exit_signal: bool,
+        arrived: bool,
     ) -> Option<EngineEvent> {
         let managed = self.ledger.get(position_id)?;
         let mut exit_reason: Option<ExitReason> = None;
@@ -2020,9 +2186,12 @@ impl EngineKernel {
         let direction = managed.position.direction;
         let ohlcv_bar = bar.to_ohlcv_bar();
         // A target is a resting limit: it fills at its level, except across a
-        // session open that gaps past it (a print has no range to gap).
-        let session_gap =
-            !self.stepping_trade && self.orders.opens_session(bar.timestamp.saturating_sub(1));
+        // session open that gaps past it (a print has no range to gap), and
+        // on the bar its position was entered at the open of: the target
+        // arrived with that bar and is marketable if the open is through it.
+        let arrived = arrived || managed.entry_timestamp == bar.timestamp;
+        let session_gap = arrived
+            || (!self.stepping_trade && self.orders.opens_session(bar.timestamp.saturating_sub(1)));
 
         let stop_hit = managed.is_stop_hit(bar.low, bar.high);
         let target_hit = managed.is_target_hit(bar.low, bar.high);
@@ -2085,7 +2254,7 @@ impl EngineKernel {
     }
 
     /// Round a unit count down to the lot size, then the size increment.
-    fn quantize_units(&self, raw_size: f64) -> f64 {
+    pub(crate) fn quantize_units(&self, raw_size: f64) -> f64 {
         let size = match self.lot_size {
             Some(lot) if lot > 0.0 => (raw_size / lot).floor() * lot,
             _ => raw_size,
@@ -2186,7 +2355,7 @@ impl EngineKernel {
     /// fills snap against the trader, limit-priced ones in their favour; see
     /// [`InstrumentSpec::snap_fill`]. Without a price increment the result is
     /// the slipped price untouched.
-    fn executed_price(
+    pub(crate) fn executed_price(
         &self,
         raw: Price,
         direction: Direction,
@@ -2555,6 +2724,9 @@ impl EngineKernel {
         target_override: Option<Price>,
         limit_priced: bool,
     ) -> Option<EngineEvent> {
+        // A capital-fraction open under `next_bar_open` is sized at the price
+        // known when it was decided, not at the open it fills at.
+        let sizing_ref = self.sizing_ref.take().filter(|_| explicit_units.is_none());
         let adjusted_price = self.executed_price(entry_price, direction, true, limit_priced, bar);
 
         // Per-instrument capital cap, never exceeding free capital on hand
@@ -2579,23 +2751,37 @@ impl EngineKernel {
             }
             Err(reason) => return Some(EngineEvent::EntryRejected { idx, reason }),
         };
+        let (sizing_value, sizing_funding) = match sizing_ref {
+            Some(reference) => {
+                let sized_at = self.executed_price(reference, direction, true, limit_priced, bar);
+                (
+                    sized_at * self.multiplier(),
+                    self.entry_funding(direction, sized_at).unwrap_or(funding),
+                )
+            }
+            None => (contract_value, funding),
+        };
         let size = match explicit_units {
             Some(units) if self.booking_fact => units,
             Some(units) => self.quantize_units(units),
             None => {
                 let budget = size_mult.map_or(available, |mult| mult * available);
-                let size = self.sized_units(budget, contract_value, direction, funding);
-                if funding.is_none() {
-                    self.fit_booked_debit(
-                        size,
-                        budget,
-                        available,
-                        contract_value,
-                        direction,
-                        funding,
-                    )
+                let fit = |budget: f64, value: f64, funding: Option<EntryFunding>| {
+                    let size = self.sized_units(budget, value, direction, funding);
+                    if funding.is_none() {
+                        self.fit_booked_debit(size, budget, available, value, direction, funding)
+                    } else {
+                        size
+                    }
+                };
+                let decided = fit(budget, sizing_value, sizing_funding);
+                if sizing_ref.is_some() {
+                    // Sized at the decision price, but never more than the
+                    // capital on hand buys at the price it fills at: a gap up
+                    // cannot overdraw the account.
+                    decided.min(fit(available, contract_value, funding))
                 } else {
-                    size
+                    decided
                 }
             }
         };
@@ -2691,6 +2877,7 @@ impl EngineKernel {
                 stop: stop_price,
                 target: target_price,
                 trail,
+                position_id: 0, // set once the position exists, below
             });
             (None, None)
         } else {
@@ -2708,6 +2895,11 @@ impl EngineKernel {
             entry_fees,
             entry_breakdown,
         )?;
+        if self.venue_managed {
+            if let Some(request) = self.protect_outbox.last_mut() {
+                request.position_id = position_id;
+            }
+        }
         let fees_money = self.ledger.book(entry_fees);
         match funding {
             None => self.move_cash(-(self.ledger.notional(adjusted_price, size) + fees_money)),

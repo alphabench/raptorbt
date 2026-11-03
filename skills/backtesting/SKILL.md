@@ -57,20 +57,33 @@ open. See [orders](../orders/SKILL.md).
 **Slippage and latency.** `slippage` is a fraction of price applied against
 you on market and stop fills (`apply_slippage`, default on); limit fills are
 at their price unless `limit_slippage` models adverse selection.
-`order_latency_ns` delays an order on the **tick** path only: bars are
-unaffected. `fill_prob_limit` / `fill_prob_slippage` / `fill_seed` add seeded
+`order_latency_ns` delays an order on the **tick** path only; a run with bars
+refuses it (`unsupported_on_bars`) rather than ignore it. `fill_prob_limit` / `fill_prob_slippage` / `fill_seed` add seeded
 stochastic fills; `queue_fill_model` and `partial_fills` model a queue and
-partial executions on tick data. All are off by default, and the same seed
+partial executions on tick data (`partial_fills` is refused on bars too). All are off by default, and the same seed
 reproduces the same fills.
 
-**Fees.** `fees` is a flat fraction of traded value. For exchange charges set
-`fee_segment` (for example `"NSE-INTRADAY"`, `"NSE-DELIVERY"`, `"NFO-OPT"`):
-brokerage, transaction tax, exchange charge, regulatory fee, stamp duty and
-GST are itemised in `trade.fee_breakdown`. Your own rates are data: a
-`RateCard` document becomes a `FeeSchedule`, passed as
-`BacktestConfig(fee_schedule=..., fee_segment=...)`. A schedule without a row
-for the fill's venue and segment is refused (`fee_schedule_gap`), never
-charged zero.
+**Fees.** `fees` is a flat fraction of traded value. For exchange charges
+give a schedule: `BacktestConfig(fee_schedule=FeeSchedule.exchange_presets())`
+(or `fee_segment="auto"`) prices each instrument on the row its own venue and
+kind select (a future on `NFO` the futures row, an option the options row,
+cash equity the delivery row, or the intraday row when the run squares off the
+same day), so the `InstrumentSpec` must carry a `venue`. The presets are the
+dated statutory schedule only: transaction tax (STT/CTT), exchange transaction
+charge, SEBI fee, stamp duty and GST, each from the date it took effect (STT
+on options rose from 0.1% to 0.15% on 2026-04-01) and the STT on an option
+exercised at expiry from the settlement row. They carry no brokerage and no
+depository charge: those come from your broker's `RateCard`, per order. The
+breakdown is in `trade.fee_breakdown`. `fee_segment` (for example
+`"NSE-INTRADAY"`, `"NFO-OPT"`) is an explicit override that prices every
+instrument on that one row. A schedule without a row for an instrument (or an
+instrument with no venue, or a BSE equity with no `scrip_group`) is refused
+(`fee_schedule_gap`), never charged zero. Rates are stored in rupees per crore of
+their base with each component separate (`row["per_crore"]`); a row not matched
+to an official circular is `unverified`, and `result.unverified_fee_rows` (and
+`full_report(...)["unverified_fee_rows"]`) lists the ones a run priced fills on:
+the costs of such a run are not exchange-accurate (BSE cash by group, every BSE
+derivatives row, NSE currency and the MCX exchange charges).
 
 **Expiry, settlement and corporate actions.** A contract's expiry and how it
 settles are declared on its `InstrumentSpec` ([instruments](../instruments/SKILL.md));
@@ -162,9 +175,9 @@ t = quarter.trades()[0]
 assert abs(t.size * t.entry_price - 25_000.0) < 1e-6
 ```
 
-Exchange charges. A segment prices the run on the built-in exchange rows and
-itemises each trade; your own card replaces them. A card that lacks the row
-you asked for is refused, not treated as free:
+Exchange charges. A segment prices the run on the built-in statutory rows
+and itemises each trade; your own card adds brokerage and replaces them. A
+card that lacks the row you asked for is refused, not treated as free:
 
 ```python
 import numpy as np
@@ -189,7 +202,7 @@ def run(**config):
 trade = run(fee_segment="NSE-INTRADAY").trades()[0]
 b = trade.fee_breakdown
 assert set(b) >= {"brokerage", "stt", "exchange_txn", "sebi_fee", "stamp_duty", "gst", "total"}
-assert abs(b["total"] - trade.fees) < 1e-9 and b["brokerage"] == 40.0       # 20 per side, the preset's cap
+assert abs(b["total"] - trade.fees) < 1e-9 and b["brokerage"] == 0.0       # a preset is statutory only
 
 card = RateCard.from_dict({
     "name": "flat-fee-card", "effective_from": "2026-01-01T00:00:00+05:30", "source": "my broker's schedule",
@@ -208,7 +221,7 @@ except InvalidParameter as e:
     assert e.code == "fee_schedule_gap"
 
 quote = FeeSchedule.exchange_presets().charge("NFO", "OPTIONS", "SELL", price=100.0, quantity=75)
-assert quote["stt"] == 11.25 and quote["brokerage"] == 20.0
+assert quote["stt"] == 11.25 and quote["brokerage"] == 0.0                  # brokerage is the card's
 ```
 
 Several signal sets on one instrument, and several instruments. `all`
@@ -398,12 +411,18 @@ assert len({final(s) for s in (1, 2, 3, 4)}) > 1         # a different seed pass
 - `fees` is a fraction of traded value; `fee_segment` and `fee_schedule`
   replace it with itemised charges. A short owes the sell-side tax when it
   opens; a four-leg structure pays the per-order charge once per leg per side.
-- `order_latency_ns` does not affect bars. `squareoff_time` (an `"HH:MM"`
-  string with `session_tz_offset_ns`) closes positions in every runner that
-  has a session: the first bar at or after it closes the position
-  (`Squareoff`), and entries are refused as `squareoff` for the rest of that
-  local day. An instrument's own `SessionSchedule` takes precedence over it,
-  and also supplies the closed-market rejections and DAY expiry.
+- `order_latency_ns` and `partial_fills` are tick-path models; a run with bars
+  refuses them (`unsupported_on_bars`). `squareoff_time` (an `"HH:MM"`
+  string) closes positions in every runner: the first bar at or after it
+  closes the position (`Squareoff`), and entries are refused as `squareoff`
+  for the rest of that local day. It is read in the instrument's own session
+  zone, else in `session_tz_offset_ns`; with neither it is refused
+  (`squareoff_needs_timezone`). A strategy whose `requirements` say
+  `Holding.intraday(flatten_before="15:15")` is squared off then without any
+  config; an explicit `squareoff_time` wins, and strategies with different
+  holdings in one run are refused (`mixed_holding`). Nothing else squares a
+  position off: the session presets carry no square-off. An instrument's
+  `SessionSchedule` also supplies the closed-market rejections and DAY expiry.
 - `run_multi_backtest` refuses an unknown `combine_mode` with
   `invalid_combine_mode`; the modes are `any`, `all`, `majority`,
   `independent` and `weighted`.
@@ -456,8 +475,9 @@ run_strategy_backtest(Strategy, np.arange(5, dtype=np.int64), x, x, x, x, x, bar
   on it: guard with the indicator's own readiness.
 - Reading `PortfolioResult` fields from a `BacktestResult` and vice versa:
   the portfolio wrapper exposes `.result`.
-- Setting `squareoff_time` without `session_tz_offset_ns` and getting a
-  square-off at the wrong local time: the cutoff is read in the offset you give.
+- Setting `squareoff_time` with no zone known: it is refused. Name the zone
+  with `session_tz_offset_ns` (`IST_OFFSET_NS`; `0` is UTC) or give the
+  instrument a `SessionSchedule`.
 
 ## 9. Validation
 

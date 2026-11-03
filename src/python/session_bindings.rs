@@ -1,7 +1,6 @@
 //! Python bindings for the multi-instrument event session.
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::errors::Fail;
@@ -127,9 +126,11 @@ pub(crate) fn convert_outcome(
                 trades: o.trades,
                 pnl: o.pnl,
                 rejected_entries: o.rejected_entries,
+                unfunded_entries: o.unfunded_entries,
             })
             .collect(),
         rejected_entries: outcome.rejected_entries,
+        unfunded_entries: outcome.unfunded_entries,
         halted: outcome.halted,
         halted_at: outcome.halted_at,
     }
@@ -146,6 +147,8 @@ pub(crate) fn convert_outcome(
 #[pyclass(name = "PortfolioSession")]
 pub struct PyPortfolioSession {
     session: Option<EventSession>,
+    /// The config, for the checks an instrument must pass when it is added.
+    config: BacktestConfig,
 }
 
 impl PyPortfolioSession {
@@ -170,7 +173,10 @@ impl PyPortfolioSession {
         let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
         let account = parse_account_mode(account_type, leverage)?;
         super::strategy_bindings::check_margin_model(&rust_config, account)?;
-        Ok(Self { session: Some(EventSession::with_account(rust_config, account)) })
+        let session = super::errors::guard_money("KernelSession", || {
+            EventSession::with_account(rust_config.clone(), account)
+        })?;
+        Ok(Self { session: Some(session), config: rust_config })
     }
 
     /// Register an instrument; returns its index for routing.
@@ -185,6 +191,7 @@ impl PyPortfolioSession {
     ) -> PyResult<usize> {
         let (direction, policy, spec) = parse_instrument_args(direction, instrument, oms_type)?;
         let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
+        super::strategy_bindings::check_market(&self.config, symbol, spec.as_ref())?;
         Ok(self.session_mut()?.add_instrument(
             symbol.to_string(),
             direction,
@@ -322,9 +329,11 @@ impl PyPortfolioSession {
             }
         }
         if bp.shape()[1] != bs.shape()[1] || ap.shape()[1] != asz.shape()[1] {
-            return Err(PyValueError::new_err(
+            return Err(Fail::new(
+                "length_mismatch",
                 "price and size arrays must have the same level count",
-            ));
+            )
+            .into());
         }
         let snapshots: Vec<DepthTick> = (0..n)
             .map(|row| {
@@ -572,7 +581,7 @@ impl PyPortfolioSession {
     #[pyo3(signature = (
         instrument, side, kind, submitted_idx, submitted_ts, client_id,
         units=None, size_frac=None, limit_price=None, trigger_price=None,
-        tif="gtc", expire_ns=None, stop_price=None, target_price=None,
+        tif="auto", expire_ns=None, stop_price=None, target_price=None,
         offset=None, offset_kind="price", limit_offset=0.0,
         post_only=false, reduce_only=false, parent_id=None,
     ))]
@@ -691,6 +700,17 @@ impl PyPortfolioSession {
         Ok(self.session_mut()?.kernel_mut(instrument).cancel_all_orders(idx))
     }
 
+    /// Link working orders on distinct instruments, given as
+    /// `(instrument, order_id)` pairs sized in units, into one atomic group:
+    /// the legs fill together on the event where every one is marketable,
+    /// funded as a whole, or none fills and each is rejected. Returns the
+    /// group id. See ``docs/structures.md``.
+    fn link_group(&mut self, legs: Vec<(usize, u64)>) -> PyResult<u64> {
+        self.session_mut()?.link_group(&legs).map_err(|reason| {
+            Fail::new("invalid_order_group", reason).op("link_group").param("legs").into()
+        })
+    }
+
     fn link_oco(&mut self, instrument: usize, order_ids: Vec<u64>) -> PyResult<()> {
         self.session_mut()?.kernel_mut(instrument).link_oco(&order_ids);
         Ok(())
@@ -722,9 +742,11 @@ impl PyPortfolioSession {
         price: f64,
         size: f64,
     ) -> PyResult<u64> {
-        self.session_mut()?
-            .adopt_position(instrument, timestamp_ns, price, size)
-            .map_err(pyo3::exceptions::PyValueError::new_err)
+        self.session_mut()?.adopt_position(instrument, timestamp_ns, price, size).map_err(|e| {
+            PyErr::from(
+                Fail::new("adoption_refused", e).op("adopt_position").param("size").value(size),
+            )
+        })
     }
 
     /// Declare the corporate actions of the run and the adjustment policy its

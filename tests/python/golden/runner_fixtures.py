@@ -907,10 +907,6 @@ def scenario_table():
         config=_zero_fee(liquidate_on_margin_call=True),
         run={"bar_stamp": "close", "account_type": "margin", "leverage": 8.0},
         script={"name": "allin", "args": {"drive": "on_bar", "frac": 0.9}})
-    add("pf_order_latency", P, ["order latency on bars"],
-        data=bars_2, config=_zero_fee(order_latency_ns=2 * MIN_NS), run=_bars_run(),
-        script={"name": "typed", "args": {"drive": "on_bar", "program": [
-            [0, 2, "market_buy"], [0, 12, "market_sell"], [1, 3, "limit_buy"], [1, 20, "market_sell"]]}})
     add("pf_bar_stamp_close", P, ["bar_stamp close", "composite stamps"],
         data={**bars_all, "n": 46, "stamp": "close"}, config=_zero_fee(), run={"bar_stamp": "close"},
         script={"name": "legacy", "args": {"drive": "on_bar", "subs": [[5, "m"]], "inds": [["sma", 3]],

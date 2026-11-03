@@ -92,7 +92,7 @@ def _run(d, **cfg):
     )
 
 
-def test_presets_are_the_rates_the_engine_always_charged():
+def test_presets_are_the_statutory_rates_in_force_now():
     s = FeeSchedule.exchange_presets()
     assert {(r["venue"], r["segment"]) for r in s.rows()} == {
         (v, g) for v in ("NSE", "BSE") for g in ("INTRADAY", "DELIVERY")
@@ -114,9 +114,15 @@ def test_presets_are_the_rates_the_engine_always_charged():
         assert row["stamp_buy_rate"] == old["stamp_duty_rate"], name
         assert row["gst_rate"] == old["gst_rate"], name
         assert max(row["tax_buy_rate"], row["tax_sell_rate"]) == old["stt_rate"], name
-    # the BSE and BFO rows are the NSE and NFO ones
-    assert s.row("BSE", "INTRADAY")["rates"] == s.row("NSE", "INTRADAY")["rates"]
-    assert s.row("BFO", "OPTIONS")["rates"] == s.row("NFO", "OPTIONS")["rates"]
+    # BSE and BFO have the exchange charges of their own, not the NSE family's
+    assert s.row("BSE", "INTRADAY", underlying="group:A")["rates"]["exchange_rate"] == 3.75e-5
+    assert s.row("BFO", "OPTIONS", underlying="SENSEX")["rates"]["exchange_rate"] == 3.25e-4
+    assert s.row("BFO", "OPTIONS")["rates"]["exchange_rate"] == 5e-5  # stock options, 500 per crore
+    assert s.row("BFO", "FUTURES")["rates"]["exchange_rate"] == 0.0
+    # and none of them charges brokerage or a depository fee: those are a broker's
+    for row in s.rows():
+        r_ = row["rates"]
+        assert (r_["brokerage_flat"], r_["brokerage_rate"], r_["day_fee"]) == (0.0, 0.0, None)
 
 
 def test_an_explicit_preset_schedule_leaves_a_run_bit_identical(daily):
@@ -158,9 +164,8 @@ def test_a_schedule_without_the_row_is_refused_not_free():
     with pytest.raises(ValueError, match="no rate for MCX FUTURES") as e:
         BacktestConfig(fee_segment="MCX-FUT", fee_schedule=schedule)
     assert e.value.code == "fee_schedule_gap"
-    with pytest.raises(ValueError, match="needs fee_segment") as e:
-        BacktestConfig(fee_schedule=schedule)
-    assert e.value.code == "invalid_fee_schedule"
+    # a schedule alone prices each instrument on its own row (tests/python/test_statutory_fees.py)
+    assert BacktestConfig(fee_schedule=schedule).fee_segment is None
     cfg = BacktestConfig(fee_segment="NSE-INTRADAY", fee_schedule=schedule)
     with pytest.raises(ValueError):
         cfg.fee_segment = "MCX-FUT"
@@ -202,9 +207,13 @@ def test_a_card_round_trips_through_json_and_dict():
     card = RateCard.from_dict(CARD)
     again = RateCard.from_json(card.to_json())
     assert again.to_dict() == card.to_dict()
+    # the presets take effect on several dates, which one card cannot carry
     presets = FeeSchedule.exchange_presets()
-    back = FeeSchedule.from_json(presets.to_json("2026-09-01T00:00:00+05:30"))
-    for a, b in zip(presets.rows(), back.rows()):
+    with pytest.raises(InvalidParameter, match="different dates"):
+        presets.to_json("2026-09-01T00:00:00+05:30")
+    on_day = presets.in_force_at(RateCard.from_dict(CARD).effective_ns)
+    back = FeeSchedule.from_json(on_day.to_json("2026-09-01T00:00:00+05:30"))
+    for a, b in zip(on_day.rows(), back.rows()):
         assert a["rates"] == b["rates"]
 
 

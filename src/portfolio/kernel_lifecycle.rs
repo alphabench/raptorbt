@@ -294,12 +294,16 @@ impl EngineKernel {
             let (size, direction) = (managed.position.size, managed.position.direction);
             // The closing side of the line, priced per contract.
             let per_contract = resolved.value * multiplier;
-            let (settle_breakdown, settle_fee) = match self.fee_model.settlement_breakdown(
-                per_contract,
-                size,
-                direction,
-                bar.timestamp,
-            ) {
+            // A physically settled contract's own settlement is not charged by the
+            // schedule's settlement row: what is owed is the delivery of the
+            // underlying, a separate event priced on the cash market's delivery
+            // rates (`deliver`), so the derivative's STT is not stacked on it.
+            let settlement_row = if style == SettlementStyle::Physical {
+                None
+            } else {
+                self.fee_model.settlement_breakdown(per_contract, size, direction, bar.timestamp)
+            };
+            let (settle_breakdown, settle_fee) = match settlement_row {
                 Some(b) => {
                     let fees = self.booked_fee(b.total());
                     (
@@ -404,10 +408,14 @@ impl EngineKernel {
             let (id, size, held) = (managed.id, managed.position.size, managed.position.direction);
             let (entry_ts, entry_breakdown) = (managed.entry_timestamp, managed.entry_breakdown);
             let qty = left.min(size);
-            let (breakdown, fees) = self
-                .booked_charge(self.fee_model.breakdown(value, qty, held, false), || {
-                    self.fee_model.calculate(value, qty, held)
-                });
+            // Closing a held line with the delivery: a held long is given away
+            // (a sell); a held short is bought back.
+            let delivery =
+                self.fee_model.delivery_breakdown(value, qty, held == Direction::Short, ts);
+            let (breakdown, fees) = self.booked_charge(
+                delivery.or_else(|| self.fee_model.breakdown(value, qty, held, false)),
+                || self.fee_model.calculate(value, qty, held),
+            );
             let exit = |fee_breakdown| ExitDetails {
                 idx,
                 timestamp: ts,
@@ -443,10 +451,12 @@ impl EngineKernel {
             left -= qty;
         }
         if left > 1e-12 {
-            let (breakdown, fees) = self
-                .booked_charge(self.fee_model.breakdown(value, left, direction, true), || {
-                    self.fee_model.calculate(value, left, direction)
-                });
+            let delivery =
+                self.fee_model.delivery_breakdown(value, left, direction == Direction::Long, ts);
+            let (breakdown, fees) = self.booked_charge(
+                delivery.or_else(|| self.fee_model.breakdown(value, left, direction, true)),
+                || self.fee_model.calculate(value, left, direction),
+            );
             // A line the account cannot fund by rule is still delivered:
             // carried at its notional, as a cash account carries a line.
             let funding = self.entry_funding(direction, price).unwrap_or(None);

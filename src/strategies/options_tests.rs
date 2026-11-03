@@ -162,7 +162,8 @@ fn the_metrics_summary_reports_the_costs_charged() {
 
 #[test]
 fn an_itemized_segment_reports_its_components() {
-    // Brokerage is a flat Rs 20 per order, which no percentage rate can
+    // The built-in row is the statutory schedule (transaction tax on the sell,
+    // exchange charge, stamp duty on the buy), which no percentage rate can
     // express -- and `fee_breakdown` was hard-coded None, so a configured
     // segment reached the model and reported nothing.
     let result = costed_run(100.0, 0.001, Some("NFO-OPT"), 50, false);
@@ -170,13 +171,14 @@ fn an_itemized_segment_reports_its_components() {
     let trade = &result.trades[0];
     let breakdown = trade.fee_breakdown.expect("an itemized segment reports its components");
 
-    assert_eq!(breakdown.brokerage, 40.0, "2 orders (entry, exit) x Rs 20");
+    assert_eq!(breakdown.brokerage, 0.0, "a built-in row carries no brokerage");
+    assert!((breakdown.stt - 7.5).abs() < 1e-9, "0.15% of the 5000 premium sold");
     assert!(
         (breakdown.total() - trade.fees).abs() < 1e-9,
         "the itemized total is the money actually charged"
     );
     assert!((trade.fees - (trade.entry_fees + trade.exit_fees)).abs() < 1e-9);
-    assert!(trade.fees > 40.0, "real costs dwarf the 10.00 flat rate here: {}", trade.fees);
+    assert!(trade.fees > 10.0, "real costs exceed the 10.00 flat rate here: {}", trade.fees);
 }
 
 #[test]

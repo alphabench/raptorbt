@@ -15,7 +15,18 @@ the rule says so. Two things build on it:
   ``{"roll": role, "from": old, "to": new}``. A venue may refuse the close (a reduce-only order
   with nothing to reduce, a halted strategy): the open is then never sent, so the exposure is
   never doubled, and ``on_roll_failed`` is called (it raises unless you override it). Without
-  ``auto_roll`` the strategy rolls its own positions, in ``on_roll``. The roll's progress (the
+  ``auto_roll`` the strategy rolls its own positions, in ``on_roll``. If the open itself is
+  rejected, cancelled or expired, ``on_roll_failed`` is called for it too (the position is then
+  closed in the old contract and open in neither). The open keeps the **notional exposure**
+  (``roll_sizing = "notional"``, the default): ``N_new = floor(N_old * L_old * P_old / (L_new *
+  P_new))`` lots, where ``N`` is lots, ``L`` the lot size and ``P`` the price (times the
+  contract multiplier), the old price being the close's fill and the new one the new contract's
+  last close. The open's tags carry the lots, the notionals and the residual exposure the rounding
+  leaves, and ``on_roll_sized(ctx, roll, sizing)`` hears the same. ``roll_sizing = "lots"`` keeps the
+  lot count instead (the quantity opened is the lots closed times the new contract's lot). A roll
+  that sizes to no lot, or whose new contract has no price yet, is a failed roll
+  (``on_roll_failed``), never a silent fallback.
+  The roll's progress (the
   contract each role names, the roll counter and the opens still waiting for their close) is part
   of the strategy's ``state()``, so a restored node resumes it.
 * :func:`continuous_series`, which builds one price history from the contracts' bars under an
@@ -32,11 +43,12 @@ with :func:`~raptorbt.strategy.requirements.plan_instruments` (``roll_lead_days`
 
 from __future__ import annotations
 
+import math
 from typing import Mapping, NamedTuple, Sequence
 
 import numpy as np
 
-from raptorbt.errors import InvalidData, InvalidParameter, InvalidSubscription, StateError
+from raptorbt.errors import InvalidData, InvalidParameter, InvalidSubscription, StateError, UnknownSymbol
 from raptorbt.strategy.orders import Market
 
 _DAY = 86_400 * 10**9
@@ -78,6 +90,7 @@ class RollEvents:
 
     #: Move the strategy's positions to the new contract with orders when a role rolls.
     auto_roll = False
+    roll_sizing = "notional"
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -106,10 +119,24 @@ class RollEvents:
     def on_roll(self, ctx, roll: RollEvent) -> None:
         """A continuous role moved to another contract."""
 
+    def on_roll_sized(self, ctx, roll: RollEvent, sizing: dict) -> None:
+        """The open of a roll was sized. ``sizing`` has ``policy``, ``lots_old``, ``lots_new``,
+        ``notional_old``, ``notional_new`` and ``residual`` (the notional the rounding leaves
+        out of the new contract: old minus new, so positive is under-exposed)."""
+
     def on_roll_failed(self, ctx, roll: RollEvent, close_id: str, status: str, reason) -> None:
-        """The close of a position in the old contract ended without filling (``status`` is
-        ``rejected``, ``canceled`` or ``expired``), so its open in the new contract was not
-        sent. Raises by default: the position is still in the old contract."""
+        """A step of the roll ended without filling (``status`` is ``rejected``, ``canceled`` or
+        ``expired``). ``close_id`` names the order: a close of a position in the old contract
+        (the open in the new contract was not sent, and the position is still in the old one),
+        or, when its id ends in ``:o{k}``, the open in the new contract (the position is closed
+        and not open in the new contract). Raises by default."""
+        if close_id.rpartition(":")[2].startswith("o"):  # ids are {role}:roll{n}:c{k} and :o{k}[.part]
+            raise StateError(
+                f"auto_roll: opening {close_id!r} in {roll.to_symbol!r} ended {status} ({reason}); "
+                f"the position was closed in {roll.from_symbol!r} and is open in neither contract",
+                code="roll_open_failed",
+                operation="auto_roll",
+            )
         raise StateError(
             f"auto_roll: closing {close_id!r} in {roll.from_symbol!r} ended {status} ({reason}); "
             f"the open in {roll.to_symbol!r} was not sent and the position is still in the old contract",
@@ -228,20 +255,82 @@ class RollEvents:
                 "to": event.to_symbol,
                 "ts": event.ts_ns,
                 "left": float(p.size),
+                "from_lot": self._lot(ctx, event.from_symbol),
+                "to_lot": self._lot(ctx, event.to_symbol),
             }
             self.submit_order(
                 Market(side=closing, quantity=p.size, instrument=event.from_symbol, reduce_only=True, tags=tags),
                 client_id=close_id,
             )
 
+    def _notional_sizing(self, ctx, job, event, qty, lots_old, from_lot, to_lot):
+        """``N_new = floor(N_old * L_old * P_old / (L_new * P_new))`` and what it leaves; ``None``
+        when it is no lot. The old price is the close's fill, the new one the new contract's last
+        close (a contract with no bar yet cannot be priced: the roll fails loudly)."""
+        last = ctx.data.latest(job["to"])
+        if last is None:
+            raise StateError(
+                f"auto_roll: {job['to']!r} has no price yet, so the roll cannot keep the exposure; "
+                "feed it a bar before the roll, or set roll_sizing = 'lots'",
+                code="roll_price_missing",
+                operation="auto_roll",
+                parameter="to",
+                value=job["to"],
+            )
+        old_mult, new_mult = self._multiplier(ctx, job["from"]), self._multiplier(ctx, job["to"])
+        p_old, p_new = float(event.price), float(last.close)
+        notional_old = qty * p_old * old_mult
+        unit_new = to_lot * p_new * new_mult
+        lots_new = float(math.floor(notional_old / unit_new + 1e-9))
+        if lots_new < 1:
+            return None
+        notional_new = lots_new * unit_new
+        return {
+            "policy": "notional",
+            "lots_old": lots_old,
+            "lots_new": lots_new,
+            "notional_old": notional_old,
+            "notional_new": notional_new,
+            "residual": notional_old - notional_new,
+        }
+
+    @staticmethod
+    def _multiplier(ctx, symbol: str) -> float:
+        try:
+            return float(ctx.instrument(symbol).multiplier or 1.0)
+        except UnknownSymbol as e:
+            if e.code != "no_instrument_spec":
+                raise
+            return 1.0
+
+    @staticmethod
+    def _lot(ctx, symbol: str) -> float:
+        """The instrument spec's lot size; an instrument with no spec trades in units."""
+        try:
+            return float(ctx.instrument(symbol).lot_size)
+        except UnknownSymbol as e:
+            if e.code != "no_instrument_spec":
+                raise
+            return 1.0
+
     def _roll_orders(self, ctx, event) -> None:
-        """A close of a roll filled (send its open) or failed (say so)."""
+        """A close of a roll filled (send its open) or failed (say so); an open of a roll that
+        is rejected, cancelled or expired is a failed roll too."""
         _, _, _, pending, _ = self._roll_state()
         cid = getattr(event, "client_order_id", None)
         job = pending.get(cid)
         if job is None:
             return
         kind = event.kind
+        roll = RollEvent(job["role"], job["from"], job["to"], job["ts"])
+        if job.get("open"):
+            # The open is the last step: the job stays until the venue has taken it.
+            if kind in ("order_accepted", "order_filled"):
+                del pending[cid]
+            elif kind in ("order_rejected", "order_canceled", "order_expired"):
+                del pending[cid]
+                self.on_roll_failed(ctx, roll, cid, kind.removeprefix("order_"), getattr(event, "reject_reason", None))
+            return
         if kind == "order_filled":
             qty = min(float(event.size), job["left"])
             job["left"] -= qty
@@ -249,15 +338,52 @@ class RollEvents:
             job["part"] = part + 1
             if job["left"] <= 1e-9 * max(1.0, qty):
                 del pending[cid]
+            from_lot, to_lot = job.get("from_lot", 1.0), job.get("to_lot", 1.0)
             tags = {"roll": job["role"], "from": job["from"], "to": job["to"]}
+            open_qty = qty
+            policy = self.roll_sizing
+            if policy not in ("notional", "lots"):
+                raise InvalidParameter(
+                    f"roll_sizing is 'notional' or 'lots', got {policy!r}",
+                    code="invalid_roll_sizing",
+                    operation="auto_roll",
+                    parameter="roll_sizing",
+                    value=policy,
+                    valid=["notional", "lots"],
+                )
+            lots_old = qty / from_lot
+            if policy == "lots":
+                # The same number of lots in the new contract's lot.
+                if from_lot != to_lot:
+                    open_qty = lots_old * to_lot
+                    tags["lots"] = f"{lots_old:g}"
+                    tags["lot_size"] = f"{from_lot:g}->{to_lot:g}"
+            else:
+                sizing = self._notional_sizing(ctx, job, event, qty, lots_old, from_lot, to_lot)
+                if sizing is None:
+                    del pending[cid]
+                    self.on_roll_failed(ctx, roll, cid, "zero_size", "the new contract's notional is below one lot of it")
+                    return
+                open_qty = sizing["lots_new"] * to_lot
+                tags.update(
+                    roll_sizing="notional",
+                    lots=f"{lots_old:g}->{sizing['lots_new']:g}",
+                    notional_old=f"{sizing['notional_old']:.2f}",
+                    notional_new=f"{sizing['notional_new']:.2f}",
+                    residual=f"{sizing['residual']:.2f}",
+                )
+                self.on_roll_sized(ctx, roll, sizing)
             # One open per fill of the close, for the quantity that fill closed.
+            open_id = job["open_id"] if part == 0 else f"{job['open_id']}.{part}"
+            pending[open_id] = {
+                "open": True, "role": job["role"], "from": job["from"], "to": job["to"], "ts": job["ts"],
+            }  # fmt: skip
             self.submit_order(
-                Market(side=job["side"], quantity=qty, instrument=job["to"], tags=tags),
-                client_id=job["open_id"] if part == 0 else f"{job['open_id']}.{part}",
+                Market(side=job["side"], quantity=open_qty, instrument=job["to"], tags=tags),
+                client_id=open_id,
             )
         elif kind in ("order_rejected", "order_canceled", "order_expired"):
             del pending[cid]
-            roll = RollEvent(job["role"], job["from"], job["to"], job["ts"])
             self.on_roll_failed(ctx, roll, cid, kind.removeprefix("order_"), getattr(event, "reject_reason", None))
 
 

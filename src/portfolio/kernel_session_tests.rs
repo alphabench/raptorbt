@@ -57,13 +57,15 @@ fn rejection_of(events: &[EngineEvent]) -> Option<&'static str> {
     })
 }
 
+/// The NSE calendar with a 15:20 square-off, which most tests here are about
+/// (the preset itself carries none).
 fn nse() -> Option<SessionSchedule> {
-    Some(SessionSchedule::nse_equity())
+    Some(SessionSchedule::nse_equity().with_squareoff_minute(Some(15 * 60 + 20)).unwrap())
 }
 
 /// The NSE calendar without a square-off, for tests that are not about it.
 fn nse_no_squareoff() -> Option<SessionSchedule> {
-    nse().map(|s| s.with_squareoff_minute(None).unwrap())
+    Some(SessionSchedule::nse_equity())
 }
 
 #[test]

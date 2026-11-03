@@ -264,8 +264,11 @@ impl PyMarginModel {
     }
 }
 
-/// The worst expiry loss of `[(spec, quantity, price), ...]` option legs at
-/// expiry, evaluated on the strike grid plus far ends.
+/// The worst loss of `[(spec, quantity, price), ...]` legs at the option
+/// expiry over every underlying price from zero up: exact on the strikes and
+/// the slope above the highest one, `inf` when the position keeps losing as
+/// the price rises. Future and cash legs are included; option legs must share
+/// one expiry.
 #[pyfunction(name = "defined_risk")]
 pub fn defined_risk_py(legs: Vec<PyLine<'_>>) -> PyResult<f64> {
     defined_risk(&lines(&legs)).map_err(model_err)

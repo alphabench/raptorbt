@@ -1142,7 +1142,7 @@ def _dry_run(strategy_cls: type, req: Requirements) -> list[Issue]:
         # it warns again in the real run, so the probe does not repeat it.
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="register_indicator", category=UserWarning)
-            run_strategies([(strategy, list(plan.symbols))], data, BacktestConfig(initial_capital=1_000_000.0),
+            run_strategies([(strategy, list(plan.symbols))], data, BacktestConfig(initial_capital=1_000_000.0, session_tz_offset_ns=0),
                            instruments=listed or None, account_type="margin" if listed else "cash",
                            bar_stamp="close")
     except Exception as exc:  # the strategy's own code: reported, never hidden

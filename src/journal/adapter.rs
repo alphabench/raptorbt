@@ -94,7 +94,12 @@ impl Outcome {
             "fenced" => Outcome::Fenced(m),
             "unknown_outcome" => Outcome::Unknown,
             "not_sent" => Outcome::NotSent,
-            _ => Outcome::Error(m),
+            "error" => Outcome::Error(m),
+            // A status this code never writes: the record is not the journal's own. Say so,
+            // rather than reading it as an ordinary error.
+            other => Outcome::Error(format!(
+                "the journal holds an adapter result with the unknown status {other:?}: {m}"
+            )),
         }
     }
 
@@ -219,7 +224,12 @@ impl JournalingAdapter {
         match j.peek_expected() {
             Some(next) if next.record.kind == kind::ADAPTER_RESULT => {
                 let payload = &next.record.payload;
-                let status = payload.get("status").and_then(Value::as_str).unwrap_or("error");
+                let Some(status) = payload.get("status").and_then(Value::as_str) else {
+                    // An adapter_result always names its status; one that does not is damaged.
+                    return Outcome::Error(
+                        "the journal holds an adapter result with no status".to_string(),
+                    );
+                };
                 let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
                 Outcome::from_status(status, message)
             }
@@ -230,7 +240,7 @@ impl JournalingAdapter {
 
 /// An order request as the journal states it.
 pub fn request_value(req: &OrderRequest) -> Value {
-    Value::map([
+    let mut value = Value::map([
         ("client_order_id", Value::str(&req.client_order_id)),
         ("symbol", Value::str(&req.symbol)),
         ("side", Value::str(format!("{:?}", req.side).to_lowercase())),
@@ -245,7 +255,13 @@ pub fn request_value(req: &OrderRequest) -> Value {
         ("tags", Value::Map(req.tags.iter().map(|(k, v)| (k.clone(), Value::str(v))).collect())),
         ("submitted_ns", Value::Int(req.submitted_ns)),
         ("submitted_idx", Value::Int(req.submitted_idx as i64)),
-    ])
+    ]);
+    // Written only when set (hedging), so the records of an order that names no position are the
+    // bytes they always were and an older journal replays.
+    if let (Some(position_id), Value::Map(m)) = (req.position_id, &mut value) {
+        m.insert("position_id".to_string(), Value::Int(position_id as i64));
+    }
+    value
 }
 
 /// A change request as the journal states it.

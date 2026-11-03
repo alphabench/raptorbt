@@ -25,7 +25,7 @@ A settlement price is never guessed. It is one of:
 | a number | the price you declared for the contract (an exchange's final settlement price). For a physical option it is the *underlying's* final price, which decides exercise | `declared` |
 | `"last_price"` | the contract's own last price: the close of the bar at or after the expiry, or the last price seen when the expiry passes with no bar | `last_price` |
 | `"underlying"` | the underlying's price: an option settles to intrinsic value against it, a future at the price itself. Taken from `set_underlying_price` when you supplied one, else from the underlying's last close in the same run. Without either the settlement is refused | `underlying` |
-| `"auto"` (default) | an option settles to intrinsic value when you supplied the underlying's price (`set_underlying_price`), otherwise at its last price; every other contract at its last price | `underlying` or `last_price`, whichever was used |
+| `"auto"` (default) | an option settles to intrinsic value against the underlying's price when the run has one — `set_underlying_price`, else the underlying's print at the expiry instant when the underlying is registered in the run (the contract waits for that print if its own bar comes first, so the price never depends on which symbol is listed first) — and at its own last price when it has neither; every other contract at its last price | `underlying` or `last_price`, whichever was used |
 
 A price the terms need but the run never gave refuses the settlement: the
 position stays open, `on_contract_event` hears `lifecycle_refused` once with a
@@ -70,19 +70,160 @@ Priced on the fee schedule the run uses (`BacktestConfig(fee_schedule=...,
 fee_segment=...)`): the schedule's `SETTLEMENT` row for the venue and segment
 in force on the settlement's date, on the closing side, on the settlement
 value. A schedule with no settlement row for the segment falls back to the
-instrument's `settlement_fee` fraction, and otherwise charges nothing. A
-physical option is charged on its intrinsic (exercise) value, not on the
-nothing it closes at.
+instrument's `settlement_fee` fraction, and otherwise charges nothing.
 
-## Fee rows by date, and the per-instrument-day fee
+The statutory events stay separate:
 
-With a fee schedule, a fill on day D is charged by the row whose
-`effective_from` is the latest at or before D (the venue's trading date, from
-`session_tz_offset_ns`). A fill earlier than every row takes the earliest. A
-row that names an underlying (an agricultural commodity) beats the general row
-for instruments declaring that underlying. The per-instrument-day fee (the
-depository charge on a delivery sell) is owed by the first fill of a trading
-date that carries it, once per instrument and date.
+- **Exercise STT** is the settlement row of a cash-settled option. The built-in
+  NFO and BFO schedule carries it: 0.15% of the *intrinsic* value, charged to
+  the buyer (the line closing a long) and to no one else. An option that expires
+  worthless settles at an intrinsic value of zero and owes nothing; a writer
+  owes no exercise STT.
+- **Physical delivery** (a stock future, or an exercised stock option) is a
+  delivery event of its own on the underlying: the stock leg is charged at the
+  cash market's delivery rates (STT on both sides, stamp duty on the buyer; NFO
+  maps to NSE, BFO to BSE), whatever segment the derivative is priced in. The
+  derivative's own settlement is not charged by the schedule's settlement row,
+  so its STT is not stacked on the delivery's. The depository charge, owed when
+  delivered stock is later sold, belongs to that later sale.
+- **Index options and futures** are cash-settled at the underlying's print at
+  the expiry instant. For an index that print is the official closing value the
+  caller supplies for the instant; the engine takes no average or VWAP of
+  anything.
+
+## Fee rows: by instrument, by date
+
+`FeeSchedule.exchange_presets()` is the dated statutory schedule, stored in
+rupees per crore of each row's base (`row["per_crore"]`; a fraction would carry
+the conversion's rounding) with every component separate and the base, side,
+`effective_from` and `effective_until` on the row: exchange transaction charge,
+investor protection fund contribution (IPFT, the `ipft` part), SEBI fee,
+transaction tax (STT, CTT) on the side that owes it, stamp duty on the buyer, and
+GST at 18% of exchange + IPFT + SEBI (IPFT is included conservatively). The base
+is turnover, premium (an option's trade), intrinsic value (an exercised option's
+settlement row) or delivery value.
+
+| Rows | Figure | From | Source / status |
+| --- | --- | --- | --- |
+| NSE cash, NFO futures, NFO options | exchange 297 / 173 / 3,503 + IPFT 10 / 10 / 50 per crore; from 2026-03-01 306.99 / 182.99 / 3,552 + 0.01 | 2024-10-01 / 2026-03-01 | NSE/FA/73061, confirmed |
+| STT | delivery 0.1% both sides, intraday 0.025% sell; futures 0.02% then 0.05%, options 0.1% then 0.15% on the sell; exercised options 0.125% then 0.15% on the buyer's intrinsic value | 2026-04-01 for the second figure | Finance Act, confirmed |
+| CTT | non-agri futures 0.01% sell, options 0.05% sell, a commodity option exercised 0.0001% on intrinsic value, agricultural futures none | 2024-10-01 | Finance Act, confirmed (the MCX exchange charges are not) |
+| SEBI fee, stamp duty | 10 per crore (agricultural commodities 1); stamp 1,500 / 300 / 200 / 300 / 10 per crore | 2020 and 2019 | confirmed |
+| BSE currency | futures 45, options 100 per crore of premium | 2024-10-01 | BSE Notice 20240927-36, confirmed |
+| BSE cash by scrip group, every BFO row, NSE currency, MCX and agricultural exchange charges | BSE A/B 375; BFO Sensex and Bankex options 3,250, Sensex 50 and stock options 500, futures nil; CDS futures 35, options 3,110; MCX futures 210, options 4,180 per crore | 2024-10-01 | `unverified` |
+
+A row that is not matched to an official publication is `unverified`, and its
+figure is stored with its source rather than as a zero; where the sources
+publish no IPFT for a segment the row says it charges none. Every result
+(`BacktestResult.unverified_fee_rows`, `PortfolioResult.result`, `full_report`)
+lists the unverified rows it priced fills on, as `VENUE:SEGMENT[:KEY]`, so no one
+mistakes the costs for exchange-accurate. BSE cash charges depend on the scrip
+group: set `InstrumentSpec.scrip_group` (`"A"` or `"B"` are priced); an
+instrument without one, or with another, is refused (`fee_schedule_gap`) naming
+the groups. A fill before the first row (2024-10-01) is priced on it. The
+presets carry no brokerage and no depository charge: those come from a broker's
+`RateCard`, where the card says per order.
+`tests/python/fixtures/statutory_fees.json` holds the schedule and
+`tests/python/test_statutory_fees.py` proves the presets equal it on every date.
+
+With a fee schedule, an instrument is priced on the row its own venue and kind
+select: a `Contract` the futures row, an `Option` the options row, cash equity
+the delivery row (the intraday row when the run squares positions off the same
+day). The venue comes from `InstrumentSpec.venue`; an instrument without one,
+or a venue the schedule does not price, is refused (`fee_schedule_gap`) when it
+is registered. `fee_segment` is an explicit override: one venue and segment for
+every instrument.
+
+A fill on day D is charged by the row whose `effective_from` is the latest at
+or before D (the venue's trading date, in the instrument's session zone, else
+`session_tz_offset_ns`). A row that names an underlying (an agricultural
+commodity) beats the general row for instruments declaring that underlying.
+The per-instrument-day fee (the depository charge on a delivery sell, from a
+card) is owed by the first fill of a trading date that carries it, once per
+instrument and date. A brokerage that a card says is per order is charged by
+the kernel on each fill; an order that fills in several slices
+(`partial_fills`) therefore pays the flat amount per slice, which is open.
+
+## Sessions
+
+`SessionSchedule` decides what trades on a local date in this order: a
+per-date override (a special session, Muhurat trading, a half day; empty
+windows close the date), the holiday set, the latest dated window change that
+covers the date, the base weekday windows. Presets (`nse_equity`, `bse_equity`,
+`nse_fo`, `bse_fo`, `mcx`, `cds`, `bcd`) carry no holidays and no square-off;
+the equity-derivatives close is 15:30 until 2026-07-31 and 15:40 from
+2026-08-03 (that date has a single source, so the 15:30 close before it is
+unverified); MCX has a day session to 17:00 and an evening session whose close
+follows the exchange's dated periods: 23:55 from 2024-11-04, 23:30 from
+2025-03-10, 23:55 from 2025-11-03, 23:30 from 2026-03-09, 23:55 from 2026-11-02
+(the first two are in the exchange circulars NSE/COM/64245 and NSE/COM/66555, the
+rest follow the seasonal pattern and are not matched to a circular); the
+internationally referenceable agricultural contracts (`mcx_select_agri()`) close
+at 21:00. Dates before 2024-11-04 are closed, not guessed (`schedule.coverage`),
+and need a calendar document. NSE currency on INR pairs trades 09:00-17:00
+(`cds()`), on cross-currency pairs 09:00-19:30 (`cds_cross()`). Muhurat trading on
+2026-11-08 has no preset: its times were not notified, so add them with
+`with_session_override(20261108, [(open, close)])`. A bar on such a date raises `session_not_covered`
+(naming the date and the covered ranges) in `run_strategies`,
+`run_strategy_backtest` and `LiveNode.push_bar`, so it cannot be read as a
+holiday.
+
+A dated calendar document loads a venue's schedule:
+`SessionSchedule.from_calendars(venue, [json, ...])`.
+
+```json
+{"name": "calendar-2026-q4", "utc_offset": "+05:30",
+ "valid_from": "2026-09-28", "valid_to": "2026-12-31",
+ "sessions": {"NSE": {"open": "09:15", "close": "15:30"},
+              "MCX": {"windows": [["09:00", "17:00"], ["17:00", "23:55"]]}},
+ "holidays": [{"date": "2026-10-02", "venues": ["NSE", "MCX"]}],
+ "overrides": [{"venue": "MCX", "date": "2026-10-20", "open": "17:00", "close": "23:55"},
+               {"venue": "NSE", "date": "2026-11-08", "windows": [["18:15", "19:15"]]}]}
+```
+
+`sessions` windows apply Monday to Friday unless `"weekdays"` says otherwise;
+an override opens a date whatever the weekday or holiday set says
+(`"closed": true` closes it). Holidays and overrides are the caller's own data:
+the crate ships none. Several documents share one `utc_offset`; the later one
+answers for the dates it covers, and a date no document covers is closed, not
+guessed. Intraday composite bars of an instrument with a schedule start at the
+open of the window they fall in and end at its close.
+
+## Defaults that follow the instrument
+
+Order validity is a capability of the exchange segment, not a global enum. NSE
+equity cash holds good-till-cancelled and good-till-date orders itself; NSE
+commodity does too, with a date no later than the contract's maturity; NSE
+equity derivatives, currency (NSE and BSE: BSE currency is end of session), BSE
+and MCX are established as day orders only. An order that names no time in force
+(`tif="auto"`) is `day` on an instrument with a session or on a day-only
+segment, and `gtc` otherwise. An explicit `gtc` or `gtd` on a segment without
+native support is refused (`order_validity_unsupported`, naming `day`, `ioc`,
+`fok`); a broker that keeps an order alive by resubmitting it every day is the
+host's business and not the exchange's validity. The segment comes from
+`InstrumentSpec.venue`; an instrument with no venue allows everything.
+
+A position is squared off only when the run asks (`squareoff_time`, read in the
+instrument's session zone, else `session_tz_offset_ns`; refused with neither) or
+the strategy's `requirements.holding` is `Holding.intraday(flatten_before=...)`.
+
+Annualisation counts trading periods, one rule everywhere (`full_report`, the
+metrics of every runner, the tick path): an explicit `periods_per_year` wins;
+else `session_minutes` (bars per session times 252); else the instrument's
+session schedule when it has one (its trading minutes per day times 252); else
+what the data shows, the median number of observations per local day times 252.
+Nights and weekends add no periods; only `session_minutes=0`, naming a market
+that never closes, counts calendar time. `session_tz_offset_ns` defaults to none
+(days are UTC dates).
+
+Tick size comes from the `InstrumentSpec` (`price_increment`), which the host
+loads from the exchange's contract master. It is not a constant: NSE stock-option
+ticks are 0.01 below an underlying price of 250 and 0.05 at or above it
+(NSE/FAOP/70382, 23 September 2025, in force from 3 November 2025), reviewed
+monthly on the underlying's close of the last trading day, so a host that
+trades stock options must reload the master each month. Index options and
+futures follow their contract specifications. An off-tick price is refused
+against the spec's tick.
 
 ## Corporate actions
 
@@ -100,6 +241,16 @@ run_strategies([s], data, corporate_actions=actions, adjustment_policy="raw")
 symbol without data is refused (`unknown_symbol`).
 
 ### Adjustment policy
+
+A live node takes `raw` only. `adjusted` puts every bar before a split on the
+basis after it, which a batch run can do because it holds the whole series. A
+node is fed bar by bar: when the ex-date arrives, the bars already pushed, the
+indicator state and composite bars built on them (an EMA carries all its
+history), and the orders priced from them are on the old basis, and restating
+them would mean replaying the whole feed. So `adjusted` is refused
+(`invalid_adjustment_policy`) with that reason. Run `raw` (positions are
+rescaled at the ex-date), or push history already adjusted and declare no
+action inside it.
 
 | Policy | History the strategy sees | The position |
 | --- | --- | --- |

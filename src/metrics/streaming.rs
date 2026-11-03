@@ -32,9 +32,6 @@ pub struct StreamingMetrics {
     count_negative: usize,
 
     // === Equity and drawdown tracking ===
-    /// Initial capital.
-    #[allow(dead_code)]
-    initial_capital: f64,
     /// Peak equity value (for drawdown calculation).
     peak_equity: f64,
     /// Current equity value.
@@ -111,7 +108,6 @@ impl StreamingMetrics {
             count_positive: 0,
             count_negative: 0,
             // Equity tracking
-            initial_capital,
             peak_equity: initial_capital,
             current_equity: initial_capital,
             max_drawdown_pct: 0.0,

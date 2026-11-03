@@ -26,6 +26,34 @@ pub(crate) fn parse_policy(text: Option<&str>) -> PyResult<AdjustmentPolicy> {
     text.map(AdjustmentPolicy::parse).transpose().map_err(policy_err).map(Option::unwrap_or_default)
 }
 
+/// Refuse corporate actions given to an array runner that cannot apply them.
+///
+/// They are not dropped: a split or a dividend that never reached the book
+/// would change the run's shares and cash with no sign in the result. The
+/// runners that apply them are named in the error.
+pub(crate) fn refuse_corporate_actions(
+    operation: &str,
+    actions: &Option<Vec<PyCorporateAction>>,
+) -> PyResult<()> {
+    match actions {
+        Some(given) if !given.is_empty() => Err(Fail::new(
+            "unsupported_corporate_actions",
+            format!(
+                "{operation} cannot apply corporate actions, and refuses them rather than \
+                 ignoring them; use run_single_backtest (one instrument), run_strategy_backtest \
+                 (one instrument, class-based) or run_strategies (several)"
+            ),
+        )
+        .op(operation)
+        .param("corporate_actions")
+        .value(given.len() as i64)
+        .valid(["run_single_backtest", "run_strategy_backtest", "run_strategies"])
+        .skill("execution")
+        .into()),
+        _ => Ok(()),
+    }
+}
+
 /// A corporate action on one instrument: a split, a bonus or a cash dividend.
 ///
 /// `ts` is the ex-date's first instant in nanoseconds. A split or bonus

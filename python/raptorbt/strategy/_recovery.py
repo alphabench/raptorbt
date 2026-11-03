@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from raptorbt import journal as jr
 from raptorbt.errors import InvalidData, InvalidParameter, StateError, UnsupportedOperation
+from raptorbt.execution import AdapterError
 from raptorbt.journal import Discrepancy
 
 # Strategy methods a live node calls itself (not routed through api.HOOKS): the recovery sequence
@@ -214,14 +215,22 @@ def restore(
     built_epoch = journal_epochs[0] if journal_epochs else None
     last_epoch = journal_epochs[-1] if journal_epochs else None
     epoch = kwargs.pop("epoch", None)
-    if epoch is None:
-        epoch = last_epoch
-    if epoch is not None and last_epoch is not None and epoch < last_epoch:
-        raise StateError(
-            f"restore() was given epoch {epoch}, but the journal already holds epoch "
-            f"{last_epoch}: a node does not go back to an older epoch",
-            code="stale_epoch", operation="LiveNode.restore",
-        )
+    if last_epoch is not None:
+        # A journal that holds an epoch belongs to a node that fenced the account with it. The
+        # node that restores it takes the account over, and only a newer epoch fences the old
+        # one: restoring under the epoch the journal ends on would leave two nodes with one.
+        if epoch is None:
+            raise StateError(
+                f"the journal holds epoch {last_epoch}: restore() needs epoch= greater than it, "
+                "so the node that wrote it is fenced out",
+                code="epoch_required", operation="LiveNode.restore",
+            )
+        if epoch <= last_epoch:
+            raise StateError(
+                f"restore() was given epoch {epoch}, but the journal already holds epoch "
+                f"{last_epoch}: a restored node takes a newer one, and never an older or the same",
+                code="stale_epoch", operation="LiveNode.restore",
+            )
     if epoch is not None and kwargs.get("execution") is not None and not getattr(
         kwargs["execution"], "can_fence", False
     ):
@@ -255,6 +264,7 @@ def restore(
     if node._adapter_kind != "adapter":
         return node
     node._state = "recovering"
+    _teach_adapter(node)
     if reconcile == "skip":
         node._resume_record({"skipped": True})
         node._state = "live"
@@ -265,6 +275,30 @@ def restore(
         elif accept is not None:
             node.resume(accept=accept)
     return node
+
+
+def _teach_adapter(node) -> None:
+    """Give a fresh adapter the orders the rebuilt node holds as working at the venue.
+
+    The replay ran with the adapter muted, so an adapter built after the restart has never
+    seen them. Without this it ignores their fills and refuses to cancel them. An adapter with
+    no ``restore_orders`` (a venue of your own) is left as it is: it keeps its own records."""
+    teach = getattr(node._execution, "restore_orders", None)
+    if not callable(teach):
+        return
+    rows = [
+        {"request": req, "status": status, "filled_qty": filled, "avg_price": avg}
+        for req, status, filled, avg in node._rt.working_requests()
+    ]
+    try:
+        teach(rows)
+    except AdapterError as e:
+        node._rt.close()
+        raise StateError(
+            f"the adapter cannot account for the orders this node holds as working: {e}. "
+            "A restored node must be able to cancel and follow them",
+            code="adapter_cannot_adopt", operation="LiveNode.restore",
+        ) from e
 
 
 def _check_namespace(start_payload: dict, adapter) -> None:
@@ -439,12 +473,19 @@ def venue_positions(raw) -> dict[str, float]:
 
 
 def venue_cash(raw) -> tuple[float | None, dict]:
-    """``(cash, snapshot)`` of what an adapter's ``balances()`` returned: a ``{"cash": x}``
-    mapping, or an object with ``available`` (the :class:`~raptorbt.adapters.VenueBalances`
-    a broker adapter returns; its ``available`` is the cash compared, its ``currency`` is
-    kept in the record)."""
+    """``(cash, snapshot)`` of what an adapter's ``balances()`` returned.
+
+    A ``{"cash": x}`` mapping is compared as it is. A :class:`~raptorbt.adapters.VenueBalances`
+    is compared like with like: the node's cash is what the account holds *before* margin is
+    set aside for positions, so the balance it is compared with is the venue's ``total`` (the
+    whole balance) when the broker gives one, else ``available + used``. ``available`` alone is
+    what is left to trade with after margin, which the node's cash is not: it is never compared
+    on its own (``cash`` is ``None`` and the snapshot says what was missing). The snapshot's
+    ``compared`` names the field used."""
     if isinstance(raw, Mapping):
         snap = {k: _f(v) if isinstance(v, (int, float)) else v for k, v in sorted(raw.items())}
+        if raw.get("cash") is not None:
+            snap["compared"] = "cash"
         return (None if raw.get("cash") is None else float(raw["cash"])), snap
     available = _get(raw, "available")
     if available is None:
@@ -452,11 +493,17 @@ def venue_cash(raw) -> tuple[float | None, dict]:
             f"balances() returned neither a mapping with 'cash' nor an object with 'available': {raw!r}",
             code="invalid_execution", operation="LiveNode.reconcile", parameter="balances",
         )
-    snap = {"cash": float(available), "currency": _get(raw, "currency")}
+    snap = {"available": float(available), "currency": _get(raw, "currency")}
     for name in ("used", "total"):
         if _get(raw, name) is not None:
             snap[name] = float(_get(raw, name))
-    return float(available), snap
+    if "total" in snap:
+        snap["compared"] = "total"
+        return snap["total"], snap
+    if "used" in snap:
+        snap["compared"] = "available + used"
+        return float(available) + snap["used"], snap
+    return None, snap
 
 
 def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
@@ -492,9 +539,19 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
             venue[cid] = o
         snapshot["open_orders"] = sorted(venue)
         known = {row[0] for row in sent}
+        # Orders an exit rule held at the venue will make: the venue lists them only once the
+        # rule fires, so their absence from its open orders is not a missing order.
+        held = set(rt.venue_held_orders())
         for cid, strat, sym, side, qty, filled, status in sent:
             ours = status in _WORKING
             theirs = venue.get(cid)
+            if ours and theirs is None and cid in held:
+                if cid in unconfirmed:
+                    found.append(Discrepancy(
+                        "exit_rule_unconfirmed", sym, cid, status, None,
+                        "the venue may hold the exit rule that fires this order: its answer is unknown",
+                    ))
+                continue
             if ours and theirs is None:
                 why = "its request has no confirmed outcome" if cid in unconfirmed else "the venue lists it as not open"
                 found.append(Discrepancy("missing_order", sym, cid, status, None, why))
@@ -514,6 +571,22 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
     if has_positions:
         theirs = venue_positions(adapter.positions())
         snapshot["positions"] = dict(sorted(theirs.items()))
+        # A position the broker names by its own key and the adapter could not map to a symbol
+        # of this node is not compared with anything: say so, never skip it.
+        resolve = getattr(adapter, "symbol_of", None)
+        mine_symbols = set(node._symbols)
+        for key, vq in sorted(theirs.items()):
+            if key in mine_symbols:
+                continue
+            sym = resolve(key) if callable(resolve) else None
+            if sym is not None and sym in mine_symbols:
+                theirs.pop(key)
+                theirs[sym] = theirs.get(sym, 0.0) + vq
+                continue
+            found.append(Discrepancy(
+                "unmapped_position", key, None, None, vq,
+                "the venue holds a position under a key that is no symbol of this node",
+            ))
         for sym in node._symbols:
             mine = sum(
                 p.direction * float(p.size)
@@ -526,10 +599,16 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
                 found.append(Discrepancy("position_mismatch", sym, None, mine, vq, ""))
     if has_balances:
         cash, snapshot["balances"] = venue_cash(adapter.balances())
+        field = snapshot["balances"].get("compared")
         if cash is not None:
             mine = sum(float(v.cash()) for v in node._views)
             if abs(mine - cash) > cash_tolerance:
-                found.append(Discrepancy("cash_mismatch", None, None, mine, cash, ""))
+                found.append(Discrepancy(
+                    "cash_mismatch", None, None, mine, cash,
+                    f"the node's cash against the venue's {field or 'cash'}, tolerance {cash_tolerance}",
+                ))
+        else:
+            snapshot["balances"]["compared"] = field or "none: the venue gave no balance comparable with the node's cash"
     ts = rt.clock()[0]
     node._journal.append("reconcile", ts, {"found": len(found), "venue": snapshot}, source="host")
     for d in found:

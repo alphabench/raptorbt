@@ -181,7 +181,9 @@ def test_symbol_less_indicators_and_subscriptions_follow_a_new_instrument():
                 self.seen.append(ctx.symbol)
 
     s = Indic()
-    node = LiveNode([s], ["A"], CONFIG, bar_stamp="close", history=16)
+    # the symbol-less registration is the case under test, so its warning is expected
+    with pytest.warns(UserWarning, match="register_indicator"):
+        node = LiveNode([s], ["A"], CONFIG, bar_stamp="close", history=16)
     run(node, feed(["A"], 0, 6))
     before = s.fast.update_count
     node.add_instrument("B", spec("B"))

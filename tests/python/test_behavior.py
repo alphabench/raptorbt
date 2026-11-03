@@ -163,7 +163,10 @@ def test_daily_annualization_is_unchanged(daily):
 def test_intraday_sharpe_uses_session_count(intraday):
     """1-minute bars annualized as daily understate Sharpe by ~sqrt(94500/365)."""
     entries, exits = sma_crossover(intraday)
-    correct = run(intraday, entries, exits, initial_capital=500_000.0, fees=0.0003)
+    correct = run(
+        intraday, entries, exits, initial_capital=500_000.0, fees=0.0003,
+        session_minutes=raptorbt.SESSION_NSE,
+    )
     as_daily = run(
         intraday,
         entries,
@@ -174,6 +177,27 @@ def test_intraday_sharpe_uses_session_count(intraday):
     )
     ratio = abs(correct.metrics.sharpe_ratio / as_daily.metrics.sharpe_ratio)
     assert ratio == pytest.approx(math.sqrt(94_500.0 / 365.0), rel=0.01)
+
+
+def test_no_session_is_assumed_when_none_is_given(intraday):
+    """With no ``session_minutes`` the trading day is what the data shows: observations per day x 252.
+
+    Nights and weekends add no return periods, so a one-minute series is not annualised on
+    calendar time (525,600 a year), and no NSE session is assumed.
+    """
+    entries, exits = sma_crossover(intraday)
+    unnamed = run(intraday, entries, exits, initial_capital=500_000.0, fees=0.0003)
+    continuous = run(
+        intraday, entries, exits, initial_capital=500_000.0, fees=0.0003, session_minutes=0.0
+    )
+    _, counts = np.unique(intraday["timestamps"] // (86_400 * 10**9), return_counts=True)
+    per_day = float(np.median(counts))
+    named = run(
+        intraday, entries, exits, initial_capital=500_000.0, fees=0.0003,
+        periods_per_year=per_day * 252,
+    )
+    assert unnamed.metrics.sharpe_ratio == pytest.approx(named.metrics.sharpe_ratio)
+    assert unnamed.metrics.sharpe_ratio != pytest.approx(continuous.metrics.sharpe_ratio)
 
 
 def test_mcx_session_scales_annualization(intraday):
@@ -272,7 +296,7 @@ def test_fee_breakdown_reconciles_with_charged_fees(daily):
 
 
 def test_gst_is_not_levied_on_taxes(daily):
-    """GST applies to brokerage/exchange/SEBI, never to STT or stamp duty."""
+    """GST applies to brokerage/exchange/SEBI/IPFT, never to STT or stamp duty."""
     entries, exits = sma_crossover(daily)
     r = run(
         daily,
@@ -283,7 +307,8 @@ def test_gst_is_not_levied_on_taxes(daily):
         fee_segment="NSE-DELIVERY",
     )
     b = r.trades()[0].fee_breakdown
-    expected = 0.18 * (b["brokerage"] + b["exchange_txn"] + b["sebi_fee"])
+    # GST is on brokerage, exchange charge, SEBI fee and IPFT (the IPFT conservatively included)
+    expected = 0.18 * (b["brokerage"] + b["exchange_txn"] + b["ipft"] + b["sebi_fee"])
     assert b["gst"] == pytest.approx(expected, rel=1e-9)
 
 

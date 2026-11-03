@@ -56,6 +56,83 @@ schedule (`src/data/feed.rs`, `Entry::key`). Live pushes are the exception by
 design: they are appended in arrival order after the sealed batch data, and
 arrival order is the schedule.
 
+### Equal timestamps
+
+Events at one timestamp are delivered one at a time in the stream registration
+order above, which follows the order of the caller's mapping. **This is a known
+defect:** what a decision on `IDX` at `t` sees of `FA`, and which
+bar of `FA` a cross-instrument order fills on, depend on that order. The fix is
+the two-phase rule in "Equal timestamps: the two-phase rule (design)" below.
+A `LiveNode` has no mapping: its schedule is the arrival order of the pushes.
+
+An order for another instrument (`instrument=` on the order) is placed on that
+instrument's own clock. Under `next_bar_open` it fills at the open of the
+target's first bar stamped strictly after the decision, never at a bar that
+closed at or before it, whichever event at `t` was applied first.
+
+## Equal timestamps: the two-phase rule (design)
+
+Status: designed, not built. The fix for "a result depends on the
+order the mapping lists its symbols in".
+
+**The rule.** For one timestamp `t` and one event kind (trades, then quotes,
+then depth, then bars, as in the merge key), every instrument's events at `t`
+are *applied* before any decision taken at `t` is *matched*:
+
+1. **Apply.** Each event at `t` is ingested in turn: the market store and the
+   data views a strategy reads (`ctx.data`, history, indicators, aggregators),
+   the book's marks, and the lifecycle (corporate actions, expiries). Nothing
+   is decided and no order is matched yet. Afterwards every instrument's bar
+   of `t` is visible to every strategy.
+2. **Decide.** Each strategy's handlers run for each of its events at `t`. A
+   decision sees the same market state whatever the order of the events;
+   orders and commands queue and are not yet sent anywhere.
+3. **Match.** For each instrument with an event at `t`, the queued commands
+   are applied and its kernel steps: resting orders from earlier bars match
+   the bar, then the orders decided at `t` sweep (at `t`'s close under
+   `same_bar_close`, or stashed for the next open under `next_bar_open`). An
+   order for an instrument with no event at `t` waits on that instrument's own
+   clock and fills at its first event stamped after `t` (so the rule for a
+   cross-instrument order is the one rule for any order: the target's first
+   bar that closes at or after the decision, at that bar's close under
+   `same_bar_close`, or strictly after it at the open under `next_bar_open`).
+
+What the rule fixes. What a decision sees of another instrument, and the bar a
+cross-instrument order fills on, no longer depend on which event of `t` was
+delivered first; they depend only on `t`. What it cannot remove is the
+tie-break between simultaneous *decisions* that compete for the same resource:
+two market orders decided at `t` that cannot both be funded, or the numbering
+of the engine's order ids. These resolve in decision order, and the decision
+order of one strategy's handlers at `t` is ascending symbol (a stated
+convention that cannot change what any handler sees). A strategy whose
+handlers have side effects on its own state that depend on the sequence is
+that strategy's own business.
+
+**Where it lives.** The runtime's `run` loop and `dispatch` become a loop over
+timestamp groups of the merge cursor (peek the next key's `(ts, phase)`),
+calling `advance` for each event of the group (phase 1), the handlers for each
+(phase 2, with `drain_commands` queueing rather than applying), and the book's
+`apply` for each (phase 3). `process_bar` / `process_trade` / `process_quote` /
+`process_book` and `step` split along those three lines; `begin_event` runs in
+phase 1; the venue's `poll` runs in phase 3 (a simulated venue steps its
+shadow books with the same group); reports a fill books still reach the
+strategy in phase 3, before the next group.
+
+**LiveNode.** A live node cannot know that a timestamp group is complete, so by
+default it processes each push on arrival, as it does today: a one-event group.
+A host that wants the batch semantics pushes a group at once
+(`push_group(ts, {symbol: bar})`, or several `push_*` calls between
+`begin_group()` and `flush()`), and a push with a later timestamp, `advance_to`
+and `finish()` flush an open group. Warm-up replay uses the group form.
+A live run reproduces a batch run exactly when it delivers the same groups.
+
+**Journal and recovery.** The journal records group boundaries
+(`group_begin` / `group_end` with the timestamp) around the events of a group,
+and each record keeps its own sequence; replay re-applies a recorded group as
+one group, so recovery reproduces the three phases. Journals written before the
+change have no boundaries and replay as one-event groups, as they ran.
+
+
 ## Equity sampling
 
 The event session records **one equity point per distinct timestamp**, taken
@@ -136,6 +213,23 @@ resting order submitted on bar `i` can first fill on bar `i+1`
 `submitted_idx >= idx` are skipped). A stop-limit whose trigger is touched
 rests as a limit that becomes marketable from the next bar.
 
+A limit that is **marketable at the price its decision was made at** (a buy
+above the decision bar's fill price, a sell below it; a limit at the price
+itself rests) does not wait for
+a later bar to come back to it, which may never happen: under `same_bar_close`
+it trades on the decision bar at that price, like a market order placed there.
+Under `next_bar_open` the arrival rule below trades it at the next open.
+
+Protective legs meet the rest of the bar their entry filled in. Under
+`next_bar_open` an entry fills at a bar's open, so a position's stop and target
+trade against that same bar, whichever way they were attached: the position's
+own (`enter(stop_price=...)` or a configured stop), a typed order's
+`stop_price`/`target_price`, a bracket's child orders, or the protective orders
+a venue run sends once the fill is booked. When the bar touches both levels the
+stop wins (the leg submitted first); when it opens through the stop the stop
+trades at the open; when it opens through the target the target is marketable
+on arrival and trades at the open (see "Limit fill prices").
+
 When one bar touches both legs of a bracket (stop and target), the leg that
 was submitted first wins, and the bracket helpers submit the stop first. Its
 fill cancels the other leg, whose queued outcome for that bar is dropped
@@ -197,7 +291,7 @@ Scope:
   instrument with no `SessionSchedule`: the first event at or after the
   cutoff closes every position (`Squareoff`), and entries are refused with
   `squareoff` until that local day ends. An instrument's own
-  `SessionSchedule.squareoff_minute` takes precedence.
+  `SessionSchedule.squareoff_minute` is the default minute for that instrument (the presets set none); the run's own `squareoff_time` beats it, read in the schedule's zone.
 
 ## Three times of an event
 
@@ -261,6 +355,7 @@ become eligible. The engine records the ordinal on the order (`arrival_idx`).
 
 | situation | fill price |
 |---|---|
+| marketable when sent, `same_bar_close` (through the decision bar's fill price) | that price, on the decision bar, like a market order |
 | marketable on arrival (the bar opens through the limit; a print through it) | the open (the touch), no limit slippage |
 | resting, the bar trades through the limit | the limit, plus `limit_slippage` if configured |
 | resting, the bar opens through the limit mid-session | the limit: a resting order gets no price improvement |

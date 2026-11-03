@@ -55,6 +55,50 @@ impl EngineKernel {
         self.spec.as_ref().and_then(|s| s.session.as_ref())
     }
 
+    /// The time in force an order gets when it names none: `"day"` on an
+    /// instrument with an exchange session (an order is cancelled at that
+    /// session's close, as an exchange does), `"gtc"` on one without. Put
+    /// `tif="gtc"` on the order to carry it across sessions where the venue
+    /// allows that.
+    pub fn default_tif(&self) -> &'static str {
+        if self.schedule().is_some()
+            || self.spec.as_ref().and_then(|s| s.native_gtc()) == Some(false)
+        {
+            "day"
+        } else {
+            "gtc"
+        }
+    }
+
+    /// Refuse a validity the instrument's exchange segment does not hold: a
+    /// `gtc` or `gtd` where only day orders are established, or a `gtd` dated
+    /// past the contract's maturity where the segment holds them. The message
+    /// says why; `None` without a venue allows everything.
+    pub fn check_validity(&self, tif: &str, expire_ns: Option<i64>) -> Result<(), String> {
+        let Some(spec) = &self.spec else { return Ok(()) };
+        if tif != "gtc" && tif != "gtd" {
+            return Ok(());
+        }
+        match spec.native_gtc() {
+            Some(false) => Err(format!(
+                "{tif} is not a validity the {} segment of {:?} holds: its orders are day orders \
+                 (cancelled at the session's end), or ioc/fok; a broker that keeps an order alive \
+                 resubmits it each day, which is the host's business, not the exchange's",
+                spec.venue.as_deref().unwrap_or_default(),
+                spec.symbol
+            )),
+            Some(true) => match (tif, expire_ns, spec.expiration_ns) {
+                ("gtd", Some(until), Some(maturity)) if until > maturity => Err(format!(
+                    "gtd expiry {until} is past the maturity of {:?} ({maturity}): the exchange \
+                     holds a good-till-date order no later than the contract's maturity",
+                    spec.symbol
+                )),
+                _ => Ok(()),
+            },
+            None => Ok(()),
+        }
+    }
+
     /// Evaluate the calendar for the event about to be stepped, and arm the
     /// square-off if it is due. Called once at the top of every step.
     pub(crate) fn session_gate(&mut self, ts: i64, mode: StepMode) -> SessionGate {
@@ -72,7 +116,13 @@ impl EngineKernel {
             decision_open: schedule.is_open(ts),
             data_open: schedule.is_open(data_ts),
         };
-        let due = schedule.squareoff_due(ts, self.session_state.squareoff_day);
+        // The run's own `squareoff_time` is read in the schedule's zone and
+        // beats the schedule's default minute.
+        let last = self.session_state.squareoff_day;
+        let due = match self.config.squareoff_time_minutes {
+            Some(minute) => schedule.squareoff_due_at(minute, ts, last),
+            None => schedule.squareoff_due(ts, last),
+        };
         let today = schedule.session_day(ts);
         if let Some(day) = due {
             self.session_state.squareoff_day = Some(day);
@@ -87,7 +137,7 @@ impl EngineKernel {
     /// instrument with no calendar: the first event at or after that local
     /// time of day closes every position, and entries are refused with
     /// `squareoff` until the day ends. An instrument's own `SessionSchedule`
-    /// takes precedence and this does nothing for it.
+    /// reads the minute in its own zone instead (see `session_gate`).
     fn configured_squareoff(&mut self, ts: i64) {
         let Some(minutes) = self.config.squareoff_time_minutes else { return };
         let local_s = (ts + self.config.session_tz_offset_ns).div_euclid(1_000_000_000);

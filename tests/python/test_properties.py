@@ -410,7 +410,19 @@ def test_random_order_sequences_stay_legal_and_consistent(seed):
         # Timing: a fill is never on the bar that decided the order if the
         # order rests, nor under next_bar_open for any order.
         resting = o.kind != "market" or o.tif in ("at_open", "at_close")
-        if resting or timing == "next_bar_open":
+        # A plain limit marketable at the decision bar's close trades there under
+        # same_bar_close, like a market order placed on that bar.
+        close = b["close"][o.submitted_idx]
+        marketable = (
+            o.kind == "limit"
+            and timing == "same_bar_close"
+            and o.tif not in ("at_open", "at_close")
+            and o.limit_price is not None
+            and (o.limit_price > close if o.side == "buy" else o.limit_price < close)
+        )
+        if marketable and o.last_fill_idx == o.submitted_idx:
+            pass
+        elif resting or timing == "next_bar_open":
             assert o.last_fill_idx > o.submitted_idx, label
         else:
             assert o.last_fill_idx == o.submitted_idx, label

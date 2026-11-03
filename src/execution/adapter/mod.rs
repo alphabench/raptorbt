@@ -93,6 +93,11 @@ pub struct OrderRequest {
     /// order's quantity to what traded; a real venue works `quantity` and
     /// ignores this.
     pub size_frac: Option<f64>,
+    /// Under hedging: the position this order closes or reduces (the engine's id for it).
+    /// A venue that nets positions has no use for it and refuses an order that names one;
+    /// a venue that keeps positions apart closes exactly that position. `None` for an order
+    /// that opens, and always `None` on a netting account.
+    pub position_id: Option<u64>,
 }
 
 /// A change to a working order. `None` leaves a field as it is.

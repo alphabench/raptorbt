@@ -6,7 +6,6 @@
 //! strategy hooks. Result accounting is shared with the array-based runners,
 //! so both paths produce identical metrics for identical decisions.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::errors::Fail;
@@ -398,6 +397,23 @@ impl PyPositionSnapshot {
 
 /// Per-bar simulation session for one instrument.
 ///
+/// Refuse a setting of `config` that cannot be carried out on the instrument
+/// being registered (a fee schedule with no row for it, a `squareoff_time`
+/// with no time zone), as the structured error.
+pub(crate) fn check_market(
+    config: &BacktestConfig,
+    symbol: &str,
+    spec: Option<&crate::instruments::InstrumentSpec>,
+) -> PyResult<()> {
+    config.check_instrument(symbol, spec).map_err(|e| {
+        let fail = match e.code {
+            "squareoff_needs_timezone" => Fail::new("squareoff_needs_timezone", e.message),
+            _ => Fail::new("fee_schedule_gap", e.message),
+        };
+        fail.param(e.param).value(e.symbol).valid(e.valid).into()
+    })
+}
+
 /// Drive it by calling [`PyKernelSession::step`] once per bar in ascending
 /// order, then [`PyKernelSession::finish`] to obtain the standard backtest
 /// result. Scalars cross the boundary per bar, so a Python driver loop pays
@@ -456,22 +472,45 @@ impl PyKernelSession {
         let account = parse_account_mode(account_type, leverage)?;
         check_margin_model(&rust_config, account)?;
 
-        let mut runner =
-            SingleRunner::from_config(rust_config, symbol.to_string(), direction, inst.as_ref());
-        if let Some(spec) = instrument {
-            let spec = crate::instruments::InstrumentSpec::from(spec);
-            if !spec.kind.tradable() {
-                return Err(Fail::new(
-                    "untradable_instrument",
-                    format!("instrument {:?} is not tradable (kind={:?})", spec.symbol, spec.kind),
-                )
-                .param("instrument")
-                .value(spec.symbol.to_string())
-                .into());
+        let spec = match instrument {
+            Some(spec) => {
+                let spec = crate::instruments::InstrumentSpec::from(spec);
+                if !spec.kind.tradable() {
+                    return Err(Fail::new(
+                        "untradable_instrument",
+                        format!(
+                            "instrument {:?} is not tradable (kind={:?})",
+                            spec.symbol, spec.kind
+                        ),
+                    )
+                    .param("instrument")
+                    .value(spec.symbol.to_string())
+                    .into());
+                }
+                Some(spec)
             }
-            runner = runner.with_instrument(spec);
+            None => None,
+        };
+        // The runner books the initial capital: one that cannot be booked is
+        // the structured `money_overflow`, not a panic out of the constructor.
+        let mut rust_config = rust_config;
+        if rust_config.session_minutes.is_none() {
+            rust_config.session_minutes =
+                spec.as_ref().and_then(|s| s.session.as_ref()).map(|s| s.trading_minutes());
         }
-        runner = runner.with_position_policy(policy).with_account_mode(account);
+        check_market(&rust_config, symbol, spec.as_ref())?;
+        let runner = super::errors::guard_money("KernelSession", || {
+            let mut runner = SingleRunner::from_config(
+                rust_config,
+                symbol.to_string(),
+                direction,
+                inst.as_ref(),
+            );
+            if let Some(spec) = spec {
+                runner = runner.with_instrument(spec);
+            }
+            runner.with_position_policy(policy).with_account_mode(account)
+        })?;
 
         Ok(Self { runner: Some(runner) })
     }
@@ -524,14 +563,14 @@ impl PyKernelSession {
     /// Submit an order.
     ///
     /// `side` is `"buy"`/`"sell"`; `kind` is `"market"`, `"limit"`,
-    /// `"stop_market"`, or `"stop_limit"`; `tif` is `"gtc"`, `"day"`,
+    /// `"stop_market"`, or `"stop_limit"`; `tif` is `"auto"` (DAY on an instrument with a session, else GTC), `"gtc"`, `"day"`,
     /// `"gtd"` (requires `expire_ns`), `"ioc"`, or `"fok"`. Exactly one of
     /// `units`/`size_frac` sizes an opening order; omit both to close the
     /// full position with a closing-side order. Returns the engine order id.
     #[pyo3(signature = (
         side, kind, submitted_idx, submitted_ts, client_id,
         units=None, size_frac=None, limit_price=None, trigger_price=None,
-        tif="gtc", expire_ns=None, stop_price=None, target_price=None,
+        tif="auto", expire_ns=None, stop_price=None, target_price=None,
         offset=None, offset_kind="price", limit_offset=0.0,
         post_only=false, reduce_only=false, parent_id=None,
     ))]
@@ -723,7 +762,7 @@ impl PyKernelSession {
 
     /// Cash not locked as margin (margin mode); all cash otherwise.
     fn free_capital(&self) -> PyResult<f64> {
-        Ok(self.runner_ref()?.kernel().free_capital())
+        Ok(self.runner_ref()?.free_capital())
     }
 
     /// Halt the session: new entries are refused as `killed`; working orders
@@ -733,9 +772,47 @@ impl PyKernelSession {
     fn halt(&mut self, reason: &str, flatten: bool) -> PyResult<()> {
         self.runner
             .as_mut()
-            .ok_or_else(|| PyValueError::new_err("session is already finished"))?
+            .ok_or_else(|| PyErr::from(Fail::new("run_finished", "session is already finished")))?
             .halt(reason, flatten);
         Ok(())
+    }
+
+    /// Declare the corporate actions of the run and the adjustment policy its
+    /// bars are on (`"raw"` or `"adjusted"`). Call before the first step.
+    /// Every action must name this session's symbol.
+    #[pyo3(signature = (actions, policy))]
+    fn set_corporate_actions(
+        &mut self,
+        actions: Vec<super::lifecycle_bindings::PyCorporateAction>,
+        policy: &str,
+    ) -> PyResult<()> {
+        let (actions, policy) =
+            super::lifecycle_bindings::extract_actions(Some(actions), Some(policy))?;
+        let runner = self.runner_mut()?;
+        let symbol = runner.kernel().symbol().to_string();
+        for a in &actions {
+            if a.instrument != symbol {
+                return Err(Fail::new(
+                    "unknown_symbol",
+                    format!(
+                        "corporate action on {:?}: this session trades {symbol:?}",
+                        a.instrument
+                    ),
+                )
+                .param("corporate_actions")
+                .value(a.instrument.as_str())
+                .into());
+            }
+        }
+        runner
+            .set_corporate_actions(&actions, policy)
+            .map_err(super::lifecycle_bindings::action_err)
+    }
+
+    /// Dividend cash credited so far (a short's debit is negative).
+    #[getter]
+    fn dividends_received(&self) -> PyResult<f64> {
+        Ok(self.runner_ref()?.dividends_received())
     }
 
     /// Whether the drawdown limit or a halt has latched.
@@ -876,8 +953,14 @@ pub(crate) fn submit_twap_on(
             submitted_ts,
             submitted_idx,
         )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        .map_err(|e| {
+            PyErr::from(Fail::new("invalid_order_value", e.to_string()).param("algo").value("twap"))
+        })
 }
+
+/// The `tif` of an order that names none: the instrument decides (DAY on one
+/// with an exchange session, GTC otherwise).
+pub(crate) const TIF_AUTO: &str = "auto";
 
 /// The typed form of Python order arguments.
 pub(crate) struct ParsedOrder {
@@ -885,6 +968,35 @@ pub(crate) struct ParsedOrder {
     pub qty: QtySpec,
     pub kind: OrderKind,
     pub tif: TimeInForce,
+}
+
+/// Refuse an order whose quantity is not a whole number of lots (or size
+/// steps) or whose prices are not a whole number of ticks. One check for every
+/// mode: the simulation used to floor and snap while a venue was sent the raw
+/// terms. The error names the nearest valid values in `valid`.
+pub(crate) fn check_grid(
+    grid: &crate::execution::orders::OrderGrid,
+    units: Option<f64>,
+    prices: &[(&'static str, Option<f64>)],
+) -> PyResult<()> {
+    grid.check(units, prices).map_err(|off| {
+        let what = if off.off_lot {
+            "a whole number of lots (or size steps)"
+        } else {
+            "a whole number of ticks"
+        };
+        let message = format!(
+            "{} {} is not {what}: the step is {}; use one of the valid values, or round it \
+             yourself before submitting",
+            off.parameter, off.value, off.step
+        );
+        let fail = if off.off_lot {
+            Fail::new("off_lot_quantity", message)
+        } else {
+            Fail::new("off_tick_price", message)
+        };
+        fail.param(off.parameter).value(off.value).valid(off.valid).into()
+    })
 }
 
 /// Parse Python order arguments. `price_increment` is the instrument's tick
@@ -1125,6 +1237,26 @@ pub(crate) fn submit_order_checked(
     parent_id: Option<u64>,
     refusal: Option<&'static str>,
 ) -> PyResult<u64> {
+    check_grid(
+        &kernel.order_grid(),
+        units,
+        &[
+            ("limit_price", limit_price),
+            ("trigger_price", trigger_price),
+            ("stop_price", stop_price),
+            ("target_price", target_price),
+        ],
+    )?;
+    // An order that names no time in force takes its instrument's default.
+    let tif = if tif == TIF_AUTO { kernel.default_tif() } else { tif };
+    kernel.check_validity(tif, expire_ns).map_err(|why| {
+        PyErr::from(
+            Fail::new("order_validity_unsupported", why)
+                .param("tif")
+                .value(tif)
+                .valid(["day", "ioc", "fok"]),
+        )
+    })?;
     let ParsedOrder { side, qty, kind: kind_parsed, tif } = parse_order(
         kernel.price_increment(),
         side,

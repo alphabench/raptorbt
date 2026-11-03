@@ -508,7 +508,9 @@ pub struct BacktestConfig {
     /// NSE equity is 375 (09:15-15:30); MCX commodity is 870 (09:00-23:30);
     /// CDS is 480. Assuming NSE on MCX data understates Sharpe by ~1.5x.
     /// `Some(0.0)` marks a continuously traded (24x7) market, which annualizes
-    /// on calendar time instead. `None` uses the NSE default.
+    /// on calendar time instead. `None` assumes no session: the trading day is
+    /// what the data shows (observations per local day times 252), or the
+    /// instrument's own session schedule when it has one.
     pub session_minutes: Option<f64>,
 
     /// Local time-of-day, in minutes from midnight, at which open positions
@@ -578,6 +580,12 @@ pub struct BacktestConfig {
     /// first bar of the same date.
     #[serde(default)]
     pub session_tz_offset_ns: i64,
+
+    /// Whether the caller named the session time zone (even UTC). Without
+    /// it, `squareoff_time` has no zone to be read in and a run on an
+    /// instrument with no session schedule is refused
+    /// ([`BacktestConfig::check_instrument`]).
+    pub session_tz_set: bool,
 
     /// Fill resting limits from observed queue position instead of
     /// `fill_prob_limit`'s coin flip.
@@ -703,6 +711,7 @@ impl Default for BacktestConfig {
             partial_fills: false,
             order_latency_ns: 0,
             session_tz_offset_ns: 0,
+            session_tz_set: false,
             limit_slippage: 0.0,
             liquidate_on_margin_call: false,
             fill_prob_slippage: 0.0,
@@ -719,6 +728,21 @@ impl Default for BacktestConfig {
     }
 }
 
+/// A config setting that cannot be carried out on the instrument it meets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketSettingError {
+    /// The structured error code the bindings raise.
+    pub code: &'static str,
+    /// The config parameter at fault.
+    pub param: &'static str,
+    /// The instrument the setting met.
+    pub symbol: String,
+    /// The accepted alternatives when they are known (the venues a fee
+    /// schedule has rows for), else empty.
+    pub valid: Vec<String>,
+    pub message: String,
+}
+
 impl BacktestConfig {
     /// The execution-timing policy in force.
     ///
@@ -733,6 +757,146 @@ impl BacktestConfig {
         })
     }
 
+    /// Whether `spec`'s positions are squared off the same day: the run asks
+    /// for a `squareoff_time`, or the instrument's session has a square-off
+    /// minute. Cash equity is then priced on the intraday fee row.
+    pub fn intraday_for(&self, spec: &crate::instruments::InstrumentSpec) -> bool {
+        self.squareoff_time_minutes.is_some()
+            || spec.session.as_ref().is_some_and(|s| s.squareoff_minute().is_some())
+    }
+
+    /// Refuse a setting that cannot be carried out on this instrument, when
+    /// the instrument is registered rather than at the first fill: a fee
+    /// schedule that picks the row per instrument needs the instrument's
+    /// venue, and `squareoff_time` needs a time zone to be read in.
+    pub fn check_instrument(
+        &self,
+        symbol: &str,
+        spec: Option<&crate::instruments::InstrumentSpec>,
+    ) -> std::result::Result<(), MarketSettingError> {
+        if let Some(b) = self.fee_binding.as_ref().filter(|b| b.fixed.is_none()) {
+            let refuse = |message: String| {
+                let mut venues: Vec<String> =
+                    b.schedule.rows.iter().map(|r| r.venue.clone()).collect();
+                venues.sort();
+                venues.dedup();
+                MarketSettingError {
+                    code: "fee_schedule_gap",
+                    param: "fee_schedule",
+                    symbol: symbol.to_string(),
+                    valid: venues,
+                    message,
+                }
+            };
+            let Some(spec) = spec else {
+                return Err(refuse(format!(
+                    "instrument {symbol:?} has no InstrumentSpec, so the fee schedule cannot \
+                     choose its row: give it an InstrumentSpec with a venue (instruments= in \
+                     run_strategies and LiveNode), or set fee_segment to price every \
+                     instrument on one row"
+                )));
+            };
+            let (venue, segment, group) =
+                crate::execution::fees::fee_row_for(spec, self.intraday_for(spec), &b.schedule)
+                    .map_err(refuse)?;
+            b.schedule
+                .row_for(&venue, segment, group.as_deref().or(spec.underlying()), i64::MAX, false)
+                .map_err(|e| refuse(format!("instrument {symbol:?}: {e}")))?;
+        }
+        // A physically settled derivative on the equity-derivatives venues is delivered
+        // in the cash market's stock: its delivery must be priceable from the schedule.
+        if let Some(b) = &self.fee_binding {
+            if spec.is_some_and(|s| {
+                s.settlement.style == crate::instruments::lifecycle::SettlementStyle::Physical
+            }) {
+                let spec = spec.expect("checked");
+                let venue = spec
+                    .venue
+                    .clone()
+                    .or_else(|| b.fixed.as_ref().map(|(v, _)| v.clone()))
+                    .map(|v| v.to_ascii_uppercase());
+                let cash = match venue.as_deref() {
+                    Some("NFO") => Some("NSE"),
+                    Some("BFO") => Some("BSE"),
+                    _ => None,
+                };
+                if let Some(cash) = cash {
+                    let groups: Vec<String> = b
+                        .schedule
+                        .rows
+                        .iter()
+                        .filter(|r| {
+                            r.venue == cash
+                                && r.segment == crate::execution::costs::FeeSegment::Delivery
+                        })
+                        .filter_map(|r| {
+                            r.underlying.as_deref()?.strip_prefix("group:").map(str::to_string)
+                        })
+                        .collect();
+                    let key = if groups.is_empty() {
+                        None
+                    } else {
+                        match spec.scrip_group.as_deref().map(str::to_ascii_uppercase) {
+                            Some(g) if groups.contains(&g) => Some(format!("group:{g}")),
+                            _ => {
+                                let mut groups = groups;
+                                groups.sort();
+                                groups.dedup();
+                                return Err(MarketSettingError {
+                                    code: "fee_schedule_gap",
+                                    param: "fee_schedule",
+                                    symbol: symbol.to_string(),
+                                    valid: groups.clone(),
+                                    message: format!(
+                                        "instrument {symbol:?} is delivered in {cash} cash stock, whose \
+                                         charges depend on the scrip group: set the InstrumentSpec \
+                                         scrip_group to one of {}",
+                                        groups.join(", ")
+                                    ),
+                                });
+                            }
+                        }
+                    };
+                    if let Err(e) = b.schedule.row_for(
+                        cash,
+                        crate::execution::costs::FeeSegment::Delivery,
+                        key.as_deref(),
+                        i64::MAX,
+                        false,
+                    ) {
+                        return Err(MarketSettingError {
+                            code: "fee_schedule_gap",
+                            param: "fee_schedule",
+                            symbol: symbol.to_string(),
+                            valid: Vec::new(),
+                            message: format!(
+                                "instrument {symbol:?} is delivered in {cash} cash stock: {e}"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        let zone_known = self.session_tz_set
+            || self.session_tz_offset_ns != 0
+            || spec.is_some_and(|s| s.session.is_some());
+        if self.squareoff_time_minutes.is_some() && !zone_known {
+            return Err(MarketSettingError {
+                code: "squareoff_needs_timezone",
+                param: "squareoff_time",
+                symbol: symbol.to_string(),
+                valid: Vec::new(),
+                message: format!(
+                    "squareoff_time is a local time of day, but instrument {symbol:?} has no \
+                     session schedule and the config names no time zone: set \
+                     session_tz_offset_ns (IST_OFFSET_NS for Indian markets, 0 for UTC) or give \
+                     the instrument a SessionSchedule"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Fee model implied by this config.
     ///
     /// An unparseable `fee_segment` falls back to the flat rate rather than
@@ -741,13 +905,19 @@ impl BacktestConfig {
         use crate::execution::{indian_costs::Segment, FeeModel};
 
         if let Some(b) = &self.fee_binding {
-            let dated = crate::execution::fees::DatedFees::new(
-                b.schedule.clone(),
-                b.venue.clone(),
-                b.segment,
-                self.session_tz_offset_ns,
-            )
-            .expect("a fee binding is validated when the schedule is attached");
+            let dated = match &b.fixed {
+                Some((venue, segment)) => crate::execution::fees::DatedFees::new(
+                    b.schedule.clone(),
+                    venue.clone(),
+                    *segment,
+                    self.session_tz_offset_ns,
+                )
+                .expect("a fee binding is validated when the schedule is attached"),
+                None => crate::execution::fees::DatedFees::per_instrument(
+                    b.schedule.clone(),
+                    self.session_tz_offset_ns,
+                ),
+            };
             return FeeModel::Dated(Box::new(dated));
         }
         if let Some(rates) = self.fee_rates {
@@ -809,7 +979,7 @@ impl BacktestConfig {
             // Explicit zero marks a continuously traded market.
             Some(m) if m <= 0.0 => SessionSpec::Continuous,
             Some(minutes) => SessionSpec::Session { minutes },
-            None => SessionSpec::default(),
+            None => SessionSpec::Inferred { tz_offset_ns: self.session_tz_offset_ns },
         }
     }
 }
@@ -1107,11 +1277,22 @@ pub struct BacktestResult {
     ///
     /// Empty for a run that placed no typed orders.
     pub orders: Vec<crate::execution::orders::OrderRecord>,
+    /// The fee rows the run priced fills on whose rates are not matched to an
+    /// official publication (`RowStatus::Unverified`), as `VENUE:SEGMENT[:KEY]`
+    /// labels. Anyone reading the costs should read these first.
+    pub unverified_fee_rows: Vec<String>,
     /// Whether a latching halt (the drawdown limit, or an explicit halt)
     /// stopped new entries during the run.
     pub halted: bool,
     /// Bars stepped when that halt latched.
     pub halted_at: Option<usize>,
+    /// Entries a risk limit refused (position, size, exposure, drawdown or
+    /// daily-loss limits). A run that never got into the market shows here
+    /// rather than as an empty trade list.
+    pub rejected_entries: usize,
+    /// Entries the account could not fund: refused for capital or margin, or
+    /// sized to nothing. Not in `rejected_entries`, which counts risk limits.
+    pub unfunded_entries: usize,
 }
 
 impl BacktestResult {
@@ -1130,9 +1311,26 @@ impl BacktestResult {
             trades,
             returns,
             orders: Vec::new(),
+            unverified_fee_rows: Vec::new(),
             halted: false,
             halted_at: None,
+            rejected_entries: 0,
+            unfunded_entries: 0,
         }
+    }
+
+    /// Name the unverified fee rows the run used.
+    pub fn with_unverified_fee_rows(mut self, rows: Vec<String>) -> Self {
+        self.unverified_fee_rows = rows;
+        self
+    }
+
+    /// Record the entries the run's risk limits refused and the ones its
+    /// account could not fund.
+    pub fn with_refusals(mut self, rejected_entries: usize, unfunded_entries: usize) -> Self {
+        self.rejected_entries = rejected_entries;
+        self.unfunded_entries = unfunded_entries;
+        self
     }
 
     /// Record whether a latching halt stopped the run, and when.

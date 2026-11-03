@@ -5,25 +5,22 @@
 //! round trip -- STT "on sell side", stamp duty "on buy side" -- which is why
 //! each component states which side it lands on.
 //!
-//! The rates are not kept here: they are the exchange presets of
-//! [`crate::execution::costs`] (`exchange_rates`), the same rows a user loads
-//! or overrides as a [`FeeSchedule`](crate::execution::costs::FeeSchedule).
-//! [`Segment`] is the enum the engine's `fee_segment` string selects, and
-//! [`calculate_side`] charges one side through the single computation in
+//! The rates are not kept here: they are the dated statutory exchange rows
+//! of [`crate::execution::costs`] (`exchange_rates`), the same rows a user
+//! loads or overrides as a [`FeeSchedule`](crate::execution::costs::FeeSchedule),
+//! at the latest date in force. [`Segment`] is the enum the engine's
+//! `fee_segment` string selects, and [`calculate_side`] charges one side
+//! through the single computation in
 //! [`FeeRates::charge_fill`](crate::execution::costs::FeeRates::charge_fill),
 //! so the equity curve and the reported breakdown are the same money.
 //!
-//! Every rate was checked against the published exchange, clearing-corporation
-//! and regulator schedules on 2026-08-20 and is pinned field by field in this
-//! module's tests. Two deliberate approximations, stated rather than hidden:
-//!
-//! * BSE equity and BFO derivatives share the NSE-family schedules. Their
-//!   published exchange-transaction rates differ by under 0.2 bps, and the
-//!   NSE/NFO schedule is the reference these presets are tested against.
-//! * The STT levied on options that are *exercised* (0.15% of intrinsic) is
-//!   not modelled -- the engine closes positions by trading out, and the
-//!   settlement path freezes legs at their settlement value without
-//!   simulating exercise.
+//! Every rate is pinned field by field in this module's tests. The rows carry
+//! no brokerage and no depository charge: a broker's own charges come from its
+//! rate card. BSE equity and BFO derivatives have rows of their own in the
+//! dated schedule; [`Segment`] names the NSE-family segments only and a run
+//! priced by venue and kind reaches the others. The tax on options that are
+//! *exercised* is the settlement row of the exchange schedule, charged by the
+//! settlement path on the intrinsic value (buyer side only).
 
 use crate::core::types::Direction;
 use crate::execution::costs::{exchange_rates, FeeRates, FeeSegment};
@@ -233,7 +230,7 @@ mod tests {
     #[test]
     fn gst_excludes_stt_and_stamp_duty() {
         let fees = calculate_side(Segment::EquityDelivery, 1_000_000.0, Direction::Long, true);
-        let expected = 0.18 * (fees.brokerage + fees.exchange_txn + fees.sebi_fee);
+        let expected = 0.18 * (fees.brokerage + fees.exchange_txn + fees.ipft + fees.sebi_fee);
         assert!((fees.gst - expected).abs() < 1e-9, "GST must not be levied on taxes");
     }
 
@@ -245,6 +242,8 @@ mod tests {
             + fees.exchange_txn
             + fees.sebi_fee
             + fees.stamp_duty
+            + fees.ipft
+            + fees.dp_charge
             + fees.gst;
         assert!((fees.total() - manual).abs() < 1e-12);
     }
@@ -284,38 +283,29 @@ mod tests {
 
     // ── Brokerage behaviour ─────────────────────────────────────────────────
 
-    /// Equity delivery carries ZERO brokerage. An old flat 20 charged money
-    /// no one collects -- 47 bps of phantom cost on a 10,000 position, and it
-    /// dominated STT below about 21,000.
+    /// The built-in rows are what the exchanges and the tax authority levy:
+    /// no brokerage at any size, and no depository charge. Brokerage comes
+    /// from a broker's rate card.
     #[test]
-    fn equity_delivery_charges_no_brokerage() {
-        for is_entry in [true, false] {
-            let fees = calculate_side(Segment::EquityDelivery, 10_000.0, Direction::Long, is_entry);
-            assert_eq!(fees.brokerage, 0.0);
-        }
-    }
-
-    /// Intraday equity and futures brokerage is min(20, 0.03% of order
-    /// value): below 66,667 the percentage is cheaper.
-    #[test]
-    fn brokerage_cap_applies_below_the_crossover() {
-        for segment in [Segment::EquityIntraday, Segment::FuturesNfo, Segment::FuturesMcx] {
-            let small = calculate_side(segment, 50_000.0, Direction::Long, true);
-            assert!(
-                (small.brokerage - 15.0).abs() < 1e-9,
-                "{segment:?}: 0.03% of 50k is Rs 15, under the Rs 20 cap"
-            );
-            let large = calculate_side(segment, 500_000.0, Direction::Long, true);
-            assert_eq!(large.brokerage, 20.0, "{segment:?}: capped at Rs 20");
-        }
-    }
-
-    /// Options brokerage is flat 20 per order at any premium.
-    #[test]
-    fn options_brokerage_is_flat_at_any_size() {
-        for value in [1_000.0, 50_000.0, 5_000_000.0] {
-            let fees = calculate_side(Segment::OptionsNfo, value, Direction::Long, true);
-            assert_eq!(fees.brokerage, 20.0);
+    fn the_built_in_rows_charge_no_brokerage_or_depository_fee() {
+        let all = [
+            Segment::EquityIntraday,
+            Segment::EquityDelivery,
+            Segment::FuturesNfo,
+            Segment::OptionsNfo,
+            Segment::FuturesMcx,
+            Segment::OptionsMcx,
+            Segment::FuturesCds,
+            Segment::OptionsCds,
+        ];
+        for segment in all {
+            for value in [1_000.0, 50_000.0, 5_000_000.0] {
+                for is_entry in [true, false] {
+                    let fees = calculate_side(segment, value, Direction::Long, is_entry);
+                    assert_eq!((fees.brokerage, fees.dp_charge), (0.0, 0.0), "{segment:?}");
+                }
+            }
+            assert!(segment.rates().day_fee.is_none());
         }
     }
 
@@ -334,45 +324,45 @@ mod tests {
     #[test]
     fn pinned_equity_delivery_rates() {
         let s = Segment::EquityDelivery.rates();
-        assert_eq!(capped(&s), (0.0, 0.0, None)); // zero brokerage
+        assert_eq!(capped(&s), (0.0, 0.0, None)); // no brokerage in a preset
         assert_eq!((s.tax_buy_rate, s.tax_sell_rate), (0.001, 0.001)); // STT 0.1% both
-        assert_eq!(s.exchange_rate, 0.0000307); // NSE 0.00307%
+        assert_eq!(s.exchange_rate, 306.99 / 1.0e7); // NSE/FA/73061: 306.99 per crore
+        assert_eq!(s.investor_fund_rate, 0.01 / 1.0e7); // IPFT 0.01 per crore
         assert_eq!(s.regulatory_rate, 0.000001); // 10 per crore
         assert_eq!(s.stamp_buy_rate, 0.00015); // 0.015% buy side
         assert_eq!(s.gst_rate, 0.18);
-        let day = s.day_fee.expect("delivery owes the depository charge");
-        assert!((day.amount * (1.0 + s.gst_rate) - DP_SELL_CHARGE_PER_ISIN_PER_DAY).abs() < 1e-12);
+        assert!(s.day_fee.is_none(), "the depository charge is the broker's, on its rate card");
     }
 
     #[test]
     fn pinned_equity_intraday_rates() {
         let s = Segment::EquityIntraday.rates();
-        // "0.03% or 20, whichever lower"
-        assert_eq!(capped(&s), (0.0, 0.0003, Some(20.0)));
+        assert_eq!(capped(&s), (0.0, 0.0, None));
         assert_eq!((s.tax_buy_rate, s.tax_sell_rate), (0.0, 0.00025)); // STT 0.025% sell
-        assert_eq!(s.exchange_rate, 0.0000307); // NSE 0.00307%
+        assert_eq!(s.exchange_rate, 306.99 / 1.0e7); // NSE/FA/73061: 306.99 per crore
+        assert_eq!(s.investor_fund_rate, 0.01 / 1.0e7); // IPFT 0.01 per crore
         assert_eq!(s.stamp_buy_rate, 0.00003); // 0.003% buy side
     }
 
     #[test]
     fn pinned_nfo_futures_rates() {
         let s = Segment::FuturesNfo.rates();
-        assert_eq!(capped(&s), (0.0, 0.0003, Some(20.0)));
+        assert_eq!(capped(&s), (0.0, 0.0, None));
         // STT on sale of futures in securities: 0.05%, effective 2026-04-01
         // (was 0.02% from 2024-10-01, 0.0125% before that).
         assert_eq!((s.tax_buy_rate, s.tax_sell_rate), (0.0, 0.0005));
-        assert_eq!(s.exchange_rate, 0.0000183); // NSE 0.00183%
+        assert_eq!(s.exchange_rate, 182.99 / 1.0e7); // futures 182.99 per crore
         assert_eq!(s.stamp_buy_rate, 0.00002); // 0.002% buy side
     }
 
     #[test]
     fn pinned_nfo_options_rates() {
         let s = Segment::OptionsNfo.rates();
-        assert_eq!(capped(&s), (20.0, 0.0, None)); // flat 20 per executed order
-                                                   // STT on sale of an option: 0.15% of premium, effective 2026-04-01
-                                                   // (was 0.1% from 2024-10-01, 0.0625% before that).
+        assert_eq!(capped(&s), (0.0, 0.0, None));
+        // STT on sale of an option: 0.15% of premium, effective 2026-04-01
+        // (was 0.1% from 2024-10-01).
         assert_eq!((s.tax_buy_rate, s.tax_sell_rate), (0.0, 0.0015));
-        assert_eq!(s.exchange_rate, 0.0003553); // NSE 0.03553% on premium
+        assert_eq!(s.exchange_rate, 3_552.0 / 1.0e7); // options 3,552 per crore of premium
         assert_eq!(s.stamp_buy_rate, 0.00003); // 0.003% buy side
         assert!(Segment::OptionsNfo.charges_on_premium());
     }
@@ -380,148 +370,50 @@ mod tests {
     #[test]
     fn pinned_mcx_rates() {
         let fut = Segment::FuturesMcx.rates();
-        assert_eq!(fut.brokerage_rate, 0.0003);
+        assert_eq!(fut.brokerage_rate, 0.0);
         assert_eq!(fut.tax_kind, TaxKind::Ctt);
         assert_eq!(fut.tax_sell_rate, 0.0001); // CTT 0.01% sell side, non-agri
-        assert_eq!(fut.exchange_rate, 0.000021); // MCX 0.0021%
+        assert_eq!(fut.exchange_rate, 210.0 / 1.0e7); // Rs 2.10 per lakh (unverified)
         assert_eq!(fut.stamp_buy_rate, 0.00002);
 
         let opt = Segment::OptionsMcx.rates();
         assert_eq!(opt.brokerage_rate, 0.0);
         assert_eq!(opt.tax_sell_rate, 0.0005); // CTT 0.05% sell side on premium
-        assert_eq!(opt.exchange_rate, 0.000418); // MCX 0.0418% on premium
+        assert_eq!(opt.exchange_rate, 4_180.0 / 1.0e7); // Rs 41.80 per lakh (unverified)
         assert_eq!(opt.stamp_buy_rate, 0.00003);
     }
 
     #[test]
     fn pinned_cds_rates() {
         let fut = Segment::FuturesCds.rates();
-        assert_eq!(fut.brokerage_rate, 0.0003);
+        assert_eq!(fut.brokerage_rate, 0.0);
         assert_eq!(fut.tax_kind, TaxKind::None); // no STT on currency
-        assert_eq!(fut.exchange_rate, 0.0000035); // NSE 0.00035%
+        assert_eq!(fut.exchange_rate, 35.0 / 1.0e7); // 0.00035% (unverified)
         assert_eq!(fut.stamp_buy_rate, 0.000001); // 0.0001% (10 per crore)
 
         let opt = Segment::OptionsCds.rates();
         assert_eq!(opt.brokerage_rate, 0.0);
         assert_eq!(opt.tax_kind, TaxKind::None);
-        assert_eq!(opt.exchange_rate, 0.000311); // NSE 0.0311% on premium
+        assert_eq!(opt.exchange_rate, 3_110.0 / 1.0e7); // 0.0311% on premium (unverified)
         assert_eq!(opt.stamp_buy_rate, 0.000001);
     }
 
-    /// The charge before the rates became data: its own table and its own
-    /// arithmetic, frozen here. The data-driven path must reproduce it to the
-    /// last bit, so no existing result moves.
-    mod frozen {
-        use super::*;
-
-        #[derive(Clone, Copy)]
-        pub struct Old {
-            flat: f64,
-            rate: f64,
-            stt: f64,
-            stt_both: bool,
-            no_stt: bool,
-            exch: f64,
-            stamp: f64,
-        }
-
-        pub fn table(seg: Segment) -> Old {
-            let o = |flat, rate, stt, stt_both, no_stt, exch, stamp| Old {
-                flat,
-                rate,
-                stt,
-                stt_both,
-                no_stt,
-                exch,
-                stamp,
-            };
-            match seg {
-                Segment::EquityIntraday => {
-                    o(20.0, 0.0003, 0.00025, false, false, 0.0000307, 0.00003)
-                }
-                Segment::EquityDelivery => o(0.0, 0.0, 0.001, true, false, 0.0000307, 0.00015),
-                Segment::FuturesNfo => o(20.0, 0.0003, 0.0005, false, false, 0.0000183, 0.00002),
-                Segment::OptionsNfo => o(20.0, 0.0, 0.0015, false, false, 0.0003553, 0.00003),
-                Segment::FuturesMcx => o(20.0, 0.0003, 0.0001, false, false, 0.000021, 0.00002),
-                Segment::OptionsMcx => o(20.0, 0.0, 0.0005, false, false, 0.000418, 0.00003),
-                Segment::FuturesCds => o(20.0, 0.0003, 0.0, false, true, 0.0000035, 0.000001),
-                Segment::OptionsCds => o(20.0, 0.0, 0.0, false, true, 0.000311, 0.000001),
-            }
-        }
-
-        /// (brokerage, stt, exchange, sebi, stamp, gst, total)
-        pub fn charge(seg: Segment, value: f64, is_buy: bool) -> [f64; 7] {
-            let s = table(seg);
-            let value = value.abs();
-            let brokerage = if s.rate > 0.0 { (s.rate * value).min(s.flat) } else { s.flat };
-            let stt = if no_tax(&s) {
-                0.0
-            } else if s.stt_both {
-                s.stt * value
-            } else if is_buy {
-                0.0
-            } else {
-                s.stt * value
-            };
-            let exch = s.exch * value;
-            let sebi = 0.000001 * value;
-            let stamp = if is_buy { s.stamp * value } else { 0.0 };
-            let gst = 0.18 * (brokerage + exch + sebi);
-            let total = brokerage + stt + exch + sebi + stamp + gst;
-            [brokerage, stt, exch, sebi, stamp, gst, total]
-        }
-
-        fn no_tax(s: &Old) -> bool {
-            s.no_stt
-        }
-    }
-
+    /// One hand-computed side of each kind, from the per-crore figures: the
+    /// itemised parts are separate (exchange charge, IPFT, SEBI fee, tax, stamp
+    /// duty) and GST is 18% of exchange + IPFT + SEBI.
     #[test]
-    fn the_data_driven_charge_is_bit_identical_to_the_frozen_one() {
-        let segments = [
-            Segment::EquityIntraday,
-            Segment::EquityDelivery,
-            Segment::FuturesNfo,
-            Segment::OptionsNfo,
-            Segment::FuturesMcx,
-            Segment::OptionsMcx,
-            Segment::FuturesCds,
-            Segment::OptionsCds,
-        ];
-        let mut checked = 0;
-        for seg in segments {
-            for k in 0..400 {
-                // From a paisa to ten crore, on a log grid with odd fractions.
-                let value = 0.01 * 1.0471285480508996f64.powi(k) + 0.37 * k as f64;
-                for (direction, is_entry) in [
-                    (Direction::Long, true),
-                    (Direction::Long, false),
-                    (Direction::Short, true),
-                    (Direction::Short, false),
-                ] {
-                    let is_buy = matches!(
-                        (direction, is_entry),
-                        (Direction::Long, true) | (Direction::Short, false)
-                    );
-                    let b = calculate_side(seg, value, direction, is_entry);
-                    let want = frozen::charge(seg, value, is_buy);
-                    let got = [
-                        b.brokerage,
-                        b.stt,
-                        b.exchange_txn,
-                        b.sebi_fee,
-                        b.stamp_duty,
-                        b.gst,
-                        b.total(),
-                    ];
-                    for (g, w) in got.iter().zip(want.iter()) {
-                        assert_eq!(g.to_bits(), w.to_bits(), "{seg:?} {value} buy={is_buy}");
-                    }
-                    assert_eq!((b.ipft, b.dp_charge, b.exact_total), (0.0, 0.0, None));
-                    checked += 1;
-                }
-            }
-        }
-        assert_eq!(checked, 8 * 400 * 4);
+    fn a_nfo_option_sale_is_itemised_from_the_per_crore_figures() {
+        // 150,000 of premium sold, after 2026-04-01: STT 0.15%, exchange 3,552/crore,
+        // IPFT 0.01/crore, SEBI 10/crore, no stamp duty on a sale.
+        let b = calculate_side(Segment::OptionsNfo, 150_000.0, Direction::Long, false);
+        let crore = 1.0e7;
+        assert!((b.stt - 150_000.0 * 15_000.0 / crore).abs() < 1e-9);
+        assert!((b.exchange_txn - 150_000.0 * 3_552.0 / crore).abs() < 1e-9);
+        assert!((b.ipft - 150_000.0 * 0.01 / crore).abs() < 1e-12);
+        assert!((b.sebi_fee - 150_000.0 * 10.0 / crore).abs() < 1e-9);
+        assert_eq!(b.stamp_duty, 0.0);
+        let gst = 0.18 * (b.exchange_txn + b.ipft + b.sebi_fee);
+        assert!((b.gst - gst).abs() < 1e-9, "GST is on exchange + IPFT + SEBI, never on the tax");
+        assert!((b.total() - (b.stt + b.exchange_txn + b.ipft + b.sebi_fee + b.gst)).abs() < 1e-9);
     }
 }

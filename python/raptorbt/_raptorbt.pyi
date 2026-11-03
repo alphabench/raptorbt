@@ -45,9 +45,12 @@ class BacktestConfig:
     periods_per_year: float | None
     risk_free_rate: float
     session_minutes: float | None
-    # Set together with `fee_segment` to price the run on your own rates
-    # instead of the built-in exchange presets; `fee_segment` then names the
-    # row ("NFO-OPT") and a segment the schedule has no row for is refused.
+    # The rates that price the run: your own schedule, or with only
+    # `fee_segment` the dated statutory exchange presets (no brokerage).
+    # Without `fee_segment` (or with "auto") each instrument is priced on the
+    # row its InstrumentSpec venue and kind select, so a future never pays the
+    # option row and a missing venue is refused. `fee_segment` ("NFO-OPT")
+    # fixes one row for every instrument, an explicit override.
     fee_schedule: FeeSchedule | None
     fee_segment: str | None
     max_positions: int | None
@@ -57,7 +60,9 @@ class BacktestConfig:
     queue_fill_model: bool
     partial_fills: bool
     order_latency_ns: int
-    session_tz_offset_ns: int
+    # UTC offset of the session's local time; None names no zone (days are
+    # UTC dates and squareoff_time is refused where no schedule gives a zone).
+    session_tz_offset_ns: int | None
     limit_slippage: float
     liquidate_on_margin_call: bool
     fill_seed: int
@@ -105,7 +110,7 @@ class BacktestConfig:
         queue_fill_model: bool = ...,
         partial_fills: bool = ...,
         order_latency_ns: int = ...,
-        session_tz_offset_ns: int = ...,
+        session_tz_offset_ns: int | None = ...,
         limit_slippage: float = ...,
         liquidate_on_margin_call: bool = ...,
         squareoff_time: str | None = ...,
@@ -121,6 +126,7 @@ class BacktestConfig:
         money_decimals: int = ...,
         margin_model: MarginModel | None = ...,
     ) -> None: ...
+    def with_squareoff_time(self, hhmm: str | None) -> BacktestConfig: ...
     def set_fixed_stop(self, percent: float) -> None: ...
     def set_atr_stop(self, multiplier: float, period: int) -> None: ...
     def set_trailing_stop(self, percent: float) -> None: ...
@@ -344,6 +350,11 @@ class BacktestResult:
     # (ctx.halt); halted_at is the bar count when it latched.
     halted: bool
     halted_at: int | None
+    # Entries a risk limit refused, and entries the account could not fund
+    # (capital or margin short, or sized to nothing). A run that never got into
+    # the market says why here; the two are never summed.
+    rejected_entries: int
+    unfunded_entries: int
 
     # These three return numpy arrays, not lists: `+` concatenates a list and
     # adds elementwise on an array, so the declared type decides what the
@@ -432,18 +443,30 @@ def run_single_backtest(
     config: BacktestConfig | None = ...,
     position_sizes: _F64 | None = ...,
     instrument_config: InstrumentConfig | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> BacktestResult: ...
 def run_basket_backtest(
     instruments: Sequence[_Instrument],
     config: BacktestConfig | None = ...,
     sync_mode: str = ...,
     instrument_configs: dict[str, InstrumentConfig] | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> BacktestResult: ...
 def run_portfolio_backtest(
     instruments: Sequence[_Instrument],
     config: BacktestConfig | None = ...,
     allocation: str = ...,
     instrument_configs: dict[str, InstrumentConfig] | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> PortfolioResult:
     """Simulate instruments against one shared capital pool.
 
@@ -479,6 +502,10 @@ def run_options_backtest(
     # option_prices in length; ValueError otherwise. Nothing is synthesized
     # when absent -- the next bar's value is the fill.
     option_open_prices: _F64 | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> BacktestResult:
     """Backtest a single-leg option against its underlying.
 
@@ -522,6 +549,10 @@ def run_spread_backtest(
     # expiry settlement, squareoff, max-loss and target-profit closes keep
     # pricing at the current marks. Nothing is synthesized when absent.
     legs_open_premiums: list[_F64] | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> BacktestResult: ...
 def run_tick_backtest(
     timestamps: _I64,
@@ -553,6 +584,10 @@ def run_tick_backtest(
     # Itemized regulatory schedule, e.g. "NFO-OPT". Unset keeps the flat `fees`
     # rate, which cannot express per-order brokerage at any rate.
     fee_segment: str | None = ...,
+    # Honored by run_single_backtest; every other array runner refuses them
+    # with ``unsupported_corporate_actions`` rather than ignoring them.
+    corporate_actions: Sequence[CorporateAction] | None = ...,
+    adjustment_policy: str | None = ...,
 ) -> BacktestResult: ...
 # Returns (strategy_id, result) pairs, not bare results: the id is what lets a
 # caller match a result back to the item that produced it. Declared as
@@ -801,6 +836,11 @@ class SessionSchedule:
         holidays: list[int] | None = ...,
         squareoff_minute: int | None = ...,
     ) -> None: ...
+    overrides: dict[int, list[tuple[int, int]]]
+    #: ``(from, to)`` ``yyyymmdd`` ranges the schedule answers for; empty is every date, and any other date is closed.
+    coverage: list[tuple[int, int]]
+    #: Trading minutes in a regular session (the longest weekday of the base windows).
+    trading_minutes: float
     @staticmethod
     def nse_equity(
         holidays: list[int] | None = ..., squareoff_minute: int | None = ...
@@ -813,6 +853,40 @@ class SessionSchedule:
     def bse_equity(
         holidays: list[int] | None = ..., squareoff_minute: int | None = ...
     ) -> SessionSchedule: ...
+    @staticmethod
+    def bse_fo(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def mcx(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def mcx_select_agri(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def cds_cross(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def cds(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def bcd(
+        holidays: list[int] | None = ..., squareoff_minute: int | None = ...
+    ) -> SessionSchedule: ...
+    @staticmethod
+    def from_calendars(venue: str, documents: list[str]) -> SessionSchedule: ...
+    def with_window_change(
+        self,
+        from_date: int,
+        windows: dict[str | int, list[tuple[int, int]]],
+        to_date: int | None = ...,
+    ) -> SessionSchedule: ...
+    def with_session_override(self, date: int, windows: list[tuple[int, int]]) -> SessionSchedule: ...
+    def windows_on(self, date: int) -> list[tuple[int, int]]: ...
     def with_holidays(self, dates: list[int]) -> SessionSchedule: ...
     def with_squareoff_minute(self, squareoff_minute: int | None) -> SessionSchedule: ...
     def is_open(self, ts_ns: int) -> bool: ...
@@ -848,6 +922,7 @@ class RateCard:
 class FeeSchedule:
     @staticmethod
     def exchange_presets() -> FeeSchedule: ...
+    def in_force_at(self, at: int) -> FeeSchedule: ...
     @staticmethod
     def from_cards(cards: list[RateCard]) -> FeeSchedule: ...
     @staticmethod
@@ -961,6 +1036,8 @@ class InstrumentSpec:
     #: With a schedule the kernel enforces the session; without one the
     #: instrument trades at any timestamp, as before.
     session: SessionSchedule | None
+    #: The exchange's scrip group where charges depend on it (BSE cash: "A", "B").
+    scrip_group: str | None
     def to_json(self) -> str: ...
     @staticmethod
     def from_json(text: str) -> InstrumentSpec: ...
@@ -1237,6 +1314,9 @@ class OrderRequest:
     post_only: bool
     parent_client_order_id: str | None
     tags: dict[str, str]
+    #: Under hedging, the engine's id of the position this order closes; ``None`` for an order
+    #: that opens, and always ``None`` on a netting account.
+    position_id: int | None
     submitted_ns: int
 
 class ExecutionReport:
@@ -1695,6 +1775,11 @@ class PortfolioSession:
         trigger_price: float | None = ...,
     ) -> bool: ...
     def link_oco(self, instrument: int, order_ids: list[int]) -> None: ...
+    # Legs are (instrument, order_id) pairs, each a working opening order sized
+    # in units. They fill together on the event where every leg is marketable,
+    # funded as a whole at the group's margin, or none fills and each is
+    # rejected ("group_unfunded", or "group_leg_failed" when a leg ended).
+    def link_group(self, legs: list[tuple[int, int]]) -> int: ...
     # Adopt a position the account already holds (broker-truth seeding): no
     # order, no fill, no fees, no trade record. Cash mode debits the cost
     # basis; a fully funded margin book locks it instead. Cash or leverage-1.0
@@ -1886,6 +1971,9 @@ class KernelSession:
     def free_capital(self) -> float: ...
     def halt(self, reason: str = ..., flatten: bool = ...) -> None: ...
     def is_halted(self) -> bool: ...
+    def set_corporate_actions(self, actions: list[CorporateAction], policy: str) -> None: ...
+    @property
+    def dividends_received(self) -> float: ...
     def set_stop_price(
         self, price: float | None, position_id: int | None = ...
     ) -> None: ...

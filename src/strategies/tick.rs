@@ -80,8 +80,8 @@ pub struct TickBacktest {
 
 impl TickBacktest {
     /// The fee model comes from [`BacktestConfig::fee_model`], so setting
-    /// `fee_segment` charges the itemized regulatory schedule -- per-order
-    /// brokerage included -- and leaving it unset keeps the flat `fees` rate.
+    /// `fee_segment` charges the itemized statutory schedule -- no brokerage,
+    /// that is a broker's card -- and leaving it unset keeps the flat `fees` rate.
     pub fn new(config: TickBacktestConfig) -> Self {
         Self { config }
     }
@@ -659,24 +659,25 @@ mod tests {
     }
 
     #[test]
-    fn an_itemized_segment_charges_per_order_brokerage() {
-        // Brokerage is a flat Rs 20 per order, which a proportional rate
-        // cannot express at any rate -- this is why fee_segment matters more
-        // than the rate being right.
+    fn an_itemized_segment_charges_the_statutory_schedule() {
+        // The transaction tax lands on the sell only, which a proportional
+        // rate cannot express at any rate -- this is why fee_segment matters
+        // more than the rate being right.
         let result = costed_run(100.0, 0.001, Some("NFO-OPT"), 75, 1);
 
         let trade = &result.trades[0];
         let breakdown = trade.fee_breakdown.expect("an itemized segment reports its components");
 
-        assert_eq!(breakdown.brokerage, 40.0, "2 orders (entry, exit) x Rs 20");
+        assert_eq!(breakdown.brokerage, 0.0, "a built-in row carries no brokerage");
+        assert!((breakdown.stt - 11.25).abs() < 1e-9, "0.15% of the 7500 premium sold");
         assert!(
             (breakdown.total() - trade.fees).abs() < 1e-9,
             "the itemized total is the money actually charged"
         );
         assert_eq!(trade.fees, trade.entry_fees + trade.exit_fees);
         assert!(
-            trade.fees > 40.0,
-            "real costs dwarf the 15.00 flat rate on this notional: {}",
+            trade.fees > 15.0,
+            "real costs exceed the 15.00 flat rate on this notional: {}",
             trade.fees
         );
     }

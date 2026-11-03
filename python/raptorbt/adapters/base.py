@@ -70,6 +70,7 @@ from typing import Any
 from raptorbt.execution import (
     AdapterError,
     ExecutionReport,
+    Fenced,
     OrderRefused,
     OrderRequest,
     Unsupported,
@@ -139,10 +140,6 @@ class MalformedRow(AdapterError):
 
 class AuthExpired(AdapterError):
     """The session token is no longer valid."""
-
-
-class Fenced(AdapterError):
-    """This adapter no longer holds the host's lease (or its epoch was superseded): it sends nothing."""
 
 
 # -- data ----------------------------------------------------------------------
@@ -400,6 +397,10 @@ class BrokerAdapter:
     time_in_forces: frozenset[str] = frozenset({"day"})
     products: frozenset[str] = frozenset({"intraday", "delivery"})
     fill_source = "order_updates"  # or "trades"
+    #: Whether the venue keeps several positions per instrument apart and can close one by
+    #: name (the request's ``position_id``). Brokers here net positions per instrument, so a
+    #: mapping says ``False`` and a node with ``oms_type="hedging"`` is refused at construction.
+    supports_hedging = False
     tag_max_len = 20
     tag_charset = "A-Za-z0-9"
 
@@ -476,6 +477,7 @@ class BrokerAdapter:
         self._fenced = False
         self._lease = self._lease_check(lease)
         self._seen_unmapped: dict[tuple[str, str], None] = {}
+        self._seen_ignored: dict[tuple[str, str, str], None] = {}
         self._native_index: tuple[int, dict[str, str]] = (-1, {})
         self.ignored_updates = 0
         self._executor = executor or InlineExecutor()
@@ -521,8 +523,22 @@ class BrokerAdapter:
 
         Unsupported by default, so the engine evaluates every rule itself. A mapping whose
         broker can hold a percent or P&L exit overrides this, and reports the orders the rule
-        makes under ``request.exit_client_ids``."""
+        makes under ``request.exit_client_ids``. A mapping that holds rules overrides
+        :meth:`cancel_exit_rule` and :meth:`replace_exit_rule` too: the engine ends or changes
+        a held rule through them, and refuses to leave one at a venue that cannot be told."""
         raise Unsupported(f"{self.name}: exit rules are not held at the venue")
+
+    def cancel_exit_rule(self, request: Any) -> None:
+        """Take back an exit rule :meth:`place_exit_rule` accepted (``request`` is the one that
+        was placed). Return when the venue no longer holds it; raise ``Unsupported`` when it
+        cannot be taken back, and the engine will not report the rule cancelled."""
+        raise Unsupported(f"{self.name}: a held exit rule cannot be cancelled")
+
+    def replace_exit_rule(self, old: Any, new: Any) -> None:
+        """Change a held rule to cover ``new.legs`` (its size or positions changed): afterwards
+        the venue holds ``new`` and not ``old``. Raise ``Unsupported`` when it cannot be changed
+        in place; the engine then cancels it and watches the rule itself."""
+        raise Unsupported(f"{self.name}: a held exit rule cannot be changed in place")
 
     def parse_order_update(self, payload: Any) -> OrderStatusUpdate | None:
         """A feed message to an update; ``None`` for messages that are not order updates."""
@@ -570,6 +586,8 @@ class BrokerAdapter:
 
     def submit(self, request: OrderRequest) -> None:
         self._refuse_if_fenced()
+        if getattr(request, "position_id", None) is not None and not self.supports_hedging:
+            raise Unsupported(f"{self.name}: this venue nets positions; it cannot close a named position")
         if request.account_id and self.account_id and request.account_id != self.account_id:
             raise OrderRefused("order is for another account than this session")
         if request.post_only:
@@ -689,6 +707,7 @@ class BrokerAdapter:
         if rec is None or stale:
             if stale:
                 self._event("fenced_drop", job.client_order_id, f"{job.kind} of epoch {job.epoch} < {self._epoch}")
+                self._report_unsent(job, "fenced")
             return True
         try:
             return getattr(self, f"_do_{job.kind}")(rec, job)
@@ -752,6 +771,9 @@ class BrokerAdapter:
         rec.attempted = True
         try:
             vid = self._call(lambda: self.place(rec), "orders", retry_ambiguous=False)
+        except Fenced:
+            rec.attempted = False  # place retries only after "certainly not processed": nothing is out there
+            raise
         except VenueRefusal as e:
             self._terminal(rec, "rejected", ExecutionReport.rejected(self._reason(e), self._now()))
         except Transient as e:
@@ -1005,12 +1027,12 @@ class BrokerAdapter:
         with self._lock:
             rec = self._resolve(u)
             if rec is None:
-                self.ignored_updates += 1
+                self._ignored("update", u.venue_order_id, u.status, "no order of this node has that id or tag", u.tag)
                 return
             if rec.venue_order_id is None:
                 if not self._matches(rec, u):
                     # the same tag with other terms: an earlier run's order, not ours
-                    self.ignored_updates += 1
+                    self._ignored("update", u.venue_order_id, u.status, "the tag is ours, the terms are not", u.tag, rec.client_order_id)
                     return
                 rec.venue_order_id = u.venue_order_id
                 self._by_venue[u.venue_order_id] = rec.client_order_id
@@ -1018,7 +1040,7 @@ class BrokerAdapter:
                 if self._matches(rec, u):
                     self._event("venue_id_mismatch", rec.client_order_id, f"{u.venue_order_id} != {rec.venue_order_id}")
                 else:
-                    self.ignored_updates += 1
+                    self._ignored("update", u.venue_order_id, u.status, "another venue order carries this order's tag", u.tag, rec.client_order_id)
                 return
             arrival = arrival_ns if arrival_ns is not None else self._now()
             ts = u.ts_ns or arrival
@@ -1070,7 +1092,7 @@ class BrokerAdapter:
             cid = client_order_id or self._by_venue.get(venue_order_id or "")
             rec = self._orders.get(cid or "")
             if rec is None:
-                self.ignored_updates += 1
+                self._ignored("trade", venue_order_id, None, f"execution {exec_id} belongs to no order of this node", None, client_order_id)
                 return
             if exec_id in rec.seen_exec:
                 return
@@ -1080,6 +1102,23 @@ class BrokerAdapter:
             rec.trade_fed = True
             arrival = arrival_ns if arrival_ns is not None else self._now()
             self._push(rec, ExecutionReport.fill(exec_id, qty, price, ts_ns or arrival, fee=fee), arrival)
+
+    def _ignored(self, what: str, venue_order_id: str | None, status: str | None, why: str, tag: str | None = None, cid: str | None = None) -> None:
+        """Count a row or trade that changed nothing, and say so once per venue order and status.
+
+        Every venue order of the account that is not this node's lands here (another strategy, a
+        manual order), so the event is not repeated for the same order and status; the counter
+        still counts every one. An order of this node's that is ignored shows up here too, and
+        that is the case to look for after a restart."""
+        self.ignored_updates += 1
+        key = (what, str(venue_order_id), str(status))
+        if key in self._seen_ignored:
+            return
+        self._seen_ignored[key] = None
+        while len(self._seen_ignored) > 10_000:
+            self._seen_ignored.pop(next(iter(self._seen_ignored)))
+        detail = json.dumps({"what": what, "venue_order_id": venue_order_id, "status": status, "tag": tag, "why": why})
+        self._event("ignored_update", cid or (self.ids.decode(tag) if tag else None), detail)
 
     def _resolve(self, u: OrderStatusUpdate) -> _Rec | None:
         cid = self._by_venue.get(u.venue_order_id) or u.client_order_id or self.ids.decode(u.tag)
@@ -1238,6 +1277,13 @@ class BrokerAdapter:
         for p in self._read(self.fetch_positions):
             ins = self._instrument_or_none(p.symbol)
             if ins is None:
+                # The broker's own key (a mapping that could not invert it): the node's symbols
+                # are known to the adapter once a node is built on it (``know_symbols``).
+                symbol = self.symbol_of(p.symbol)
+                if symbol is not None:
+                    p = replace(p, symbol=symbol)
+                    ins = self._instrument_or_none(symbol)
+            if ins is None:
                 self._event("unmapped_instrument", None, json.dumps({"symbol": p.symbol, "net_qty": p.net_qty, "what": "position left as the broker counts it"}))
                 out.append(p)
             else:
@@ -1291,8 +1337,9 @@ class BrokerAdapter:
 
         Monotonic: a lower epoch raises. **Without a ``lease`` this only guards this process**: it
         compares a number held here, so two processes that were each given an epoch both keep
-        sending (``can_fence`` is ``False``). With a ``lease`` the host's check runs before every
-        write and a process that lost it is refused with :class:`Fenced`. Neither recalls a
+        sending (``can_fence`` is ``False``). With a ``lease`` the host's check runs in this call
+        (a node calls it before every request and from its heartbeat) and before every write, and a
+        process that lost it is refused with :class:`~raptorbt.execution.Fenced`. Neither recalls a
         request already in flight. A higher epoch lifts a previous ``Fenced`` refusal (the host
         re-acquired the lease).
         """
@@ -1302,6 +1349,11 @@ class BrokerAdapter:
             if epoch > self._epoch:
                 self._fenced = False
             self._epoch = epoch
+            # The node calls this before every request it sends and from its heartbeat: with a
+            # lease the answer is the host's, so a node that lost it is fenced at once instead of
+            # journaling a request nobody sends.
+            if self._fenced or not self._holds_lease():
+                raise Fenced(f"this adapter does not hold the lease for epoch {epoch}")
 
     @property
     def epoch(self) -> int:
@@ -1349,7 +1401,11 @@ class BrokerAdapter:
             raise Fenced(f"this adapter lost its lease at epoch {self._epoch}; fence() with a higher epoch after re-acquiring it")
 
     def _drop_fenced(self) -> None:
-        """Lease lost: drop every queued write (no report: the new owner reconciles from the venue)."""
+        """Lease lost: drop every queued write, and tell the node each one was not sent.
+
+        A request the node handed over was journaled as taken. A dropped one gets a rejected
+        report (reason ``fenced``) so the node never holds an order as working that no one sent;
+        the new owner reconciles whatever was in flight before the lease was lost."""
         with self._lock:
             self._fenced = True
             keep: deque[_Job] = deque()
@@ -1358,7 +1414,24 @@ class BrokerAdapter:
                     keep.append(j)
                 else:
                     self._event("fenced_drop", j.client_order_id, f"{j.kind} of epoch {j.epoch}: lease lost")
+                    self._report_unsent(j, "fenced")
             self._outbox = keep
+
+    def _report_unsent(self, job: _Job, why: str) -> None:
+        """Answer a queued write that will never be sent, the way a refusal would."""
+        rec = self._orders.get(job.client_order_id or "")
+        if rec is None or rec.terminal:
+            return
+        if job.kind == "submit":
+            if rec.attempted or rec.venue_order_id:
+                return  # an earlier try may be at the venue: reconcile decides, not a rejection
+            self._terminal(rec, "rejected", ExecutionReport.rejected(why, self._now()))
+        elif job.kind == "cancel":
+            rec.cancel_requested = False
+            self._push(rec, ExecutionReport.cancel_rejected(why, self._now()))
+        elif job.kind == "modify":
+            rec.pending_modify = None
+            self._push(rec, ExecutionReport.replace_rejected(why, self._now()))
 
     # -- state ---------------------------------------------------------------------------------
 
@@ -1435,6 +1508,72 @@ class BrokerAdapter:
     def native_key(self, ins: Instrument) -> str:
         """The key broker rows are matched to instruments by."""
         return ins.key or f"{ins.exchange}:{ins.symbol}"
+
+    def know_symbols(self, symbols: Iterable[str]) -> None:
+        """Learn which broker key is which of ``symbols`` (a node calls this when it is built),
+        so a position or row the broker reports under its own key is read as the engine's
+        symbol even when no order has been sent yet. A symbol the mapping does not know is
+        skipped here and refused when an order for it is sent."""
+        for symbol in symbols:
+            ins = self._instrument_or_none(symbol)
+            if ins is not None:
+                self._by_native[self.native_key(ins)] = symbol
+
+    def restore_orders(self, working: Iterable[Mapping[str, Any]]) -> list[str]:
+        """Teach a fresh adapter the orders a restarted node holds as working.
+
+        A node rebuilt from its journal knows which orders are working at the venue; this
+        adapter, built after the restart, does not, and without them it drops the fills of
+        those orders (``ignored_update``) and refuses to cancel them. ``working`` has one
+        mapping per order: ``request`` (the :class:`~raptorbt.execution.OrderRequest` with its
+        current terms), ``status`` (the node's), ``filled_qty`` and ``avg_price`` (what the node
+        has booked). The adapter keeps the node's fill progress, so the next row of the venue
+        yields exactly the fills the node has not seen. It looks each order up in the day's
+        book by its tag and terms and binds the venue's id; an order the book does not show is
+        still registered (the reconciliation reports it missing). Returns the client ids
+        adopted. Raises :class:`Unsupported` for an order whose symbol is not mapped: the
+        adapter cannot account for it, so the restore is refused."""
+        adopted: list[str] = []
+        for row in working:
+            req = row["request"]
+            cid = req.client_order_id
+            with self._lock:
+                if cid in self._orders:
+                    continue
+            ins = self.instrument(req.symbol)
+            product = req.tags.get("product", self.default_product)
+            tag = self.ids.encode(cid)
+            try:
+                wire = self.translate(req, ins, product, tag)
+            except AdapterError as exc:
+                wire = {}
+                self._event("restore_unsendable", cid, f"{type(exc).__name__}: {exc}")
+            fp = (
+                req.symbol, req.side, req.quantity, req.order_type, req.limit_price,
+                req.trigger_price, req.time_in_force, product,
+            )  # fmt: skip
+            rec = _Rec(
+                cid, tag, req.symbol, req.side, req.quantity, req.order_type, req.limit_price,
+                req.trigger_price, req.time_in_force, product, wire, fp,
+            )  # fmt: skip
+            status = str(row.get("status", ""))
+            filled = float(row.get("filled_qty") or 0.0)
+            avg = row.get("avg_price")
+            rec.attempted = True  # it was sent before the restart: never place it again blindly
+            rec.accepted = status != "submitted"
+            rec.cancel_requested = status == "pendingcancel"
+            rec.cum_qty = filled
+            rec.cum_notional = filled * float(avg) if filled and avg is not None else 0.0
+            with self._lock:
+                self._orders[cid] = rec
+                self._by_native[self.native_key(ins)] = req.symbol
+            found, state = self._try_lookup(rec)
+            if found is not None:
+                self._bind(rec, found.venue_order_id)
+            else:
+                self._event("restore_order_unbound", cid, f"the day's book {state} for tag {tag}")
+            adopted.append(cid)
+        return adopted
 
     def symbol_of(self, native_key: str | None) -> str | None:
         """Engine symbol for a broker-native key, as far as orders sent so far reveal it."""

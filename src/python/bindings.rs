@@ -1,10 +1,9 @@
 //! PyO3 function bindings for RaptorBT.
 
 use numpy::{PyArray1, PyReadonlyArray1};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::errors::Fail;
+use super::errors::{invalid_input, Fail};
 
 use std::collections::HashMap;
 
@@ -103,7 +102,7 @@ pub struct PyBacktestConfig {
     /// Trading minutes per session for intraday annualization.
     ///
     /// NSE equity 375, MCX 870, CDS 480. `0` marks a 24x7 market.
-    /// `None` defaults to NSE.
+    /// `None` assumes no session: intraday bars count against calendar time.
     #[pyo3(get, set)]
     pub session_minutes: Option<f64>,
     /// Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT".
@@ -136,9 +135,12 @@ pub struct PyBacktestConfig {
     /// Order-entry latency on the tick path (ns); 0 = same-print.
     #[pyo3(get, set)]
     pub order_latency_ns: i64,
-    /// Offset for the trading date DAY orders expire on (0 = UTC).
+    /// UTC offset of the session's local time, in ns: the zone a trading day,
+    /// DAY-order expiry and `squareoff_time` are read in. `None` is unnamed
+    /// (days are UTC dates) and refuses `squareoff_time` on an instrument
+    /// with no session schedule; name UTC as `0`.
     #[pyo3(get, set)]
-    pub session_tz_offset_ns: i64,
+    pub session_tz_offset_ns: Option<i64>,
     /// Squareoff time as minutes from local midnight; `None` disables.
     ///
     /// Set through the `squareoff_time` "HH:MM" argument, not directly.
@@ -218,7 +220,7 @@ impl PyBacktestConfig {
         queue_fill_model=false,
         partial_fills=false,
         order_latency_ns=0,
-        session_tz_offset_ns=0,
+        session_tz_offset_ns=None,
         limit_slippage=0.0,
         liquidate_on_margin_call=false,
         squareoff_time=None,
@@ -255,7 +257,7 @@ impl PyBacktestConfig {
         queue_fill_model: bool,
         partial_fills: bool,
         order_latency_ns: i64,
-        session_tz_offset_ns: i64,
+        session_tz_offset_ns: Option<i64>,
         limit_slippage: f64,
         liquidate_on_margin_call: bool,
         squareoff_time: Option<String>,
@@ -316,6 +318,16 @@ impl PyBacktestConfig {
         })
     }
 
+    /// A copy whose `squareoff_time` is `hhmm` (`None` disables it): how a
+    /// runner applies the flatten time a strategy's requirements declare
+    /// without changing the caller's config.
+    #[pyo3(signature = (hhmm))]
+    fn with_squareoff_time(&self, hhmm: Option<&str>) -> PyResult<Self> {
+        let mut copy = self.clone();
+        copy.squareoff_time_minutes = parse_squareoff_time(hhmm)?;
+        Ok(copy)
+    }
+
     #[setter]
     fn set_money_decimals(&mut self, decimals: u32) -> PyResult<()> {
         check_money_decimals(decimals)?;
@@ -359,8 +371,10 @@ impl PyBacktestConfig {
     }
 
     /// Set fixed percentage stop-loss.
-    fn set_fixed_stop(&mut self, percent: f64) {
+    fn set_fixed_stop(&mut self, percent: f64) -> PyResult<()> {
+        stop_fraction("set_fixed_stop", percent)?;
         self.stop_config = StopConfig::Fixed { percent };
+        Ok(())
     }
 
     /// Set ATR-based stop-loss.
@@ -369,8 +383,10 @@ impl PyBacktestConfig {
     }
 
     /// Set trailing stop-loss.
-    fn set_trailing_stop(&mut self, percent: f64) {
+    fn set_trailing_stop(&mut self, percent: f64) -> PyResult<()> {
+        stop_fraction("set_trailing_stop", percent)?;
         self.stop_config = StopConfig::Trailing { percent };
+        Ok(())
     }
 
     /// Set fixed percentage take-profit.
@@ -405,6 +421,27 @@ impl PyBacktestConfig {
 ///
 /// Refuses anything it cannot read rather than guessing — a silently
 /// defaulted timing would decide which bar every fill prices off.
+/// A fixed or trailing stop is a fraction of the price (`0.05` is 5%). A whole
+/// number such as `5.0` is almost certainly a percentage meant as one, and it
+/// would put a long's stop below zero, so it is refused instead of obeyed.
+fn stop_fraction(call: &str, percent: f64) -> PyResult<()> {
+    if percent.is_finite() && percent > 0.0 && percent <= 1.0 {
+        return Ok(());
+    }
+    Err(Fail::new(
+        "invalid_config",
+        format!(
+            "{call}: percent is a fraction of the price in (0, 1] (0.05 is 5%), got {percent}; \
+             for 5% pass 0.05"
+        ),
+    )
+    .op(call)
+    .param("percent")
+    .value(percent)
+    .valid(["a fraction in (0, 1], e.g. 0.05 for 5%"])
+    .into())
+}
+
 fn parse_fill_timing(value: Option<&str>) -> PyResult<Option<crate::core::types::FillTiming>> {
     use crate::core::types::FillTiming;
     let Some(raw) = value else {
@@ -469,26 +506,64 @@ fn parse_squareoff_time(value: Option<&str>) -> PyResult<Option<u32>> {
 }
 
 impl PyBacktestConfig {
-    /// The rates a schedule gives `fee_segment`. A schedule with no
-    /// `fee_segment` has nothing to price and is refused, as is a name the
-    /// schedule has no row for: a schedule never silently charges the flat
-    /// `fees` rate or nothing.
+    /// The rates a schedule gives an explicit `fee_segment`, validated.
+    ///
+    /// Without a schedule the dated exchange presets answer. A schedule with
+    /// no `fee_segment` (or `"auto"`) prices each instrument on the row its
+    /// own venue and kind select, so there is nothing to resolve here. A name
+    /// the schedule has no row for is refused: a schedule never silently
+    /// charges the flat `fees` rate or nothing.
     fn resolve_fee_rates(
         schedule: Option<&super::costs_bindings::PyFeeSchedule>,
         fee_segment: Option<&str>,
     ) -> PyResult<Option<crate::execution::costs::FeeRates>> {
         match (schedule, fee_segment) {
-            (None, _) => Ok(None),
+            (_, None) => Ok(None),
+            (_, Some(seg)) if seg.eq_ignore_ascii_case(FEE_SEGMENT_AUTO) => Ok(None),
             (Some(s), Some(seg)) => super::costs_bindings::resolve_rates(&s.inner, seg).map(Some),
-            (Some(_), None) => Err(Fail::new(
-                "invalid_fee_schedule",
-                "fee_schedule needs fee_segment to say which row prices the run, e.g. \"NFO-OPT\"",
+            (None, Some(seg)) => super::costs_bindings::resolve_rates(
+                &crate::execution::costs::FeeSchedule::exchange_presets(),
+                seg,
             )
-            .op("BacktestConfig")
-            .param("fee_segment")
-            .into()),
+            .map(Some),
         }
     }
+
+    /// The binding the run is priced on: the user's schedule or, with only a
+    /// `fee_segment`, the dated exchange presets. The row is the explicit
+    /// `fee_segment`'s, or, with none or `"auto"`, chosen per instrument.
+    fn fee_binding(&self) -> Option<crate::execution::fees::FeeBinding> {
+        let schedule = match (&self.fee_schedule, &self.fee_segment) {
+            (Some(s), _) => s.inner.clone(),
+            (None, Some(_)) => {
+                std::sync::Arc::new(crate::execution::costs::FeeSchedule::exchange_presets())
+            }
+            (None, None) => return None,
+        };
+        let fixed = match self.fee_segment.as_deref() {
+            None => None,
+            Some(seg) if seg.eq_ignore_ascii_case(FEE_SEGMENT_AUTO) => None,
+            // Validated when the segment or schedule was attached.
+            Some(seg) => super::costs_bindings::resolve_row(&schedule, seg)
+                .ok()
+                .map(|(venue, segment, _)| (venue, segment)),
+        };
+        Some(crate::execution::fees::FeeBinding { schedule, fixed })
+    }
+}
+
+/// `fee_segment` value that prices each instrument on the row its own venue
+/// and kind select; the same as leaving `fee_segment` out beside a schedule.
+const FEE_SEGMENT_AUTO: &str = "auto";
+
+/// The engine config for a run with no instrument specs (the array runners),
+/// refused when a setting cannot be carried out without one: a fee schedule
+/// that picks its row per instrument, or a `squareoff_time` with no time
+/// zone.
+fn checked_config(config: Option<&PyBacktestConfig>) -> PyResult<BacktestConfig> {
+    let config = config.map(BacktestConfig::from).unwrap_or_default();
+    super::strategy_bindings::check_market(&config, "the run", None)?;
+    Ok(config)
 }
 
 fn check_money_decimals(decimals: u32) -> PyResult<()> {
@@ -517,17 +592,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             squareoff_time_minutes: py_config.squareoff_time_minutes,
             fee_segment: py_config.fee_segment.clone(),
             fee_rates: py_config.fee_rates,
-            // Validated when the schedule was attached, so the row exists.
-            fee_binding: match (&py_config.fee_schedule, py_config.fee_segment.as_deref()) {
-                (Some(s), Some(seg)) => super::costs_bindings::resolve_row(&s.inner, seg).ok().map(
-                    |(venue, segment, _)| crate::execution::fees::FeeBinding {
-                        schedule: s.inner.clone(),
-                        venue,
-                        segment,
-                    },
-                ),
-                _ => None,
-            },
+            fee_binding: py_config.fee_binding(),
             money_decimals: py_config.money_decimals,
             margin_model: py_config
                 .margin_model
@@ -540,7 +605,8 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             queue_fill_model: py_config.queue_fill_model,
             partial_fills: py_config.partial_fills,
             order_latency_ns: py_config.order_latency_ns,
-            session_tz_offset_ns: py_config.session_tz_offset_ns,
+            session_tz_offset_ns: py_config.session_tz_offset_ns.unwrap_or(0),
+            session_tz_set: py_config.session_tz_offset_ns.is_some(),
             limit_slippage: py_config.limit_slippage,
             liquidate_on_margin_call: py_config.liquidate_on_margin_call,
             fill_prob_slippage: py_config.fill_prob_slippage,
@@ -594,8 +660,10 @@ impl PyInstrumentConfig {
     }
 
     /// Set fixed percentage stop-loss override.
-    fn set_fixed_stop(&mut self, percent: f64) {
+    fn set_fixed_stop(&mut self, percent: f64) -> PyResult<()> {
+        stop_fraction("set_fixed_stop", percent)?;
         self.stop_config = Some(StopConfig::Fixed { percent });
+        Ok(())
     }
 
     /// Set ATR-based stop-loss override.
@@ -604,8 +672,10 @@ impl PyInstrumentConfig {
     }
 
     /// Set trailing stop-loss override.
-    fn set_trailing_stop(&mut self, percent: f64) {
+    fn set_trailing_stop(&mut self, percent: f64) -> PyResult<()> {
+        stop_fraction("set_trailing_stop", percent)?;
         self.stop_config = Some(StopConfig::Trailing { percent });
+        Ok(())
     }
 
     /// Set fixed percentage take-profit override.
@@ -805,7 +875,7 @@ pub struct PyTrade {
     pub exit_fees: f64,
     /// Itemized regulatory costs, when `config.fee_segment` is set.
     ///
-    /// Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
+    /// Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, ipft, dp_charge, total.
     /// `total` equals `fees`, so reported costs and the equity curve agree.
     #[pyo3(get)]
     pub fee_breakdown: Option<HashMap<String, f64>>,
@@ -1156,9 +1226,21 @@ pub struct PyBacktestResult {
     /// entries during the run.
     #[pyo3(get)]
     halted: bool,
+    /// The fee rows fills were priced on that are not matched to an official
+    /// publication (`"NFO:FUTURES"`, ...). Empty when every row was confirmed or
+    /// the run used flat fees or a user's own card.
+    #[pyo3(get, set)]
+    pub unverified_fee_rows: Vec<String>,
     /// Bars stepped when the halt latched.
     #[pyo3(get)]
     halted_at: Option<usize>,
+    /// Entries a risk limit refused.
+    #[pyo3(get)]
+    rejected_entries: usize,
+    /// Entries the account could not fund (capital or margin short, or sized
+    /// to nothing). Not counted in `rejected_entries`.
+    #[pyo3(get)]
+    unfunded_entries: usize,
 }
 
 #[pymethods]
@@ -1212,7 +1294,7 @@ impl PyBacktestResult {
 /// shares the same execution core and result types. Array runners remain
 /// supported and will only be deprecated in a future major release.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None, instrument_config=None))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, entries, exits, direction=1, weight=1.0, symbol="UNKNOWN", config=None, position_sizes=None, instrument_config=None, corporate_actions=None, adjustment_policy=None))]
 pub fn run_single_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1229,6 +1311,8 @@ pub fn run_single_backtest<'py>(
     config: Option<&PyBacktestConfig>,
     position_sizes: Option<PyReadonlyArray1<f64>>,
     instrument_config: Option<&PyInstrumentConfig>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
     // Borrowed, not copied: the `PyReadonlyArray1` guards stay alive for the
     // whole call, so the engine can read NumPy's buffers directly. Copying
@@ -1256,25 +1340,90 @@ pub fn run_single_backtest<'py>(
         weight,
     };
 
-    let rust_config = config.map(BacktestConfig::from).unwrap_or_default();
+    let rust_config = checked_config(config)?;
     let inst_config = instrument_config.map(InstrumentConfig::from);
 
-    let backtest = SingleBacktest::new(rust_config);
-    let result = backtest.run_with_instrument_config(&ohlcv, &signals, inst_config.as_ref());
+    let unverified =
+        match (&rust_config.fee_binding, ohlcv.timestamps.first(), ohlcv.timestamps.last()) {
+            (Some(b), Some(&first), Some(&last)) => b.unverified_between(first, last),
+            _ => Vec::new(),
+        };
 
-    Ok(convert_result(result))
+    let (actions, policy) =
+        super::lifecycle_bindings::extract_actions(corporate_actions, adjustment_policy)?;
+    for action in &actions {
+        if action.instrument != symbol {
+            return Err(Fail::new(
+                "unknown_symbol",
+                format!("corporate action on {:?}: this run trades {symbol:?}", action.instrument),
+            )
+            .op("run_single_backtest")
+            .param("corporate_actions")
+            .value(action.instrument.as_str())
+            .into());
+        }
+    }
+    // Under `adjusted` the bars before each split are put on the later basis
+    // here, on copies; the caller's arrays are not touched.
+    let adjusted = if policy == crate::instruments::AdjustmentPolicy::Adjusted {
+        let mut copy = OhlcvData {
+            timestamps: ohlcv.timestamps.clone(),
+            open: ohlcv.open.to_vec().into(),
+            high: ohlcv.high.to_vec().into(),
+            low: ohlcv.low.to_vec().into(),
+            close: ohlcv.close.to_vec().into(),
+            volume: ohlcv.volume.to_vec().into(),
+        };
+        crate::instruments::lifecycle::adjust_bars(
+            symbol,
+            &actions,
+            &ohlcv.timestamps,
+            copy.open.to_mut(),
+            copy.high.to_mut(),
+            copy.low.to_mut(),
+            copy.close.to_mut(),
+            copy.volume.to_mut(),
+        )
+        .map_err(super::lifecycle_bindings::action_err)?;
+        Some(copy)
+    } else {
+        None
+    };
+
+    let backtest = SingleBacktest::new(rust_config);
+    let result = backtest
+        .run_with_lifecycle(
+            adjusted.as_ref().unwrap_or(&ohlcv),
+            &signals,
+            inst_config.as_ref(),
+            &actions,
+            policy,
+        )
+        .map_err(super::lifecycle_bindings::action_err)?;
+
+    // The rows the fills used (the book names them) and the rows the span of
+    // the data touches: both are unverified, so both are listed.
+    let mut rows = result.unverified_fee_rows.clone();
+    rows.extend(unverified);
+    rows.sort();
+    rows.dedup();
+    Ok(convert_result(result.with_unverified_fee_rows(rows)))
 }
 
 /// Run basket/collective backtest.
 #[pyfunction]
-#[pyo3(signature = (instruments, config=None, sync_mode="all", instrument_configs=None))]
+#[pyo3(signature = (instruments, config=None, sync_mode="all", instrument_configs=None, corporate_actions=None, adjustment_policy=None))]
 pub fn run_basket_backtest<'py>(
     _py: Python<'py>,
     instruments: Vec<PyInstrumentArrays<'py>>,
     config: Option<&PyBacktestConfig>,
     sync_mode: &str,
     instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions("run_basket_backtest", &corporate_actions)?;
+    let _ = adjustment_policy;
     let rust_instruments: Vec<(OhlcvData, CompiledSignals)> = instruments
         // Iterated by reference so the numpy guards stay alive and their
         // buffers can be borrowed rather than copied; `into_iter` would drop
@@ -1332,11 +1481,8 @@ pub fn run_basket_backtest<'py>(
         _ => SyncMode::All,
     };
 
-    let basket_config = BasketConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
-        sync_mode: mode,
-        ..Default::default()
-    };
+    let basket_config =
+        BasketConfig { base: checked_config(config)?, sync_mode: mode, ..Default::default() };
 
     // Convert PyInstrumentConfig map to InstrumentConfig map
     let rust_inst_configs: Option<HashMap<String, InstrumentConfig>> =
@@ -1364,14 +1510,18 @@ pub struct PyInstrumentSummary {
     /// Entries refused because the portfolio was at its limit or halted.
     #[pyo3(get)]
     pub rejected_entries: usize,
+    /// Entries the account could not fund: sized to nothing, or refused for
+    /// capital or margin. Not counted in `rejected_entries`.
+    #[pyo3(get)]
+    pub unfunded_entries: usize,
 }
 
 #[pymethods]
 impl PyInstrumentSummary {
     fn __repr__(&self) -> String {
         format!(
-            "InstrumentSummary(symbol='{}', trades={}, pnl={:.2}, rejected_entries={})",
-            self.symbol, self.trades, self.pnl, self.rejected_entries
+            "InstrumentSummary(symbol='{}', trades={}, pnl={:.2}, rejected_entries={}, unfunded_entries={})",
+            self.symbol, self.trades, self.pnl, self.rejected_entries, self.unfunded_entries
         )
     }
 }
@@ -1387,6 +1537,10 @@ pub struct PyPortfolioResult {
     /// Entries refused by the risk gate, across all instruments.
     #[pyo3(get)]
     pub rejected_entries: usize,
+    /// Entries that could not be funded, across all instruments (not in
+    /// `rejected_entries`).
+    #[pyo3(get)]
+    pub unfunded_entries: usize,
     /// Whether the drawdown kill-switch tripped.
     #[pyo3(get)]
     pub halted: bool,
@@ -1405,9 +1559,10 @@ impl PyPortfolioResult {
 
     fn __repr__(&self) -> String {
         format!(
-            "PortfolioResult(instruments={}, rejected_entries={}, halted={})",
+            "PortfolioResult(instruments={}, rejected_entries={}, unfunded_entries={}, halted={})",
             self.per_instrument.len(),
             self.rejected_entries,
+            self.unfunded_entries,
             self.halted
         )
     }
@@ -1426,7 +1581,7 @@ impl PyPortfolioResult {
 /// `allocation`: "equal_weight" (default) divides the pool across the slots
 /// that could still open; "full" lets each entry take the whole remaining pool.
 #[pyfunction]
-#[pyo3(signature = (instruments, config=None, allocation="equal_weight", instrument_configs=None))]
+#[pyo3(signature = (instruments, config=None, allocation="equal_weight", instrument_configs=None, corporate_actions=None, adjustment_policy=None))]
 #[allow(clippy::type_complexity)]
 pub fn run_portfolio_backtest<'py>(
     _py: Python<'py>,
@@ -1434,7 +1589,14 @@ pub fn run_portfolio_backtest<'py>(
     config: Option<&PyBacktestConfig>,
     allocation: &str,
     instrument_configs: Option<HashMap<String, PyInstrumentConfig>>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyPortfolioResult> {
+    super::lifecycle_bindings::refuse_corporate_actions(
+        "run_portfolio_backtest",
+        &corporate_actions,
+    )?;
+    let _ = adjustment_policy;
     use crate::strategies::portfolio::{
         CapitalAllocation, PortfolioBacktest, PortfolioBacktestConfig,
     };
@@ -1512,10 +1674,7 @@ pub fn run_portfolio_backtest<'py>(
         }
     };
 
-    let portfolio_config = PortfolioBacktestConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
-        allocation,
-    };
+    let portfolio_config = PortfolioBacktestConfig { base: checked_config(config)?, allocation };
 
     let rust_inst_configs: Option<HashMap<String, InstrumentConfig>> =
         instrument_configs.map(|configs| {
@@ -1535,9 +1694,11 @@ pub fn run_portfolio_backtest<'py>(
                 trades: s.trades,
                 pnl: s.pnl,
                 rejected_entries: s.rejected_entries,
+                unfunded_entries: s.unfunded_entries,
             })
             .collect(),
         rejected_entries: out.rejected_entries,
+        unfunded_entries: out.unfunded_entries,
         halted: out.halted,
         halted_at: out.halted_at,
     })
@@ -1548,7 +1709,7 @@ pub fn run_portfolio_backtest<'py>(
 #[allow(clippy::too_many_arguments)]
 /// Run options backtest.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, option_prices, entries, exits, direction=1, symbol="OPTION", config=None, option_type="call", strike_selection="atm", size_type="percent", size_value=1.0, lot_size=1, strike_interval=50.0, option_open_prices=None))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, option_prices, entries, exits, direction=1, symbol="OPTION", config=None, option_type="call", strike_selection="atm", size_type="percent", size_value=1.0, lot_size=1, strike_interval=50.0, option_open_prices=None, corporate_actions=None, adjustment_policy=None))]
 pub fn run_options_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1570,7 +1731,14 @@ pub fn run_options_backtest<'py>(
     lot_size: usize,
     strike_interval: f64,
     option_open_prices: Option<PyReadonlyArray1<f64>>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions(
+        "run_options_backtest",
+        &corporate_actions,
+    )?;
+    let _ = adjustment_policy;
     let ohlcv = OhlcvData {
         timestamps: numpy_cow_i64(&timestamps),
         open: numpy_cow_f64(&open),
@@ -1678,7 +1846,7 @@ pub fn run_options_backtest<'py>(
     };
 
     let options_config = OptionsConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
+        base: checked_config(config)?,
         option_type: opt_type,
         strike_selection: strike_sel,
         size_type: size,
@@ -1698,7 +1866,7 @@ pub fn run_options_backtest<'py>(
 #[allow(clippy::too_many_arguments)]
 /// Run pairs trading backtest.
 #[pyfunction]
-#[pyo3(signature = (leg1_timestamps, leg1_open, leg1_high, leg1_low, leg1_close, leg1_volume, leg2_timestamps, leg2_open, leg2_high, leg2_low, leg2_close, leg2_volume, entries, exits, direction=1, symbol="PAIR", config=None, hedge_ratio=1.0, dynamic_hedge=false))]
+#[pyo3(signature = (leg1_timestamps, leg1_open, leg1_high, leg1_low, leg1_close, leg1_volume, leg2_timestamps, leg2_open, leg2_high, leg2_low, leg2_close, leg2_volume, entries, exits, direction=1, symbol="PAIR", config=None, hedge_ratio=1.0, dynamic_hedge=false, corporate_actions=None, adjustment_policy=None))]
 pub fn run_pairs_backtest<'py>(
     _py: Python<'py>,
     leg1_timestamps: PyReadonlyArray1<i64>,
@@ -1720,7 +1888,11 @@ pub fn run_pairs_backtest<'py>(
     config: Option<&PyBacktestConfig>,
     hedge_ratio: f64,
     dynamic_hedge: bool,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions("run_pairs_backtest", &corporate_actions)?;
+    let _ = adjustment_policy;
     let leg1_ohlcv = OhlcvData {
         timestamps: numpy_cow_i64(&leg1_timestamps),
         open: numpy_cow_f64(&leg1_open),
@@ -1751,7 +1923,7 @@ pub fn run_pairs_backtest<'py>(
     };
 
     let pairs_config = PairsConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
+        base: checked_config(config)?,
         hedge_ratio,
         dynamic_hedge,
         ..Default::default()
@@ -1790,7 +1962,7 @@ pub fn run_pairs_backtest<'py>(
 #[allow(clippy::too_many_arguments)]
 /// Run spread backtest (multi-leg options).
 #[pyfunction]
-#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None, leg_expiry_timestamps=None, legs_open_premiums=None))]
+#[pyo3(signature = (timestamps, underlying_close, legs_premiums, leg_configs, entries, exits, config=None, spread_type="custom", max_loss=None, target_profit=None, leg_expiry_timestamps=None, legs_open_premiums=None, corporate_actions=None, adjustment_policy=None))]
 pub fn run_spread_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -1805,7 +1977,11 @@ pub fn run_spread_backtest<'py>(
     target_profit: Option<f64>,
     leg_expiry_timestamps: Option<Vec<i64>>,
     legs_open_premiums: Option<Vec<PyReadonlyArray1<f64>>>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions("run_spread_backtest", &corporate_actions)?;
+    let _ = adjustment_policy;
     let ts = numpy_to_vec_i64(timestamps);
     crate::data::ensure_time_sorted(
         &format!("{spread_type} spread underlying bars"),
@@ -1837,7 +2013,7 @@ pub fn run_spread_backtest<'py>(
         .into_iter()
         .map(|(opt_type, strike, quantity, lot_size)| {
             let option_type = SpreadOptionType::from_code(&opt_type).ok_or_else(|| {
-                PyValueError::new_err(format!(
+                invalid_input(format!(
                     "unknown option type {opt_type:?} for the leg at strike {strike}; \
                      expected one of CE/CALL/C or PE/PUT/P (case-insensitive). \
                      Defaulting would price a put as a call."
@@ -1852,7 +2028,7 @@ pub fn run_spread_backtest<'py>(
     // would do it silently, which is worse than refusing.
     if let Some(ref expiries) = leg_expiry_timestamps {
         if expiries.len() != rust_leg_configs.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(invalid_input(format!(
                 "leg_expiry_timestamps has {} entries but there are {} legs; \
                  each leg needs its own expiry, matched by position. \
                  Guessing would settle the wrong leg.",
@@ -1882,7 +2058,7 @@ pub fn run_spread_backtest<'py>(
     };
 
     let spread_config = SpreadConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
+        base: checked_config(config)?,
         spread_type: spread_type_enum,
         leg_configs: rust_leg_configs,
         max_loss,
@@ -1997,7 +2173,7 @@ pub fn batch_spread_backtest(
     let ts = numpy_to_vec_i64(timestamps);
     crate::data::ensure_time_sorted("batch spread underlying bars", ts.iter().copied())?;
     let underlying = numpy_to_vec_f64(underlying_close);
-    let base_config = config.map(BacktestConfig::from).unwrap_or_default();
+    let base_config = checked_config(config)?;
 
     // Prepare each item into a self-contained struct for parallel execution
     struct PreparedItem {
@@ -2017,7 +2193,7 @@ pub fn batch_spread_backtest(
                 .into_iter()
                 .map(|(opt_type, strike, quantity, lot_size)| {
                     let option_type = SpreadOptionType::from_code(&opt_type).ok_or_else(|| {
-                        PyValueError::new_err(format!(
+                        invalid_input(format!(
                             "unknown option type {opt_type:?} for the leg at strike \
                                  {strike}; expected CE/CALL/C or PE/PUT/P \
                                  (case-insensitive)."
@@ -2198,7 +2374,7 @@ pub fn batch_single_backtest(
     )?;
     crate::data::ensure_prices_finite("batch single shared price series", &ohlcv)?;
     let n = ohlcv.len();
-    let base_config = config.map(BacktestConfig::from).unwrap_or_default();
+    let base_config = checked_config(config)?;
 
     struct PreparedItem {
         item_id: String,
@@ -2215,7 +2391,7 @@ pub fn batch_single_backtest(
         .into_iter()
         .map(|item| {
             if item.entries.len() != n || item.exits.len() != n {
-                return Err(PyValueError::new_err(format!(
+                return Err(invalid_input(format!(
                     "item '{}': entries ({}) and exits ({}) must match the shared \
                      price series length ({n})",
                     item.item_id,
@@ -2225,7 +2401,7 @@ pub fn batch_single_backtest(
             }
             if let Some(sizes) = &item.position_sizes {
                 if sizes.len() != n {
-                    return Err(PyValueError::new_err(format!(
+                    return Err(invalid_input(format!(
                         "item '{}': position_sizes ({}) must match the shared \
                          price series length ({n})",
                         item.item_id,
@@ -2234,7 +2410,7 @@ pub fn batch_single_backtest(
                 }
             }
             let direction = Direction::from_int(item.direction).ok_or_else(|| {
-                PyValueError::new_err(format!(
+                invalid_input(format!(
                     "item '{}': direction must be 1 (long) or -1 (short), got {}",
                     item.item_id, item.direction
                 ))
@@ -2283,7 +2459,7 @@ pub fn batch_single_backtest(
 #[allow(clippy::too_many_arguments)]
 /// Run multi-strategy backtest.
 #[pyfunction]
-#[pyo3(signature = (timestamps, open, high, low, close, volume, strategies, config=None, combine_mode="any"))]
+#[pyo3(signature = (timestamps, open, high, low, close, volume, strategies, config=None, combine_mode="any", corporate_actions=None, adjustment_policy=None))]
 pub fn run_multi_backtest<'py>(
     _py: Python<'py>,
     timestamps: PyReadonlyArray1<i64>,
@@ -2295,7 +2471,11 @@ pub fn run_multi_backtest<'py>(
     strategies: Vec<PyStrategySignals<'_>>,
     config: Option<&PyBacktestConfig>,
     combine_mode: &str,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions("run_multi_backtest", &corporate_actions)?;
+    let _ = adjustment_policy;
     let ohlcv = OhlcvData {
         timestamps: numpy_cow_i64(&timestamps),
         open: numpy_cow_f64(&open),
@@ -2345,7 +2525,7 @@ pub fn run_multi_backtest<'py>(
     };
 
     let multi_config = MultiStrategyConfig {
-        base: config.map(BacktestConfig::from).unwrap_or_default(),
+        base: checked_config(config)?,
         combine_mode: mode,
         ..Default::default()
     };
@@ -2386,8 +2566,7 @@ pub fn run_multi_backtest<'py>(
     max_trades = usize::MAX,
     lot_size = 1_u32,
     quantity = 1_i64,
-    fee_segment = None,
-))]
+    fee_segment = None, corporate_actions=None, adjustment_policy=None))]
 // The argument list IS the Python signature; collapsing it into a
 // struct would change the public API for no reader benefit.
 #[allow(clippy::too_many_arguments)]
@@ -2414,7 +2593,11 @@ pub fn run_tick_backtest<'py>(
     lot_size: u32,
     quantity: i64,
     fee_segment: Option<&str>,
+    corporate_actions: Option<Vec<super::lifecycle_bindings::PyCorporateAction>>,
+    adjustment_policy: Option<&str>,
 ) -> PyResult<PyBacktestResult> {
+    super::lifecycle_bindings::refuse_corporate_actions("run_tick_backtest", &corporate_actions)?;
+    let _ = adjustment_policy;
     // This path enters at the ask and exits at the bid, with its stop below
     // entry and target above -- it is long-only. Refuse a short rather than
     // silently running long logic against a negative quantity.
@@ -2685,8 +2868,7 @@ pub fn sma<'py>(
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::trend::sma(&vec, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::trend::sma(&vec, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2698,8 +2880,7 @@ pub fn ema<'py>(
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::trend::ema(&vec, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::trend::ema(&vec, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2711,8 +2892,7 @@ pub fn rsi<'py>(
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::momentum::rsi(&vec, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::momentum::rsi(&vec, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2728,7 +2908,7 @@ pub fn macd<'py>(
 ) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
     let vec = numpy_to_vec_f64(data);
     let result = indicators::momentum::macd(&vec, fast_period, slow_period, signal_period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(invalid_input)?;
     Ok((
         vec_to_numpy_f64(py, result.macd_line),
         vec_to_numpy_f64(py, result.signal_line),
@@ -2750,8 +2930,8 @@ pub fn stochastic<'py>(
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
-    let result = indicators::momentum::stochastic(&h, &l, &c, k_period, d_period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result =
+        indicators::momentum::stochastic(&h, &l, &c, k_period, d_period).map_err(invalid_input)?;
     Ok((vec_to_numpy_f64(py, result.k), vec_to_numpy_f64(py, result.d)))
 }
 
@@ -2767,8 +2947,7 @@ pub fn atr<'py>(
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
-    let result = indicators::volatility::atr(&h, &l, &c, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::volatility::atr(&h, &l, &c, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2782,8 +2961,8 @@ pub fn bollinger_bands<'py>(
     std_dev: f64,
 ) -> PyResult<Py<PyAny>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::volatility::bollinger_bands(&vec, period, std_dev)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result =
+        indicators::volatility::bollinger_bands(&vec, period, std_dev).map_err(invalid_input)?;
     super::indicator_bindings::bollinger_bands_obj(
         py,
         vec_to_numpy_f64(py, result.upper),
@@ -2804,8 +2983,7 @@ pub fn adx<'py>(
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
-    let result = indicators::strength::adx(&h, &l, &c, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::strength::adx(&h, &l, &c, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2822,8 +3000,7 @@ pub fn vwap<'py>(
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
     let v = numpy_to_vec_f64(volume);
-    let result = indicators::volume::vwap(&h, &l, &c, &v)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::volume::vwap(&h, &l, &c, &v).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2841,8 +3018,8 @@ pub fn supertrend<'py>(
     let h = numpy_to_vec_f64(high);
     let l = numpy_to_vec_f64(low);
     let c = numpy_to_vec_f64(close);
-    let result = indicators::trend::supertrend(&h, &l, &c, period, multiplier)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result =
+        indicators::trend::supertrend(&h, &l, &c, period, multiplier).map_err(invalid_input)?;
 
     let direction_array = PyArray1::from_vec(py, result.direction);
     Ok((vec_to_numpy_f64(py, result.supertrend), direction_array))
@@ -2856,8 +3033,7 @@ pub fn rolling_min<'py>(
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::rolling::rolling_min(&vec, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::rolling::rolling_min(&vec, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2869,8 +3045,7 @@ pub fn rolling_max<'py>(
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let vec = numpy_to_vec_f64(data);
-    let result = indicators::rolling::rolling_max(&vec, period)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let result = indicators::rolling::rolling_max(&vec, period).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2972,7 +3147,7 @@ pub fn simulate_portfolio_mc(
                 &config,
             )
         })
-        .map_err(PyValueError::new_err)?;
+        .map_err(invalid_input)?;
 
     // Build Python dict result
     let dict = pyo3::types::PyDict::new(py);
@@ -3037,6 +3212,8 @@ pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
                 ("sebi_fee".to_string(), b.sebi_fee),
                 ("stamp_duty".to_string(), b.stamp_duty),
                 ("gst".to_string(), b.gst),
+                ("ipft".to_string(), b.ipft),
+                ("dp_charge".to_string(), b.dp_charge),
                 ("total".to_string(), b.total()),
             ])
         }),
@@ -3127,7 +3304,10 @@ pub(crate) fn convert_result(result: crate::core::types::BacktestResult) -> PyBa
         trades,
         orders,
         returns: result.returns,
+        unverified_fee_rows: result.unverified_fee_rows,
         halted: result.halted,
         halted_at: result.halted_at,
+        rejected_entries: result.rejected_entries,
+        unfunded_entries: result.unfunded_entries,
     }
 }

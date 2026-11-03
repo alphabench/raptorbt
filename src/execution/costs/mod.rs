@@ -16,6 +16,6 @@ pub use rates::{
 };
 pub use rounding::Round;
 pub use schedule::{
-    exchange_rates, FeeRow, FeeSchedule, FeeSegment, DAY_FEE_DELIVERY_SELL, EXCHANGE_PRESETS,
+    exchange_rates, FeeBase, FeeRow, FeeSchedule, FeeSegment, RowMeta, RowStatus, EXCHANGE_PRESETS,
     EXCHANGE_SOURCE,
 };

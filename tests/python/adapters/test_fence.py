@@ -42,9 +42,24 @@ def test_a_lease_makes_the_adapter_able_to_fence():
 def test_the_lease_is_asked_before_every_write_with_the_current_epoch():
     lease = Lease()
     venue, a = make(lease=lease)
-    a.fence(3)
+    a.fence(3)  # the node asks before each request it sends: the lease answers here too
+    asked_by_fence = len(lease.asked)
     a.submit(request())
-    assert lease.asked == [3] and sum(venue.place_calls.values()) == 1
+    assert asked_by_fence == 1 and set(lease.asked) == {3}
+    assert len(lease.asked) > asked_by_fence and sum(venue.place_calls.values()) == 1
+
+
+def test_fence_runs_the_lease_check_and_raises_fenced_when_it_is_lost():
+    lease = Lease()
+    _, a = make(lease=lease)
+    a.fence(1)
+    lease.ok = False
+    with pytest.raises(Fenced):
+        a.fence(1)
+    with pytest.raises(Fenced):
+        a.fence(1)  # and stays fenced until a higher epoch re-acquires it
+    lease.ok = True
+    a.fence(2)
 
 
 def test_a_lost_lease_refuses_with_fenced_and_sends_nothing():
@@ -57,6 +72,10 @@ def test_a_lost_lease_refuses_with_fenced_and_sends_nothing():
     assert venue.place_calls == {}
     kinds = [e.kind for e in a.drain_events()]
     assert kinds.count("fenced_drop") == 2 and "fenced" in kinds
+    # Each write that was dropped is answered, so no one holds it as sent.
+    assert [(q.client_order_id, q.report.kind, q.report.reason) for q in a.drain_reports()] == [
+        ("s0-0", "rejected", "fenced"), ("s1-0", "rejected", "fenced"),
+    ]
     with pytest.raises(Fenced):
         a.submit(request(strategy=2))
     with pytest.raises(Fenced):

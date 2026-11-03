@@ -5,11 +5,11 @@
 //! rebalance}`. Errors map to `ValueError` with the Rust message verbatim,
 //! so a Python caller sees exactly what was refused and why.
 
+use super::errors::invalid_input;
 use std::collections::HashMap;
 
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::execution::indian_costs::{Segment, DP_SELL_CHARGE_PER_ISIN_PER_DAY};
@@ -25,7 +25,7 @@ use crate::portfolio::risk_contrib::risk_contributions as risk_contributions_rs;
 use super::numpy_bridge::{numpy_to_vec2_f64, numpy_to_vec_f64};
 
 fn to_py_err(e: PortfolioMathError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    invalid_input(e)
 }
 
 fn to_pyarray2<'py>(
@@ -36,7 +36,7 @@ fn to_pyarray2<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     Array2::from_shape_vec((rows, cols), flat)
         .map(|a| a.into_pyarray(py))
-        .map_err(|e| PyValueError::new_err(format!("shape error: {e}")))
+        .map_err(|e| invalid_input(format!("shape error: {e}")))
 }
 
 /// Parse a cost-segment name for the portfolio surface.
@@ -50,7 +50,7 @@ fn parse_segment(segment: &str) -> PyResult<Segment> {
         "options_mcx" => Ok(Segment::OptionsMcx),
         "futures_cds" => Ok(Segment::FuturesCds),
         "options_cds" => Ok(Segment::OptionsCds),
-        other => Err(PyValueError::new_err(format!(
+        other => Err(invalid_input(format!(
             "unknown segment '{other}'; expected one of equity_delivery, equity_intraday, \
              futures_nfo, options_nfo, futures_mcx, options_mcx, futures_cds, options_cds"
         ))),
@@ -434,7 +434,7 @@ pub fn batch_optimize_portfolios(
         .into_iter()
         .map(|(id, r)| match r {
             Ok(inner) => Ok((id, PyOptimizationResult { inner })),
-            Err(e) => Err(PyValueError::new_err(format!("item '{id}': {e}"))),
+            Err(e) => Err(invalid_input(format!("item '{id}': {e}"))),
         })
         .collect()
 }
@@ -515,14 +515,14 @@ pub fn composite_scores<'py>(
     weights: PyReadonlyArray1<f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     if factors.is_empty() {
-        return Err(PyValueError::new_err("no factor panels supplied"));
+        return Err(invalid_input("no factor panels supplied"));
     }
     let converted: Vec<(Vec<f64>, usize, usize)> =
         factors.into_iter().map(numpy_to_vec2_f64).collect();
     let (rows, cols) = (converted[0].1, converted[0].2);
     for (i, (_, r, c)) in converted.iter().enumerate() {
         if *r != rows || *c != cols {
-            return Err(PyValueError::new_err(format!(
+            return Err(invalid_input(format!(
                 "factor {i} shape {r}x{c} differs from factor 0 shape {rows}x{cols}"
             )));
         }
@@ -612,7 +612,7 @@ pub fn rank_ic(
     let (f_flat, rows, cols) = numpy_to_vec2_f64(factor);
     let (p_flat, p_rows, p_cols) = numpy_to_vec2_f64(prices);
     if rows != p_rows || cols != p_cols {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+        return Err(invalid_input(format!(
             "factor is {rows}x{cols} but prices is {p_rows}x{p_cols}"
         )));
     }
@@ -716,14 +716,14 @@ pub fn simulate_rebalance_policy(
     let (px, n_dates, n_assets) = numpy_to_vec2_f64(prices);
     let (tw, tw_dates, tw_assets) = numpy_to_vec2_f64(target_weights);
     if tw_dates != n_dates || tw_assets != n_assets {
-        return Err(PyValueError::new_err(format!(
+        return Err(invalid_input(format!(
             "target_weights shape {tw_dates}x{tw_assets} differs from prices {n_dates}x{n_assets}"
         )));
     }
     let policy = match policy.to_ascii_lowercase().as_str() {
         "calendar" => {
             if policy_param < 1.0 || policy_param.fract() != 0.0 {
-                return Err(PyValueError::new_err(format!(
+                return Err(invalid_input(format!(
                     "calendar policy_param must be a whole number >= 1, got {policy_param}"
                 )));
             }
@@ -731,7 +731,7 @@ pub fn simulate_rebalance_policy(
         }
         "band" => RebalancePolicy::Band { band: policy_param },
         other => {
-            return Err(PyValueError::new_err(format!(
+            return Err(invalid_input(format!(
                 "unknown policy '{other}'; expected 'calendar' or 'band'"
             )))
         }

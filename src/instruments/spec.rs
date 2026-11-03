@@ -126,6 +126,10 @@ pub struct InstrumentSpec {
     /// at the schedule's square-off minute and expires DAY orders at the close.
     #[serde(default)]
     pub session: Option<SessionSchedule>,
+    /// The exchange's classification of the scrip where charges depend on it
+    /// (BSE cash equity: `"A"`, `"B"`, ...). `None` where it does not matter.
+    #[serde(default)]
+    pub scrip_group: Option<String>,
 }
 
 impl InstrumentSpec {
@@ -151,6 +155,7 @@ impl InstrumentSpec {
             venue: None,
             currency: None,
             session: None,
+            scrip_group: None,
         }
     }
 
@@ -168,6 +173,23 @@ impl InstrumentSpec {
         }
         match &self.kind {
             InstrumentKind::Option { strike, .. } => Some(rate * strike * self.multiplier),
+            _ => None,
+        }
+    }
+
+    /// Whether the exchange segment the instrument trades on holds a good-till-
+    /// cancelled or good-till-date order itself: `Some(true)` on NSE equity
+    /// cash and NSE commodity (a date no later than the contract's maturity),
+    /// `Some(false)` where only day orders are established (NSE equity
+    /// derivatives, currency, BSE, MCX), `None` without a venue or for one the engine
+    /// does not know, where it allows the order. A broker that
+    /// keeps an order alive by resubmitting it each day is the host's business,
+    /// not the exchange's validity.
+    pub fn native_gtc(&self) -> Option<bool> {
+        match self.venue.as_deref()?.to_ascii_uppercase().as_str() {
+            "NSE" | "NCO" => Some(true),
+            "NFO" | "BFO" | "CDS" | "BCD" | "BSE" | "MCX" => Some(false),
+            // A venue the engine knows nothing about: no claim either way.
             _ => None,
         }
     }
