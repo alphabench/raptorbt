@@ -17,6 +17,8 @@ from raptorbt import BacktestConfig, FeeSchedule, RateCard
 from raptorbt.errors import InvalidParameter
 
 DAY_NS = 86_400_000_000_000
+# 2026-09-02 00:00 IST: after the test card (2026-09-01) and every preset row
+T0 = 1_788_287_400 * 10**9
 
 CARD = {
     "name": "test-card-2026-09",
@@ -57,7 +59,7 @@ def daily():
     n = len(close)
     openp = np.concatenate([[close[0]], close[:-1]])
     return {
-        "timestamps": np.arange(n, dtype=np.int64) * DAY_NS,
+        "timestamps": T0 + np.arange(n, dtype=np.int64) * DAY_NS,
         "open": openp,
         "high": np.maximum(openp, close) * 1.004,
         "low": np.minimum(openp, close) * 0.996,

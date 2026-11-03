@@ -273,8 +273,17 @@ def test_undefined_ratios_are_none_and_json_safe():
 # ---------------------------------------------------------------------------
 
 
+# 2026-09-02 IST: the dated statutory fee rows refuse a fill before their first date (2023-04-01)
+FEE_ERA_NS = 1_788_287_400 * 10**9
+
+
+def _in_fee_era(ohlcv):
+    return {**ohlcv, "timestamps": ohlcv["timestamps"] + FEE_ERA_NS}
+
+
 def test_fee_breakdown_reconciles_with_charged_fees(daily):
     """Itemized costs and the equity curve must be the same money."""
+    daily = _in_fee_era(daily)
     entries, exits = sma_crossover(daily)
     r = run(
         daily,
@@ -297,6 +306,7 @@ def test_fee_breakdown_reconciles_with_charged_fees(daily):
 
 def test_gst_is_not_levied_on_taxes(daily):
     """GST applies to brokerage/exchange/SEBI/IPFT, never to STT or stamp duty."""
+    daily = _in_fee_era(daily)
     entries, exits = sma_crossover(daily)
     r = run(
         daily,

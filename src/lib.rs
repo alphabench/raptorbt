@@ -27,8 +27,8 @@ pub mod runtime;
 pub mod signals;
 pub mod strategies;
 
-/// A money fault is a structured error in Python (`money_overflow`), raised
-/// through a panic only to unwind out of the kernel. Its panic notice would be
+/// A money fault is a structured error in Python (`money_overflow`), as is a fee
+/// schedule gap (`fee_schedule_gap`), each raised through a panic only to unwind out of the kernel. Its panic notice would be
 /// a second, unstructured report of the same failure on stderr, so the hook
 /// skips it and leaves every other panic to the hook that was there before.
 fn silence_money_fault_notices() {
@@ -41,7 +41,10 @@ fn silence_money_fault_notices() {
                 .downcast_ref::<String>()
                 .map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied());
-            if message.is_some_and(|m| m.starts_with(accounts::money::MONEY_FAULT_PREFIX)) {
+            if message.is_some_and(|m| {
+                m.starts_with(accounts::money::MONEY_FAULT_PREFIX)
+                    || m.starts_with(execution::fees::FEE_GAP_PREFIX)
+            }) {
                 return;
             }
             previous(info);

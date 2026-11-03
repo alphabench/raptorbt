@@ -25,7 +25,7 @@ impl PortfolioBook {
         order_id: u64,
         report: &ExecutionReport,
     ) -> Result<(ReportOutcome, Vec<EngineEvent>), VenueError> {
-        let (outcome, mut events) = self.with_lent_account(instrument, |kernel| {
+        let (outcome, mut events) = self.with_lent_account(instrument, Some(ts), |kernel| {
             kernel.apply_venue_report(idx, ts, order_id, report)
         })?;
         // A fill books after the event's own step has sampled equity (the
@@ -52,6 +52,8 @@ impl PortfolioBook {
     fn with_lent_account<R>(
         &mut self,
         instrument: usize,
+        // The instant of a booking: the sold option lines margin together with their hedge held.
+        at: Option<i64>,
         f: impl FnOnce(
             &mut crate::portfolio::kernel::EngineKernel,
         ) -> Result<(R, Vec<EngineEvent>), VenueError>,
@@ -74,6 +76,12 @@ impl PortfolioBook {
                 None => own,
             }
         });
+        let (group_context, hedge_pending) = match at {
+            Some(ts) if self.margin_groups => {
+                (self.group_context_for(instrument, ts), self.hedge_pending_for(instrument))
+            }
+            _ => (None, false),
+        };
         let kernel = &mut self.kernels[instrument];
         let locked_before = kernel.locked_margin();
         let injected = match self.account.mode() {
@@ -85,12 +93,16 @@ impl PortfolioBook {
         let injected = kernel.lend_cash(injected);
         kernel.set_external_open_count(portfolio_open);
         kernel.set_external_exposure(external_exposure);
+        kernel.set_group_context(group_context);
+        kernel.set_hedge_pending(hedge_pending);
         let result = f(kernel);
         let delta_cash = kernel.cash_money() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
         kernel.set_cash_money(crate::accounts::Money::ZERO);
         kernel.set_external_open_count(None);
         kernel.set_external_exposure(None);
+        kernel.set_group_context(None);
+        kernel.set_hedge_pending(false);
         self.settle(delta_cash, delta_locked);
         if self.grouped.is_none() {
             self.regroup_option_margin();
@@ -100,6 +112,9 @@ impl PortfolioBook {
             if let EngineEvent::Exited { trade, .. } = event {
                 self.streaming.update(trade.return_pct / 100.0);
                 self.trades.push((**trade).clone());
+            }
+            if super::is_unfunded_refusal(event) {
+                self.unfunded[instrument] += 1;
             }
             self.order_logs[instrument].observe(&self.kernels[instrument], event);
         }
@@ -119,7 +134,7 @@ impl PortfolioBook {
         price: Option<f64>,
     ) -> Result<(), crate::portfolio::risk::RejectReason> {
         let (verdict, _) = self
-            .with_lent_account(instrument, |k| {
+            .with_lent_account(instrument, None, |k| {
                 Ok((k.venue_pretrade(side, units, reduce_only, price), Vec::new()))
             })
             .expect("a check cannot fail");
@@ -140,7 +155,7 @@ impl PortfolioBook {
         limit_priced: bool,
     ) -> Result<f64, &'static str> {
         let (units, _) = self
-            .with_lent_account(instrument, |k| {
+            .with_lent_account(instrument, None, |k| {
                 Ok((k.venue_units(bar, side, frac, ref_price, limit_priced), Vec::new()))
             })
             .expect("a sizing cannot fail");

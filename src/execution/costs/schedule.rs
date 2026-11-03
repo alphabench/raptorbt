@@ -117,8 +117,8 @@ pub struct FeeRow {
     pub underlying: Option<String>,
     /// A row that prices a contract's settlement at expiry, never a trade.
     pub settlement: bool,
-    /// UTC nanoseconds. A fill before every row's date is priced on the
-    /// earliest row.
+    /// UTC nanoseconds. A fill before every row's date is refused
+    /// (`fee_schedule_gap`), never priced on the earliest row.
     pub effective_from: i64,
     pub rates: FeeRates,
     pub meta: RowMeta,
@@ -147,6 +147,16 @@ pub struct FeeSchedule {
     pub rows: Vec<FeeRow>,
 }
 
+/// `yyyy-mm-dd` of a UTC-ns instant on the Indian calendar (the day a row takes effect on).
+fn ist_date_text(ns: i64) -> String {
+    const IST_NS: i64 = (5 * 3600 + 30 * 60) * 1_000_000_000;
+    const DAY_NS: i64 = 86_400_000_000_000;
+    let ymd = crate::core::session_schedule::yyyymmdd_from_day(
+        ns.saturating_add(IST_NS).div_euclid(DAY_NS),
+    );
+    format!("{:04}-{:02}-{:02}", ymd / 10_000, ymd / 100 % 100, ymd % 100)
+}
+
 impl FeeSchedule {
     pub fn new(name: impl Into<String>, source: impl Into<String>, rows: Vec<FeeRow>) -> Self {
         FeeSchedule { name: name.into(), source: source.into(), rows }
@@ -165,8 +175,10 @@ impl FeeSchedule {
     /// The row that prices a fill on `venue` in `segment` at `at` (UTC ns).
     ///
     /// The row for the instrument's own underlying beats the general one;
-    /// among rows in force at `at` the latest wins; a fill before every row
-    /// takes the earliest. No row is an error, never a free fill.
+    /// among rows in force at `at` the latest wins. No row is an error, never
+    /// a free fill: a venue and segment the schedule has no row for, a date
+    /// before the earliest row (named in the error), and a date after the
+    /// last row ended.
     pub fn row_for(
         &self,
         venue: &str,
@@ -175,6 +187,31 @@ impl FeeSchedule {
         at: i64,
         settlement: bool,
     ) -> Result<&FeeRow> {
+        match self.row_for_opt(venue, segment, underlying, at, settlement)? {
+            Some(row) => Ok(row),
+            None => {
+                let suffix = underlying.map(|u| format!(" ({u})")).unwrap_or_default();
+                Err(RaptorError::invalid_config(format!(
+                    "{}: no rate for {venue} {}{suffix}",
+                    self.name,
+                    segment.as_str()
+                )))
+            }
+        }
+    }
+
+    /// [`FeeSchedule::row_for`], telling "the schedule has no such row at all"
+    /// (`Ok(None)`, which a settlement lookup reads as nothing to charge) from
+    /// a row that exists but not for that date (an error: a date before the
+    /// earliest row, or after the last one ended).
+    pub fn row_for_opt(
+        &self,
+        venue: &str,
+        segment: FeeSegment,
+        underlying: Option<&str>,
+        at: i64,
+        settlement: bool,
+    ) -> Result<Option<&FeeRow>> {
         let rows: Vec<&FeeRow> = self
             .rows
             .iter()
@@ -191,12 +228,7 @@ impl FeeSchedule {
             own
         };
         if pool.is_empty() {
-            let suffix = underlying.map(|u| format!(" ({u})")).unwrap_or_default();
-            return Err(RaptorError::invalid_config(format!(
-                "{}: no rate for {venue} {}{suffix}",
-                self.name,
-                segment.as_str()
-            )));
+            return Ok(None);
         }
         let in_force =
             |r: &FeeRow| r.effective_from <= at && r.meta.effective_until.is_none_or(|u| at < u);
@@ -208,24 +240,25 @@ impl FeeSchedule {
             }
         }
         if let Some(b) = best {
-            return Ok(b);
+            return Ok(Some(b));
         }
-        // Before every row's date the earliest answers; after the last row has
-        // ended nothing does.
+        let what = if settlement { "settlement" } else { segment.as_str() };
         if pool.iter().any(|r| r.effective_from <= at) {
             return Err(RaptorError::invalid_config(format!(
-                "{}: no rate in force for {venue} {} at that date (its rows have ended)",
+                "{}: no rate in force for {venue} {what} on {} (its rows have ended)",
                 self.name,
-                segment.as_str()
+                ist_date_text(at),
             )));
         }
-        let mut earliest = pool[0];
-        for r in &pool[1..] {
-            if r.effective_from < earliest.effective_from {
-                earliest = r;
-            }
-        }
-        Ok(earliest)
+        let earliest = pool.iter().map(|r| r.effective_from).min().unwrap_or(i64::MAX);
+        Err(RaptorError::invalid_config(format!(
+            "{}: no rate for {venue} {what} on {}: its earliest row takes effect on {}. A fill \
+             before it would be priced on a rate that was not in force; load a schedule with \
+             rows for that period",
+            self.name,
+            ist_date_text(at),
+            ist_date_text(earliest),
+        )))
     }
 
     /// The rows in force at `at` (UTC ns), one per venue, segment,
@@ -283,8 +316,11 @@ pub const EXCHANGE_SOURCE: &str = "statutory and exchange charges only, in force
      given, stored in rupees per crore and itemised: exchange transaction charge, investor \
      protection fund contribution (IPFT), SEBI turnover fee, transaction tax (STT, CTT), stamp \
      duty and GST. Rows matched to an official circular or statute are `confirmed`; the rest \
-     (BSE cash by scrip group, every BSE derivatives row, NSE currency, MCX exchange charges) are \
-     `unverified` and a result lists the ones it used. No brokerage and no depository charge: \
+     (BSE cash by scrip group, every BSE derivatives row, NSE currency, MCX exchange charges, and \
+     the NSE cash, futures and options rows before 2024-10-01, which use the slab-era exchange \
+     rate and charge no IPFT) are `unverified` and a result lists the ones it used. The earliest \
+     row is 2023-04-01 for NSE cash and NFO and 2024-10-01 for the other venues: a fill before a \
+     venue and segment's first row is refused (`fee_schedule_gap`). No brokerage and no depository charge: \
      those come from a broker's rate card";
 
 const GST: f64 = 0.18;
@@ -333,12 +369,21 @@ struct Stat {
 
 use FeeSegment::{Delivery, Futures, Intraday, Options};
 
+/// The earliest date any preset row takes effect: where the sourced statutory rates and the
+/// slab-era exchange rates both begin. A fill before a (venue, segment)'s first row is refused.
+const FIRST: i32 = 20230401;
+/// The true-to-label exchange charges and the rows of every venue but NSE cash and NFO start here.
 const START: i32 = 20241001;
 const NSE_IPFT_SPLIT: i32 = 20260301;
 const STT_2026: i32 = 20260401;
 
 const SRC_NSE: &str = "NSE/FA/73061 (2026-02-27) and the existing-charge table it cites; SEBI \
      true-to-label structure from 2024-10-01";
+const SRC_SLAB: &str = "slab-era representative rate: the NSE exchange transaction charge before \
+     the true-to-label structure of 2024-10-01 (cash Rs 322, equity futures Rs 188, equity \
+     options Rs 4,950 per crore), not matched to a circular; the transaction tax is statute \
+     (Finance Act 2023, Finance (No. 2) Act 2024); IPFT for the period is not known and not \
+     charged";
 const SRC_STT: &str = "Finance Act 2026 (STT rates from 2026-04-01; Finance (No. 2) Act 2024 \
      before) - https://www.incometaxindia.gov.in";
 const SRC_CTT: &str = "Commodities transaction tax, Finance Act 2013 (section 117), agricultural \
@@ -358,17 +403,26 @@ const UNVERIFIED_MCX: &str = "MCX/F&A/631/2024 (2024-09-24) as reported (futures
 
 const AGRI: [&str; 6] = ["CASTORSEED", "COTTONCNDY", "CPO", "KAPAS", "MENTHAOIL", "RUBBER"];
 
-fn stt_cr(date: i32, before: f64, after: f64) -> f64 {
+/// The sell-side transaction tax of a row dated `date`, from `[until 2024-10-01, until
+/// 2026-04-01, from 2026-04-01]`.
+fn stt_cr(date: i32, by_era: [f64; 3]) -> f64 {
     if date >= STT_2026 {
-        after
+        by_era[2]
+    } else if date >= START {
+        by_era[1]
     } else {
-        before
+        by_era[0]
     }
 }
 
 /// The dates (ascending, from [`START`]) at which any of `edges` splits a period.
 fn periods(edges: &[i32]) -> Vec<(i32, Option<i32>)> {
-    let mut dates: Vec<i32> = std::iter::once(START).chain(edges.iter().copied()).collect();
+    periods_from(START, edges)
+}
+
+/// The dates (ascending, from `first`) at which any of `edges` splits a period.
+fn periods_from(first: i32, edges: &[i32]) -> Vec<(i32, Option<i32>)> {
+    let mut dates: Vec<i32> = std::iter::once(first).chain(edges.iter().copied()).collect();
     dates.sort_unstable();
     dates.dedup();
     dates.iter().enumerate().map(|(i, &d)| (d, dates.get(i + 1).copied())).collect()
@@ -377,15 +431,19 @@ fn periods(edges: &[i32]) -> Vec<(i32, Option<i32>)> {
 fn statutory() -> Vec<Stat> {
     let mut rows = Vec::new();
     let mut push = |s: Stat| rows.push(s);
-    let nse_edges = [NSE_IPFT_SPLIT];
-
-    // NSE cash. Exchange 297 + IPFT 10 per crore until 2026-02-28, 306.99 + 0.01 after.
+    // NSE cash. Exchange 297 + IPFT 10 per crore until 2026-02-28, 306.99 + 0.01 after; before
+    // 2024-10-01 the slab-era 322 and no IPFT.
     for (segment, tax_sell, tax_buy, stamp) in
         [(Delivery, 10_000.0, 10_000.0, 1_500.0), (Intraday, 2_500.0, 0.0, 300.0)]
     {
-        for (from, until) in periods(&nse_edges) {
-            let (exchange, ipft) =
-                if from >= NSE_IPFT_SPLIT { (306.99, 0.01) } else { (297.0, 10.0) };
+        for (from, until) in periods_from(FIRST, &[START, NSE_IPFT_SPLIT]) {
+            let (exchange, ipft, status, source) = if from < START {
+                (322.0, 0.0, RowStatus::Unverified, SRC_SLAB)
+            } else if from >= NSE_IPFT_SPLIT {
+                (306.99, 0.01, RowStatus::Confirmed, SRC_NSE)
+            } else {
+                (297.0, 10.0, RowStatus::Confirmed, SRC_NSE)
+            };
             push(Stat {
                 venue: "NSE",
                 segment,
@@ -394,8 +452,8 @@ fn statutory() -> Vec<Stat> {
                 from,
                 until,
                 base: FeeBase::Turnover,
-                status: RowStatus::Confirmed,
-                source: SRC_NSE,
+                status,
+                source,
                 cr: Cr {
                     tax_kind: TaxKind::Stt,
                     tax_sell,
@@ -435,9 +493,14 @@ fn statutory() -> Vec<Stat> {
             });
         }
     }
-    // NSE equity derivatives.
-    for (from, until) in periods(&[NSE_IPFT_SPLIT, STT_2026]) {
+    // NSE equity derivatives. Sell-side STT: futures 0.0125% from 2023-04-01, 0.02% from
+    // 2024-10-01, 0.05% from 2026-04-01; options premium 0.0625%, 0.1%, 0.15%. Before 2024-10-01
+    // the exchange charge is the slab-era rate (futures 188, options 4,950) and IPFT is not known.
+    for (from, until) in periods_from(FIRST, &[START, NSE_IPFT_SPLIT, STT_2026]) {
         let split = from >= NSE_IPFT_SPLIT;
+        let slab = from < START;
+        let (status, source) =
+            if slab { (RowStatus::Unverified, SRC_SLAB) } else { (RowStatus::Confirmed, SRC_NSE) };
         push(Stat {
             venue: "NFO",
             segment: Futures,
@@ -446,14 +509,26 @@ fn statutory() -> Vec<Stat> {
             from,
             until,
             base: FeeBase::Turnover,
-            status: RowStatus::Confirmed,
-            source: SRC_NSE,
+            status,
+            source,
             cr: Cr {
                 tax_kind: TaxKind::Stt,
-                tax_sell: stt_cr(from, 2_000.0, 5_000.0),
+                tax_sell: stt_cr(from, [1_250.0, 2_000.0, 5_000.0]),
                 tax_buy: 0.0,
-                exchange: if split { 182.99 } else { 173.0 },
-                ipft: if split { 0.01 } else { 10.0 },
+                exchange: if slab {
+                    188.0
+                } else if split {
+                    182.99
+                } else {
+                    173.0
+                },
+                ipft: if slab {
+                    0.0
+                } else if split {
+                    0.01
+                } else {
+                    10.0
+                },
                 sebi: 10.0,
                 stamp_buy: 200.0,
             },
@@ -466,22 +541,36 @@ fn statutory() -> Vec<Stat> {
             from,
             until,
             base: FeeBase::Premium,
-            status: RowStatus::Confirmed,
-            source: SRC_NSE,
+            status,
+            source,
             cr: Cr {
                 tax_kind: TaxKind::Stt,
-                tax_sell: stt_cr(from, 10_000.0, 15_000.0),
+                tax_sell: stt_cr(from, [6_250.0, 10_000.0, 15_000.0]),
                 tax_buy: 0.0,
-                exchange: if split { 3_552.0 } else { 3_503.0 },
-                ipft: if split { 0.01 } else { 50.0 },
+                exchange: if slab {
+                    4_950.0
+                } else if split {
+                    3_552.0
+                } else {
+                    3_503.0
+                },
+                ipft: if slab {
+                    0.0
+                } else if split {
+                    0.01
+                } else {
+                    50.0
+                },
                 sebi: 10.0,
                 stamp_buy: 300.0,
             },
         });
     }
-    // The tax on an option exercised at expiry, on its intrinsic value, charged to the buyer.
-    for (from, until) in periods(&[STT_2026]) {
-        for venue in ["NFO", "BFO"] {
+    // The tax on an option exercised at expiry, on its intrinsic value, charged to the buyer:
+    // 0.125% until 2026-03-31, 0.15% after. NFO from 2023-04-01, BFO with its other rows.
+    for venue in ["NFO", "BFO"] {
+        let first = if venue == "NFO" { FIRST } else { START };
+        for (from, until) in periods_from(first, &[STT_2026]) {
             push(Stat {
                 venue,
                 segment: Options,
@@ -494,7 +583,7 @@ fn statutory() -> Vec<Stat> {
                 source: SRC_STT,
                 cr: Cr {
                     tax_kind: TaxKind::Stt,
-                    tax_sell: stt_cr(from, 12_500.0, 15_000.0),
+                    tax_sell: if from >= STT_2026 { 15_000.0 } else { 12_500.0 },
                     ..Cr::NONE
                 },
             });
@@ -514,7 +603,7 @@ fn statutory() -> Vec<Stat> {
             source: UNVERIFIED_BFO,
             cr: Cr {
                 tax_kind: TaxKind::Stt,
-                tax_sell: stt_cr(from, 2_000.0, 5_000.0),
+                tax_sell: stt_cr(from, [2_000.0, 2_000.0, 5_000.0]),
                 sebi: 10.0,
                 stamp_buy: 200.0,
                 ..Cr::NONE
@@ -538,7 +627,7 @@ fn statutory() -> Vec<Stat> {
                 source: UNVERIFIED_BFO,
                 cr: Cr {
                     tax_kind: TaxKind::Stt,
-                    tax_sell: stt_cr(from, 10_000.0, 15_000.0),
+                    tax_sell: stt_cr(from, [10_000.0, 10_000.0, 15_000.0]),
                     exchange,
                     sebi: 10.0,
                     stamp_buy: 300.0,

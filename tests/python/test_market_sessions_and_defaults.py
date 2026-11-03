@@ -72,12 +72,15 @@ def test_mcx_follows_the_exchanges_dated_evening_closes_and_refuses_earlier_date
     assert mcx.windows_on(20251206) == []  # Saturday
     assert mcx.session_close_ns(20251201) == ist(2025, 12, 1, 23, 55)
     # before the first dated period nothing is guessed
-    assert mcx.coverage == [(20241104, 21991231)]
+    assert mcx.coverage == [(20241104, 22001231)]
     assert mcx.windows_on(20241101) == [] and mcx.session_date(ist(2024, 11, 1, 12, 0)) is None
     # the internationally referenceable agricultural contracts close at 21:00 all year
     agri = SessionSchedule.mcx_select_agri()
     assert agri.windows_on(20251201) == [day, (1020, minutes(21, 0))]
     assert agri.windows_on(20260615) == [day, (1020, minutes(21, 0))]
+    # the other agricultural contracts close at 17:00 all year
+    assert SessionSchedule.mcx_other_agri().windows_on(20260615) == [day]
+    assert SessionSchedule.mcx_other_agri().windows_on(20251201) == [day]
 
 
 def test_currency_cross_pairs_trade_until_1930():
@@ -413,8 +416,21 @@ def test_bars_on_a_date_the_session_schedule_does_not_cover_raise_session_not_co
         _mcx_run(2024, 6, 10)
     err = e.value
     assert (err.code, err.parameter, err.value, err.skill) == ("session_not_covered", "session", 20240610, "instruments")
-    assert list(err.valid) == ["20241104..21991231"] and "20240610" in str(err)
+    assert list(err.valid) == ["20241104..22001231"] and "20240610" in str(err)
     _mcx_run(2026, 6, 15)  # inside the covered dates it runs
+
+
+def test_the_mcx_preset_follows_the_us_clock_rule_past_2027():
+    """The close has no dated end: it moves with the US clocks every year, and a bar in 2028 runs."""
+    mcx = SessionSchedule.mcx()
+    # 2028: the second Sunday of March is the 12th, the first of November the 5th
+    assert mcx.windows_on(20280310)[-1] == (1020, minutes(23, 55))
+    assert mcx.windows_on(20280313)[-1] == (1020, minutes(23, 30))
+    assert mcx.windows_on(20281103)[-1] == (1020, minutes(23, 30))
+    assert mcx.windows_on(20281106)[-1] == (1020, minutes(23, 55))
+    spec = {"M": rb.InstrumentSpec.futures_contract("M", ist(2028, 6, 1, 0, 0), 1.0, session=mcx)}
+    run_strategies([Script({})], {"M": bars([(100,) * 4] * 3, ist(2028, 3, 15, 10, 0))},
+                   BacktestConfig(initial_capital=1e5, fees=0.0), bar_stamp="close", instruments=spec)
 
 
 def test_a_live_node_refuses_a_pushed_bar_outside_the_covered_dates():
@@ -432,7 +448,11 @@ def test_a_live_node_refuses_a_pushed_bar_outside_the_covered_dates():
 def _validity_run(venue, kind="future", **order):
     start = ist(2026, 11, 2, 10, 0)
     if kind == "future":
-        spec = rb.InstrumentSpec.futures_contract("F", ist(2026, 11, 26, 15, 30), 1.0, venue=venue)
+        # "F" is a name MCX has no class for: its session is given, not implied
+        spec = rb.InstrumentSpec.futures_contract(
+            "F", ist(2026, 11, 26, 15, 30), 1.0, venue=venue,
+            session=rb.SessionSchedule.mcx() if venue == "MCX" else None,
+        )
     else:
         spec = rb.InstrumentSpec.equity("F", venue=venue)
     place = {1: lambda s, c: s.submit_order(O.Limit(side="buy", price=99.0, quantity=1.0, **order))}

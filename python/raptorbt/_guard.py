@@ -1,4 +1,4 @@
-"""Turn the engine's money faults into the structured ``money_overflow`` error.
+"""Turn the engine's money and fee-schedule faults into their structured errors.
 
 The kernel books amounts as integers. When one cannot be booked (not finite,
 past the range) or a sum would overflow, it stops with a panic whose message
@@ -9,6 +9,10 @@ not a ``RaptorBTError``. This module wraps every callable the extension exports
 passes up through the callback and is converted at the outer entry point, so
 the per-event ``ctx`` objects are not wrapped. Any other panic is left as it is:
 those are internal invariants.
+
+A fill priced on a date the fee schedule has no rate for stops the same way, with a panic whose
+message starts ``fee_schedule_gap:``; it leaves Python as ``fee_schedule_gap``
+(:class:`raptorbt.errors.InvalidParameter`).
 """
 
 from __future__ import annotations
@@ -20,12 +24,18 @@ import re
 from raptorbt import errors
 
 _FAULT = re.compile(r"money_overflow:\s*(.*)", re.S)
+_GAP = re.compile(r"fee_schedule_gap:\s*(.*)", re.S)
 _SKIP_CLASSES = re.compile(r"(Context|Ctx)$")
 
 
 def _convert(exc: BaseException, operation: str):
     if type(exc).__name__ != "PanicException":
         return None
+    gap = _GAP.search(str(exc))
+    if gap is not None:
+        return errors.InvalidParameter(
+            gap.group(1).strip(), code="fee_schedule_gap", operation=operation
+        )
     match = _FAULT.search(str(exc))
     if match is None:
         return None

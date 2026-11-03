@@ -12,11 +12,18 @@ import pytest
 
 from raptorbt import FeeSchedule, InstrumentSpec, RateCard
 
-from test_lifecycle import bars, card, config, holder, holder_cls, run, trades
+from test_lifecycle import bars as _bars
+from test_lifecycle import card, config, holder, holder_cls, run, trades
 
-# These runs sit at nanosecond 4, before the schedule's first row (2024-10-01), which prices them: the
-# exercised-option STT then is 0.125% (it is 0.15% from 2026-04-01; see test_statutory_fees.py).
+# These runs sit a few nanoseconds after 2026-02-02, in force of the schedule's rows (a fill before a
+# schedule's first row is refused): the exercised-option STT then is 0.125% (it is 0.15% from
+# 2026-04-01; see test_statutory_fees.py).
+T0 = 1_770_000_000 * 10**9
 EXERCISE_STT = 0.00125
+
+
+def bars(closes):
+    return _bars(closes, start=T0)
 
 
 def priced(segment):
@@ -28,7 +35,7 @@ def priced(segment):
 
 def call(strike=100.0):
     opt = InstrumentSpec.option(
-        "OPT", strike=strike, right="call", expiration_ns=4, lot_size=1.0, underlying="U"
+        "OPT", strike=strike, right="call", expiration_ns=T0 + 4, lot_size=1.0, underlying="U"
     )
     opt.settlement_price = "underlying"
     return opt
@@ -69,7 +76,7 @@ def test_the_writer_of_an_exercised_call_owes_no_exercise_stt():
 
 def physical_future():
     fut = InstrumentSpec.futures_contract(
-        "FUT", expiration_ns=3, lot_size=1.0, multiplier=1.0, underlying="U"
+        "FUT", expiration_ns=T0 + 3, lot_size=1.0, multiplier=1.0, underlying="U"
     )
     fut.settlement_style = "physical"
     fut.settlement_price = 120.0
@@ -137,7 +144,7 @@ def test_a_cash_settled_future_still_pays_its_settlement_row():
     cfg = config()
     cfg.fee_segment = "NFO-FUT"
     cfg.fee_schedule = sched
-    fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0, multiplier=1.0)
+    fut = InstrumentSpec.futures_contract("FUT", expiration_ns=T0 + 2, lot_size=1.0, multiplier=1.0)
     r = run(holder("FUT", units=6.0), {"FUT": bars([100, 101, 102, 103])}, instruments={"FUT": fut}, config=cfg)
     (t,) = trades(r)
     assert t.exit_fees == pytest.approx(0.001 * 102.0 * 6.0, abs=0.01)

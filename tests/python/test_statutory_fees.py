@@ -281,11 +281,14 @@ def test_the_fixture_cites_a_source_and_a_status_for_every_row():
         assert row["base"] in ("turnover", "premium", "intrinsic_value", "delivery_value")
     unverified = {(r["venue"], r["segment"]) for r in FIXTURE["rows"] if r["status"] == "unverified"}
     # what the sources could not confirm: BSE cash by group, every BSE derivatives row, NSE
-    # currency, and the MCX exchange charges
+    # currency, the MCX exchange charges, and the NSE slab-era rows before 2024-10-01
     assert unverified == {
         ("BSE", "DELIVERY"), ("BSE", "INTRADAY"), ("BFO", "FUTURES"), ("BFO", "OPTIONS"),
         ("CDS", "FUTURES"), ("CDS", "OPTIONS"), ("MCX", "FUTURES"), ("MCX", "OPTIONS"),
+        ("NSE", "DELIVERY"), ("NSE", "INTRADAY"), ("NFO", "FUTURES"), ("NFO", "OPTIONS"),
     }
+    slab = [r for r in FIXTURE["rows"] if r["effective_from"] == "2023-04-01" and r["event"] == "TRADE"]
+    assert slab and all(r["status"] == "unverified" and "slab-era" in r["source"] for r in slab)
     confirmed = {(r["venue"], r["segment"]) for r in FIXTURE["rows"] if r["status"] == "confirmed"}
     assert {("NSE", "DELIVERY"), ("NFO", "FUTURES"), ("NFO", "OPTIONS"), ("BCD", "FUTURES")} <= confirmed
     assert PRESETS.source.startswith("statutory and exchange charges only")
@@ -293,10 +296,14 @@ def test_the_fixture_cites_a_source_and_a_status_for_every_row():
 
 def test_the_presets_name_the_dates_they_start_on_and_change_on():
     dates = sorted({r["effective_from"] for r in FIXTURE["rows"]})
-    assert dates == ["2024-10-01", "2026-03-01", "2026-04-01"]
-    assert min(r["effective_from"] for r in PRESETS.rows()) == _day("2024-10-01")
+    assert dates == ["2023-04-01", "2024-10-01", "2026-03-01", "2026-04-01"]
+    # nothing is encoded before 2023-04-01: a fill earlier is refused, not back-dated
+    assert min(r["effective_from"] for r in PRESETS.rows()) == _day("2023-04-01")
+    # in force in mid-2025: every 2024-10-01 row, and the exercise tax of NFO options (2023-04-01)
     assert PRESETS.in_force_at(_day("2025-06-01")).rows() == [
-        r for r in PRESETS.rows() if r["effective_from"] == _day("2024-10-01")
+        r for r in PRESETS.rows()
+        if r["effective_from"] == _day("2024-10-01")
+        or (r["settlement"] and r["venue"] == "NFO" and r["effective_from"] == _day("2023-04-01"))
     ]
 
 
@@ -358,7 +365,10 @@ def test_bse_cash_needs_the_scrip_group_and_names_the_groups_it_prices():
     with pytest.raises(InvalidParameter, match="not known for scrip group"):
         _one_future("BSE", "RELI", None, scrip_group="X", kind="cash")
     runs = _one_future("BSE", "RELI", None, scrip_group="A", kind="cash")
-    assert list(runs["batch"].result.unverified_fee_rows) == ["BSE:DELIVERY:group:A"]
+    # the same-day round trip is repriced on the intraday row; the delivery row priced the entry first
+    assert list(runs["batch"].result.unverified_fee_rows) == [
+        "BSE:DELIVERY:group:A", "BSE:INTRADAY:group:A",
+    ]
     # the figure is the group A/B one, 375 per crore, and no group is assumed
     assert PRESETS.row("BSE", "DELIVERY", underlying="group:A")["per_crore"]["exchange"] == 375.0
 

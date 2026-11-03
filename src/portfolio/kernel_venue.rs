@@ -254,6 +254,26 @@ impl EngineKernel {
     }
 
     /// Name the position an order closes (hedging); see `OrderRequest::position_id`.
+    /// Mark a market order as the strategy's answer to a fill (see [`Order::follow_up`]).
+    pub fn set_order_follow_up(&mut self, order_id: u64) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.follow_up = true;
+        }
+    }
+
+    /// Take the follow-up mark off an order: it goes the ordinary way (to the next bar's open
+    /// under `next_bar_open`).
+    pub(crate) fn clear_order_follow_up(&mut self, order_id: u64) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.follow_up = false;
+        }
+    }
+
+    /// Whether market orders decided at a bar fill at the next bar's open.
+    pub(crate) fn fills_at_next_open(&self) -> bool {
+        self.fill_timing == FillTiming::NextBarOpen
+    }
+
     pub fn set_order_position(&mut self, order_id: u64, position_id: Option<u64>) {
         if let Some(order) = self.orders.get_mut(order_id) {
             order.position_id = position_id;
@@ -593,6 +613,21 @@ impl EngineKernel {
         // `take_back` releases the lock the execution took; it must still be held.
         if self.margin.locked_for(b.position_id) + b.locked.abs() * 1e-9 < b.locked {
             return Err(refuse("the margin the execution locked is no longer held"));
+        }
+        // A correction books the execution again after taking it back; if the book cannot keep
+        // a fill it fails to book, that would refuse after the take-back. Refuse before anything
+        // changes: the order, the position and the cash stay as they were.
+        if matches!(report, ExecutionReport::Correction { .. })
+            && self.unbooked_fills.len() >= MAX_UNBOOKED_FILLS
+        {
+            return Err(VenueError::FillNotBooked {
+                order_id,
+                reason: format!(
+                    "the book already holds {MAX_UNBOOKED_FILLS} fills it could not book, so a \
+                     correction that must be booked again is refused before it changes anything: \
+                     reconcile the position with the venue"
+                ),
+            });
         }
         let order = self.orders.get_mut(order_id).ok_or(VenueError::UnknownOrder(order_id))?;
         let client_id = order.client_id.clone();

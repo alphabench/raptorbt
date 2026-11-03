@@ -58,22 +58,22 @@ arrival order is the schedule.
 
 ### Equal timestamps
 
-Events at one timestamp are delivered one at a time in the stream registration
-order above, which follows the order of the caller's mapping. **This is a known
-defect:** what a decision on `IDX` at `t` sees of `FA`, and which
-bar of `FA` a cross-instrument order fills on, depend on that order. The fix is
-the two-phase rule in "Equal timestamps: the two-phase rule (design)" below.
-A `LiveNode` has no mapping: its schedule is the arrival order of the pushes.
+Events that share a timestamp and a kind are one group, applied in three phases
+(see "Equal timestamps: the two-phase rule" below), so a result does not depend
+on the order of the caller's mapping. Events of a group are decided and matched
+in ascending symbol. A `LiveNode` has no mapping: by default each push is a
+group of one, delivered on arrival; a host delivers a group with `push_group`
+or `begin_group()` / `flush()`.
 
 An order for another instrument (`instrument=` on the order) is placed on that
 instrument's own clock. Under `next_bar_open` it fills at the open of the
 target's first bar stamped strictly after the decision, never at a bar that
 closed at or before it, whichever event at `t` was applied first.
 
-## Equal timestamps: the two-phase rule (design)
+## Equal timestamps: the two-phase rule
 
-Status: designed, not built. The fix for "a result depends on the
-order the mapping lists its symbols in".
+The fix for "a result depends on the order the
+mapping lists its symbols in".
 
 **The rule.** For one timestamp `t` and one event kind (trades, then quotes,
 then depth, then bars, as in the merge key), every instrument's events at `t`
@@ -108,6 +108,72 @@ convention that cannot change what any handler sees). A strategy whose
 handlers have side effects on its own state that depend on the sequence is
 that strategy's own business.
 
+Where the rules above are silent:
+
+- *Group.* Events with the same `(timestamp, kind)`, one per instrument; an
+  instrument that appears twice at one instant is split into successive groups.
+  A group of one event takes the path a single event always took (no snapshot,
+  no deferral).
+- *Phase 1* ingests each event in ascending symbol (watermarks, aggregators,
+  indicator bank, and the indicators strategies own), then runs every
+  subscriber's lifecycle for each event, then marks each book at the event's
+  price (`PortfolioBook::premark`: the equity mark only; the order-routing stamp
+  `last_seen` stays with the step). The composite bars are kept per event, so
+  each decision reads its own event. A strategy's view covers its own
+  subscriptions only: when it decides event `E` its book has every other event
+  of the group it subscribes to marked at the group's price and `E`'s own
+  instrument at the mark it had before the group, as a lone event is decided,
+  so its result in a shared run equals its run alone.
+- *Indicators* (built). Every instrument's indicators are up to date for the
+  whole group before any strategy decides, so a decision at `t` reads every
+  subscribed instrument's indicators as of `t`, whatever the symbols are called
+  (it used to read another instrument's indicator after its bar only if that
+  instrument sorted first). This holds for the shared bank and for an
+  `Indicator` a strategy owns (`share=False`, or one that cannot be shared); the
+  owned ones are fed in phase 1 too, per stream. What differs is the strategy's
+  *own* event, whose hooks keep the bar-by-bar reveal a lone event always had:
+  - an indicator on the event's own primary stream shows its value *before* the
+    bar in every hook that runs ahead of `on_bar` (lifecycle events, time
+    events, `on_composite_bar`), and its value after the bar from `on_bar` on;
+  - an indicator on one of the event's own composite streams shows the value
+    after the emission the hook is handling: after brick `k` in the hook for
+    brick `k` when one event completes several bricks, after all of them from
+    `on_bar` on;
+  - an indicator on another instrument's stream, primary or composite, shows its
+    value after everything that instrument's event brought, in every hook of
+    this event. Its own hook for that stream is the only place the intermediate
+    values (before the bar, after brick `k`) show, so the value a hook sees on
+    its own stream is the value after the group for that stream whenever the
+    stream emitted one bar;
+  - an indicator fed by an instrument set (registered without `symbol=`: the
+    instruments' bars interleaved, in ascending symbol inside a group) treats
+    every event of the group as its own stream: before the strategy's reveal in
+    an event it shows the value before the group, from the reveal on the value
+    after the whole group. (The feed order inside the group is by symbol, so an
+    order-sensitive indicator such as an EMA over the interleaved stream
+    depends on the names, as it always did; a windowed sum does not.);
+  - in the match phase every indicator shows the whole group.
+  Market data (`ctx.series`) and marks are not ordered this way either: they
+  show every instrument's bar of the group. A contract with an event in the
+  group is not settled idle by another event's lifecycle: it settles on its own
+  bar. An object registered through `register_indicator` that is not an
+  `Indicator` is still fed by its own event's hooks.
+- *Phase 2* runs the handlers per event, then per strategy. What a strategy
+  queues is taken off its queue after each event and kept with the event.
+  Inside a group a handler sees the books as they were before the group:
+  cash, positions and open orders do not move until the match phase.
+- *Phase 3* first applies the queued commands of every event to their
+  instruments' kernels, in three passes over the whole group (orders without a
+  parent, orders with one, then cancel, modify, close and link), so a
+  reference to an order another event of the group created resolves whatever
+  the symbol order, then steps each event's kernel and runs the hooks its
+  fills reach (what those queue is settled at once, as before). Applying all
+  commands first is what makes an order for another instrument meet the
+  target's bar of `t` whichever of the two is stepped first. A venue-driven
+  node keeps the venue route's own order of sends.
+- *Context.* `ctx.local`, `ctx.idx` and `ctx.bar` are re-pointed at the event
+  for each phase.
+
 **Where it lives.** The runtime's `run` loop and `dispatch` become a loop over
 timestamp groups of the merge cursor (peek the next key's `(ts, phase)`),
 calling `advance` for each event of the group (phase 1), the handlers for each
@@ -119,7 +185,7 @@ shadow books with the same group); reports a fill books still reach the
 strategy in phase 3, before the next group.
 
 **LiveNode.** A live node cannot know that a timestamp group is complete, so by
-default it processes each push on arrival, as it does today: a one-event group.
+default it processes each push on arrival: a one-event group.
 A host that wants the batch semantics pushes a group at once
 (`push_group(ts, {symbol: bar})`, or several `push_*` calls between
 `begin_group()` and `flush()`), and a push with a later timestamp, `advance_to`
@@ -365,3 +431,63 @@ become eligible. The engine records the ordinal on the order (`arrival_idx`).
 | if-touched order | the open if the bar opens through the trigger, else the trigger |
 
 A stop is different: a gap through the stop always fills at the open.
+
+## Orders sent in answer to a fill
+
+An order a strategy sends from a fill hook normally meets the next step of its instrument. Three
+engine users send theirs *in answer to a fill* (tag `after_fill`): a continuous roll's open (the
+close's fill), a structure's sold legs (their hedges' fills) and a structure's closes (a failed
+leg). Such a market order meets the bar of the step the fill came in, in every mode: it fills at
+that bar's close under `same_bar_close` and at its open under `next_bar_open`, so a roll is never
+flat between its close and its open and a sold leg is priced with its hedge. On a target whose bar
+of that instant is not stepped yet (its name sorts later) the order waits for that step and fills
+there; on one already stepped it fills at once on the stepped bar (`EngineKernel::fill_follow_up`).
+A simulated venue (`PaperExecution`) does the same in its shadow book, and the reports are heard
+in the same step. A real broker fills when it fills; the strategy answers its fill report. A chain
+of answers is bounded: past eight in one step the next answer is cancelled before it books and the
+strategy is halted with `follow_up_loop` on the journal; the node keeps running. An order counts as an answer only if it is queued while the engine is delivering that fill to
+the strategy: the runtime records the fill it is delivering, and its timing comes from that record,
+never from anything on the order (the `after_fill` tag is refused on a strategy's order, and there is
+no helper to mark one). Under `next_bar_open` an answer meets the bar its fill came in only when that fill was at
+the bar's open; after an event inside the bar (a limit filled, an expiry) it goes to the next bar's open.
+
+On a simulated venue an order decided on one instrument for another whose bar of the same instant
+is already stepped meets that bar under `same_bar_close`, as in a batch run (`PaperVenue::set_deciding`), so
+the result no longer depends on which symbol sorts first.
+
+### When hooks hear a match, and what they know
+
+In the match phase every instrument of the group is matched first (a simulated venue's shadow
+books included); only then do the hooks hear what happened, and the commands they queue apply from
+the next bar of every instrument. A hook therefore cannot reach a bar of the group that has not been
+matched, and the result does not depend on the symbols' names. Under `next_bar_open` a fill is at
+the open, so a hook hearing a match reads `ctx.bar`, `ctx.data` and `ctx.series` as of the bars
+before the instant (`ctx.fill_ns` is the instant, the previous bar's stamp). Indicators and
+strategy-owned objects fed in phase 1 show the whole group (the rule above) and are not hidden; a
+strategy that wants to be causal at an open must not size an answer from them.
+Time rules in the fill path (a structure's `entry_timeout`) use `ctx.fill_ns` when it is set.
+
+### A flattening halt
+
+A halt raised while deciding bar `t` closes positions as an ordinary reduce-only market order
+decided there: at bar `t`'s close under `same_bar_close`, at the next bar's open under
+`next_bar_open`; the same in batch, node and paper. A halt asked for between events acts as raised
+while deciding the next event. A flatten detected after an event applied (daily loss, margin call)
+fills at that event's close, or the next bar's open under `next_bar_open`.
+
+## A bar stamped at the session close
+
+A bar stamped at the instant its session closes that is the first bar of its session (its
+predecessor belongs to an earlier session: a daily bar) is that session's bar. A decision on it is
+in session: a `same_bar_close` order fills at that close, a `next_bar_open` order at the next
+session's open. A minute bar stamped at the close follows another bar of its session, the market
+has closed, and a decision on it is refused `market_closed`. A resting `day` order placed on a
+daily bar lapses at that close; use `tif="gtc"` where the venue holds it.
+
+## Venue and session
+
+An `InstrumentSpec` that names a venue the session presets cover (NSE, BSE, NFO, BFO, MCX, CDS,
+BCD) and no session has that venue's session: its orders default to `day`, and its composite bars
+sit on the session grid. `session=` overrides it. On MCX the contract's class picks the preset (select agricultural 21:00, other agricultural 17:00, the rest 23:55 / 23:30), by the underlying or the symbol, in a factory, the `venue` setter and `from_json` alike. A venue no preset covers (for example NCO) has no
+session to guess: a `day` order on it is refused (`order_validity_unsupported`), and so is a composite bar of a calendar unit (`invalid_parameter`); an instrument that
+names no venue still trades at any time.

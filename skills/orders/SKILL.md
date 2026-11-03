@@ -88,7 +88,7 @@ bar that already closed when it was placed.
 | `Strategy.link_oco(*client_ids)` | One-cancels-other among two or more submitted orders. |
 | `Strategy.cancel_order(client_id)`, `cancel_all_orders()` | Cancel one working order (or a `Twap`'s unreleased slices), or all of them. A finished order is a no-op; an id never submitted raises `unknown_order`. |
 | `Strategy.modify_order(client_id, units=None, size_frac=None, limit_price=None, trigger_price=None)` | Replace price or size of a working order. `units` is the quantity. |
-| `Strategy.submit_structure(ctx, structure, *, chain, underlying, spot, lots=1, ...)`, `update_structures(ctx, marks)`, `close_structure(group)`, `structure_status(group)` | A multi-leg option position as one group of orders; see `docs/structures.md`. |
+| `Strategy.submit_structure(ctx, structure, *, chain, underlying, spot, lots=1, ...)`, `update_structures(ctx, marks)`, `close_structure(group)`, `structure_status(group)` | A multi-leg option position placed hedge-first in every mode: bought legs first, each sold leg when its hedges have filled, hedges closed if a sold leg fails; see `docs/structures.md`. |
 | `Strategy.cache` | `order(id)`, `orders()`, `orders_open()`, `is_order_open(id)`, `realized_pnl()`: order states folded from events. |
 | `raptorbt.MarketOrder`, `raptorbt.ClosePosition` | The legacy intents behind `enter()` and `close_position()`. Prefer the methods. |
 | `raptorbt.StopConfig`, `raptorbt.TargetConfig` | Fixed, ATR, trailing and risk-reward stop and target models for `BacktestConfig` (`set_fixed_stop(0.02)` is 2 percent; fractions, not percents). |
@@ -315,13 +315,18 @@ assert fill_price(orders.Market(side="buy", quantity=10, tif="at_open")) == 100.
 assert fill_price(orders.Market(side="buy", quantity=10, tif="at_close")) == 102.0           # bar 2 close
 ```
 
-A short option structure as one group of orders. All checks run before any
-leg is sent; legs fill independently and `update_structures` must be called
-every bar:
+A short option structure, placed hedge-first the same way in a backtest, on
+`PaperExecution` and on a broker. All checks run before any leg is sent. The
+bought legs go out at once; each sold leg goes out when the hedges covering it
+have filled, for the quantity they cover. A sold leg that is refused closes
+the hedges that filled, with orders of their own (`group.failure` says which
+order failed and why). The engine drives this from the order events: nothing
+needs calling for it (`update_structures` is for exits). A sold leg needs a
+margin model that groups option lines to be funded with its hedge held:
 
 ```python
 import numpy as np
-from raptorbt import BacktestConfig, InstrumentSpec, OptionChain, Strategy, run_strategies
+from raptorbt import BacktestConfig, InstrumentSpec, MarginModel, OptionChain, Strategy, run_strategies
 from raptorbt import structures as st
 
 STEP, T0, N, LOT = 60 * 10**9, 1_767_225_600 * 10**9, 20, 50.0
@@ -359,7 +364,8 @@ class Condor(Strategy):
 
 
 s = Condor()
-res = run_strategies([s], data, BacktestConfig(initial_capital=2_000_000.0, fees=0.0),
+res = run_strategies([s], data,
+                     BacktestConfig(initial_capital=2_000_000.0, fees=0.0, margin_model=MarginModel.defined_risk()),
                      instruments={sp.symbol: sp for sp in specs}, account_type="margin",
                      bar_stamp="close")
 assert s.structure_status(s.group) == "filled"

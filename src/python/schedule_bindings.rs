@@ -98,16 +98,17 @@ impl PySessionSchedule {
     }
 
     /// MCX non-agricultural contracts: a day session 09:00-17:00 and an
-    /// evening session 17:00-23:55 IST (23:30 in the US daylight-saving
-    /// periods of 2025 and 2026 the exchange notified).
+    /// evening session 17:00-23:55 IST, 23:30 while the US is on daylight saving
+    /// (from the Monday after the second Sunday of March to the Sunday that is
+    /// the first of November). Covered from 2024-11-04, with no end.
     #[staticmethod]
     #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn mcx(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
         Self::preset(SessionSchedule::mcx(), holidays, squareoff_minute)
     }
 
-    /// MCX internationally referenceable agricultural contracts: the `mcx`
-    /// periods, closing at 21:00.
+    /// MCX internationally referenceable agricultural contracts (Cotton, Cotton
+    /// Seed Oil / CPO, Kapas): 09:00-21:00 all year, covered as `mcx`.
     #[staticmethod]
     #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn mcx_select_agri(
@@ -115,6 +116,13 @@ impl PySessionSchedule {
         squareoff_minute: Option<u32>,
     ) -> PyResult<Self> {
         Self::preset(SessionSchedule::mcx_select_agri(), holidays, squareoff_minute)
+    }
+
+    /// All other MCX agricultural contracts: 09:00-17:00 all year.
+    #[staticmethod]
+    #[pyo3(signature = (holidays=None, squareoff_minute=None))]
+    fn mcx_other_agri(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {
+        Self::preset(SessionSchedule::mcx_other_agri(), holidays, squareoff_minute)
     }
 
     /// NSE currency derivatives on cross-currency pairs: Mon-Fri 09:00-19:30 IST.

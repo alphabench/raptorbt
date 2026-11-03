@@ -106,9 +106,33 @@ pub fn infer_periods_per_year(timestamps: &[i64]) -> Option<f64> {
     infer_periods_per_year_with_session(timestamps, SessionSpec::default())
 }
 
+/// The largest share of a daily series' bars two adjacent weekday classes may hold for the series
+/// to count as leaving weekends out. A session market with weekday sessions still has a handful
+/// of special sessions on a weekend (a Budget-day Saturday, a Muhurat Sunday), which must not
+/// turn its trading-day count into calendar time; a seven-day series puts 2/7 of its bars there.
+const WEEKEND_SHARE: f64 = 0.05;
+
+/// Whether a daily series leaves out weekends: some two adjacent days of the week together carry
+/// at most [`WEEKEND_SHARE`] of its bars. Read from the day numbers alone, so it needs no time
+/// zone (a constant shift of the day cut moves every bar by the same residue). Fewer than six bars
+/// cannot show a weekend.
+fn skips_weekends(timestamps: &[i64]) -> bool {
+    const DAY: i64 = 24 * 60 * 60 * 1_000_000_000;
+    if timestamps.len() < 6 {
+        return false;
+    }
+    let mut per_day = [0usize; 7];
+    for &t in timestamps {
+        per_day[t.div_euclid(DAY).rem_euclid(7) as usize] += 1;
+    }
+    let quiet = (0..7).map(|d| per_day[d] + per_day[(d + 1) % 7]).min().unwrap_or(0);
+    (quiet as f64) <= WEEKEND_SHARE * timestamps.len() as f64
+}
+
 /// Infer periods per year from bar timestamps and a session specification.
 ///
-/// Daily-or-coarser spacing annualizes on calendar time. Intraday spacing
+/// Daily bars of a session market (no weekend bars) annualize on 252 trading days; coarser
+/// spacing, a market named continuous and a seven-day series annualize on calendar time. Intraday spacing
 /// annualizes on trading sessions, since an intraday series only accrues
 /// returns during market hours -- treating a 1-minute NSE bar as 1/525600 of a
 /// calendar year would overstate the period count by roughly 4x.
@@ -124,9 +148,19 @@ pub fn infer_periods_per_year_with_session(
         return None;
     }
 
-    // A day or more between bars: calendar-based.
+    // A day or more between bars. Daily bars of a session market (no weekend bar in the
+    // series) accrue returns on trading days, as intraday bars do: 252 a year. Coarser bars,
+    // a market named continuous (`session_minutes=0`) and a seven-day series count calendar time.
     const DAY_NANOS: f64 = 24.0 * 60.0 * 60.0 * 1e9;
     if spacing >= DAY_NANOS {
+        let calendar_market = match session {
+            SessionSpec::Continuous => true,
+            SessionSpec::Session { minutes } => minutes <= 0.0,
+            SessionSpec::Inferred { .. } => false,
+        };
+        if spacing < 1.5 * DAY_NANOS && !calendar_market && skips_weekends(timestamps) {
+            return Some(TRADING_DAYS * DAY_NANOS / spacing);
+        }
         return Some(NANOS_PER_YEAR / spacing);
     }
 
@@ -256,6 +290,57 @@ mod tests {
         let ts: Vec<i64> = (0..1000).map(|i| i * MIN).collect();
         let ppy = infer_periods_per_year_with_session(&ts, SessionSpec::Continuous).unwrap();
         assert!((ppy - 525_600.0).abs() < 100.0, "expected ~525600, got {ppy}");
+    }
+
+    #[test]
+    fn weekday_daily_bars_count_trading_days() {
+        // 60 weekday bars at 15:30 IST (10:00 UTC): 252 whatever the session says, unless the
+        // market is named continuous.
+        let mut ts = Vec::new();
+        let mut day = 20_600;
+        while ts.len() < 60 {
+            if day % 7 != 2 && day % 7 != 3 {
+                // epoch day 0 is a Thursday: 2 and 3 are the weekend
+                ts.push(day * DAY + 10 * 3600 * 1_000_000_000);
+            }
+            day += 1;
+        }
+        for spec in [
+            SessionSpec::default(),
+            SessionSpec::Session { minutes: 375.0 },
+            SessionSpec::Inferred { tz_offset_ns: 19_800 * 1_000_000_000 },
+        ] {
+            let ppy = infer_periods_per_year_with_session(&ts, spec).unwrap();
+            assert!((ppy - 252.0).abs() < 1e-9, "expected 252 for {spec:?}, got {ppy}");
+        }
+        for spec in [SessionSpec::Session { minutes: 0.0 }, SessionSpec::Continuous] {
+            let ppy = infer_periods_per_year_with_session(&ts, spec).unwrap();
+            assert!((ppy - 365.0).abs() < 1e-9, "calendar for {spec:?}, got {ppy}");
+        }
+        // Weekly bars stay on calendar time.
+        let weekly: Vec<i64> = (0..60).map(|i| i * 7 * DAY).collect();
+        let ppy = infer_periods_per_year(&weekly).unwrap();
+        assert!((ppy - 52.14).abs() < 0.1);
+    }
+
+    #[test]
+    fn a_handful_of_weekend_sessions_do_not_make_a_session_market_a_calendar_one() {
+        // A year of weekday bars plus a Budget-day Saturday and a Muhurat Sunday: 252 trading days.
+        let mut ts = Vec::new();
+        let mut day = 20_000;
+        while ts.len() < 250 {
+            let weekend = day % 7 == 2 || day % 7 == 3;
+            if !weekend || ts.len() == 40 || ts.len() == 200 {
+                ts.push(day * DAY + 10 * 3600 * 1_000_000_000);
+            }
+            day += 1;
+        }
+        let ppy = infer_periods_per_year(&ts).unwrap();
+        assert!((ppy - 252.0).abs() < 1e-9, "two special sessions: expected 252, got {ppy}");
+        // A series that trades the weekend regularly counts calendar time.
+        let every: Vec<i64> = (0..250).map(|i| (20_000 + i) * DAY).collect();
+        let ppy = infer_periods_per_year(&every).unwrap();
+        assert!((ppy - 365.0).abs() < 1e-9, "seven-day series: expected 365, got {ppy}");
     }
 
     #[test]

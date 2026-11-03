@@ -5,7 +5,6 @@ from raptorbt.structures.book import (
     Exit,
     LegState,
     StructureBook,
-    StructureEvents,
     StructureGroup,
 )
 from raptorbt.structures.legs import (
@@ -56,7 +55,6 @@ __all__ = [
     "Strike",
     "Structure",
     "StructureBook",
-    "StructureEvents",
     "StructureGroup",
     "UnderlyingLeg",
     "bear_call_spread",

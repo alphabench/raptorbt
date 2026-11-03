@@ -21,15 +21,16 @@
 
 use std::collections::HashMap;
 
+use crate::accounts::AccountMode;
 use crate::core::types::{
-    BacktestConfig, BacktestMetrics, BacktestResult, CompiledSignals, InstrumentConfig, OhlcvData,
-    Trade,
+    BacktestConfig, BacktestResult, CompiledSignals, InstrumentConfig, OhlcvData,
 };
-use crate::execution::{FillPrice, SlippageModel};
 use crate::indicators::volatility::atr;
-use crate::portfolio::engine::compute_backtest_metrics_with_config;
-use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar, StepInput};
+use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::kernel::StepInput;
+use crate::portfolio::ledger::PositionPolicy;
 use crate::signals::processor::SignalProcessor;
+use crate::strategies::legs::{bar_entry, kernel_bar};
 
 /// How capital is divided among instruments when an entry opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,13 +114,6 @@ impl PortfolioBacktest {
         }
 
         let n_instruments = instruments.len();
-        let fee_model = self.config.base.fee_model();
-        let slippage_model = if self.config.base.apply_slippage && self.config.base.slippage > 0.0 {
-            SlippageModel::percentage(self.config.base.slippage)
-        } else {
-            SlippageModel::None
-        };
-        let fill_price = FillPrice::for_timing(self.config.base.resolved_fill_timing());
 
         // Clean each instrument's signals independently.
         let processor = SignalProcessor::new();
@@ -131,267 +125,111 @@ impl PortfolioBacktest {
         // Precompute ATR only when a stop or target needs it.
         let atr_series = self.precompute_atr(instruments, instrument_configs, n_bars);
 
-        // One kernel per instrument. Each starts with zero cash: the pool is
-        // handed to it bar by bar, so no kernel holds capital of its own.
-        let mut kernels: Vec<EngineKernel> = instruments
-            .iter()
-            .map(|(_, signals)| {
-                let inst_config = instrument_configs.and_then(|m| m.get(&signals.symbol));
-                let mut kernel = EngineKernel::new(
-                    self.config.base.clone(),
-                    fee_model.clone(),
-                    slippage_model.clone(),
-                    fill_price,
-                    signals.symbol.clone(),
-                    signals.direction,
-                    inst_config,
-                );
-                kernel.set_cash_money(crate::accounts::Money::ZERO);
-                kernel
-            })
-            .collect();
+        // One book: the shared account, one kernel per instrument, the curves
+        // and the portfolio-wide limits. What is particular to this runner is
+        // the order of the bar (every exit before any entry, so capital freed
+        // this bar funds this bar's entries) and the share of the pool an
+        // entry may draw (`CapitalAllocation`, handed to the kernel as the
+        // step's budget).
+        let mut book = PortfolioBook::new(self.config.base.clone(), AccountMode::Cash);
+        for (_, signals) in instruments {
+            let inst_config = instrument_configs.and_then(|m| m.get(&signals.symbol));
+            book.add_instrument(
+                signals.symbol.clone(),
+                signals.direction,
+                None,
+                inst_config,
+                PositionPolicy::Net,
+            );
+        }
 
-        let mut risk = self.config.base.risk_gate();
+        // The limits judge the equity of the whole bar, every held instrument
+        // marked, not the equity between two instruments' steps.
+        book.judge_per_instant(true);
         let timestamps = &instruments[0].0.timestamps;
-
-        // The shared pool is booked cash, in minor units, like each kernel's.
-        let scale = crate::accounts::MoneyScale::new(self.config.base.money_decimals)
-            .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}"));
-        let mut cash = scale.money(self.config.base.initial_capital).unwrap_or_else(|e| {
-            crate::accounts::money::money_fault(format!("initial_capital: {e}"))
-        });
-        let mut equity_curve = vec![self.config.base.initial_capital; n_bars];
-        let mut drawdown_curve = vec![0.0; n_bars];
-        let mut returns = vec![0.0; n_bars];
-        let mut trades: Vec<Trade> = Vec::new();
-        let mut peak_equity = scale.to_f64(cash);
-        let mut per_instrument_trades = vec![0usize; n_instruments];
-        let mut per_instrument_pnl = vec![0.0f64; n_instruments];
-        let mut rejected = vec![0usize; n_instruments];
-        let mut unfunded = vec![0usize; n_instruments];
         let mut halted_at: Option<usize> = None;
 
         for i in 0..n_bars {
-            if risk.daily_active() {
-                risk.roll_day(self.config.base.day_of(timestamps[i]));
-            }
+            let ts = timestamps[i];
+            let step_input = |idx: usize, entry: bool, exit: bool, budget: Option<f64>| StepInput {
+                entry,
+                exit,
+                atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
+                size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
+                budget,
+                ..StepInput::default()
+            };
 
-            // Exits first, across all instruments, so capital freed this bar is
-            // available to entries on the same bar.
-            for (idx, kernel) in kernels.iter_mut().enumerate() {
-                if !kernel.is_in_position() {
+            // Exits first, across all instruments.
+            for idx in 0..n_instruments {
+                if !book.kernel(idx).is_in_position() {
                     continue;
                 }
-                let bar = bar_at(&instruments[idx].0, i);
-                let input = StepInput {
-                    entry: false,
-                    exit: cleaned[idx].1[i],
-                    atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
-                    size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
-                    ..StepInput::default()
-                };
-
-                kernel.set_cash_money(crate::accounts::Money::ZERO);
-                for event in kernel.step(i, &bar, input) {
-                    if let EngineEvent::Exited { trade, .. } = event {
-                        per_instrument_trades[idx] += 1;
-                        per_instrument_pnl[idx] += trade.pnl;
-                        trades.push(*trade);
-                    }
-                }
-                // Whatever the exit produced returns to the pool.
-                cash += kernel.cash_money();
-                kernel.set_cash_money(crate::accounts::Money::ZERO);
+                let bar = kernel_bar(&instruments[idx].0, i);
+                book.apply(
+                    &bar_entry(idx, i, bar),
+                    None,
+                    step_input(idx, false, cleaned[idx].1[i], None),
+                );
             }
 
-            // Entries, gated on the shared pool and the shared constraints.
-            let open_now = kernels.iter().filter(|k| k.is_in_position()).count();
-            let mut open_count = open_now;
-
+            // Entries, gated by the book's limits and sized from the pool.
             for idx in 0..n_instruments {
-                // Gross notional the other instruments hold, for
-                // `max_gross_exposure`; only computed when that cap is set.
-                let external_exposure = kernels[idx].tracks_exposure().then(|| {
-                    kernels
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, _)| *j != idx)
-                        .map(|(j, k)| k.gross_notional(instruments[j].0.close[i]))
-                        .sum::<f64>()
-                });
-                let kernel = &mut kernels[idx];
                 // Under NextBarOpen the previous bar's signal fills in this
                 // bar's step, so a flat kernel with a waiting entry must be
                 // stepped even though this bar has no signal of its own.
-                let pending = kernel.has_pending_entry();
-                if kernel.is_in_position() || !(cleaned[idx].0[i] || pending) {
+                let pending = book.kernel(idx).has_pending_entry();
+                if book.kernel(idx).is_in_position() || !(cleaned[idx].0[i] || pending) {
                     continue;
                 }
-
-                if risk.check_entry(open_count).is_err() {
-                    risk.record_rejection();
-                    rejected[idx] += 1;
+                let open_count = book.open_total();
+                let budget = self.entry_budget(book.free_capital(), open_count, n_instruments);
+                // A limit that will refuse this entry: the position limit, a
+                // latched halt (drawdown, kill) or the day's loss block.
+                let at_limit = self.config.base.max_positions.is_some_and(|m| open_count >= m)
+                    || book.is_halted()
+                    || book.any_day_blocked();
+                if budget <= 0.0 && !at_limit {
+                    // Nothing to give this entry: it is dropped, waiting one included.
                     if pending {
-                        kernel.clear_pending_entry();
+                        book.kernel_mut(idx).clear_pending_entry();
                     }
                     continue;
                 }
-
-                let budget = self.entry_budget(scale.to_f64(cash), open_count, n_instruments);
-                if budget <= 0.0 {
-                    if pending {
-                        kernel.clear_pending_entry();
-                    }
-                    continue;
-                }
-
-                let bar = bar_at(&instruments[idx].0, i);
-                let input = StepInput {
-                    entry: cleaned[idx].0[i],
-                    exit: false,
-                    atr: atr_series[idx].as_ref().map_or(0.0, |a| a.get(i).copied().unwrap_or(0.0)),
-                    size_mult: instruments[idx].1.position_sizes.as_ref().map(|s| s[i]),
-                    ..StepInput::default()
-                };
-
-                // Lend the kernel its slice of the pool; it spends what it needs
-                // and hands back the remainder.
-                let lent = kernel.lend_cash(budget);
-                kernel.set_external_exposure(external_exposure);
-                let events = kernel.step(i, &bar, input);
-                kernel.set_external_exposure(None);
-                let spent = lent - kernel.cash_money();
-                kernel.set_cash_money(crate::accounts::Money::ZERO);
-                cash -= spent;
-
-                // A fill-bar stop can close the position in the same step that
-                // opened it: that trade is booked like any other, and the
-                // slot it briefly held is not taken.
-                for event in events {
-                    match event {
-                        EngineEvent::Exited { trade, .. } => {
-                            per_instrument_trades[idx] += 1;
-                            per_instrument_pnl[idx] += trade.pnl;
-                            trades.push(*trade);
-                        }
-                        // Size, position and exposure limits live in the
-                        // kernel; count their refusals here with the rest.
-                        EngineEvent::EntryRejected { reason, .. } if reason.is_risk_limit() => {
-                            risk.record_rejection();
-                            rejected[idx] += 1;
-                        }
-                        EngineEvent::EntryRejected { reason, .. } if reason.is_unfunded() => {
-                            unfunded[idx] += 1;
-                        }
-                        _ => {}
-                    }
-                }
-                if kernel.is_in_position() {
-                    open_count += 1;
-                }
+                // Under a limit the step is taken so the book's gate refuses
+                // the entry and counts it.
+                let budget = budget.max(0.0);
+                let bar = kernel_bar(&instruments[idx].0, i);
+                let input = step_input(idx, cleaned[idx].0[i], false, Some(budget));
+                book.apply(&bar_entry(idx, i, bar), None, input);
             }
 
-            // Mark to market.
-            let position_value: f64 = kernels
-                .iter()
-                .enumerate()
-                .map(|(idx, k)| k.position_value(instruments[idx].0.close[i]))
-                .sum();
-            let mut equity = scale.to_f64(cash) + position_value;
-
-            // The day's loss limit. Reaching it refuses entries for the rest
-            // of the day (the gate's `check_entry` above) and, when asked,
-            // closes everything at this bar's close.
-            if risk.daily_active()
-                && risk.on_day_equity(Some(self.config.base.day_of(timestamps[i])), equity)
-                && risk.flatten_on_daily_loss()
-            {
-                for (idx, kernel) in kernels.iter_mut().enumerate() {
-                    if !kernel.is_in_position() {
-                        continue;
-                    }
-                    let bar = bar_at(&instruments[idx].0, i);
-                    kernel.set_cash_money(crate::accounts::Money::ZERO);
-                    for event in kernel.halt_cleanup(i, Some(&bar), false, true) {
-                        if let EngineEvent::Exited { trade, .. } = event {
-                            per_instrument_trades[idx] += 1;
-                            per_instrument_pnl[idx] += trade.pnl;
-                            trades.push(*trade);
-                        }
-                    }
-                    cash += kernel.cash_money();
-                    kernel.set_cash_money(crate::accounts::Money::ZERO);
-                }
-                equity = scale.to_f64(cash);
-            }
-            equity_curve[i] = equity;
-
-            if equity > peak_equity {
-                peak_equity = equity;
-            }
-            drawdown_curve[i] =
-                if peak_equity > 0.0 { (peak_equity - equity) / peak_equity * 100.0 } else { 0.0 };
-
-            if i > 0 && equity_curve[i - 1] != 0.0 {
-                returns[i] = (equity - equity_curve[i - 1]) / equity_curve[i - 1];
-            }
-
-            let was_halted = risk.is_halted();
-            risk.on_equity(equity, peak_equity);
-            if !was_halted && risk.is_halted() {
+            book.judge(ts, i);
+            if halted_at.is_none() && book.is_halted() {
                 halted_at = Some(i);
             }
         }
 
-        // Mark any still-open positions at the final close, matching the
-        // single-instrument engine's zero-fee EndOfData convention.
-        let last_idx = n_bars - 1;
-        for (idx, kernel) in kernels.iter_mut().enumerate() {
-            if !kernel.is_in_position() {
-                continue;
-            }
-            let bar = bar_at(&instruments[idx].0, last_idx);
-            kernel.set_cash_money(crate::accounts::Money::ZERO);
-            if let Some(trade) = kernel.finalize(last_idx, &bar) {
-                per_instrument_trades[idx] += 1;
-                per_instrument_pnl[idx] += trade.pnl;
-                trades.push(trade);
-            }
-            cash += kernel.cash_money();
-            kernel.set_cash_money(crate::accounts::Money::ZERO);
-        }
-
-        if n_bars > 0 {
-            equity_curve[last_idx] = scale.to_f64(cash);
-        }
-
-        let metrics = self.finalize_metrics(
-            &equity_curve,
-            &drawdown_curve,
-            &returns,
-            &trades,
-            &instruments[0].0.timestamps,
-        );
-
+        let outcome = book.finish();
         let per_instrument = instruments
             .iter()
-            .enumerate()
-            .map(|(idx, (_, s))| InstrumentSummary {
+            .zip(&outcome.instruments)
+            .map(|((_, s), o)| InstrumentSummary {
                 symbol: s.symbol.clone(),
-                trades: per_instrument_trades[idx],
-                pnl: per_instrument_pnl[idx],
-                rejected_entries: rejected[idx],
-                unfunded_entries: unfunded[idx],
+                trades: o.trades,
+                pnl: o.pnl,
+                rejected_entries: o.rejected_entries,
+                unfunded_entries: o.unfunded_entries,
             })
             .collect();
 
         PortfolioBacktestResult {
-            result: BacktestResult::new(metrics, equity_curve, drawdown_curve, trades, returns),
+            result: outcome.result,
             per_instrument,
-            rejected_entries: risk.rejected_entries(),
-            unfunded_entries: unfunded.iter().sum(),
-            halted: risk.is_halted(),
-            halted_at,
+            rejected_entries: outcome.rejected_entries,
+            unfunded_entries: outcome.unfunded_entries,
+            halted: outcome.halted,
+            halted_at: halted_at.filter(|_| outcome.halted),
         }
     }
 
@@ -460,36 +298,6 @@ impl PortfolioBacktest {
                 )
             })
             .collect()
-    }
-
-    fn finalize_metrics(
-        &self,
-        equity_curve: &[f64],
-        drawdown_curve: &[f64],
-        returns: &[f64],
-        trades: &[Trade],
-        timestamps: &[i64],
-    ) -> BacktestMetrics {
-        compute_backtest_metrics_with_config(
-            equity_curve,
-            drawdown_curve,
-            returns,
-            trades,
-            timestamps,
-            &self.config.base,
-        )
-    }
-}
-
-/// Extract a single bar from an OHLCV series.
-fn bar_at(ohlcv: &OhlcvData, i: usize) -> KernelBar {
-    KernelBar {
-        timestamp: ohlcv.timestamps[i],
-        open: ohlcv.open[i],
-        high: ohlcv.high[i],
-        low: ohlcv.low[i],
-        close: ohlcv.close[i],
-        volume: ohlcv.volume[i],
     }
 }
 

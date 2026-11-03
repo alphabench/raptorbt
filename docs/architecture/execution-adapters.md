@@ -102,7 +102,7 @@ runtime, which sends orders.
 | `Twap` | the schedule stays in the book; each slice is sent as a market order when it is due |
 | `halt` | working orders that add exposure are cancelled, new entries are refused, and with `flatten` reduce-only market orders close the positions |
 | `link_oco` | `link_oco` on the adapter; where it answers `Unsupported` the engine keeps the group and cancels the others when one fills |
-| `submit_structure` | its legs are ordinary orders: identical results to `run_strategies` (tested) |
+| `submit_structure` | ordinary orders, hedge-first: the bought legs first, each sold leg when the hedges covering it have filled (the engine sends it on the fill report), with identical results to `run_strategies` (tested). The venue needs no group or atomic capability |
 
 ### Protective orders: `protective="venue"` or `"local"`
 

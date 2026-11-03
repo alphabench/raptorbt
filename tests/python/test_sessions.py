@@ -327,7 +327,7 @@ class TestInstrumentMetadata:
                     self.close_position()
 
         plain = run(Trade(), data, spec())
-        tagged = run(Trade(), data, spec(venue="NSE", currency="USD"))
+        tagged = run(Trade(), data, spec(venue="LSE", currency="USD"))
         _assert_same_result(plain, tagged)
 
 
@@ -368,7 +368,9 @@ class TestNoScheduleIsUnchanged:
         a = self._busy_strategy()
         b = self._busy_strategy()
         no_spec = run(a, data, None)
-        no_schedule = run(b, data, spec(venue="NSE", currency="INR"))
+        # a spec that names no venue (so implies no session) is pure data; a venue the presets
+        # cover would bring its session (pinned below), and a day order on one they do not is refused
+        no_schedule = run(b, data, spec(currency="INR"))
         _assert_same_result(no_spec, no_schedule)
         assert a.events == b.events
         assert len(no_spec.trades()) > 3
@@ -380,10 +382,20 @@ class TestNoScheduleIsUnchanged:
         ).result
         b = run_portfolio_strategy(
             self._busy_strategy(), data, config=_zero_fee_config(), bar_stamp="close",
-            instruments={"A": spec(symbol="A", venue="NSE")},
+            instruments={"A": spec(symbol="A", currency="INR")},
         ).result
         assert np.array_equal(np.asarray(a.equity_curve()), np.asarray(b.equity_curve()))
         assert len(a.trades()) == len(b.trades())
+
+    def test_a_known_venue_implies_its_session_so_off_hours_bars_are_not_just_data(self):
+        data = bars((THU, (3, 0), (23, 0)), (SAT, (3, 0), (20, 0)), (MON, (9, 15), (15, 30)),
+                    step=7)
+        implied = self._busy_strategy()
+        none = self._busy_strategy()
+        with_venue = run(implied, data, spec(venue="NSE", currency="INR"))
+        without = run(none, data, None)
+        assert len(with_venue.trades()) < len(without.trades()), "the closed hours took no entries"
+        assert spec(venue="NSE").session is not None and spec(venue="LSE").session is None
 
 
 # ---------------------------------------------------------------------------

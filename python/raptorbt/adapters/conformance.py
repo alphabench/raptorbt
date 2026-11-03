@@ -417,6 +417,10 @@ class _Proxy:
             client_order_id, quantity=quantity, limit_price=limit_price, trigger_price=trigger_price
         )
 
+    def restore_orders(self, working):
+        """A restored node teaches the adapter behind this proxy the orders it holds."""
+        return self.binding.adapter.restore_orders(working)
+
 
 class _Channel:
     """Between the venue and the binding: what the profile does to events."""

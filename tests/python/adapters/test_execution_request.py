@@ -8,6 +8,7 @@ MIN = 60_000_000_000
 
 class _Rec:
     namespace = "T1"
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self):
         self.requests = []

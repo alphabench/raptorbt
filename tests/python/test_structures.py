@@ -212,7 +212,11 @@ def test_nothing_is_queued_when_a_pre_flight_check_fails():
 def test_legs_are_queued_as_one_tagged_group_protective_first():
     s = Strategy()
     g = s.submit_structure(ctx_at(NOW), st.iron_condor(1, 2), chain=CHAIN, underlying=U, spot=100.2)
-    assert len(queued(s)) == 4
+    commands = queued(s)
+    # hedge-first: the two bought wings go out; the sold legs wait for the wings that cover them
+    assert [c[0] for c in commands] == ["submit"] * 2
+    bought = [i for i, ls in enumerate(g.legs) if ls.leg.side == "buy"]
+    assert [c[1] for c in commands] == [f"{g.id}:{i}" for i in bought]
     assert g.status(s.cache) == "submitted"
     assert [ls.client_id for ls in g.legs] == [f"{g.id}:{i}" for i in range(4)]
     with pytest.raises(InvalidParameter) as e:
@@ -226,7 +230,7 @@ def test_limit_legs_carry_the_given_prices():
     r = ic.resolve(CHAIN, U, 100.0, NOW)
     px = {l.instrument: 4.25 for l in r.legs}
     s.submit_structure(ctx_at(NOW), ic, chain=CHAIN, underlying=U, spot=100.0, order_type="limit", prices=px)
-    assert len(queued(s)) == 2
+    assert len(queued(s)) == 2  # two sold limit legs, nothing covers them
 
 
 # -- runs ---------------------------------------------------------------------------------------
@@ -386,10 +390,13 @@ def test_a_rejected_sold_leg_unwinds_what_filled_and_cancels_the_rest():
     rows = {r[0]: r for r in order_rows(res)}
     g = s.group
     states = [g.leg_status(s.cache, i) for i in range(4)]
-    assert states[0] == "rejected" and rows[f"{g.id}:0"][4] == "order_size"
-    assert set(states) <= {"rejected", "canceled", "filled"}, states
-    # the wing orders sit on the instruments' next bars, so how many had filled when the
-    # refusal was heard depends on bar order; whatever filled was closed, the rest was cancelled
+    refused = [i for i, x in enumerate(states) if x == "rejected"]
+    assert refused and all(rows[f"{g.id}:{i}"][4] == "order_size" for i in refused)
+    assert all(g.legs[i].leg.side == "sell" for i in refused), "only a sold leg is over the limit"
+    assert g.failure[1:] == ("rejected", "order_size")
+    assert set(states) <= {"rejected", "canceled", "filled", "waiting"}, states
+    # a sold leg is sent when its hedge has filled, so how many legs had filled when the refusal
+    # was heard depends on bar order; whatever filled was closed, the rest was cancelled or never sent
     filled = [i for i, x in enumerate(states) if x == "filled"]
     assert filled, "the test needs at least one leg to have filled before the failure"
     assert g.reason == "leg_failure" and s.structure_status(g) == "closed"
@@ -423,17 +430,15 @@ class UnderlyingOnly(Base):
                 ctx, self.structure, chain=CHAIN, underlying=U, spot=ctx.bar.close)
 
 
-def test_the_event_mixin_unwinds_in_the_same_step_as_the_failure():
-    mixed = type("M", (st.StructureEvents, UnderlyingOnly), {})()
+def test_a_strategy_that_looks_at_its_group_only_on_one_instruments_bars_still_unwinds_at_once():
+    """The strategy base class forwards order events to the groups: no mixin, no update call on
+    the failing leg's bar."""
     plain = UnderlyingOnly()
-    cut = notional_cut()
-    a = run(plain, max_order_notional=cut)
-    b = run(mixed, max_order_notional=cut)
-    closes = lambda res: [r for r in order_rows(res) if ":x" in r[0]]  # noqa: E731
-    # Heard in the same step, the cancel reaches the second wing before it fills; heard on the
-    # underlying's next bar, it has filled and has to be closed too.
-    assert len(closes(b)) == 1 and len(closes(a)) == 2
-    assert mixed.structure_status(mixed.group) == plain.structure_status(plain.group) == "closed"
+    res = run(plain, max_order_notional=notional_cut())
+    closes = [r for r in order_rows(res) if ":x" in r[0]]
+    assert plain.structure_status(plain.group) == "closed"
+    assert plain.group.reason == "leg_failure" and plain.group.failure is not None
+    assert all(r[3] == "filled" for r in closes), closes
 
 
 def test_an_entry_that_does_not_fill_in_time_is_unwound():
@@ -495,10 +500,13 @@ def test_run_strategies_and_live_node_give_identical_results(structure, attrs, c
     node = LiveNode([live_strategy], symbols, cfg, instruments=inst, account_type="margin",
                     leverage=1.0, bar_stamp="close")
     for i in range(N_BARS):
+        # the bars of one time are one group, as the batch run delivers them
+        node.begin_group()
         for sym in symbols:
             b = data[sym]
             node.push_bar(sym, int(b["timestamps"][i]), float(b["open"][i]), float(b["high"][i]),
                           float(b["low"][i]), float(b["close"][i]), float(b["volume"][i]))
+        node.flush()
     streamed = node.finish()[0]
     d1, d2 = digest(batch), digest(streamed)
     assert d1["orders"], "the structure placed nothing"

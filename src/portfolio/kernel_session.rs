@@ -51,7 +51,7 @@ pub(crate) struct SessionGate {
 }
 
 impl EngineKernel {
-    fn schedule(&self) -> Option<&SessionSchedule> {
+    pub(crate) fn schedule(&self) -> Option<&SessionSchedule> {
         self.spec.as_ref().and_then(|s| s.session.as_ref())
     }
 
@@ -76,6 +76,19 @@ impl EngineKernel {
     /// says why; `None` without a venue allows everything.
     pub fn check_validity(&self, tif: &str, expire_ns: Option<i64>) -> Result<(), String> {
         let Some(spec) = &self.spec else { return Ok(()) };
+        // A day order ends with the session; a venue no preset covers, given no session, has no
+        // day to end, and trading it round the clock would be a silent guess.
+        if tif == "day" && spec.session.is_none() {
+            if let Some(venue) = spec.venue.as_deref() {
+                return Err(format!(
+                    "day is not a validity {:?} has: its venue {venue:?} implies no session (the \
+                     presets cover NSE, BSE, NFO, BFO, MCX, CDS and BCD) and none was given, so \
+                     there is no session end to cancel the order at; give the InstrumentSpec a \
+                     session=",
+                    spec.symbol
+                ));
+            }
+        }
         if tif != "gtc" && tif != "gtd" {
             return Ok(());
         }
@@ -113,7 +126,8 @@ impl EngineKernel {
         };
         let data_ts = if mode == StepMode::Bar { ts.saturating_sub(1) } else { ts };
         let gate = SessionGate {
-            decision_open: schedule.is_open(ts),
+            decision_open: schedule.is_open(ts)
+                || (mode == StepMode::Bar && self.session_bar_at(ts)),
             data_open: schedule.is_open(data_ts),
         };
         // The run's own `squareoff_time` is read in the schedule's zone and
@@ -162,9 +176,30 @@ impl EngineKernel {
         }
     }
 
-    /// Whether a typed order submitted at `ts` falls outside the session.
+    /// Whether a typed order submitted at `ts` falls outside the session. A bar stamped at the
+    /// session's close that is the first bar of its session (a daily bar) is that session's bar:
+    /// a decision on it is in session, and fills at that close (see [`Self::session_bar_at`]).
     pub(crate) fn closed_at(&self, ts: i64) -> bool {
-        self.schedule().is_some_and(|s| !s.is_open(ts))
+        self.schedule().is_some_and(|s| !s.is_open(ts)) && !self.session_bar_at(ts)
+    }
+
+    /// Whether `ts` is the stamp of a bar that covers its whole session: it is stamped at the
+    /// instant the session closes (the last instant of data inside it) and the bar stepped before
+    /// it belongs to an earlier session, so nothing else of this session came first. A minute bar
+    /// stamped at the close follows another bar of its session and is not one.
+    pub(crate) fn session_bar_at(&self, ts: i64) -> bool {
+        let Some(schedule) = self.schedule() else { return false };
+        if schedule.is_open(ts) || !schedule.is_open(ts.saturating_sub(1)) {
+            return false;
+        }
+        let before = match self.last_step {
+            Some((_, b)) if b.timestamp == ts => self.prev_bar_ts,
+            Some((_, b)) => Some(b.timestamp),
+            None => None,
+        };
+        before.is_none_or(|p| {
+            schedule.session_day(p.saturating_sub(1)) != schedule.session_day(ts.saturating_sub(1))
+        })
     }
 
     /// Close every open position for the session square-off, at the event's

@@ -690,6 +690,7 @@ class Venue:
     """The smallest venue of one's own, with the optional instrument capability."""
 
     namespace = "e3"
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self, refuse=()):
         self.calls, self.refuse = [], set(refuse)

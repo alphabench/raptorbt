@@ -9,6 +9,19 @@ use crate::execution::costs::{FeeBreakdown, FeeRates, FeeSchedule, FeeSegment};
 use crate::execution::indian_costs::Segment;
 use crate::instruments::{InstrumentKind, InstrumentSpec};
 
+/// What a [`fee_gap_fault`] message starts with.
+pub const FEE_GAP_PREFIX: &str = "fee_schedule_gap:";
+
+/// A fill (or settlement) priced on a date the fee schedule has no rate for. Like a money
+/// fault it unwinds out of the kernel as a panic whose message starts `fee_schedule_gap:`,
+/// which the Python layer (`raptorbt._guard`) turns into the structured error of that code:
+/// the run is refused rather than charged a rate that was not in force.
+#[cold]
+#[inline(never)]
+pub fn fee_gap_fault(detail: impl std::fmt::Display) -> ! {
+    panic!("{FEE_GAP_PREFIX} {detail}")
+}
+
 /// No trading date has paid the per-day fee yet.
 const NO_DAY: i64 = i64::MIN;
 
@@ -152,10 +165,53 @@ pub struct DatedFees {
     slices: Mutex<VecDeque<(u64, f64)>>,
     /// Labels of the rows without an official source this model priced fills on.
     unverified: Mutex<BTreeSet<String>>,
+    /// Why the trading date in progress has no rate, when it has none: pricing a fill on it
+    /// stops with [`fee_gap_fault`]. Dates without a fill never charge, so they never fail.
+    gap: Option<String>,
+    /// Cash equity bound to the delivery row whose same-day round trips are priced on the
+    /// intraday row ([`FeeModel::same_day_charges`]).
+    classify_by_day: bool,
 }
 
 /// How many booked fills' order context is kept for [`FeeModel::take_slice_before`].
 const RECENT_SLICES: usize = 4096;
+
+/// What the booked legs of a same-day round trip paid in brokerage (see
+/// [`FeeModel::same_day_charges`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SameDayBrokerage {
+    /// The entry's brokerage when its itemised charges are known.
+    pub entry: Option<f64>,
+    /// What the entry was booked at in all, from which the brokerage is read when `entry` is
+    /// `None` (a slice of a position that was scaled into or partly closed).
+    pub entry_total: f64,
+    /// The exit's brokerage, as booked.
+    pub exit: f64,
+}
+
+impl DatedFees {
+    /// The brokerage an entry booked at `booked_total` on the delivery row paid: the total less
+    /// what the row charges on `value` with no brokerage, over what one rupee of brokerage adds
+    /// (GST on it). Read back, not recomputed, so a position built of several fills or sliced
+    /// into several exits keeps what each order was charged.
+    fn booked_entry_brokerage(&self, day: i64, is_buy: bool, value: f64, booked_total: f64) -> f64 {
+        let Ok(row) = self.schedule.row_for(
+            &self.venue,
+            self.segment,
+            self.underlying.as_deref(),
+            day,
+            false,
+        ) else {
+            return 0.0;
+        };
+        let without = row.rates.charge_keeping_brokerage(is_buy, value, 0.0).total();
+        let slope = row.rates.charge_keeping_brokerage(is_buy, value, 1.0).total() - without;
+        if slope <= 0.0 {
+            return 0.0;
+        }
+        ((booked_total - without) / slope).max(0.0)
+    }
+}
 
 impl Clone for DatedFees {
     fn clone(&self) -> Self {
@@ -176,6 +232,8 @@ impl Clone for DatedFees {
             last_value: AtomicU64::new(self.last_value.load(Ordering::Relaxed)),
             slices: Mutex::new(self.slice_log().clone()),
             unverified: Mutex::new(self.unverified_set().clone()),
+            gap: self.gap.clone(),
+            classify_by_day: self.classify_by_day,
         }
     }
 }
@@ -207,6 +265,8 @@ impl DatedFees {
             last_value: AtomicU64::new(0),
             slices: Mutex::new(VecDeque::new()),
             unverified: Mutex::new(BTreeSet::new()),
+            gap: None,
+            classify_by_day: false,
         })
     }
 
@@ -231,6 +291,8 @@ impl DatedFees {
             last_value: AtomicU64::new(0),
             slices: Mutex::new(VecDeque::new()),
             unverified: Mutex::new(BTreeSet::new()),
+            gap: None,
+            classify_by_day: false,
         }
     }
 
@@ -242,6 +304,8 @@ impl DatedFees {
         self.scrip_group =
             spec.scrip_group.as_ref().map(|g| format!("group:{}", g.to_ascii_uppercase()));
         self.day = NO_DAY;
+        self.gap = None;
+        self.classify_by_day = false;
         // A fill's row is the one in force on the venue's own trading date.
         if let Some(session) = &spec.session {
             self.tz_offset_ns = session.tz_offset_ns();
@@ -264,6 +328,20 @@ impl DatedFees {
             });
         match resolved {
             Ok((venue, segment, rates)) => {
+                // Cash equity priced as delivery is repriced on the intraday row when it is
+                // opened and closed on one trading date, if the schedule has that row.
+                self.classify_by_day = segment == FeeSegment::Delivery
+                    && matches!(spec.kind, InstrumentKind::Cash | InstrumentKind::CurrencyPair)
+                    && matches!(
+                        self.schedule.row_for_opt(
+                            &venue,
+                            FeeSegment::Intraday,
+                            self.underlying.as_deref(),
+                            i64::MAX,
+                            false
+                        ),
+                        Ok(Some(_))
+                    );
                 self.venue = venue;
                 self.segment = segment;
                 self.current = rates;
@@ -284,6 +362,9 @@ impl DatedFees {
         if let Some(why) = &self.unresolved {
             panic!("fee schedule {:?} cannot price this instrument: {why}", self.schedule.name);
         }
+        if let Some(why) = &self.gap {
+            fee_gap_fault(why);
+        }
         &self.current
     }
 
@@ -297,13 +378,13 @@ impl DatedFees {
 
     /// [`DatedFees::rates_at`] for a trading date being priced: a row without
     /// an official source is remembered as used.
-    fn rates_used_at(&self, ts: i64) -> Option<FeeRates> {
+    fn rates_used_at(&self, ts: i64) -> Result<FeeRates, String> {
         let row = self
             .schedule
             .row_for(&self.venue, self.segment, self.underlying.as_deref(), ts, false)
-            .ok()?;
+            .map_err(|e| e.to_string())?;
         self.note_used(row);
-        Some(row.rates)
+        Ok(row.rates)
     }
 
     fn note_used(&self, row: &crate::execution::costs::FeeRow) {
@@ -327,8 +408,12 @@ impl DatedFees {
             return;
         }
         if self.unresolved.is_none() {
-            if let Some(r) = self.rates_used_at(self.day_start(ts)) {
-                self.current = r;
+            match self.rates_used_at(self.day_start(ts)) {
+                Ok(r) => {
+                    self.current = r;
+                    self.gap = None;
+                }
+                Err(why) => self.gap = Some(why),
             }
         }
         self.day = day;
@@ -613,11 +698,69 @@ impl FeeModel {
         }
     }
 
+    /// The charges of a round trip of cash equity opened and closed on one trading date (the
+    /// venue's own, by its session time zone), repriced on the intraday row of that date:
+    /// `(entry, exit)` for `entry_value` and `exit_value` traded by a `direction` line. `None`
+    /// when the model does not classify by day (not a dated schedule, a row family the run
+    /// fixed, an instrument that is not cash equity, a schedule without an intraday row) or
+    /// the legs fall on different dates, in which case the delivery charges stand.
+    ///
+    /// The kernel prices an entry as delivery because it cannot know the exit; this is the
+    /// correction when the exit lands the same day. Only what differs between the two rows is
+    /// restated: the brokerage stays as it was booked (`entry_brokerage`, `exit_brokerage`), so an
+    /// order a card charges per order is not charged again on each slice of a partly closed
+    /// position.
+    pub fn same_day_charges(
+        &self,
+        entry_value: f64,
+        exit_value: f64,
+        direction: Direction,
+        entry_ts: i64,
+        exit_ts: i64,
+        brokerage: SameDayBrokerage,
+    ) -> Option<(FeeBreakdown, FeeBreakdown)> {
+        let FeeModel::Dated(d) = self else { return None };
+        if !d.classify_by_day || d.unresolved.is_some() {
+            return None;
+        }
+        let day = d.day_start(entry_ts);
+        if day != d.day_start(exit_ts) {
+            return None;
+        }
+        let row = match d.schedule.row_for(
+            &d.venue,
+            FeeSegment::Intraday,
+            d.underlying.as_deref(),
+            day,
+            false,
+        ) {
+            Ok(row) => row,
+            Err(why) => fee_gap_fault(why),
+        };
+        d.note_used(row);
+        let entry_buy = is_buy(direction, true);
+        let entry_brokerage = match brokerage.entry {
+            Some(b) => b,
+            None => {
+                d.booked_entry_brokerage(day, entry_buy, entry_value.abs(), brokerage.entry_total)
+            }
+        };
+        Some((
+            row.rates.charge_keeping_brokerage(entry_buy, entry_value, entry_brokerage),
+            row.rates.charge_keeping_brokerage(
+                is_buy(direction, false),
+                exit_value,
+                brokerage.exit,
+            ),
+        ))
+    }
+
     /// The charge on settling `size` contracts at `price` per contract
     /// (already times the multiplier) at `ts`, on the schedule's settlement
     /// row in force then, for the side closing a `direction` line. `None`
     /// when the model has no settlement row to price it (the caller falls
-    /// back to the instrument's `settlement_fee`).
+    /// back to the instrument's `settlement_fee`). A settlement row that
+    /// exists but not for that date stops with [`fee_gap_fault`].
     pub fn settlement_breakdown(
         &self,
         price: Price,
@@ -630,7 +773,11 @@ impl FeeModel {
             return None;
         }
         let row =
-            d.schedule.row_for(&d.venue, d.segment, d.underlying.as_deref(), ts, true).ok()?;
+            match d.schedule.row_for_opt(&d.venue, d.segment, d.underlying.as_deref(), ts, true) {
+                Ok(Some(row)) => row,
+                Ok(None) => return None,
+                Err(why) => fee_gap_fault(why),
+            };
         d.note_used(row);
         Some(row.rates.charge_fill(is_buy(direction, false), (price * size).abs(), 0.0, false))
     }
@@ -875,5 +1022,57 @@ mod tests {
         assert_eq!(priced(model.take_slice_before(7)), 0.0, "the second slice of order 7");
         assert_eq!(priced(model.take_slice_before(8)), 20.0);
         assert_eq!(model.breakdown(100.0, 10.0, Direction::Long, true).unwrap().brokerage, 20.0);
+    }
+
+    fn dated_row(settlement: bool, from: i64) -> crate::execution::costs::FeeRow {
+        crate::execution::costs::FeeRow {
+            venue: "NFO".into(),
+            segment: FeeSegment::Options,
+            underlying: None,
+            settlement,
+            effective_from: from,
+            rates: FeeRates { tax_sell_rate: 0.001, ..FeeRates::ZERO },
+            meta: Default::default(),
+        }
+    }
+
+    fn dated_model(rows: Vec<crate::execution::costs::FeeRow>) -> FeeModel {
+        let schedule = Arc::new(FeeSchedule::new("t", "t", rows));
+        FeeModel::Dated(Box::new(
+            DatedFees::new(schedule, "NFO".into(), FeeSegment::Options, 0).unwrap(),
+        ))
+    }
+
+    /// A schedule with no settlement row has nothing to charge at expiry; that is not a lookup
+    /// failure, and the caller falls back to the instrument's own fee.
+    #[test]
+    fn a_schedule_without_a_settlement_row_has_nothing_to_charge() {
+        let model = dated_model(vec![dated_row(false, 1_000)]);
+        assert!(model.settlement_breakdown(100.0, 1.0, Direction::Long, 5_000).is_none());
+    }
+
+    /// A settlement row that exists but not yet for the date is a lookup error, never `None`.
+    #[test]
+    #[should_panic(expected = "fee_schedule_gap:")]
+    fn a_settlement_before_the_first_settlement_row_stops_with_the_gap() {
+        let model = dated_model(vec![dated_row(false, 1_000), dated_row(true, 2_000)]);
+        let _ = model.settlement_breakdown(100.0, 1.0, Direction::Long, 1_500);
+    }
+
+    /// A fill on a date before the first row stops with the gap; a date with no fill does not.
+    #[test]
+    #[should_panic(expected = "earliest row takes effect on")]
+    fn a_fill_before_the_first_row_stops_with_the_gap() {
+        let mut model = dated_model(vec![dated_row(false, 10 * DAY_NS)]);
+        model.set_time(DAY_NS);
+        let _ = model.breakdown(100.0, 1.0, Direction::Long, true);
+    }
+
+    #[test]
+    fn a_date_before_the_first_row_without_a_fill_charges_nothing_and_stops_nothing() {
+        let mut model = dated_model(vec![dated_row(false, 10 * DAY_NS)]);
+        model.set_time(DAY_NS);
+        model.set_time(11 * DAY_NS);
+        assert!(model.breakdown(100.0, 1.0, Direction::Short, false).is_some());
     }
 }

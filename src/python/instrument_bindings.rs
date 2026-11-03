@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 use super::errors::{Fail, Val};
 use super::schedule_bindings::PySessionSchedule;
+use crate::core::SessionSchedule;
 use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
 
 /// Python-exposed instrument market definition.
@@ -108,8 +109,31 @@ fn with_meta(
 ) -> PyResult<InstrumentSpec> {
     spec.venue = non_empty("venue", venue)?;
     spec.currency = non_empty("currency", currency)?;
-    spec.session = session.map(|s| s.inner.clone());
+    spec.session = match session {
+        Some(s) => Some(s.inner.clone()),
+        None => venue_session(&spec)?,
+    };
     Ok(spec)
+}
+
+/// The session a known Indian venue implies for an instrument that names none: without it the
+/// instrument would trade at any hour, and its day orders and daily bars would have no day.
+///
+/// The one rule for every way a spec is built (a factory, the venue setter, `from_json`). On MCX
+/// the contract's class (its underlying, else its symbol) picks the session, and a contract of no known
+/// class is refused (`mcx_session_unknown`) rather than given a guessed one.
+fn venue_session(spec: &InstrumentSpec) -> PyResult<Option<SessionSchedule>> {
+    let Some(venue) = spec.venue.as_deref() else { return Ok(None) };
+    let mut names = Vec::with_capacity(2);
+    names.extend(spec.underlying());
+    names.push(spec.symbol.as_str());
+    SessionSchedule::for_instrument(venue, &names).map_err(|e| {
+        Fail::new("mcx_session_unknown", e.to_string())
+            .op("InstrumentSpec")
+            .param("session")
+            .skill("instruments")
+            .into()
+    })
 }
 
 #[pymethods]
@@ -125,9 +149,12 @@ impl PyInstrumentSpec {
     /// Rebuild a spec from the text `to_json` wrote.
     #[staticmethod]
     fn from_json(text: &str) -> PyResult<Self> {
-        let inner: InstrumentSpec = serde_json::from_str(text).map_err(|e| {
+        let mut inner: InstrumentSpec = serde_json::from_str(text).map_err(|e| {
             refuse("invalid_parameter", "InstrumentSpec.from_json", "text", e.to_string(), "text")
         })?;
+        if inner.session.is_none() {
+            inner.session = venue_session(&inner)?;
+        }
         Ok(Self { inner })
     }
 
@@ -419,7 +446,8 @@ impl PyInstrumentSpec {
         Ok(Self { inner: with_meta(spec, venue, currency, session)? })
     }
 
-    /// Listing venue, or None. Metadata only.
+    /// Listing venue, or None. A venue the session presets cover (NSE, BSE, NFO, BFO, MCX, CDS,
+    /// BCD) gives an instrument with no session that venue's session.
     #[getter]
     fn venue(&self) -> Option<String> {
         self.inner.venue.clone()
@@ -428,6 +456,9 @@ impl PyInstrumentSpec {
     #[setter]
     fn set_venue(&mut self, venue: Option<String>) -> PyResult<()> {
         self.inner.venue = non_empty("venue", venue)?;
+        if self.inner.session.is_none() {
+            self.inner.session = venue_session(&self.inner)?;
+        }
         Ok(())
     }
 

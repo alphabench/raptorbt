@@ -33,11 +33,13 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `adoption_refused` | `InvalidParameter` | A position cannot be adopted as given: a short on a cash account, a posted margin on a cash account or a cost basis on a margin account. | depends on the call | `raptorbt-live-trading` |
 | `below_one_lot` | `InvalidParameter` | The sizing rule yields less than one lot; nothing is rounded up or to zero. | depends on the call | `raptorbt-risk` |
 | `bracket_under_hedging` | `InvalidOrder` | A reduce-only child order (a bracket's stop or target) was submitted under hedging, where every order opens its own position and a reduce-only order is always refused. | depends on the call | `raptorbt-orders` |
+| `conflicting_bar` | `StateError` | A bar was pushed for a symbol and timestamp that already has a bar with other values; a delivered bar is not revised. | depends on the call | `raptorbt-live-trading` |
 | `conflicting_order_args` | `InvalidOrder` | Two options that exclude each other were both given (e.g. units and size_frac). | depends on the call | `raptorbt-orders` |
 | `correction_not_reversible` | `StateError` | A correction or bust cannot be applied to the book as it stands: reconcile the position. | depends on the call | `raptorbt-live-trading` |
 | `declaration_outside_run` | `StateError` | subscribe() or ctx.indicators was used outside on_init / on_start. | depends on the call | `raptorbt-subscriptions` |
 | `decreasing_timestamps` | `InvalidData` | Timestamps go backwards; bars must be in time order. | depends on the call | `raptorbt-market-data` |
 | `depth_without_ticks` | `InvalidData` | depth was given for a symbol that has no ticks. | depends on the call | `raptorbt-market-data` |
+| `duplicate_bar` | `StateError` | A bar was pushed again for a symbol and timestamp that already has an identical bar; the retry is refused, not delivered twice. | depends on the call | `raptorbt-live-trading` |
 | `duplicate_client_order_id` | `InvalidOrder` | An order id was reused for a different order. | depends on the call | `raptorbt-live-trading` |
 | `duplicate_strategy` | `InvalidParameter` | The same strategy instance was passed twice in one call. | depends on the call | `raptorbt-strategy` |
 | `duplicate_symbols` | `InvalidParameter` | A symbol appears more than once. | depends on the call | `raptorbt-market-data` |
@@ -47,9 +49,11 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `exit_close_failed` | `StateError` | The closes of an exit rule were refused or cancelled the allowed number of times and the position is still open. | depends on the call | `raptorbt-live-trading` |
 | `exit_rule_not_cancellable` | `StateError` | An exit rule the venue holds cannot be taken back; it stays held. | depends on the call | `raptorbt-live-trading` |
 | `exit_rule_unconfirmed` | `StateError` | The venue did not say whether it holds, changed or dropped an exit rule. | depends on the call | `raptorbt-live-trading` |
-| `fee_schedule_gap` | `InvalidParameter` | A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from; the run is refused rather than charged nothing. | depends on the call | `raptorbt-execution` |
+| `fee_schedule_gap` | `InvalidParameter` | A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from, or a fill or settlement falls on a date before the schedule's first row (the error names the earliest date); the run is refused rather than charged nothing or charged a rate that was not in force. | depends on the call | `raptorbt-execution` |
 | `fence_unsupported` | `InvalidParameter` | epoch= was given with an adapter whose can_fence is not true, so the epoch would protect nothing. | depends on the call | `raptorbt-live-trading` |
 | `fenced` | `StateError` | A newer execution epoch owns the account; this node sends nothing more. | depends on the call | `raptorbt-live-trading` |
+| `group_open` | `StateError` | A timestamp group is open: flush() it before opening another, reconciling, resuming, reading health, taking a checkpoint or a state digest. | depends on the call | `raptorbt-live-trading` |
+| `group_timestamp_mismatch` | `StateError` | A bar was pushed into an open group declared at one timestamp with another timestamp; it is not part of the group and is refused. | depends on the call | `raptorbt-live-trading` |
 | `hedging_unsupported_by_venue` | `InvalidParameter` | oms_type='hedging' was given with an adapter whose venue nets positions. | depends on the call | `raptorbt-live-trading` |
 | `history_exhausted` | `StateError` | A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten. | depends on the call | `raptorbt-live-trading` |
 | `incompatible_order_options` | `InvalidOrder` | A time-in-force or flag does not apply to this order kind. | depends on the call | `raptorbt-orders` |
@@ -98,7 +102,6 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `invalid_option_right` | `InvalidParameter` | An option's right is not call or put. | `'call'`, `'put'` | `raptorbt-instruments` |
 | `invalid_option_type` | `InvalidParameter` | option_type is not recognised. | `'call'`, `'ce'`, `'c'`, `'put'`, `'pe'`, `'p'` | `raptorbt-backtesting` |
 | `invalid_order_check` | `InvalidParameter` | order_check is not callable. | depends on the call | `raptorbt-live-trading` |
-| `invalid_order_group` | `InvalidOrder` | An atomic order group cannot be formed: fewer than two legs, two legs on one instrument, an order that is unknown, finished, reduce-only or not sized in units, or a venue-managed instrument. | depends on the call | `raptorbt-orders` |
 | `invalid_order_intent` | `InvalidOrder` | Intents queued on one bar are duplicated or unknown. | depends on the call | `raptorbt-orders` |
 | `invalid_order_kind` | `InvalidOrder` | Order kind is not recognised. | `'market'`, `'limit'`, `'stop_market'`, `'stop_limit'`, `'market_if_touched'`, `'limit_if_touched'`, `'market_to_limit'`, `'trailing_stop_market'`, `'trailing_stop_limit'` | `raptorbt-orders` |
 | `invalid_order_link` | `InvalidOrder` | A parent or one-cancels-other link cannot be made. | depends on the call | `raptorbt-orders` |
@@ -127,6 +130,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `journal_evicted` | `StateError` | A journal read asked for records a bounded memory has dropped; read them from the durable sink. | depends on the call | `raptorbt-live-trading` |
 | `journal_failed` | `StateError` | The journal could not take a record, so the node stopped before acting on it. | depends on the call | `raptorbt-live-trading` |
 | `length_mismatch` | `InvalidData` | Arrays that must share one length do not. | depends on the call | `raptorbt-market-data` |
+| `mcx_session_unknown` | `InvalidParameter` | An MCX instrument with no session names no known contract class (select agricultural COTTON, KAPAS, COTWASOIL at 09:00-21:00; other agricultural at 09:00-17:00; bullion, base metals, energy), so no session is implied: pass session=. | depends on the call | `raptorbt-instruments` |
 | `misaligned_legs` | `InvalidData` | Legs traded bar by bar (a basket, a pair) do not share their timestamps. | depends on the call | `raptorbt-market-data` |
 | `missing_bar_ns` | `InvalidParameter` | bar_stamp='open' was given without the bar width bar_ns. | depends on the call | `raptorbt-timeframes` |
 | `missing_field` | `InvalidData` | A required field is missing from a symbol's arrays. | depends on the call | `raptorbt-market-data` |
@@ -147,7 +151,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `off_lot_quantity` | `InvalidOrder` | An order's quantity is not a whole number of the instrument's lots (or size steps). It is refused in every mode so the simulation and a venue see the same terms; `valid` lists the nearest valid quantities. | depends on the call | `raptorbt-orders` |
 | `off_tick_price` | `InvalidOrder` | A limit, trigger, stop or target price is not a whole number of the instrument's ticks. It is refused in every mode so the simulation and a venue see the same terms; `valid` lists the nearest valid prices. | depends on the call | `raptorbt-orders` |
 | `order_check_intent` | `InvalidOrder` | enter() or close_position() was used with an order_check installed; they carry no order for it to see. | depends on the call | `raptorbt-live-trading` |
-| `order_validity_unsupported` | `InvalidOrder` | A gtc or gtd order on an instrument whose exchange segment holds only day orders (NSE equity derivatives, currency, BSE, MCX), or a gtd dated past the contract's maturity where the segment holds them. | `'day'`, `'ioc'`, `'fok'` | `raptorbt-orders` |
+| `order_validity_unsupported` | `InvalidOrder` | A gtc or gtd order on an instrument whose exchange segment holds only day orders (NSE equity derivatives, currency, BSE, MCX), or a gtd dated past the contract's maturity where the segment holds them, or a day order on an instrument whose venue no session preset covers and that has no session. | `'day'`, `'ioc'`, `'fok'` | `raptorbt-orders` |
 | `paper_unsolicited_position_change` | `StateError` | The simulated venue changed a position with no order behind it. | depends on the call | `raptorbt-live-trading` |
 | `portfolio_total_unavailable` | `UnsupportedOperation` | A ctx.portfolio total needs the shared runtime (run_strategies). | depends on the call | `raptorbt-portfolio` |
 | `primary_bars_without_ticks` | `InvalidSubscription` | primary_bars was given but there are no ticks to aggregate. | depends on the call | `raptorbt-subscriptions` |

@@ -332,7 +332,7 @@ def card(effective_from, brokerage, settle=None, name="c"):
 
 class TestCharges:
     def test_a_settlement_is_charged_on_the_schedules_settlement_row(self):
-        sched = FeeSchedule.from_cards([card("2026-01-01T00:00:00+00:00", "20", settle="0.1")])
+        sched = FeeSchedule.from_cards([card("1970-01-01T00:00:00+00:00", "20", settle="0.1")])
         cfg = priced(sched, "NFO-FUT")
         fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0, multiplier=10.0)
         r = run_strategy_backtest(
@@ -347,7 +347,7 @@ class TestCharges:
         assert t.fees == pytest.approx(t.entry_fees + t.exit_fees, abs=1e-9)
 
     def test_a_schedule_without_a_settlement_row_falls_back_to_the_spec_fraction(self):
-        sched = FeeSchedule.from_cards([card("2026-01-01T00:00:00+00:00", "20")])
+        sched = FeeSchedule.from_cards([card("1970-01-01T00:00:00+00:00", "20")])
         cfg = priced(sched, "NFO-FUT")
         fut = InstrumentSpec.futures_contract("FUT", expiration_ns=2, lot_size=1.0)
         fut.settlement_fee = 0.001

@@ -44,6 +44,11 @@ BOOK_GRAIN = 0.015
 # ---------------------------------------------------------------------------
 # data
 # ---------------------------------------------------------------------------
+# 2026-09-02 00:00 UTC: a whole UTC day, and inside the dated fee rows (a fill before a schedule's
+# first row is refused, and some runs here price on a fee segment)
+T0 = 1_788_307_200 * 10**9
+
+
 def _bars(rng, n, start=100.0):
     """Positive random-walk OHLCV with gaps and wicks."""
     ret = rng.normal(0.0, 0.012, n)
@@ -53,7 +58,7 @@ def _bars(rng, n, start=100.0):
     high = np.maximum(open_, close) * (1.0 + np.abs(rng.normal(0.0, 0.006, n)))
     low = np.minimum(open_, close) * (1.0 - np.abs(rng.normal(0.0, 0.006, n)))
     return {
-        "timestamps": np.arange(n, dtype=np.int64) * NS_MIN,
+        "timestamps": T0 + np.arange(n, dtype=np.int64) * NS_MIN,
         "open": open_,
         "high": high,
         "low": low,
@@ -444,7 +449,7 @@ def test_random_order_sequences_stay_legal_and_consistent(seed):
 # ---------------------------------------------------------------------------
 def _flat(n, price=100.0):
     return {
-        "timestamps": np.arange(n, dtype=np.int64) * NS_MIN,
+        "timestamps": T0 + np.arange(n, dtype=np.int64) * NS_MIN,
         "open": np.full(n, price), "high": np.full(n, price),
         "low": np.full(n, price), "close": np.full(n, price),
         "volume": np.full(n, 1_000.0),

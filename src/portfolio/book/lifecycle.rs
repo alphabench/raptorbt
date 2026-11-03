@@ -171,7 +171,7 @@ impl PortfolioBook {
         // 3. Contracts that expired with no later bar of their own.
         for k in 0..self.live_count() {
             let i = self.live_at(k);
-            if Some(i) == current || !self.kernels[i].expired_at(ts) {
+            if Some(i) == current || self.in_group.contains(&i) || !self.kernels[i].expired_at(ts) {
                 continue;
             }
             if !self.kernels[i].has_contract_state() || self.waits_for_underlying(i, ts) {

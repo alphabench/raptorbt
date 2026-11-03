@@ -46,6 +46,7 @@ journal into a fresh node that must write the same records.
 | `adapter_result` | engine | `ok`, `refused`, `unsupported`, `error` (an exception: may or may not have arrived), `fenced`, `unknown_outcome`, `not_sent` |
 | `halt` | host / strategy / engine | `node.halt`, `halt_account`, or `ctx.halt`; from the engine: the day's loss limit (`daily_loss`), the drawdown limit (`drawdown`), a margin call (`margin_call`), written before the strategy hears of it and before anything reaches a venue |
 | `annotation` | host | `node.annotate(ts, kind, detail)`; a `resend` |
+| `group_begin` `group_end` | feed | a timestamp group opened and closed (`begin_group` / `flush`, `push_group`); `group_end` is written before the engine acts on the group. `restore` replays a recorded group as one group; a journal without them replays every push alone |
 | `instrument_add` `instrument_retire` | host | an instrument added to or retired from the running node (the spec as JSON); replayed by `restore` |
 | `restatement` | engine | a correction or bust the book followed |
 | `unbooked_fill` | engine | a venue fill the order took and the book could not book yet. At most 1024 are kept at once: the next one raises `venue_fill_not_booked` instead of joining a list nobody reads. They are tried again after every booking and every restatement (a bust or correction frees cash, margin and room) |
@@ -187,8 +188,32 @@ the node hands them to `adapter.restore_orders(...)` (a `BrokerAdapter` has it):
 registers each with the node's own fill progress, finds it in the day's book by tag and terms,
 and binds the venue's id. Fills the venue made meanwhile then arrive as the difference from
 what the node booked, and a cancel reaches the order. An adapter that cannot account for one
-(its symbol is not mapped) refuses the restore (`adapter_cannot_adopt`). A venue row the
-adapter ignores raises an `ignored_update` event once per order and status.
+(its symbol is not mapped) refuses the restore (`adapter_cannot_adopt`). An adapter with no
+`restore_orders` must say `keeps_own_records = True` (a venue of your own that remembers the
+node's orders itself); one that does neither is refused with the same code, because it would
+ignore the working orders without a word. A venue row the adapter ignores raises an
+`ignored_update` event once per order and status.
+
+**A crash in the middle of a timestamp group.** The journal can end after `group_begin` and some
+of the group's pushes, with no `group_end`. The replay reproduces exactly what the node held:
+the pushes are held, undelivered, as they were before the crash, and the group is left open.
+`restore` then reconciles and resumes as usual (`reconcile` and `resume` are allowed while a
+restored node has an open group: nothing of the group has been decided, so the venue and the
+node agree). `node.open_group` reports `{"timestamp": ns, "symbols": [...]}`, the pushes the
+group already holds. The host sends the symbols not listed and calls `flush()`; the group is
+then delivered as the uninterrupted run would have delivered it (same state digest). The host
+does not re-push the listed symbols: they are already in the journal and the history, and a
+second push would be a second bar. This is chosen over discarding the held events because a
+discard would have to roll back the history rings (a push stores its row before delivery) and
+add a record the replay must understand; leaving the group open changes neither. A group
+still open when the host cannot complete it is closed by `flush()` with what it holds.
+`checkpoint`, `state_digest` and `health` refuse while it is open (`group_open`).
+
+`push_group` checks every bar (symbol, finite prices, session coverage, a timestamp not older
+than the instrument's latest) before it opens a group, so a refused bar delivers nothing and a
+retry delivers each good bar once. A failure inside the group (a full history ring, a journal
+sink that raises) leaves the group open and unflushed with the pushes it took; `open_group`
+says which.
 
 ## The adapter's namespace
 

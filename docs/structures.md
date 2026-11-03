@@ -3,9 +3,9 @@
 `raptorbt.structures` describes multi-leg option positions declaratively, binds them to
 contracts from an `OptionChain` at the event time, and places them as one group of ordinary
 orders. `raptorbt.sizing` turns capital, risk, volatility or margin into a whole number of lots.
-Neither adds an order type or touches the engine: a structure is a set of `Market`/`Limit`
-orders sent with `submit_order`, so it behaves the same in `run_strategies`, the portfolio and
-tick runners and `LiveNode`.
+Neither adds an order type: a structure is a set of `Market`/`Limit` orders sent with
+`submit_order`, hedge-first (below), so it behaves the same in `run_strategies`, the portfolio and
+tick runners and `LiveNode` on the in-process engine, on `PaperExecution` and on a broker adapter.
 
 ## Describing a structure
 
@@ -78,8 +78,11 @@ class Condor(Strategy):
 
 `Strategy.submit_structure(ctx, structure, *, chain, underlying, spot, lots=1, now_ns=None,
 underlying_spec=None, order_type="market", prices=None, net_limit=None, exit=None,
-on_leg_failure="unwind", margin_model=None, available=None, tif="gtc", group_id=None)`
+on_leg_failure="unwind", margin_model=None, available=None, tif="auto", group_id=None)`
 
+* `tif` is every leg's time in force. The default `"auto"` is the instrument-driven one: DAY on an
+  instrument with a session, good-till-cancelled on one without. Pass `"gtc"` to keep legs working
+  past the session.
 * `order_type="limit"` sends each leg as a `Limit` at `prices[symbol]`. `prices` is also
   the reference for `net_limit` and for the margin check.
 * `net_limit`: the net premium (debit positive) at those prices must not exceed it, else
@@ -90,56 +93,77 @@ on_leg_failure="unwind", margin_model=None, available=None, tif="gtc", group_id=
 * All checks run before any order is queued, so a group is sent whole or not at all.
 * Two legs resolving to the same contract are refused; give one leg a `ratio`.
 
-Legs go out protective-first (shares and bought options, then sold options), each as its own
-order with client id `"<group>:<leg index>"` and `tags={"structure": group}`. The group id
+### Hedge-first
+
+One model in every mode (a backtest, a node on `SimulatedExecution`, `PaperExecution`, a broker):
+
+1. **Bought legs first.** The bought legs (shares and bought options: the hedges) go out at once.
+2. **Sold legs follow the hedges.** A sold leg goes out when the hedges that cover it have filled
+   (a sold call is covered by bought calls and bought shares, a sold put by bought puts, sold
+   shares by bought calls). With partial fills a sold leg goes out for the share of its planned
+   quantity that its least-filled covering hedge has filled, in whole lots, and again as more
+   fills, so a sold quantity never runs ahead of its hedge cover. A sold leg nothing covers (a
+   straddle, a strangle) goes out with the hedges. A ratio structure that sells more than it buys
+   keeps its ratio: the uncovered excess is the structure's own.
+3. **A failed sold leg closes the hedges.** See leg failure below. Every step is an order of its
+   own in the journal: the sold legs, and the closes, tagged `close=<reason>`.
+4. **Funding.** The sold leg is sent with the hedge held, so a margin model that groups option
+   lines (`MarginModel.defined_risk()`, `spread_credit`, `from_spec`) gives the hedged
+   requirement. A leg the account cannot fund is refused once, with the engine's reason (for
+   example `insufficient_capital`), and that is the group's `failure`.
+5. **Same step.** The sold leg and a close are sent in answer to a fill, so they meet the bar the
+   fill came in (the close under `same_bar_close`, the open under `next_bar_open`), in a backtest
+   and on a simulated venue alike; a real broker fills when it fills. The group is driven by the
+   order events the strategy base class forwards to it: no call and no mixin is needed, and a
+   subclass's own `on_order_event` runs after it.
+
+Each order has the client id `"<group>:<leg index>"` (a sold leg sent in several parts has
+`"<group>:<leg index>.<k>"` for the later ones) and `tags={"structure": group}`. The group id
 defaults to `"<order_id_tag>-st<n>"`.
 
-### Fill semantics and leg failure
+### Leg failure
 
-Legs fill independently. A leg is *failed* when its order is rejected, cancelled or expired.
+A leg is *failed* when one of its orders was rejected, cancelled or expired (time in force).
 
 | `on_leg_failure` | what happens on the first failed leg |
 |---|---|
-| `"unwind"` (default) | every leg still working is cancelled; every leg that filled is closed with a `reduce_only` market order; the group ends `closed`, reason `leg_failure` |
+| `"unwind"` (default) | every order still working is cancelled; every leg that filled is closed with a `reduce_only` market order (sold legs first), tagged `close="leg_failure"`; the group ends `closed`, reason `leg_failure`, and `group.failure` is `(client id, status, engine reason)` |
 | `"keep"` | nothing is undone; `status` reads `broken` and the strategy decides (`close_structure`) |
 
-The unwind runs in `update_structures` (call it from `on_bar`, for every symbol's bar), or in
-the same event step as the failure if the strategy inherits `StructureEvents`
-(`class S(StructureEvents, Strategy)`). Until then a filled leg is open. A leg that fills after
-the unwind began (a cancel that lost a race with a fill) is closed on the next update; a close
-the engine refuses is retried three times and then reported as `stuck`.
+The close runs in the step of the failing order event. Every order still working is cancelled
+first, including the remainder of a part-filled leg (an order is working until its fills reach its
+size, whatever the venue says of the part that filled), and what filled is closed at once: the sold
+legs, then the bought legs once no sold leg is open or could still fill, so a cover is never taken
+off a position it covers. A fill that arrives after its leg was closed (a cancel that lost a race
+with a fill), even after the group read `closed`, is closed in turn and the group reads `closing`
+again. A close the venue refuses is tried again on a later step, never in the step it was refused
+(an `update_structures` call or an order event on a later bar), at most three times, and then
+reported as `stuck`; the cover stays on while a sold leg is stuck. A hedge that fails (for example one the account
+cannot fund) fails the group the same way, and the sold legs it would have covered are never sent.
+
+**A stop or target on a bought option of a margin group is the engine's, in every mode.** On an
+account whose margin model margins option lines together (`MarginModel.defined_risk()`,
+`spread_credit(...)`), the stop or target of a bought option is never sent to a
+venue as a resting order (one would be refused, `insufficient_margin`, when it fired, leaving the
+sold legs unprotected). When it fires, or when a square-off or liquidation reaches the leg, the
+engine sends `reduce_only` market closes: the group's sold legs first, then the hedge once none is
+left open. They are ordinary orders, priced by the run's fill timing (the bar's close under
+`same_bar_close`; the next open under `next_bar_open`, or this bar's open when it opened through the
+level), journaled, and the strategy hears an order event for each. A batch run, a node, the paper
+venue and a broker send the same closes in the same order. A close the strategy itself asks for
+(`close_position`) is not a forced exit: it is refused while it would leave a sold leg without a
+hedge.
 
 `group.status(cache)` / `strategy.structure_status(group)`: `submitted`, `working`, `filled`
-(every leg), `broken`, `closing`, `closed`, `stuck`. `group.leg_status(cache, i)` is
-`submitted`, `working`, `filled`, `rejected`, `canceled` or `expired`.
+(every leg), `broken`, `closing`, `closed`, `stuck`. `group.leg_status(cache, i)` is `waiting` (a
+sold leg whose hedges have not filled), `submitted`, `working`, `filled`, `rejected`, `canceled`
+or `expired`.
 
-Fills are read from the order cache as whole-order fills. With `partial_fills` on, a leg that
-has filled in part reads as filled; its close is sent for the planned quantity and is
-`reduce_only`, so it cannot open the opposite position.
-
-### Atomic groups
-
-`PortfolioSession.link_group([(instrument, order_id), ...])` makes working orders on distinct
-instruments one group (units-sized, opening orders; two legs on one instrument, a reduce-only or
-unknown order and a venue-managed instrument raise `invalid_order_group`). A linked leg never
-fills alone:
-
-* the matcher finds a leg marketable and its kernel holds it back;
-* on the event where every leg is held back at the same instant, the group is funded as a whole:
-  with a margin model that groups option lines (`defined_risk`, `spread_credit`, `from_spec`) the
-  requirement of the legs and the lines already open, less what that group already locks, plus the
-  entry costs, against the free capital; with no such model, each leg's own funding summed;
-* if it fits, the legs fill through the ordinary fill path, bought legs first and then by instrument
-  index, so the order of the request changes nothing and a sold leg is funded with its hedge held;
-* if it does not, every leg is rejected as `group_unfunded` (counted once in `unfunded_entries`)
-  and no position opens;
-* a leg that ends unfilled (cancelled, expired, rejected) rejects the rest as `group_leg_failed`.
-
-Legs whose bars do not share a timestamp never fill together: a leg held back at an earlier
-instant is not carried forward. **Venue runs:** legs are separate venue orders, which a venue
-cannot fill atomically, and hedge-first placement would still leave a naked sold leg if the hedge's
-partner is refused; `link_group` refuses a venue-managed instrument instead. `submit_structure`
-does not link its legs yet; it still sends independent orders (see above).
+Fills are read from the order events as the quantity filled, so a part-filled hedge covers only
+what it filled, and a close is for the quantity that filled. A structure group hears every order
+event once, whether or not the strategy overrides `on_order_event` and calls `super()`. The order-event
+hook is switched on when the strategy creates its first group (before any leg is queued); a strategy
+that places no structures and does not override `on_order_event` is not called on order events at all.
 
 ### Group exits
 

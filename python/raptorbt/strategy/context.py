@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import warnings
 from typing import NamedTuple
 
@@ -183,7 +184,7 @@ class StrategyContext:
     @property
     def net_position(self) -> float:
         """Signed unit total across open positions (hedging nets out)."""
-        return sum(p.size * p.direction for p in self._session.positions())
+        return math.fsum(p.size * p.direction for p in self._session.positions())
 
     @property
     def is_net_long(self) -> bool:

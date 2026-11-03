@@ -30,6 +30,7 @@ Typical shape::
 
 from __future__ import annotations
 
+import logging
 import weakref
 from typing import Iterable, Literal
 
@@ -87,6 +88,8 @@ DEFAULT_HISTORY = 10_000
 
 _BAR_FIELDS = ("open", "high", "low", "close", "volume")
 
+
+_log = logging.getLogger(__name__)
 
 class LiveNode:
     """Many strategies over the symbols of one pushed feed.
@@ -396,6 +399,12 @@ class LiveNode:
             if (c := SessionCoverage.of(s, (instruments or {}).get(s), f"{name}.push_bar"))
         }
         self._index_of = {s: i for i, s in enumerate(symbols)}
+        self._last_push = None
+        #: Per symbol, the last bar delivered: a retried push of it is refused, not delivered twice.
+        self._last_bar: dict[str, tuple] = {}
+        #: What stopped the call that poisoned the node, as ``(code, first line)``.
+        self._poison: tuple[str | None, str] | None = None
+        self._ungrouped = 0
         self._retired: dict[str, int] = {}
         self._holders: dict[str, list[int]] = {}
         self._finished = False
@@ -499,8 +508,14 @@ class LiveNode:
             rt.set_warmup(True, self._warmup_muted)
             self._muted_now = self._warmup_muted
             try:
-                for push in warmup:
-                    rt.push_bar(*push)
+                # History is replayed in group form: the bars of one close time
+                # are applied before any is decided.
+                rt.begin_group(None, False)
+                try:
+                    for push in warmup:
+                        rt.push_bar(*push)
+                finally:
+                    rt.flush(False)
             finally:
                 self._muted_now = False
             rt.set_warmup(False)
@@ -549,20 +564,25 @@ class LiveNode:
         """
         self._check_open(push=True)
         ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
-        return self._rt.push_tick(
-            self._index(symbol, "push_tick"),
-            timestamp,
-            ltp,
-            bid,
-            ask,
-            buy_qty_delta,
-            sell_qty_delta,
-            ltq,
-            bid_qty,
-            ask_qty,
-            oi,
-            arrival_ns,
-        )
+        self._note_push(symbol, timestamp)
+        try:
+            return self._rt.push_tick(
+                self._index(symbol, "push_tick"),
+                timestamp,
+                ltp,
+                bid,
+                ask,
+                buy_qty_delta,
+                sell_qty_delta,
+                ltq,
+                bid_qty,
+                ask_qty,
+                oi,
+                arrival_ns,
+            )
+        except BaseException as e:
+            self._note_failure(e)
+            raise
 
     def push_bar(
         self,
@@ -581,17 +601,21 @@ class LiveNode:
         ``timestamp`` is stamped as the node's ``bar_stamp`` declares.
         """
         self._check_open(push=True)
-        reject_bar_only_settings(self._bar_config, [symbol], f"{self._name}.push_bar")
-        ensure_pushed_finite(
-            symbol, f"{self._name}.push_bar", open=open, high=high, low=low, close=close
-        )
-        covered = self._coverage.get(symbol)
-        if covered is not None:
-            covered.check(timestamp)
+        self._check_bar(symbol, timestamp, open, high, low, close, volume, "push_bar")
         self._stamps.warn_missing(f"{self._name}.push_bar", stacklevel=3 + self._extra)
-        self._rt.push_bar(
-            self._index(symbol, "push_bar"), timestamp, open, high, low, close, volume, arrival_ns
-        )
+        self._note_push(symbol, timestamp)
+        index = self._index(symbol, "push_bar")
+        try:
+            self._rt.push_bar(index, timestamp, open, high, low, close, volume, arrival_ns)
+        except BaseException as e:
+            self._note_failure(e)
+            raise
+        finally:
+            # A bar the runtime took is delivered, whatever a hook then raised: the host's retry
+            # of it is refused as a duplicate rather than delivered and journaled twice.
+            taken = self._rt.delivered_bar(index)
+            if taken is not None:
+                self._last_bar[symbol] = taken
 
     def warm_up(self, bars: dict[str, dict]) -> None:
         """Prime the strategies from history pushed after construction.
@@ -610,11 +634,173 @@ class LiveNode:
         self._rt.set_warmup(True, True)
         self._muted_now = True
         try:
-            for push in pushes:
-                self._rt.push_bar(*push)
+            self._rt.begin_group(None, False)
+            try:
+                for push in pushes:
+                    self._rt.push_bar(*push)
+            finally:
+                self._rt.flush(False)
         finally:
             self._muted_now = False
             self._rt.set_warmup(False)
+
+    def begin_group(self, timestamp: int | None = None) -> None:
+        """Open a timestamp group: the pushes that follow are held and
+        delivered together, as a batch run delivers the events that share a
+        timestamp.
+
+        By default each push is delivered on arrival, one event at a time, as
+        a group of one. A host that has the bars of several instruments for
+        one timestamp opens a group, pushes them, and calls :meth:`flush`
+        (or uses :meth:`push_group`): every event is then applied before any
+        is decided, and every decision is taken before any is matched, so what
+        a decision sees of another instrument, and the bar a cross-instrument
+        order meets, do not depend on the order the pushes arrived in.
+        Events that share a timestamp and a kind (trade, quote, depth, bar)
+        are one group. A push stamped later than what the group holds,
+        :meth:`advance_time`, :meth:`push_report`, :meth:`add_instrument`,
+        :meth:`retire_instrument` and :meth:`finish` deliver what is complete
+        or held. A node reproduces a batch run exactly when it delivers the
+        same groups.
+
+        ``timestamp`` is the group's, if you know it; it is only recorded. The
+        journal writes ``group_begin`` here and ``group_end`` at :meth:`flush`;
+        a journal without them replays every push alone, as it ran.
+        """
+        self._check_open(push=True)
+        try:
+            self._rt.begin_group(timestamp)
+        except BaseException as e:
+            self._note_failure(e)
+            raise
+        self._group_ts = timestamp
+
+    def flush(self) -> None:
+        """Close the open timestamp group and deliver what it holds. With none
+        open, nothing happens."""
+        self._check_open(push=True)
+        try:
+            self._rt.flush()
+        except BaseException as e:
+            self._note_failure(e)
+            raise
+
+    def push_group(
+        self,
+        timestamp: int,
+        bars: dict[str, "tuple[float, float, float, float, float] | dict[str, float]"],
+        *,
+        arrival_ns: int | None = None,
+    ) -> None:
+        """Feed the bars of several symbols for one timestamp as one group.
+
+        ``bars`` maps each symbol to ``(open, high, low, close, volume)`` or to
+        a dict with those keys. ``timestamp`` is stamped as the node's
+        ``bar_stamp`` declares, as for :meth:`push_bar`. The symbols are
+        delivered in ascending symbol order whatever order the mapping lists
+        them in; see :meth:`begin_group` for the rule.
+        """
+        # Every bar is checked before the group opens, so a bad one delivers nothing and a
+        # retry delivers each good bar once. What can still fail inside the group (the history
+        # ring full, the journal's sink) leaves the group open with the pushes it took, and
+        # nothing is flushed: ``open_group`` says what it holds, and the host sends the rest.
+        self._check_open(push=True)
+        rows = []
+        for symbol, bar in bars.items():
+            o, h, l, c, v = (
+                (bar[k] for k in ("open", "high", "low", "close", "volume"))
+                if isinstance(bar, dict)
+                else bar
+            )
+            self._check_bar(symbol, timestamp, o, h, l, c, v, "push_group")
+            rows.append((symbol, o, h, l, c, v))
+        self.begin_group(timestamp)
+        for symbol, o, h, l, c, v in rows:
+            self.push_bar(symbol, timestamp, o, h, l, c, v, arrival_ns=arrival_ns)
+        self.flush()
+
+    def _check_bar(self, symbol, timestamp, open, high, low, close, volume, call) -> None:
+        """What ``push_bar`` refuses before it delivers anything, in its order."""
+        reject_bar_only_settings(self._bar_config, [symbol], f"{self._name}.{call}")
+        ensure_pushed_finite(
+            symbol, f"{self._name}.{call}", open=open, high=high, low=low, close=close
+        )
+        group_ts = getattr(self, "_group_ts", None)
+        if group_ts is not None and self._rt.group_open and timestamp != group_ts:
+            # A group declared at a timestamp holds that timestamp's bars: one stamped otherwise
+            # is not part of it (it would be delivered as if it were).
+            raise StateError(
+                f"the open group is at {group_ts}: a bar for {symbol!r} stamped {timestamp} is not part of it",
+                code="group_timestamp_mismatch",
+                operation=f"{self._name}.{call}",
+                parameter="timestamp",
+                value=timestamp,
+                valid=[group_ts],
+            )
+        last = self._last_bar.get(symbol)
+        if last is not None and last[0] == timestamp:
+            # A bar is one per symbol and timestamp. A retry of a push that was delivered is
+            # refused, not delivered twice (a second delivery would be a second bar for every
+            # indicator, aggregator and decision); the code says whether it repeats the bar or
+            # contradicts it.
+            same = last[1:] == (open, high, low, close, volume)
+            if same:
+                raise StateError(
+                    f"{symbol!r} already has a bar at {timestamp}: this one repeats it, drop the retry",
+                    code="duplicate_bar",
+                    operation=f"{self._name}.{call}",
+                    parameter="timestamp",
+                    value=timestamp,
+                )
+            raise StateError(
+                f"{symbol!r} already has a bar at {timestamp} with other values: a bar is not revised",
+                code="conflicting_bar",
+                operation=f"{self._name}.{call}",
+                parameter="timestamp",
+                value=timestamp,
+            )
+        covered = self._coverage.get(symbol)
+        if covered is not None:
+            covered.check(timestamp)
+        if call == "push_group":
+            self._rt.check_bar(self._index(symbol, call), timestamp)
+
+    def _note_failure(self, error: BaseException) -> None:
+        """Keep the error of the call that poisoned the node, for ``health()``."""
+        if self._poison is None and self._rt.poisoned():
+            text = str(error).splitlines()
+            self._poison = (getattr(error, "code", None), text[0] if text else type(error).__name__)
+
+    def _note_push(self, symbol: str, timestamp: int) -> None:
+        """Count a push that shares its timestamp with the previous push of another instrument
+        while no group is open: a batch run delivers those together, this node delivers them one
+        at a time, so what a decision sees can differ. The first one is logged (WARNING, ``raptorbt.strategy.live_node``)."""
+        last = self._last_push
+        self._last_push = (symbol, timestamp)
+        if last is None or last[1] != timestamp or last[0] == symbol or self._rt.group_open:
+            return
+        self._ungrouped += 1
+        if self._ungrouped == 1:
+            _log.warning(
+                f"{self._name}: pushes for {last[0]!r} and {symbol!r} share timestamp {timestamp} "
+                "but were not grouped, so they are delivered one at a time, not together as a batch "
+                "run delivers them, and a decision may see the other instrument's old bar. "
+                "Use push_group(...) or begin_group()/flush(); health() counts these pushes "
+                "(ungrouped_same_timestamp_pushes)."
+            )
+
+    @property
+    def open_group(self) -> dict | None:
+        """The timestamp group left open, if any, and what it holds: ``{"timestamp": ns,
+        "symbols": [...]}``. A node restored from a journal that ends inside a group has one:
+        the replay delivered nothing of it, exactly as before the crash, so the host sends the
+        symbols not listed here and calls :meth:`flush`."""
+        if not self._rt.group_open:
+            return None
+        held = self._rt.held_pushes()
+        names = {i: s for s, i in self._index_of.items()}
+        symbols = sorted({names[i] for i, _ in held})
+        return {"timestamp": min((t for _, t in held), default=None), "symbols": symbols}
 
     def push_depth(
         self,
@@ -632,7 +818,12 @@ class LiveNode:
             f"{self._name}.push_depth",
             **{f"{side}[{i}]": price for side, levels in (("bids", bids), ("asks", asks)) for i, (price, _) in enumerate(levels)},
         )
-        self._rt.push_depth(self._index(symbol, "push_depth"), timestamp, bids, asks, arrival_ns)
+        self._note_push(symbol, timestamp)
+        try:
+            self._rt.push_depth(self._index(symbol, "push_depth"), timestamp, bids, asks, arrival_ns)
+        except BaseException as e:
+            self._note_failure(e)
+            raise
 
     def advance_time(self, timestamp: int) -> None:
         """Move time to ``timestamp`` with no data.
@@ -642,7 +833,11 @@ class LiveNode:
         routed at once and match from their instrument's next print.
         """
         self._check_open(push=True)
-        self._rt.advance_time(timestamp)
+        try:
+            self._rt.advance_time(timestamp)
+        except BaseException as e:
+            self._note_failure(e)
+            raise
 
     def push_report(
         self, client_order_id: str, report: ExecutionReport, *, arrival_ns: int
@@ -662,8 +857,15 @@ class LiveNode:
         its reports come after that event's hooks and before the next event.
         Reports may repeat, arrive late or arrive out of order; applying them
         again, or in another order, leaves the same orders, positions and
-        cash. Returns ``"applied"``, ``"duplicate"`` (already recorded) or
-        ``"late"`` (no longer matters, or cannot matter yet).
+        cash. Returns ``"applied"``, ``"duplicate"`` (already recorded),
+        ``"late"`` (no longer matters, or cannot matter yet), ``"deferred"`` (the venue filled
+        the order and the book could not book the fill yet, for instance an early reduce-only fill
+        before the entry it reduces, or for want of margin: the fill is kept and books itself when
+        the book can, and until then the position at the venue and the book disagree; the journal
+        holds an ``unbooked_fill`` record and ``health()["unbooked_fills"]`` lists it with its
+        reason) or ``"unbooked"`` (an execution on an order the node no longer holds: refused,
+        journaled as ``unbooked_fill`` with reason ``order_evicted``, never booked; reconcile the
+        position with the venue).
 
         Raises when the node has no execution adapter, when no order was sent
         under ``client_order_id``, or when the report contradicts the order.
@@ -677,7 +879,11 @@ class LiveNode:
                 parameter="report",
                 value=type(report).__name__,
             )
-        return self._rt.push_report(client_order_id, report, arrival_ns)
+        try:
+            return self._rt.push_report(client_order_id, report, arrival_ns)
+        except BaseException as e:
+            self._note_failure(e)
+            raise
 
     # -- the instrument set ------------------------------------------------------
 
@@ -969,6 +1175,7 @@ class LiveNode:
         The node is unusable afterwards: any further call raises ``RuntimeError``.
         """
         self._check_open(push=True)
+        self._rt.flush()
         self._journal_host("finish", None)
         self._finished = True
         try:
@@ -999,8 +1206,11 @@ class LiveNode:
 
     @property
     def state(self) -> str:
-        """``"live"``, or ``"recovering"`` after :meth:`restore` until
-        :meth:`resume`."""
+        """``"live"``, ``"recovering"`` after :meth:`restore` until :meth:`resume`, or
+        ``"poisoned"`` once a call stopped part way through a booking (every push is then refused;
+        :meth:`health` says what stopped)."""
+        if self._rt.poisoned():
+            return "poisoned"
         return "live" if self._state == "adding" else self._state
 
     @property
@@ -1036,6 +1246,7 @@ class LiveNode:
         the journal's ``seq_base``. Taken between pushes. See
         :meth:`restore`."""
         self._check_open()
+        self._no_open_group()
         from raptorbt.strategy import _recovery
 
         return _recovery.checkpoint(self, include_log)
@@ -1071,6 +1282,8 @@ class LiveNode:
         the node. Returns the list of :class:`~raptorbt.journal.Discrepancy`
         and delivers each to the strategy's ``on_discrepancy``."""
         self._check_open()
+        if self._state != "recovering":
+            self._no_open_group()
         from raptorbt.strategy import _recovery
 
         return _recovery.reconcile(self, cash_tolerance)
@@ -1081,6 +1294,8 @@ class LiveNode:
         otherwise ``recovering`` is raised and nothing changes."""
         self._check_open()
         if self._state != "recovering":
+            # Only a node restored from a journal that ended inside a group may resume with it open.
+            self._no_open_group()
             return
         if isinstance(accept, str):
             if accept != "all":
@@ -1124,12 +1339,24 @@ class LiveNode:
         """State for a supervisor: ``state``, ``epoch``, ``fenced``, the
         journal's ``count`` and ``chain``, and the orders with no confirmed
         outcome."""
+        if not self._finished:
+            self._no_open_group()
         out = {
             "state": self.state,
             "epoch": self._epoch,
             "fenced": self.fenced,
             "finished": self._finished,
+            "ungrouped_same_timestamp_pushes": self._ungrouped,
+            "poisoned": self._rt.poisoned(),
         }
+        if not self._finished and not out["poisoned"]:
+            # venue fills no book could take: (client order id, quantity, price, reason)
+            out["unbooked_fills"] = self._rt.unbooked_fills()
+            # strategies stopped for a sold option with no hedge left: (strategy index, reason)
+            out["margin_faults"] = self._rt.margin_faults()
+        if out["poisoned"]:
+            # the error of the call that stopped, as ``(code, message)``
+            out["poison_reason"] = self._poison
         if self._journal is not None:
             out["journal_count"] = self._journal.count
             out["chain"] = self._journal.chain
@@ -1142,6 +1369,7 @@ class LiveNode:
         """A hash of the books, orders and cash. Equal digests mean equal
         account state."""
         self._check_open()
+        self._no_open_group()
         from raptorbt.strategy import _recovery
 
         return _recovery.state_digest(self)
@@ -1271,6 +1499,14 @@ class LiveNode:
 
     def _resume_record(self, payload) -> None:
         self._journal_host("resume", payload)
+
+    def _no_open_group(self) -> None:
+        if self._rt.group_open:
+            raise StateError(
+                "a timestamp group is open: flush() it before reconcile, resume, health, a checkpoint or a state digest",
+                code="group_open",
+                operation=self._name,
+            )
 
     def _guard_push(self, what) -> None:
         if self._epoch is not None and self._rt.fenced:

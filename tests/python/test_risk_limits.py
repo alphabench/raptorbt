@@ -485,13 +485,14 @@ class TestKillSwitch:
         # Without flatten the position is left alone until the run ends.
         assert res.trades()[0].exit_reason == "EndOfData"
 
-    def test_ctx_halt_with_flatten_closes_positions_at_the_last_close(self):
+    def test_ctx_halt_with_flatten_closes_positions_at_the_close_of_the_bar_it_was_raised_on(self):
         s = Script({1: [("buy", 10.0)], 3: [("halt", True)]})
         res = run_strategy_backtest(s, **self.DATA, symbol="S", config=_config(), bar_stamp="close")
         trade = res.trades()[0]
         assert trade.exit_reason == "Liquidation"
-        # Halted on bar 3, applied as bar 3 is stepped, at the last mark: bar 2.
-        assert trade.exit_price == 100.0
+        # Corrected (was bar 2's close, 100.0, a bar early): halted while deciding bar 3, it
+        # closes as an ordinary reduce-only market order would, at bar 3's close.
+        assert trade.exit_price == 90.0
         assert res.halted is True
 
     def test_halt_cancels_working_orders(self):
@@ -563,7 +564,9 @@ class TestLiveNodeHalt:
         self._push(node, [90.0], first=3)
         result = node.finish()[0]
         trade = result.result.trades()[0]
-        assert trade.exit_reason == "Liquidation" and trade.exit_price == 95.0
+        # Corrected (was 95.0, the last mark): a halt asked for between events acts as an
+        # order sent then, so it closes at the next event's close.
+        assert trade.exit_reason == "Liquidation" and trade.exit_price == 90.0
 
     def test_halt_cancels_working_orders_and_tells_the_strategy(self):
         s = Script({0: [("limit_buy", 50.0, 5.0)]})

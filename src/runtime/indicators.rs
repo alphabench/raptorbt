@@ -50,8 +50,18 @@
 //!
 //! A read by strategy `s` through slot `x` returns, for the cell behind `x`:
 //!
-//! * `cur`, if the cell was not fed in this event;
-//! * else `prev`, if `s` has not yet revealed the stream behind `x`;
+//! * `cur`, if the cell was not fed in this event: a cell fed by another event
+//!   of the same timestamp group shows its value after that event, whether the
+//!   event is decided before or after this one (every event of a group is
+//!   applied before any is decided; see `event-semantics.md`);
+//! * for a cell fed by an instrument set (`AllPrimary`) the stream is the
+//!   reader's own whichever of its instruments is decided, so the protocol
+//!   applies to the group: `prev` is the value before the group, and the
+//!   reader's own reveal in an event shows the value after the whole group
+//!   (`cur`), for every symbol order. Outside a group this is the single event
+//!   rule below;
+//! * else (the cell is the selected event's own stream) `prev`, if `s` has not
+//!   yet revealed the stream behind `x`;
 //! * else the value after the `k`-th emission (`hist[k-1]`, or `cur` for the
 //!   last one) once `s` revealed emission `k`; `reveal_primary` reveals all.
 //!
@@ -68,7 +78,7 @@
 //! over at event boundaries.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use crate::core::error::RaptorError;
@@ -490,7 +500,7 @@ pub struct Reading {
 }
 
 impl Reading {
-    const UNINIT: Self = Self { initialized: false, values: [0.0; 3] };
+    pub(crate) const UNINIT: Self = Self { initialized: false, values: [0.0; 3] };
 
     fn scalar(v: Option<f64>) -> Self {
         v.map_or(Self::UNINIT, |x| Self { initialized: true, values: [x, 0.0, 0.0] })
@@ -552,12 +562,18 @@ enum Core {
 
 /// A core with the field it reads.
 #[derive(Debug)]
-struct CellCore {
+pub struct CellCore {
     core: Core,
     field: InputField,
 }
 
 impl CellCore {
+    /// The core of an indicator a strategy owns, reading the close (or the
+    /// whole bar), as a bank cell of the same spec would.
+    pub fn for_spec(spec: IndSpec) -> Self {
+        Self::new(&IndKey::new(IndInput::Primary(InstrumentId::new(0)), spec))
+    }
+
     fn new(key: &IndKey) -> Self {
         let p = |i: usize| key.params[i] as usize;
         let core = match key.kind {
@@ -578,7 +594,8 @@ impl CellCore {
         Self { core, field: key.field }
     }
 
-    fn update(&mut self, bar: Ohlc) -> Reading {
+    /// Feed one bar; the value after it.
+    pub fn update(&mut self, bar: Ohlc) -> Reading {
         let x = match self.field {
             InputField::Close => bar.close,
             InputField::Open => bar.open,
@@ -638,7 +655,7 @@ impl CellVals {
         Self {
             prev: AtomicReading::default(),
             cur: AtomicReading::default(),
-            touched: AtomicU64::new(u64::MAX),
+            touched: AtomicU64::new(0),
             emissions: AtomicU32::new(0),
             total: AtomicU64::new(0),
         }
@@ -671,6 +688,9 @@ const KEY_STREAM: u64 = 2 << 32;
 struct SlotCell {
     state: AtomicU64,
     cell: u32,
+    /// The cell is fed by an instrument set (`AllPrimary`): every event of the
+    /// group is the reader's own (see [`IndicatorBank::own`]).
+    fleet: bool,
 }
 
 /// A strategy's route to reveal, resolved once with
@@ -708,6 +728,11 @@ fn csr_row<'a>(offsets: &[u32], items: &'a [u32], row: usize) -> &'a [u32] {
 #[derive(Debug)]
 pub struct IndicatorBank {
     event: AtomicU64,
+    /// The first event of the timestamp group in flight (or the event itself
+    /// outside a group): a cell touched at or after it was fed by this group.
+    floor: AtomicU64,
+    /// `0` no group, `1` a group opened and awaiting its first event, `2` in progress.
+    group: AtomicU8,
     updates: AtomicU64,
     keys: Box<[IndKey]>,
     cells: Box<[CellVals]>,
@@ -757,7 +782,11 @@ impl IndicatorBank {
         let slots = registry.slots();
         let slot_cells: Box<[SlotCell]> = slots
             .iter()
-            .map(|s| SlotCell { state: AtomicU64::new(0), cell: s.ind.raw() })
+            .map(|s| SlotCell {
+                state: AtomicU64::new(0),
+                cell: s.ind.raw(),
+                fleet: matches!(keys[s.ind.index()].input, IndInput::AllPrimary(_)),
+            })
             .collect();
         // A slot is revealed by one route per primary bar that feeds it, or by
         // its composite stream's route.
@@ -805,6 +834,8 @@ impl IndicatorBank {
         let hist = vec![Vec::new(); keys.len()];
         std::sync::Arc::new(Self {
             event: AtomicU64::new(0),
+            floor: AtomicU64::new(1),
+            group: AtomicU8::new(0),
             updates: AtomicU64::new(0),
             cells: keys.iter().map(|_| CellVals::new()).collect(),
             keys,
@@ -854,6 +885,49 @@ impl IndicatorBank {
         let next = self.event.load(Ordering::Relaxed) + 1;
         assert!(next < MAX_EVENTS, "indicator bank: event counter exhausted");
         self.event.store(next, Ordering::Relaxed);
+        match self.group.load(Ordering::Relaxed) {
+            0 => self.floor.store(next, Ordering::Relaxed),
+            1 => {
+                self.floor.store(next, Ordering::Relaxed);
+                self.group.store(2, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// The events until [`IndicatorBank::close_group`] are one timestamp group:
+    /// a cell fed by several of them shows, to a reader before it has revealed
+    /// its own event, the value before the group.
+    pub fn open_group(&self) {
+        self.group.store(1, Ordering::Relaxed);
+    }
+
+    /// End the group opened by [`IndicatorBank::open_group`].
+    pub fn close_group(&self) {
+        self.group.store(0, Ordering::Relaxed);
+    }
+
+    /// The first event of the group in flight: a cell touched at or after it
+    /// was fed by this group.
+    pub fn floor(&self) -> u64 {
+        self.floor.load(Ordering::Relaxed)
+    }
+
+    /// The number of the event in flight, to select again later with
+    /// [`IndicatorBank::set_event`]. A group of events at one timestamp is
+    /// ingested event by event, then decided event by event: the selected
+    /// event is the one whose own stream the reveal protocol applies to; every
+    /// other cell shows its value after the group.
+    pub fn event_mark(&self) -> u64 {
+        self.event.load(Ordering::Relaxed)
+    }
+
+    /// Make `event` (from [`IndicatorBank::event_mark`]) the event the readers
+    /// see as the one being decided. After a group, select the last one again
+    /// so the next [`IndicatorBank::begin_event`] numbers past every cell's
+    /// stamp.
+    pub fn set_event(&self, event: u64) {
+        self.event.store(event, Ordering::Relaxed);
     }
 
     /// Feed `instrument`'s primary bar to every cell that reads it: its own
@@ -870,10 +944,11 @@ impl IndicatorBank {
 
     fn emit(&self, cells: &[u32], bar: Ohlc) -> Result<()> {
         let event = self.event.load(Ordering::Relaxed);
+        let floor = self.floor.load(Ordering::Relaxed);
         let mut w = self.writer.lock().expect("indicator writer poisoned");
         for &i in cells {
             let c = &self.cells[i as usize];
-            if c.touched.load(Ordering::Relaxed) == event
+            if c.touched.load(Ordering::Relaxed) >= floor
                 && c.emissions.load(Ordering::Relaxed) >= MAX_EMISSIONS
             {
                 return Err(RaptorError::invalid_parameter(format!(
@@ -884,7 +959,7 @@ impl IndicatorBank {
         for &i in cells {
             let i = i as usize;
             let c = &self.cells[i];
-            if c.touched.load(Ordering::Relaxed) == event {
+            if c.touched.load(Ordering::Relaxed) >= floor {
                 let after_previous = c.cur.load();
                 w.hist[i].push(after_previous);
             } else {
@@ -964,13 +1039,27 @@ impl IndicatorBank {
         let c = &self.cells[sc.cell as usize];
         let total = c.total.load(Ordering::Relaxed);
         let event = self.event.load(Ordering::Relaxed);
-        if c.touched.load(Ordering::Relaxed) != event {
+        if !self.own(sc, c, event) {
             return total;
         }
         let state = sc.state.load(Ordering::Relaxed);
         let k = if state >> STATE_BITS == event { state & STATE_MASK } else { 0 };
         let m = u64::from(c.emissions.load(Ordering::Relaxed));
         total - m + k.min(m)
+    }
+
+    /// Whether the reveal protocol applies to a read of `c` at `event`: the
+    /// cell was fed by the selected event, or, for a cell fed by an instrument
+    /// set, by the group in flight (the reader is a strategy deciding one of
+    /// the set's instruments, so the group's events are all its own).
+    #[inline]
+    fn own(&self, sc: &SlotCell, c: &CellVals, event: u64) -> bool {
+        let touched = c.touched.load(Ordering::Relaxed);
+        if sc.fleet {
+            touched >= self.floor.load(Ordering::Relaxed)
+        } else {
+            touched == event
+        }
     }
 
     /// The value the slot's strategy sees now.
@@ -980,7 +1069,11 @@ impl IndicatorBank {
         let cell = sc.cell as usize;
         let c = &self.cells[cell];
         let event = self.event.load(Ordering::Relaxed);
-        if c.touched.load(Ordering::Relaxed) != event {
+        // Only the event that fed the cell, which is the selected event for a
+        // reader of its own instrument's stream, has a reveal protocol. A cell
+        // fed by another event of the group, earlier or later, shows the value
+        // after it: every event of a group is applied before any is decided.
+        if !self.own(sc, c, event) {
             return c.cur.load();
         }
         let state = sc.state.load(Ordering::Relaxed);

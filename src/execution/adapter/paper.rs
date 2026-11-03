@@ -88,6 +88,7 @@ pub struct PaperVenue {
     /// Reports for protective legs that met the rest of the bar their
     /// position was entered on: they belong to the event being processed.
     same_event: Vec<Report>,
+    deciding: bool,
     /// Time of the latest event, for the answers above.
     now_ns: i64,
 }
@@ -112,6 +113,7 @@ impl PaperVenue {
             ended: std::collections::VecDeque::new(),
             queued: Vec::new(),
             same_event: Vec::new(),
+            deciding: false,
             now_ns: 0,
         }
     }
@@ -137,10 +139,13 @@ impl PaperVenue {
     }
 
     /// Halt a strategy's shadow book: working orders are cancelled (the
-    /// cancels leave with the next event) and new entries are refused.
-    pub fn halt(&mut self, strategy: usize, reason: &str) {
+    /// cancels leave with the next event) and new entries are refused. With
+    /// `flatten` the shadow closes its positions at its last marks, as the
+    /// strategy's own book does; the venue reports nothing for that, because
+    /// the strategy's book closes the same positions itself.
+    pub fn halt(&mut self, strategy: usize, reason: &str, flatten: bool) {
         if let Some(Some(shadow)) = self.shadows.get_mut(strategy) {
-            shadow.book.halt(reason, false);
+            shadow.book.halt(reason, flatten);
         }
     }
 
@@ -341,7 +346,10 @@ impl PaperVenue {
                 EngineEvent::Exited { trade, .. }
                     if matches!(
                         trade.exit_reason,
-                        ExitReason::Settlement | ExitReason::Delivery | ExitReason::CorporateAction
+                        ExitReason::Settlement
+                            | ExitReason::Delivery
+                            | ExitReason::CorporateAction
+                            | ExitReason::Liquidation
                     ) => {}
                 EngineEvent::Entered { .. } if delivery_in_batch => {}
                 other @ (EngineEvent::Entered { .. }
@@ -361,6 +369,11 @@ impl PaperVenue {
 
     /// The reports protective legs produced on the bar they were sent on,
     /// to be delivered with the event that is being processed.
+    /// Whether the orders sent next are what the strategy's handlers decided on the current event.
+    pub fn set_deciding(&mut self, deciding: bool) {
+        self.deciding = deciding;
+    }
+
     pub fn take_same_event(&mut self) -> Vec<Report> {
         std::mem::take(&mut self.same_event)
     }
@@ -432,6 +445,23 @@ impl ExecutionAdapter for PaperVenue {
         // the bar the entry filled in (see `EngineKernel::match_arrived`); its
         // reports leave with the next event.
         let protective = req.tags.get("client_id").is_some_and(|c| c.starts_with("prot-"));
+        // An order sent in answer to a fill the strategy just heard meets the bar that fill came
+        // in (see `Order::follow_up`); its reports leave with the step.
+        // An order for an instrument whose bar of that instant is already stepped (decided on
+        // another instrument's event of the same timestamp) meets that bar, as in a batch run.
+        let missed = self.deciding
+            && self.shadow(strategy)?.book.kernel(instrument).stepped_bar_at(req.submitted_ns);
+        if (req.tags.contains_key("after_fill") || missed)
+            && matches!(req.kind, crate::execution::orders::OrderKind::Market)
+        {
+            let shadow = self.shadow(strategy)?;
+            shadow.book.kernel_mut(instrument).set_order_follow_up(order_id);
+            let events = shadow.book.fill_follow_up(instrument, order_id, req.submitted_ns);
+            let mut reports = Vec::new();
+            self.report(strategy, instrument, &events, req.submitted_ns, &mut reports)
+                .map_err(|e| AdapterError::Refused(e.to_string()))?;
+            self.same_event.append(&mut reports);
+        }
         if req.reduce_only && protective {
             let kernel = self.shadow(strategy)?.book.kernel_mut(instrument);
             let events = kernel.match_arrived(order_id, req.submitted_ns);

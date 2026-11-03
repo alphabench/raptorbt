@@ -12,6 +12,7 @@ replay against, and the strategies' own state. See
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Callable, Iterable, Mapping
 
 from raptorbt import journal as jr
@@ -36,7 +37,7 @@ _WORKING = {
 #: Record kinds the replay driver feeds in; every other kind is either made by
 #: the engine while those run (and checked against the journal) or is passed
 #: through unchanged.
-_INPUTS = {"tick", "bar", "depth", "time", "report", "halt", "annotation", "instrument_add", "instrument_retire"}
+_INPUTS = {"tick", "bar", "depth", "time", "report", "halt", "annotation", "instrument_add", "instrument_retire", "group_begin", "group_end"}
 _DERIVED = {"command", "refusal", "adapter_request", "adapter_result", "error", "fence", "start", "restatement", "unbooked_fill", "order_resized", "adoption", "engine_exit", "lifecycle", "rejection", "simulated_report"}
 _PASSTHROUGH = {"reconcile", "discrepancy", "resume", "heartbeat", "state", "epoch"}
 
@@ -282,10 +283,20 @@ def _teach_adapter(node) -> None:
 
     The replay ran with the adapter muted, so an adapter built after the restart has never
     seen them. Without this it ignores their fills and refuses to cancel them. An adapter with
-    no ``restore_orders`` (a venue of your own) is left as it is: it keeps its own records."""
+    no ``restore_orders`` must say it ``keeps_own_records`` (a venue of your own that remembers
+    the node's orders itself); one that does neither is refused, because it would silently
+    ignore the node's working orders."""
     teach = getattr(node._execution, "restore_orders", None)
     if not callable(teach):
-        return
+        if getattr(node._execution, "keeps_own_records", False) is True:
+            return
+        node._rt.close()
+        raise StateError(
+            f"{type(node._execution).__name__} cannot account for the orders this node holds as "
+            "working: it has no restore_orders(rows) to adopt them and does not declare "
+            "keeps_own_records = True. A restored node must be able to cancel and follow them",
+            code="adapter_cannot_adopt", operation="LiveNode.restore",
+        )
     rows = [
         {"request": req, "status": status, "filled_qty": filled, "avg_price": avg}
         for req, status, filled, avg in node._rt.working_requests()
@@ -402,6 +413,10 @@ def _apply(node, journal, rec, kind, p) -> None:
         )
     elif kind == "time":
         node.advance_time(p["timestamp"])
+    elif kind == "group_begin":
+        node.begin_group(p["timestamp"])
+    elif kind == "group_end":
+        node.flush()
     elif kind == "report":
         node.push_report(rec.client_order_id, jr.report_from_payload(p), arrival_ns=arrival)
     elif kind == "halt" and rec.source == "host":
@@ -588,7 +603,7 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
                 "the venue holds a position under a key that is no symbol of this node",
             ))
         for sym in node._symbols:
-            mine = sum(
+            mine = math.fsum(
                 p.direction * float(p.size)
                 for k in range(len(node._ctxs))
                 if sym in node._symbols_of[k]
@@ -601,7 +616,7 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
         cash, snapshot["balances"] = venue_cash(adapter.balances())
         field = snapshot["balances"].get("compared")
         if cash is not None:
-            mine = sum(float(v.cash()) for v in node._views)
+            mine = math.fsum(float(v.cash()) for v in node._views)
             if abs(mine - cash) > cash_tolerance:
                 found.append(Discrepancy(
                     "cash_mismatch", None, None, mine, cash,

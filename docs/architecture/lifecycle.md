@@ -106,7 +106,8 @@ settlement row) or delivery value.
 | Rows | Figure | From | Source / status |
 | --- | --- | --- | --- |
 | NSE cash, NFO futures, NFO options | exchange 297 / 173 / 3,503 + IPFT 10 / 10 / 50 per crore; from 2026-03-01 306.99 / 182.99 / 3,552 + 0.01 | 2024-10-01 / 2026-03-01 | NSE/FA/73061, confirmed |
-| STT | delivery 0.1% both sides, intraday 0.025% sell; futures 0.02% then 0.05%, options 0.1% then 0.15% on the sell; exercised options 0.125% then 0.15% on the buyer's intrinsic value | 2026-04-01 for the second figure | Finance Act, confirmed |
+| NSE cash, NFO futures, NFO options, before 2024-10-01 | slab-era exchange 322 / 188 / 4,950 per crore, no IPFT (not known for the period); STT futures 0.0125% and options 0.0625% on the sell | 2023-04-01 | `unverified`: "slab-era representative rate" |
+| STT | delivery 0.1% both sides, intraday 0.025% sell; futures 0.0125%, 0.02% from 2024-10-01, 0.05% from 2026-04-01, options 0.0625%, 0.1%, 0.15% on the sell; exercised options 0.125% then 0.15% on the buyer's intrinsic value | 2023-04-01, 2024-10-01, 2026-04-01 | Finance Act, confirmed |
 | CTT | non-agri futures 0.01% sell, options 0.05% sell, a commodity option exercised 0.0001% on intrinsic value, agricultural futures none | 2024-10-01 | Finance Act, confirmed (the MCX exchange charges are not) |
 | SEBI fee, stamp duty | 10 per crore (agricultural commodities 1); stamp 1,500 / 300 / 200 / 300 / 10 per crore | 2020 and 2019 | confirmed |
 | BSE currency | futures 45, options 100 per crore of premium | 2024-10-01 | BSE Notice 20240927-36, confirmed |
@@ -120,7 +121,12 @@ lists the unverified rows it priced fills on, as `VENUE:SEGMENT[:KEY]`, so no on
 mistakes the costs for exchange-accurate. BSE cash charges depend on the scrip
 group: set `InstrumentSpec.scrip_group` (`"A"` or `"B"` are priced); an
 instrument without one, or with another, is refused (`fee_schedule_gap`) naming
-the groups. A fill before the first row (2024-10-01) is priced on it. The
+the groups. The earliest row is 2023-04-01 for NSE cash and NFO and 2024-10-01 for the other
+venues: a fill or settlement before a venue and segment's first row is refused
+(`fee_schedule_gap`, naming the earliest date), never priced on that row; the same holds for a
+rate card and a date before its `effective_from`. Cash equity bought and sold on one trading
+date is priced on the intraday row even in a positional run (entry and exit both, the entry
+charge repriced when the exit lands; a slice carried overnight stays on the delivery rows). The
 presets carry no brokerage and no depository charge: those come from a broker's
 `RateCard`, where the card says per order.
 `tests/python/fixtures/statutory_fees.json` holds the schedule and
@@ -144,23 +150,38 @@ instrument and date. A brokerage that a card says is per order is charged by
 the kernel on each fill; an order that fills in several slices
 (`partial_fills`) therefore pays the flat amount per slice, which is open.
 
+## Same-day cash equity
+
+A cash-equity buy is charged as delivery at entry (the exit is not known), as a broker's CNC buy
+is. A sale on the same trading date restates the round trip to the intraday row and refunds the
+difference. Until then equity, drawdown, day-loss limits and capital-edge sizing carry the delivery
+charge, so they can be slightly tighter than a pure intraday run would show. Only the components
+that differ between the two rows are restated: the brokerage stays as it was booked, per order, so
+a position sold in several slices pays each exit order once.
+
 ## Sessions
 
 `SessionSchedule` decides what trades on a local date in this order: a
 per-date override (a special session, Muhurat trading, a half day; empty
 windows close the date), the holiday set, the latest dated window change that
-covers the date, the base weekday windows. Presets (`nse_equity`, `bse_equity`,
+covers the date, a standing rule that follows the US clocks (MCX), the base weekday windows. Presets (`nse_equity`, `bse_equity`,
 `nse_fo`, `bse_fo`, `mcx`, `cds`, `bcd`) carry no holidays and no square-off;
 the equity-derivatives close is 15:30 until 2026-07-31 and 15:40 from
-2026-08-03 (that date has a single source, so the 15:30 close before it is
-unverified); MCX has a day session to 17:00 and an evening session whose close
-follows the exchange's dated periods: 23:55 from 2024-11-04, 23:30 from
-2025-03-10, 23:55 from 2025-11-03, 23:30 from 2026-03-09, 23:55 from 2026-11-02
-(the first two are in the exchange circulars NSE/COM/64245 and NSE/COM/66555, the
-rest follow the seasonal pattern and are not matched to a circular); the
-internationally referenceable agricultural contracts (`mcx_select_agri()`) close
-at 21:00. Dates before 2024-11-04 are closed, not guessed (`schedule.coverage`),
-and need a calendar document. NSE currency on INR pairs trades 09:00-17:00
+2026-08-03 (the Closing Auction Session for F&O stocks); MCX has a day session to
+17:00 and an evening session whose close follows a standing rule with no end:
+23:55, and 23:30 while the US is on daylight saving, switching on the first
+trading day after the US clocks change (the Monday after the second Sunday of
+March and after the first Sunday of November: 2024-11-04, 2025-03-10,
+2025-11-03, 2026-03-09, 2026-11-02, ...); the select agricultural
+contracts (`mcx_select_agri()`: Cotton, Kapas, Cotton Seed Wash Oil
+`COTWASOIL`) close at 21:00 all year and every other agricultural contract
+(`mcx_other_agri()`, CPO and RBD palmolein among them) at 17:00. An
+`InstrumentSpec` on `venue="MCX"` takes the session of its class from its
+underlying or symbol, for the classes the table names (those agricultural
+contracts, and bullion, base metals and energy on the evening session). A name
+in none of them is not guessed: the spec raises `mcx_session_unknown` and the
+caller passes `session=`. Dates before 2024-11-04 are
+closed, not guessed (`schedule.coverage`), and need a calendar document. NSE currency on INR pairs trades 09:00-17:00
 (`cds()`), on cross-currency pairs 09:00-19:30 (`cds_cross()`). Muhurat trading on
 2026-11-08 has no preset: its times were not notified, so add them with
 `with_session_override(20261108, [(open, close)])`. A bar on such a date raises `session_not_covered`

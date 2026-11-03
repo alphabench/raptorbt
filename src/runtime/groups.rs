@@ -493,9 +493,10 @@ impl AccountGroup {
         books: &mut [Option<PortfolioBook>],
         model: &crate::accounts::MarginModel,
     ) {
-        use crate::portfolio::book::{model_shares, ModelLines};
+        use crate::portfolio::book::{group_unbounded, model_shares, ModelLines};
         let mut bases = Vec::with_capacity(self.members.len());
         let mut shares = Vec::new();
+        let mut unbounded = None;
         {
             let mut groups = ModelLines::new();
             let mut now = 0;
@@ -508,8 +509,27 @@ impl AccountGroup {
                     base += book.kernel_count();
                 }
             }
-            for lines in groups.values() {
+            for (key, lines) in &groups {
                 shares.extend(model_shares(model, lines, now));
+                if unbounded.is_none() && group_unbounded(model, lines, now) {
+                    unbounded = Some(key.0.clone());
+                }
+            }
+        }
+        // A sold option with no hedge left and none on its way stops every member of the account
+        // that is not already stopped, the account being shared.
+        if let Some(underlying) = unbounded {
+            if !self
+                .members
+                .iter()
+                .any(|&m| books[m].as_ref().is_some_and(|b| b.hedge_on_its_way()))
+            {
+                self.halt_all(books, true);
+                for &m in &self.members {
+                    if let Some(book) = books[m].as_mut() {
+                        book.flag_unmarginable(&underlying);
+                    }
+                }
             }
         }
         let mut delta_locked = 0.0;
@@ -554,6 +574,26 @@ impl AccountGroup {
         let out = self.with_member(books, member, f).expect("the member's book is live");
         self.sync(books);
         out
+    }
+
+    /// A member's answer to a fill, met on the bar its book stepped (see
+    /// [`PortfolioBook::fill_follow_up`]), then the account-level work of a step: the option
+    /// lines are margined together again across every member.
+    pub fn fill_follow_up(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        member: usize,
+        instrument: usize,
+        order_id: u64,
+        ts: crate::core::types::Timestamp,
+    ) -> Vec<EngineEvent> {
+        let events =
+            self.run_on(books, member, |book| book.fill_follow_up(instrument, order_id, ts));
+        if !events.is_empty() {
+            self.regroup_option_margin(books);
+            self.sync(books);
+        }
+        events
     }
 
     /// Fold a finishing member's closes into the pool: `finish` is called

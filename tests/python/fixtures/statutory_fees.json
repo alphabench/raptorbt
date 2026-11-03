@@ -7,6 +7,26 @@
    "segment": "DELIVERY",
    "underlying": null,
    "event": "TRADE",
+   "effective_from": "2023-04-01",
+   "effective_until": "2024-10-01",
+   "base": "turnover",
+   "status": "unverified",
+   "source": "slab-era representative rate: the NSE exchange transaction charge before the true-to-label structure of 2024-10-01 (cash Rs 322, equity futures Rs 188, equity options Rs 4,950 per crore), not matched to a circular; the transaction tax is statute (Finance Act 2023, Finance (No. 2) Act 2024); IPFT for the period is not known and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 10000,
+    "tax_buy": 10000,
+    "exchange": 322,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "NSE",
+   "segment": "DELIVERY",
+   "underlying": null,
+   "event": "TRADE",
    "effective_from": "2024-10-01",
    "effective_until": "2026-03-01",
    "base": "turnover",
@@ -40,6 +60,26 @@
     "ipft": 0.01,
     "sebi": 10,
     "stamp_buy": 1500
+   }
+  },
+  {
+   "venue": "NSE",
+   "segment": "INTRADAY",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2023-04-01",
+   "effective_until": "2024-10-01",
+   "base": "turnover",
+   "status": "unverified",
+   "source": "slab-era representative rate: the NSE exchange transaction charge before the true-to-label structure of 2024-10-01 (cash Rs 322, equity futures Rs 188, equity options Rs 4,950 per crore), not matched to a circular; the transaction tax is statute (Finance Act 2023, Finance (No. 2) Act 2024); IPFT for the period is not known and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 2500,
+    "tax_buy": 0,
+    "exchange": 322,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
    }
   },
   {
@@ -167,6 +207,26 @@
    "segment": "FUTURES",
    "underlying": null,
    "event": "TRADE",
+   "effective_from": "2023-04-01",
+   "effective_until": "2024-10-01",
+   "base": "turnover",
+   "status": "unverified",
+   "source": "slab-era representative rate: the NSE exchange transaction charge before the true-to-label structure of 2024-10-01 (cash Rs 322, equity futures Rs 188, equity options Rs 4,950 per crore), not matched to a circular; the transaction tax is statute (Finance Act 2023, Finance (No. 2) Act 2024); IPFT for the period is not known and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 1250,
+    "tax_buy": 0,
+    "exchange": 188,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "FUTURES",
+   "underlying": null,
+   "event": "TRADE",
    "effective_from": "2024-10-01",
    "effective_until": "2026-03-01",
    "base": "turnover",
@@ -180,6 +240,26 @@
     "ipft": 10,
     "sebi": 10,
     "stamp_buy": 200
+   }
+  },
+  {
+   "venue": "NFO",
+   "segment": "OPTIONS",
+   "underlying": null,
+   "event": "TRADE",
+   "effective_from": "2023-04-01",
+   "effective_until": "2024-10-01",
+   "base": "premium",
+   "status": "unverified",
+   "source": "slab-era representative rate: the NSE exchange transaction charge before the true-to-label structure of 2024-10-01 (cash Rs 322, equity futures Rs 188, equity options Rs 4,950 per crore), not matched to a circular; the transaction tax is statute (Finance Act 2023, Finance (No. 2) Act 2024); IPFT for the period is not known and not charged",
+   "per_crore": {
+    "tax_kind": "STT",
+    "tax_sell": 6250,
+    "tax_buy": 0,
+    "exchange": 4950,
+    "ipft": 0,
+    "sebi": 10,
+    "stamp_buy": 300
    }
   },
   {
@@ -287,7 +367,7 @@
    "segment": "OPTIONS",
    "underlying": null,
    "event": "SETTLEMENT",
-   "effective_from": "2024-10-01",
+   "effective_from": "2023-04-01",
    "effective_until": "2026-04-01",
    "base": "intrinsic_value",
    "status": "confirmed",

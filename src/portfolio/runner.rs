@@ -322,7 +322,7 @@ mod halt_tests {
     }
 
     #[test]
-    fn a_flattening_halt_books_one_trade_at_the_last_marks_bar() {
+    fn a_flattening_halt_books_one_trade_at_the_close_of_the_bar_it_was_raised_on() {
         let config = BacktestConfig { fees: 0.0, ..BacktestConfig::default() };
         let mut runner = SingleRunner::from_config(config, "S".to_string(), Direction::Long, None);
         let enter = StepInput { entry: true, ..StepInput::default() };
@@ -339,9 +339,11 @@ mod halt_tests {
             .collect();
         assert_eq!(exits.len(), 1);
         assert_eq!(exits[0].exit_reason, ExitReason::Liquidation);
-        assert_eq!(exits[0].exit_price, 100.0);
+        // Corrected (was the previous bar's close, 100.0, on bar 1): the halt asked for
+        // before bar 2 closes like an ordinary reduce-only market order, at bar 2's close.
+        assert_eq!(exits[0].exit_price, 90.0);
         let result = runner.finish();
         assert_eq!(result.trades.len(), 1, "the flattened trade is booked once");
-        assert_eq!(result.trades[0].exit_idx, 1, "on the bar of the mark it trades at");
+        assert_eq!(result.trades[0].exit_idx, 2, "on the bar of the close it trades at");
     }
 }

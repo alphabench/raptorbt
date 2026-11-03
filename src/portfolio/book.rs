@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use crate::accounts::{AccountMode, Money, SharedAccount};
 use crate::core::types::{
-    BacktestConfig, BacktestResult, Direction, InstrumentConfig, Timestamp, Trade,
+    BacktestConfig, BacktestResult, Direction, ExitReason, InstrumentConfig, Timestamp, Trade,
 };
 use crate::data::DepthTick;
 use crate::instruments::InstrumentSpec;
@@ -33,8 +33,21 @@ use crate::portfolio::option_groups::{apportion, group_requirement, OptionLeg};
 use crate::portfolio::runner::OrderLog;
 use crate::portfolio::session::{InstrumentOutcome, ScheduleData, ScheduleEntry, SessionOutcome};
 
-mod atomic;
 mod venue;
+
+/// How a forced flatten closes the positions.
+#[derive(Clone, Copy)]
+enum Flatten {
+    No,
+    /// Decided in the event of `instrument` stamped `ts`, before it is applied: the close
+    /// is an ordinary reduce-only market order of that decision.
+    Decision {
+        instrument: usize,
+        ts: i64,
+    },
+    /// Detected after the last event applied, at its close.
+    AfterEvent,
+}
 
 /// Why a portfolio-wide halt latched.
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +74,18 @@ pub struct BookTotals {
     pub gross_exposure: f64,
     /// Long notional minus short notional.
     pub net_exposure: f64,
+}
+
+/// The close of a hedge leg the engine carries out as orders: the sold legs of its group first,
+/// then the hedge itself. All are ordinary reduce-only market orders, filled as the run's fill
+/// timing fills an answer to an event.
+struct Cover {
+    /// The hedge: kernel index and position id.
+    hedge: (usize, u64),
+    /// The sold legs' closing orders: kernel index and order id.
+    sold: Vec<(usize, u64)>,
+    /// The hedge's own closing order, once the sold legs are done.
+    hedge_order: Option<u64>,
 }
 
 /// One strategy's account, kernels and result curves.
@@ -110,10 +135,28 @@ pub struct PortfolioBook {
     /// being stepped (a group liquidation closing its positions). They are
     /// returned ahead of the next event's own, so the strategy hears of them.
     deferred: Vec<EngineEvent>,
-    /// Atomic order groups waiting to fill, see `book/atomic.rs`.
-    atomic: Vec<atomic::AtomicGroup>,
-    /// The id the next atomic group gets.
-    atomic_next: u64,
+    /// Exits of hedge legs in progress: the group's sold legs are being closed with orders, the
+    /// hedge's own close follows (see [`PortfolioBook::advance_covers`]).
+    covers: Vec<Cover>,
+    /// Serial of the engine's cover orders, for their client ids.
+    cover_serial: u64,
+    /// Inside [`PortfolioBook::advance_covers`], whose fills step the book again.
+    advancing_covers: bool,
+    /// Set once the book holds a sold option the margin model cannot bound (see
+    /// [`PortfolioBook::flag_unmarginable`]).
+    unmarginable: Option<String>,
+    /// Judge the account's limits once per instant, in [`PortfolioBook::judge`],
+    /// rather than after every event; see [`PortfolioBook::judge_per_instant`].
+    judge_deferred: bool,
+    /// Whether the config sets no drawdown or daily-loss limit, so the
+    /// per-event feeds to those gates can change nothing and are skipped.
+    limits_inert: bool,
+    /// Cash account, no portfolio-wide limit, no option margin groups: the
+    /// conditions (with one instrument) of the lone-bar fast path.
+    simple: bool,
+    /// Whether the account's model margins option lines together, so an
+    /// event needs the group context; false skips building it per event.
+    margin_groups: bool,
     /// Corporate actions, dividends owed and the adjustment policy.
     lifecycle: lifecycle::Lifecycle,
     /// Whether any instrument has an expiry, so the lifecycle clock runs.
@@ -121,6 +164,10 @@ pub struct PortfolioBook {
     /// Per instrument, the instant its expiry was first noticed while its
     /// settlement waited for the underlying's print.
     noticed: Vec<Option<Timestamp>>,
+    /// Instruments that have an event in the timestamp group being applied. A
+    /// contract among them settles on its own bar of the group, whichever
+    /// event of the group notices its expiry first.
+    in_group: Vec<usize>,
     /// Instruments retired from a running node: flat, with no order, and skipped by the loops
     /// that run on every event. The kernel stays (its trades and orders are in the results).
     retired: Vec<bool>,
@@ -157,7 +204,20 @@ impl PortfolioBook {
         let pool = config.initial_capital;
         let scale = crate::accounts::MoneyScale::new(config.money_decimals)
             .unwrap_or_else(|e| panic!("invalid BacktestConfig.money_decimals: {e}"));
+        let limits_inert = config.max_drawdown_pct.is_none()
+            && config.max_daily_loss.is_none()
+            && config.max_daily_loss_pct.is_none();
+        let margin_groups = !matches!(mode, AccountMode::Cash)
+            && config.margin_model.as_deref().is_some_and(|m| m.groups_options());
         Self {
+            judge_deferred: false,
+            limits_inert,
+            simple: matches!(mode, AccountMode::Cash)
+                && limits_inert
+                && !margin_groups
+                && config.max_positions.is_none()
+                && config.max_gross_exposure.is_none(),
+            margin_groups,
             config,
             kernels: Vec::new(),
             account: SharedAccount::new(mode, pool, scale),
@@ -180,11 +240,14 @@ impl PortfolioBook {
             pending_halt: None,
             grouped: None,
             deferred: Vec::new(),
-            atomic: Vec::new(),
-            atomic_next: 1,
+            unmarginable: None,
+            covers: Vec::new(),
+            cover_serial: 0,
+            advancing_covers: false,
             lifecycle: lifecycle::Lifecycle::default(),
             has_expiries: false,
             noticed: Vec::new(),
+            in_group: Vec::new(),
             retired: Vec::new(),
             dormant: 0,
             live: Vec::new(),
@@ -432,12 +495,14 @@ impl PortfolioBook {
     /// PnL, which prices winning shorts upward. The balance already includes
     /// notionally-locked margin — locks do not debit cash — so the margin arm
     /// does not double-count.
+    #[inline]
     pub fn equity(&self) -> f64 {
         self.base_cash() + self.positions_value()
     }
 
     /// The cash equity is taken from: the account balance, or, in a group,
     /// the cash this strategy's own trades have moved.
+    #[inline]
     fn base_cash(&self) -> f64 {
         match &self.grouped {
             Some(g) => self.account.scale().to_f64(g.cash),
@@ -446,6 +511,7 @@ impl PortfolioBook {
     }
 
     /// The marks of the open positions that equity adds to the cash.
+    #[inline]
     fn positions_value(&self) -> f64 {
         match self.account.mode() {
             AccountMode::Cash => self.live_marked_sum(|k, c| k.position_value(c)),
@@ -641,11 +707,12 @@ impl PortfolioBook {
         }
     }
 
-    /// Close (and optionally cancel working orders on) every instrument at
-    /// its last seen print, lending each kernel the pool as `apply` does and
-    /// folding the cash back. The returned events are the closes and
-    /// cancellations, in instrument order.
-    fn cleanup_all(&mut self, cancel_orders: bool, flatten: bool) -> Vec<EngineEvent> {
+    /// Cancel working orders on every instrument and, with `flatten`, close its
+    /// positions the way an ordinary reduce-only market order would, lending
+    /// each kernel the pool as `apply` does and folding the cash back. The
+    /// returned events are the closes made now and the cancellations, in
+    /// instrument order.
+    fn cleanup_all(&mut self, cancel_orders: bool, flatten: Flatten) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         for i in 0..self.kernels.len() {
             let (last_idx, last_bar) = match self.last_seen[i] {
@@ -661,7 +728,24 @@ impl PortfolioBook {
                 }
             };
             let injected = kernel.lend_cash(injected);
-            let closed = kernel.halt_cleanup(last_idx, last_bar.as_ref(), cancel_orders, flatten);
+            let mut closed = kernel.halt_cleanup(last_idx, cancel_orders);
+            match flatten {
+                Flatten::No => {}
+                // Decided in the event of `instrument` stamped `ts`: that instrument's bar
+                // stamped `ts` is the first it can fill on; any other instrument's first
+                // is the one after, as for any order routed to it from this event.
+                Flatten::Decision { instrument, ts } => {
+                    if kernel.is_in_position() {
+                        let first = if i == instrument { ts } else { ts.saturating_add(1) };
+                        kernel.request_flatten(ExitReason::Liquidation, first);
+                    }
+                }
+                Flatten::AfterEvent => {
+                    if let Some(bar) = last_bar.as_ref() {
+                        closed.extend(kernel.flatten_after(last_idx, bar, ExitReason::Liquidation));
+                    }
+                }
+            }
             let delta_cash = kernel.cash_money() - injected;
             let delta_locked = kernel.locked_margin() - locked_before;
             kernel.set_cash_money(Money::ZERO);
@@ -676,6 +760,41 @@ impl PortfolioBook {
             events.extend(closed);
         }
         events
+    }
+
+    /// Mark the instrument of `entry` at the price it carries, without
+    /// stepping anything. The equal-timestamp rule applies every event of a
+    /// timestamp group before any of them is decided or matched, so a decision
+    /// at `t` reads one mark for every instrument that printed at `t`, whatever
+    /// the order the group is stepped in. The step finds the same mark.
+    ///
+    /// The order-routing stamp (`last_seen`) stays with the step: an order for
+    /// this instrument decided at `t` is stamped with the last bar it stepped,
+    /// so it meets the bar of `t` still to be matched. Returns the mark the
+    /// instrument had before.
+    pub fn premark(&mut self, entry: &ScheduleEntry) -> Option<f64> {
+        let previous = self.last_close[entry.instrument];
+        if let Some(bar) = entry.as_bar() {
+            self.last_close[entry.instrument] = Some(bar.close);
+        }
+        previous
+    }
+
+    /// Note that `instrument` has an event in the group being applied.
+    pub fn group_enter(&mut self, instrument: usize) {
+        self.in_group.push(instrument);
+    }
+
+    /// The group is over.
+    pub fn group_leave(&mut self) {
+        self.in_group.clear();
+    }
+
+    /// Set an instrument's mark outright (see [`PortfolioBook::premark`]): a
+    /// decision on an event reads that event's own instrument at the mark it
+    /// had before the event, as a decision alone does.
+    pub fn set_mark(&mut self, instrument: usize, mark: Option<f64>) {
+        self.last_close[instrument] = mark;
     }
 
     /// Step one schedule entry through its kernel.
@@ -700,6 +819,17 @@ impl PortfolioBook {
         depth: Option<DepthTick>,
         input: StepInput,
     ) -> Vec<EngineEvent> {
+        if self.simple
+            && self.kernels.len() == 1
+            && self.dormant == 0
+            && self.pending_halt.is_none()
+            && self.deferred.is_empty()
+            && !self.has_expiries
+            && matches!(entry.data, ScheduleData::Bar(_))
+            && !self.lifecycle_active()
+        {
+            return self.apply_lone_bar(entry, input);
+        }
         // A halt asked for since the last event takes effect first: working
         // orders cancelled, positions closed at the last marks.
         let mut events = std::mem::take(&mut self.deferred);
@@ -707,9 +837,48 @@ impl PortfolioBook {
             events.extend(self.apply_entry(entry, depth, input));
             return events;
         };
+        let flatten = if flatten {
+            Flatten::Decision { instrument: entry.instrument, ts: entry.timestamp() }
+        } else {
+            Flatten::No
+        };
         events.extend(self.cleanup_all(true, flatten));
         events.push(EngineEvent::RiskHalted { idx: entry.local_idx, reason });
         events.extend(self.apply_entry(entry, depth, input));
+        events
+    }
+
+    /// [`PortfolioBook::apply`] for the commonest book: one instrument on a
+    /// cash account with no portfolio-wide limit, no option margin groups, no
+    /// expiry, no corporate action and no group, fed a bar. Every step the
+    /// general path takes that such a book cannot need is skipped; what it
+    /// takes (lend, step, drain, bookkeeping, the equity sample) is the same
+    /// code, so this is the same simulation, not a second one.
+    fn apply_lone_bar(&mut self, entry: &ScheduleEntry, input: StepInput) -> Vec<EngineEvent> {
+        let ScheduleData::Bar(bar) = entry.data else { unreachable!("checked by the caller") };
+        let kernel = &mut self.kernels[0];
+        let booked = self.account.balance_money();
+        kernel.set_cash_money(booked);
+        let events = kernel.step(entry.local_idx, &bar, input);
+        let delta_cash = kernel.cash_money() - booked;
+        kernel.clear_cash();
+        self.settle(delta_cash, 0.0);
+        for event in &events {
+            if let EngineEvent::Exited { trade, .. } = event {
+                self.streaming.update(trade.return_pct / 100.0);
+                self.trades.push((**trade).clone());
+            }
+            if is_unfunded_refusal(event) {
+                self.unfunded[0] += 1;
+            }
+            self.order_logs[0].observe(&self.kernels[0], event);
+        }
+        self.last_close[0] = Some(bar.close);
+        self.last_seen[0] = Some((entry.local_idx, bar));
+        // No limit is configured and the account is cash, so the account-level
+        // checks that follow a sample have nothing to trip.
+        self.sample_equity(bar.timestamp);
+        self.applied += 1;
         events
     }
 
@@ -733,14 +902,15 @@ impl PortfolioBook {
         events
     }
 
-    fn apply_entry_event(
+    /// Run `run` on one instrument's kernel with the account's cash and the portfolio's limits
+    /// lent to it, then fold what it did back into the account: cash and margin moved, a margin
+    /// call escalated, trades and unfunded entries counted, the order log fed.
+    fn lent_step(
         &mut self,
-        entry: &ScheduleEntry,
-        depth: Option<DepthTick>,
-        input: StepInput,
+        instrument: usize,
+        ts: Timestamp,
+        run: impl FnOnce(&mut EngineKernel) -> Vec<EngineEvent>,
     ) -> Vec<EngineEvent> {
-        let instrument = entry.instrument;
-
         // Portfolio-wide open count, skipped entirely when no limit is set.
         // Summing every kernel's ledger covers hedging policies, where one
         // instrument can hold several positions at once.
@@ -771,41 +941,43 @@ impl PortfolioBook {
         // *other* kernel's locks — then its arithmetic sees the portfolio's
         // free capital.
 
-        let group_context = self.group_context_for(instrument, entry.timestamp());
-        let hedge_pending = self.hedge_pending_for(instrument);
+        let (group_context, hedge_pending) = if self.margin_groups {
+            (self.group_context_for(instrument, ts), self.hedge_pending_for(instrument))
+        } else {
+            (None, false)
+        };
         let kernel = &mut self.kernels[instrument];
         let locked_before = kernel.locked_margin();
+        // Cash mode lends the booked amount itself, with no trip through f64.
         let injected = match self.account.mode() {
-            AccountMode::Cash => self.account.balance(),
+            AccountMode::Cash => {
+                let booked = self.account.balance_money();
+                kernel.set_cash_money(booked);
+                booked
+            }
             AccountMode::Margin { .. } => {
-                self.account.balance() - (self.account.locked() - locked_before)
+                kernel.lend_cash(self.account.balance() - (self.account.locked() - locked_before))
             }
         };
-        let injected = kernel.lend_cash(injected);
         kernel.set_external_open_count(portfolio_open);
         kernel.set_external_exposure(external_exposure);
         kernel.set_group_context(group_context);
         kernel.set_hedge_pending(hedge_pending);
-        let mut events = match entry.data {
-            ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
-            ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
-            ScheduleData::Quote(quote) => kernel.step_quote(&quote),
-            ScheduleData::Depth(_) => match depth {
-                Some(snapshot) => kernel.step_depth(&snapshot),
-                None => Vec::new(),
-            },
-        };
+        let mut events = run(kernel);
         let delta_cash = kernel.cash_money() - injected;
         let delta_locked = kernel.locked_margin() - locked_before;
-        kernel.set_cash_money(Money::ZERO);
+        kernel.clear_cash();
         kernel.set_external_open_count(None);
         kernel.set_external_exposure(None);
         kernel.set_group_context(None);
         kernel.set_hedge_pending(false);
         self.settle(delta_cash, delta_locked);
+        for held in self.kernels[instrument].take_held_triggers() {
+            self.start_cover(instrument, held.position_id, ts);
+        }
         // In a group the runtime regroups across every member, and escalates
         // a margin call to every member.
-        if self.grouped.is_none() {
+        if self.grouped.is_none() && !matches!(self.account.mode(), AccountMode::Cash) {
             self.regroup_option_margin();
         }
 
@@ -822,17 +994,181 @@ impl PortfolioBook {
                 self.streaming.update(trade.return_pct / 100.0);
                 self.trades.push((**trade).clone());
             }
-            if matches!(event, EngineEvent::EntryRejected { reason, .. } if reason.is_unfunded()) {
+            if is_unfunded_refusal(event) {
                 self.unfunded[instrument] += 1;
             }
             self.order_logs[instrument].observe(&self.kernels[instrument], event);
         }
-        // Atomic groups: legs held back by their kernels fill together here,
-        // or the group is refused, before the equity is sampled.
-        if !self.atomic.is_empty() {
-            let filled = self.advance_atomic(instrument, entry.timestamp());
-            events.extend(filled);
+        events.extend(self.advance_covers(ts));
+        events
+    }
+
+    /// The exit of a hedge leg on `instrument` was held back (its stop or target fired, or a
+    /// forced exit reached it): close the sold legs of its margin group first, with reduce-only
+    /// market orders, then the hedge. This sends the sold legs' orders; the hedge's follows once
+    /// they are done ([`PortfolioBook::advance_covers`]), so no instant holds a sold option
+    /// without its hedge.
+    fn start_cover(&mut self, instrument: usize, position_id: u64, ts: Timestamp) {
+        if self.covers.iter().any(|c| c.hedge == (instrument, position_id)) {
+            return;
         }
+        let mut sold = Vec::new();
+        for (j, id, size) in self.sold_legs_with(instrument) {
+            if let Some(order) = self.send_cover(j, id, size, ts) {
+                sold.push((j, order));
+            }
+        }
+        self.covers.push(Cover { hedge: (instrument, position_id), sold, hedge_order: None });
+    }
+
+    /// Send the reduce-only market order that closes `size` of a position, as the engine's own.
+    fn send_cover(
+        &mut self,
+        kernel: usize,
+        position_id: u64,
+        size: f64,
+        ts: Timestamp,
+    ) -> Option<u64> {
+        use crate::execution::orders::{OrderKind, OrderSide, QtySpec, TimeInForce};
+        let (idx, at) = match self.last_seen[kernel] {
+            Some((idx, bar)) => (idx, bar.timestamp),
+            None => (0, ts),
+        };
+        // Under `next_bar_open` an event that came after the open is answered at the next bar's
+        // open. A kernel that has not stepped this instant's bar yet must not meet the order on
+        // it: it works from the print after that one, whichever instrument the book steps first.
+        let after_open = self.kernels[kernel].fills_at_next_open()
+            && self.kernels.iter().any(|k| k.off_open_at == Some(ts));
+        let idx = if after_open && at < ts { idx + 1 } else { idx };
+        let direction = self.kernels[kernel]
+            .position_snapshots()
+            .iter()
+            .find(|p| p.position_id == position_id)?
+            .direction;
+        let side = if direction == Direction::Long { OrderSide::Sell } else { OrderSide::Buy };
+        self.cover_serial += 1;
+        let k = &mut self.kernels[kernel];
+        let id = k.submit_order_full(
+            side,
+            QtySpec::Units(size),
+            OrderKind::Market,
+            TimeInForce::Gtc,
+            idx,
+            at,
+            format!("engine-cover-{}", self.cover_serial),
+            None,
+            None,
+            false,
+            true,
+            None,
+        );
+        k.set_order_position(id, Some(position_id));
+        k.set_order_follow_up(id);
+        Some(id)
+    }
+
+    /// Carry the exits of hedge legs forward: meet the orders sent so far with the bar they were
+    /// answering (the close under `same_bar_close`, the open under `next_bar_open`, as for any
+    /// answer to an event), and once a cover's sold legs are all done send the hedge's own close.
+    /// Returns the events the fills produced.
+    fn advance_covers(&mut self, ts: Timestamp) -> Vec<EngineEvent> {
+        let mut out = Vec::new();
+        if self.advancing_covers || self.covers.is_empty() {
+            return out;
+        }
+        self.advancing_covers = true;
+        let mut at = 0;
+        while at < self.covers.len() {
+            let sold = self.covers[at].sold.clone();
+            for (j, order) in &sold {
+                out.extend(self.meet_cover_order(*j, *order, ts));
+            }
+            let done = sold.iter().all(|(j, o)| {
+                self.kernels[*j].order(*o).is_none_or(|order| order.status.is_terminal())
+            });
+            if done && self.covers[at].hedge_order.is_none() {
+                let (hk, position) = self.covers[at].hedge;
+                let size = self.kernels[hk]
+                    .position_snapshots()
+                    .iter()
+                    .find(|p| p.position_id == position)
+                    .map(|p| p.size);
+                match size.and_then(|size| self.send_cover(hk, position, size, ts)) {
+                    Some(order) => self.covers[at].hedge_order = Some(order),
+                    None => {
+                        self.covers.remove(at);
+                        continue;
+                    }
+                }
+            }
+            if let Some(order) = self.covers[at].hedge_order {
+                let hk = self.covers[at].hedge.0;
+                out.extend(self.meet_cover_order(hk, order, ts));
+                if self.kernels[hk].order(order).is_none_or(|o| o.status.is_terminal()) {
+                    self.covers.remove(at);
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        self.advancing_covers = false;
+        out
+    }
+
+    /// Fill a cover order against the bar of the event that sent it (`ts`), if its kernel has
+    /// stepped that bar: at its close under `same_bar_close`, its open under `next_bar_open`. A
+    /// kernel that has not stepped it yet meets the order at its own step of that bar, so the
+    /// price of a close is the same whichever instrument the book steps first.
+    fn meet_cover_order(&mut self, kernel: usize, order: u64, ts: Timestamp) -> Vec<EngineEvent> {
+        let waiting = self.kernels[kernel].order(order).is_some_and(|o| !o.status.is_terminal());
+        if !waiting {
+            return Vec::new();
+        }
+        self.fill_follow_up(kernel, order, ts)
+    }
+
+    /// A strategy's answer to a fill it just heard, a market order marked `follow_up`, meets the
+    /// bar `instrument`'s kernel stepped at `ts` (see [`EngineKernel::fill_follow_up`]). The
+    /// equity sample of the instant is restated afterwards. Returns the events of the fill.
+    pub fn fill_follow_up(
+        &mut self,
+        instrument: usize,
+        order_id: u64,
+        ts: Timestamp,
+    ) -> Vec<EngineEvent> {
+        // Under `next_bar_open` the follow-up is priced at the bar's open. An event of that bar
+        // that came after the open (a limit filled inside the bar, an expiry) is not known at
+        // the open, so what answers it goes the ordinary way, to the next bar.
+        if self.kernels[instrument].fills_at_next_open()
+            && self.kernels.iter().any(|k| k.off_open_at == Some(ts))
+        {
+            self.kernels[instrument].clear_order_follow_up(order_id);
+            return Vec::new();
+        }
+        let events = self.lent_step(instrument, ts, |kernel| kernel.fill_follow_up(order_id, ts));
+        if !events.is_empty() {
+            self.sample_equity(ts);
+        }
+        events
+    }
+
+    fn apply_entry_event(
+        &mut self,
+        entry: &ScheduleEntry,
+        depth: Option<DepthTick>,
+        input: StepInput,
+    ) -> Vec<EngineEvent> {
+        let instrument = entry.instrument;
+
+        let mut events = self.lent_step(instrument, entry.timestamp(), |kernel| match entry.data {
+            ScheduleData::Bar(bar) => kernel.step(entry.local_idx, &bar, input),
+            ScheduleData::Trade(tick) => kernel.step_trade(entry.local_idx, &tick, input),
+            ScheduleData::Quote(quote) => kernel.step_quote(&quote),
+            ScheduleData::Depth(_) => match depth {
+                Some(snapshot) => kernel.step_depth(&snapshot),
+                None => Vec::new(),
+            },
+        });
         // A physically settled line the kernel just ended delivers its
         // underlying before the equity is sampled.
         if self.has_expiries {
@@ -863,8 +1199,59 @@ impl PortfolioBook {
         // are one observation, not N. A later event at the same timestamp
         // replaces the sample taken after the previous one. Kernels still see
         // equity after every event, so the kill-switch reacts per event.
-        let equity = self.equity();
         let ts = entry.timestamp();
+        let equity = self.sample_equity(ts);
+
+        // The checks below are the account's. In a group they run once over
+        // every member (see `crate::runtime::groups`), not once per book.
+        if self.grouped.is_some() {
+            self.applied += 1;
+            return events;
+        }
+
+        if self.judge_deferred {
+            self.applied += 1;
+            return events;
+        }
+        self.account_checks(instrument, ts, entry.local_idx, equity, self.applied, &mut events);
+
+        self.applied += 1;
+        events
+    }
+
+    /// Judge the account's limits (margin maintenance, the day's loss, the
+    /// drawdown kill-switch) once per instant, in [`PortfolioBook::judge`],
+    /// instead of after every event. A runner that steps several instruments
+    /// at one instant and wants the limits to see the instant's equity, with
+    /// every instrument marked, not the equity between two of its steps,
+    /// turns this on and calls `judge` after the last of them. Margin
+    /// accounts keep the per-event check, which the kernels' own margin-call
+    /// escalation needs.
+    pub fn judge_per_instant(&mut self, on: bool) {
+        self.judge_deferred = on;
+    }
+
+    /// Sample the book at `ts` and judge the account's limits on the sample.
+    /// `idx` is the ordinal a halt latched here is reported at. For a bar on
+    /// which the caller stepped no instrument as well as the end of an instant
+    /// under [`PortfolioBook::judge_per_instant`]: the marks are the last
+    /// stepped.
+    pub fn judge(&mut self, ts: Timestamp, idx: usize) {
+        let equity = self.sample_equity(ts);
+        if self.grouped.is_none() {
+            let mut events = Vec::new();
+            self.account_checks(0, ts, idx, equity, idx, &mut events);
+            self.deferred.extend(events);
+        }
+        self.applied += 1;
+    }
+
+    /// Take the equity sample of the event stamped `ts`: one sample per
+    /// distinct timestamp, a later event at the same one replacing the
+    /// sample the previous one took. Returns the equity sampled.
+    #[inline]
+    fn sample_equity(&mut self, ts: Timestamp) -> f64 {
+        let equity = self.equity();
         if self.timestamps.last() == Some(&ts) {
             self.equity_curve.pop();
             self.drawdown_curve.pop();
@@ -895,18 +1282,7 @@ impl PortfolioBook {
             self.returns.drain(..drop);
             self.timestamps.drain(..drop);
         }
-
-        // The checks below are the account's. In a group they run once over
-        // every member (see `crate::runtime::groups`), not once per book.
-        if self.grouped.is_some() {
-            self.applied += 1;
-            return events;
-        }
-
-        self.account_checks(instrument, ts, entry.local_idx, equity, self.applied, &mut events);
-
-        self.applied += 1;
-        events
+        equity
     }
 
     /// The account-level checks that follow an equity sample: margin
@@ -942,6 +1318,11 @@ impl PortfolioBook {
             }
         }
 
+        // No drawdown or daily-loss limit configured: the gates below cannot trip.
+        if self.limits_inert {
+            return;
+        }
+
         // The day's loss limit, on portfolio equity. Every kernel sees the
         // same figure, so they latch together; report the rising edge once.
         let day_blocked_before = self.live_any(|k| k.is_day_blocked());
@@ -953,7 +1334,7 @@ impl PortfolioBook {
         if breached && !day_blocked_before {
             events.push(EngineEvent::RiskHalted { idx, reason: "daily_loss".to_string() });
             if self.config.flatten_on_daily_loss {
-                let closed = self.cleanup_all(false, true);
+                let closed = self.cleanup_all(false, Flatten::AfterEvent);
                 events.extend(closed);
                 // The sample above was taken before the closes paid their
                 // costs; restate it so the curve shows the flattened book.
@@ -987,7 +1368,7 @@ impl PortfolioBook {
                 }
             };
             let injected = kernel.lend_cash(injected);
-            let closed = kernel.liquidate_all(last_idx, &last_bar);
+            let closed = kernel.flatten_after(last_idx, &last_bar, ExitReason::Liquidation);
             let delta_cash = kernel.cash_money() - injected;
             let delta_locked = kernel.locked_margin() - locked_before;
             kernel.set_cash_money(Money::ZERO);
@@ -1185,8 +1566,20 @@ fn tick_periods_per_year(timestamps: &[i64], config: &BacktestConfig) -> Option<
 mod group;
 mod lifecycle;
 
-pub use group::{model_shares, ModelLine, ModelLines, OptionLegs};
+pub use group::{group_unbounded, model_shares, ModelLine, ModelLines, OptionLegs};
 
 #[cfg(test)]
 #[path = "book_tests.rs"]
 mod tests;
+
+/// Whether an event is a refusal for want of funds: an entry the account could not fund, or an
+/// order the kernel rejected for capital or margin (the order path counts as the signal path does).
+fn is_unfunded_refusal(event: &EngineEvent) -> bool {
+    match event {
+        EngineEvent::EntryRejected { reason, .. } => reason.is_unfunded(),
+        EngineEvent::OrderRejected { reason, .. } => {
+            crate::portfolio::risk::RejectReason::is_unfunded_str(reason)
+        }
+        _ => false,
+    }
+}

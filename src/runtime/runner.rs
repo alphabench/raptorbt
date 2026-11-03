@@ -397,8 +397,21 @@ impl RuntimeBuilder {
                 "an aggregation must be on an instrument the strategy trades",
             ));
         }
-        let session =
-            self.params[key.instrument().index()].spec.as_ref().and_then(|s| s.session.as_ref());
+        let spec = self.params[key.instrument().index()].spec.as_ref();
+        let session = spec.and_then(|s| s.session.as_ref());
+        // Composites of a calendar unit cut at the session open; a venue no preset covers and
+        // given no session has none, and the clock grid would be a silent guess.
+        if let Some(spec) = spec.filter(|s| s.session.is_none() && s.venue.is_some()) {
+            if crate::data::session_bars::uses_calendar(key.spec().unit) {
+                return Err(RaptorError::invalid_parameter(format!(
+                    "{:?} on venue {:?} has no session (the presets cover NSE, BSE, NFO, BFO, \
+                     MCX, CDS and BCD), so its composite bars have no session grid to cut on; give the \
+                     InstrumentSpec a session=",
+                    spec.symbol,
+                    spec.venue.as_deref().unwrap_or_default()
+                )));
+            }
+        }
         self.hub.register_with_session(strategy, key, session)
     }
 
@@ -462,6 +475,9 @@ impl RuntimeBuilder {
             current: None,
             current_depth: None,
             events: 0,
+            group: Vec::new(),
+            selected: 0,
+            spare: Vec::new(),
         })
     }
 }
@@ -618,7 +634,53 @@ pub struct RuntimeCore {
     /// The snapshot of the current event when it is a book.
     current_depth: Option<crate::data::book::DepthTick>,
     events: u64,
+    /// The events of the timestamp group in flight, empty between groups. See
+    /// [`RuntimeCore::begin_group`].
+    group: Vec<GroupSlot>,
+    /// The slot of `group` that is current.
+    selected: usize,
+    /// Slots of finished groups, kept with their buffers for the next group.
+    spare: Vec<GroupSlot>,
 }
+
+/// One event of a timestamp group: ingested, waiting to be decided and matched.
+///
+/// The aggregator hub and the indicator bank keep only the last event's
+/// emissions, so what each subscriber is owed from this event is taken when it
+/// is ingested.
+struct GroupSlot {
+    current: Current,
+    depth: Option<crate::data::book::DepthTick>,
+    /// The indicator bank's number for this event (see `IndicatorBank::event_mark`).
+    bank_event: u64,
+    /// Composite bars owed to each subscriber that has any.
+    deliveries: Vec<(StrategyId, Vec<(u16, OhlcvBar)>)>,
+    /// What the lifecycle did to each subscriber's book before the group was
+    /// decided, still to be heard.
+    lifecycle: Vec<(StrategyId, Vec<EngineEvent>)>,
+    /// One view per subscriber of the event's instrument, in the order
+    /// [`RuntimeCore::subscribers`] gives them.
+    views: Vec<View>,
+    /// The price the event marks its instrument at, if it prints one.
+    close: Option<f64>,
+}
+
+/// What one subscriber's book holds of one event of a group.
+#[derive(Clone, Copy)]
+struct View {
+    /// The event's instrument in the subscriber's own numbering, `NO_LOCAL`
+    /// when the subscriber has no book.
+    local: usize,
+    /// The subscriber's mark of the event's instrument before the group, so
+    /// a decision on the event reads its own instrument as it would alone.
+    before: Option<f64>,
+    /// The book is its own account's and has no lifecycle to run: it was
+    /// marked when the event was ingested, and nothing more is done to it
+    /// before the group is decided.
+    plain: bool,
+}
+
+const NO_LOCAL: usize = usize::MAX;
 
 impl RuntimeCore {
     /// The market data. Clone the `Arc` and build the cursor from the clone:
@@ -653,10 +715,19 @@ impl RuntimeCore {
     /// and books feed nothing. Strategy code runs after this returns.
     /// `Ok(None)` at the end of the tape.
     pub fn advance(&mut self, cursor: &mut MergeCursor<'_>) -> Result<Option<EventRef>> {
-        let Some(event) = cursor.next() else {
+        let Some((event, payload)) = Self::pull(cursor)? else {
             self.current = None;
             return Ok(None);
         };
+        self.ingest(event, payload)?;
+        Ok(Some(event))
+    }
+
+    /// Take the next event and its payload off the cursor without ingesting
+    /// it: the events of a timestamp group are pulled first, then ingested
+    /// together by [`RuntimeCore::begin_group`].
+    pub fn pull(cursor: &mut MergeCursor<'_>) -> Result<Option<(EventRef, Pushed)>> {
+        let Some(event) = cursor.next() else { return Ok(None) };
         let missing = || RaptorError::invalid_parameter("the cursor yielded an event with no row");
         let payload = match event.kind {
             EventKind::Bar => Pushed::Bar(cursor.bar(&event).ok_or_else(missing)?),
@@ -664,8 +735,7 @@ impl RuntimeCore {
             EventKind::Quote => Pushed::Quote(cursor.quote(&event).ok_or_else(missing)?),
             EventKind::Depth => Pushed::Depth(cursor.depth(&event).ok_or_else(missing)?),
         };
-        self.ingest(event, payload)?;
-        Ok(Some(event))
+        Ok(Some((event, payload)))
     }
 
     /// Make a pushed event current, as [`RuntimeCore::advance`] does for the
@@ -677,11 +747,19 @@ impl RuntimeCore {
     }
 
     fn ingest(&mut self, event: EventRef, payload: Pushed) -> Result<()> {
+        let cur = self.ingest_event(event, payload)?;
+        self.current = Some(cur);
+        Ok(())
+    }
+
+    /// The work of taking an event in. A book event's snapshot is left in
+    /// `current_depth`.
+    fn ingest_event(&mut self, event: EventRef, payload: Pushed) -> Result<Current> {
         let i = event.instrument.index();
         self.events += 1;
         self.bank.begin_event();
         let mut primary = None;
-        let mut depth = None;
+        self.current_depth = None;
         let (bar, data) = match payload {
             Pushed::Bar(bar) => {
                 self.watermark[i] = event.row + 1;
@@ -722,7 +800,7 @@ impl RuntimeCore {
             }
             Pushed::Depth(d) => {
                 self.hub.skip(event.instrument);
-                depth = Some(d);
+                self.current_depth = Some(d);
                 (
                     empty_bar(event.ts),
                     // The slot is a store row; a pushed snapshot travels in `depth`.
@@ -730,9 +808,229 @@ impl RuntimeCore {
                 )
             }
         };
-        self.current = Some(Current { event, bar, data, primary });
-        self.current_depth = depth;
+        Ok(Current { event, bar, data, primary })
+    }
+
+    /// Ingest every event of one timestamp group (see
+    /// `docs/architecture/event-semantics.md`, the two-phase rule), apply what
+    /// the books must have applied before anything is decided, and leave the
+    /// first event selected.
+    ///
+    /// 1. Each event is ingested: the visibility watermark, the aggregators and
+    ///    the indicator bank, in the order given. Afterwards every
+    ///    instrument's event of the group is visible to every strategy.
+    /// 2. Each subscriber's lifecycle runs (corporate actions, dividends,
+    ///    expiries), for each event in turn; the events it produced are heard
+    ///    by [`RuntimeCore::begin_event`] when that event is decided.
+    /// 3. Each subscriber's book marks the instrument at the event's price, so
+    ///    equity at a decision does not depend on the order of the group.
+    ///
+    /// Then, for each event in order, [`RuntimeCore::select`] it, run the
+    /// strategies' handlers, and later [`RuntimeCore::select`] it again to
+    /// [`RuntimeCore::apply`] it. [`RuntimeCore::end_group`] closes the group.
+    ///
+    /// The caller gives each instrument at most once.
+    pub fn begin_group(&mut self, events: &[(EventRef, Pushed)]) -> Result<()> {
+        if !self.group.is_empty() {
+            return Err(RaptorError::invalid_parameter("a timestamp group is already open"));
+        }
+        let opened = self.ingest_group(events);
+        if opened.is_err() {
+            self.end_group();
+        }
+        opened
+    }
+
+    fn ingest_group(&mut self, events: &[(EventRef, Pushed)]) -> Result<()> {
+        self.bank.open_group();
+        for &(event, payload) in events {
+            let current = self.ingest_event(event, payload)?;
+            let depth = self.current_depth.take();
+            let mut slot = self.spare.pop().unwrap_or_else(|| GroupSlot {
+                current,
+                depth: None,
+                bank_event: 0,
+                deliveries: Vec::new(),
+                lifecycle: Vec::new(),
+                views: Vec::new(),
+                close: None,
+            });
+            slot.current = current;
+            slot.depth = depth;
+            slot.bank_event = self.bank.event_mark();
+            slot.close = match current.data {
+                ScheduleData::Bar(b) => Some(b.close),
+                ScheduleData::Trade(t) => Some(t.price),
+                _ => None,
+            };
+            if !self.hub.emissions().is_empty() {
+                for &sid in self.index.subscribers(event.instrument) {
+                    let owed: Vec<_> = self.hub.deliveries(sid).map(|(l, b)| (l, *b)).collect();
+                    if !owed.is_empty() {
+                        slot.deliveries.push((sid, owed));
+                    }
+                }
+            }
+            // The books learn the event is in the group, and each subscriber's
+            // own number for the instrument is looked up once. A book that is
+            // its own account's and has no lifecycle to run is marked now:
+            // the later rounds would find nothing to do to it but the mark.
+            let entry = |local| ScheduleEntry {
+                instrument: local,
+                local_idx: event.local_idx as usize,
+                data: current.data,
+            };
+            for k in 0..self.index.subscribers(event.instrument).len() {
+                let sid = self.index.subscribers(event.instrument)[k];
+                let local = local_of(&self.slots, &self.strat_insts, sid, event.instrument);
+                let alone = self.group_of[sid.index()].is_none();
+                let view = match (local, self.books[sid.index()].as_mut()) {
+                    (Some(local), Some(book)) => {
+                        book.group_enter(local);
+                        if alone && !book.lifecycle_active() {
+                            let before = book.premark(&entry(local));
+                            View { local, before, plain: true }
+                        } else {
+                            View { local, before: None, plain: false }
+                        }
+                    }
+                    _ => View { local: NO_LOCAL, before: None, plain: false },
+                };
+                slot.views.push(view);
+            }
+            self.group.push(slot);
+        }
+        for i in 0..self.group.len() {
+            self.select(i);
+            let instrument = self.group[i].current.event.instrument;
+            for k in 0..self.index.subscribers(instrument).len() {
+                if self.group[i].views[k].plain {
+                    continue;
+                }
+                let sid = self.index.subscribers(instrument)[k];
+                let events = self.lifecycle_of_current(sid)?;
+                if !events.is_empty() {
+                    self.group[i].lifecycle.push((sid, events));
+                }
+            }
+        }
+        for i in 0..self.group.len() {
+            let cur = self.group[i].current;
+            for k in 0..self.group[i].views.len() {
+                let View { local, plain, .. } = self.group[i].views[k];
+                if local == NO_LOCAL || plain {
+                    continue;
+                }
+                let sid = self.index.subscribers(cur.event.instrument)[k];
+                let entry = ScheduleEntry {
+                    instrument: local,
+                    local_idx: cur.event.local_idx as usize,
+                    data: cur.data,
+                };
+                if let Some(book) = self.books[sid.index()].as_mut() {
+                    self.group[i].views[k].before = book.premark(&entry);
+                }
+            }
+        }
+        self.select(0);
         Ok(())
+    }
+
+    /// Make event `i` of the open group current: what the handlers and the
+    /// books see of the event in flight, and the indicator bank's view of it.
+    pub fn select(&mut self, i: usize) {
+        let slot = &self.group[i];
+        self.selected = i;
+        self.current = Some(slot.current);
+        self.current_depth = slot.depth;
+        self.bank.set_event(slot.bank_event);
+    }
+
+    /// Point `strategy`'s book (the `at`-th subscriber of the selected event's
+    /// instrument) at the view of the selected event's decision:
+    /// the other events of the group, as far as it subscribes to them, are
+    /// marked at the group's prices, and the event's own instrument at the
+    /// mark it had before the group (`own_before`), as a lone event is decided.
+    /// Call with `false` once the strategy has decided, to leave the group
+    /// marked everywhere.
+    pub fn decide_view(&mut self, strategy: StrategyId, at: usize, own_before: bool) {
+        let Some(slot) = self.group.get(self.selected) else { return };
+        // `at` is the strategy's place among the subscribers of the event's
+        // instrument, which is the place of its view.
+        let View { local, before, .. } = slot.views[at];
+        debug_assert_eq!(self.index.subscribers(slot.current.event.instrument)[at], strategy);
+        if local == NO_LOCAL {
+            return;
+        }
+        let mark = if own_before { before } else { slot.close.or(before) };
+        if let Some(book) = self.books[strategy.index()].as_mut() {
+            book.set_mark(local, mark);
+        }
+    }
+
+    /// Events in the open group, `0` between groups.
+    pub fn group_len(&self) -> usize {
+        self.group.len()
+    }
+
+    /// Whether a timestamp group is open.
+    pub fn grouped(&self) -> bool {
+        !self.group.is_empty()
+    }
+
+    /// Event `i` of the open group.
+    pub fn group_event(&self, i: usize) -> &Current {
+        &self.group[i].current
+    }
+
+    /// The most recent bar a group holds for `instrument`, if it has one: what
+    /// a decision at the group's timestamp sees of that instrument.
+    pub fn group_bar(&self, instrument: InstrumentId) -> Option<KernelBar> {
+        self.group
+            .iter()
+            .find(|s| s.current.event.instrument == instrument)
+            .map(|s| s.current.bar)
+            .filter(|bar| bar.close > 0.0)
+    }
+
+    /// Close the open group. The indicator bank is left on the group's last
+    /// event, so the next event is numbered past every stamp.
+    pub fn end_group(&mut self) {
+        self.bank.close_group();
+        if let Some(last) = self.group.last() {
+            self.bank.set_event(last.bank_event);
+        }
+        for i in 0..self.group.len() {
+            let instrument = self.group[i].current.event.instrument;
+            for k in 0..self.index.subscribers(instrument).len() {
+                let sid = self.index.subscribers(instrument)[k];
+                if let Some(book) = self.books[sid.index()].as_mut() {
+                    book.group_leave();
+                }
+            }
+        }
+        for mut slot in self.group.drain(..) {
+            slot.deliveries.clear();
+            slot.lifecycle.clear();
+            slot.views.clear();
+            self.spare.push(slot);
+        }
+        self.selected = 0;
+    }
+
+    /// What `strategy` is owed from the aggregators for the current event:
+    /// its own subscriptions on that instrument, in subscription order, as
+    /// `(local_stream, bar)`. In a group these are the ones taken when the
+    /// event was ingested.
+    pub fn deliveries_into(&self, strategy: StrategyId, out: &mut Vec<(u16, OhlcvBar)>) {
+        out.clear();
+        if let Some(slot) = self.group.get(self.selected) {
+            if let Some((_, owed)) = slot.deliveries.iter().find(|(sid, _)| *sid == strategy) {
+                out.extend_from_slice(owed);
+            }
+            return;
+        }
+        out.extend(self.hub.deliveries(strategy).map(|(l, b)| (l, *b)));
     }
 
     /// Forget the current event, so nothing is in flight. A live driver calls
@@ -979,6 +1277,17 @@ impl RuntimeCore {
     /// strategy, before its hooks, so the strategy sees the position after
     /// the action. [`RuntimeCore::apply`] finds nothing left to do.
     pub fn begin_event(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
+        // In a group the lifecycle ran before any event of it was decided.
+        if let Some(slot) = self.group.get_mut(self.selected) {
+            return Ok(match slot.lifecycle.iter().position(|(sid, _)| *sid == strategy) {
+                Some(at) => slot.lifecycle.remove(at).1,
+                None => Vec::new(),
+            });
+        }
+        self.lifecycle_of_current(strategy)
+    }
+
+    fn lifecycle_of_current(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
         // The common case, a book with no expiry and no action to apply,
         // costs one flag read per event.
         if self.group_of[strategy.index()].is_none()
@@ -1033,6 +1342,31 @@ impl RuntimeCore {
         }
         let book = self.books[strategy.index()].as_mut().expect("strategy book already finished");
         Ok(book.apply(&entry, depth, input))
+    }
+
+    /// The strategy's answer to a fill, a market order marked `follow_up`, met on the bar its
+    /// book stepped at `ts`; in an account group the account-level margin work follows, as after a
+    /// step. See [`PortfolioBook::fill_follow_up`].
+    pub fn fill_follow_up(
+        &mut self,
+        strategy: StrategyId,
+        local: usize,
+        order_id: u64,
+        ts: crate::core::types::Timestamp,
+    ) -> Vec<EngineEvent> {
+        if let Some(g) = self.group_of(strategy) {
+            return self.groups[g as usize].fill_follow_up(
+                &mut self.books,
+                strategy.index(),
+                local,
+                order_id,
+                ts,
+            );
+        }
+        match self.books[strategy.index()].as_mut() {
+            Some(book) => book.fill_follow_up(local, order_id, ts),
+            None => Vec::new(),
+        }
     }
 
     /// The account group of a strategy, if it is in one.

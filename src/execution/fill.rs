@@ -502,4 +502,27 @@ mod tests {
         // Should fill at open (90) not stop (95)
         assert_eq!(fill_price, Some(90.0));
     }
+
+    /// A limit marketable on arrival trades where the bar opened, so its price is within the bar
+    /// whatever the level. (A resting limit a bar gaps through mid-session fills at its limit, by
+    /// design, and may lie outside the bar.)
+    #[test]
+    fn a_limit_marketable_on_arrival_fills_within_the_bar() {
+        let bar = test_bar();
+        let model = FillModel::default();
+        for level in [10.0, 60.0, 94.0, 95.0, 99.0, 100.0, 105.0, 106.0, 150.0, 1000.0] {
+            for direction in [Direction::Long, Direction::Short] {
+                for is_entry in [true, false] {
+                    if let Some(p) =
+                        model.get_limit_fill_price(level, &bar, direction, is_entry, true)
+                    {
+                        assert!(
+                            (bar.low..=bar.high).contains(&p),
+                            "limit {level} {direction:?} entry={is_entry} filled at {p}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

@@ -44,6 +44,20 @@ latest `history` rows per symbol; `curve_samples` bounds the equity curves).
 `push_report(...)`. Timestamps must not decrease per symbol. A pushed bar is
 stamped as the node's `bar_stamp` says (`"open"` or `"close"`); always pass it.
 
+**Groups.** By default each push is delivered on arrival, alone. To deliver the
+bars of several symbols for one timestamp the way a batch run does, use
+`push_group(ts, {symbol: (o, h, l, c, v)})` or `begin_group()`, the pushes,
+then `flush()`: every event of the group is applied before any is decided, and
+every decision is taken before any is matched, so what a decision sees of
+another symbol and the bar a cross-symbol order meets do not depend on the
+order the pushes arrived in. A node that delivers the same groups reproduces a
+batch run exactly. A push stamped later, `advance_time`, `push_report` and
+`finish()` deliver what is held; `checkpoint()`, `state_digest()` and `health()` refuse an open group
+(`group_open`; so does `reconcile()`, except on a node just restored). Pushes at one timestamp that are
+not grouped are counted in `health()["ungrouped_same_timestamp_pushes"]` and logged once. A node
+restored from a journal that ended inside a group has `open_group`: send the symbols it does not list,
+then `flush()`. The journal writes `group_begin` and `group_end`.
+
 **Three times.** Every event has the exchange's time (`ctx.event_ns`), the time
 it reached the engine (`arrival_ns=`, read as `ctx.arrival_ns`; default the
 event's own time) and the processing time (arrival plus
@@ -120,6 +134,7 @@ section 3 and 7.
 | --- | --- |
 | `raptorbt.LiveNode(strategies, symbols, config=None, *, bar_stamp=, primary_bars=, warmup_bars=, warmup=, initial_positions=, corporate_actions=, adjustment_policy=, execution=, venue_account=, protective=, order_check=, instruments=, bindings=, processing_latency_ns=, journal=, epoch=, strategy_states=, accounts=, history=, curve_samples=, ...)` | The node. Strategies are instances, classes, `(strategy, symbols)` pairs, numbered by position. |
 | `push_tick`, `push_bar`, `push_depth`, `advance_time`, `warm_up`, `push_report` | The only ways in. All but `warm_up` take `arrival_ns=` (`push_report` requires it). |
+| `push_group(ts, bars, arrival_ns=)`, `begin_group(ts=None)`, `flush()` | Deliver the events of one timestamp as a group (see the feed above). |
 | `positions(i, symbol=None)`, `equity(i)`, `ctx(i)`, `is_halted(i)`, `halt(i, flatten=, reason=)`, `halt_account(name, ...)`, `memory_report()`, `finish()` | State and control. `finish()` ends the node and returns one `PortfolioResult` per strategy (`.result.trades()`, `.result.equity_curve()`); a finished node raises `node_finished`. |
 | `raptorbt.journal.Journal(header, *, seq_base=0, chain=None, file=None, fsync="orders", memory=None, sink=None)` | The journal. `since(seq)`, `head()` returns `(count, chain, header)`, `count`, `sync()`. |
 | `raptorbt.journal.read(path)`, `verify(records, header, chain=None)`, `open_for_recovery(path, ...)`, `chain_step`, `chain_start`, `canonical`, `report_from_payload`, `Record`, `Discrepancy` | Read a file (`header, seq_base, chain_from, records, torn_bytes`, checksums and chain verified), recompute the chain, reopen to recover. |
@@ -271,6 +286,7 @@ HEADER = {"run": "r-1", "algo": "demo"}
 
 class Exchange:
     namespace = "N1"
+    keeps_own_records = True  # remembers the node's orders itself, so a restored node need not teach it
     can_fence = True
     """A venue that outlives the node. It accepts orders and answers what it holds."""
 
@@ -367,6 +383,7 @@ class Died(Exception):
 
 class Exchange:
     namespace = "N1"
+    keeps_own_records = True  # remembers the node's orders itself, so a restored node need not teach it
     can_fence = True
     def __init__(self):
         self.orders, self.sent = {}, []
@@ -510,6 +527,7 @@ HEADER = {"run": "r-3"}
 
 class Venue:
     namespace = "N1"
+    keeps_own_records = True  # remembers the node's orders itself, so a restored node need not teach it
     def submit(self, request):
         pass
 

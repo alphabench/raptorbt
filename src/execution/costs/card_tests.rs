@@ -122,7 +122,9 @@ fn rows_pick_the_underlying_then_the_date() {
     assert_eq!(own.rates.exchange_rate, 0.005);
     let gap = s.row_for("MCX", FeeSegment::Futures, None, at, false).unwrap_err().to_string();
     assert!(gap.contains("no rate for MCX FUTURES"), "{gap}");
-    // A fill before the card took effect is priced on its earliest row.
-    assert!(s.row_for("NSE", FeeSegment::Intraday, None, at - 1, false).is_ok());
+    // A fill before the card took effect has no rate in force: refused, naming the card's date.
+    let early =
+        s.row_for("NSE", FeeSegment::Intraday, None, at - 1, false).unwrap_err().to_string();
+    assert!(early.contains("earliest row takes effect on"), "{early}");
     assert_eq!(card.backdated_fills(&[at - 1, at, at + 1]), 1);
 }

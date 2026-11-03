@@ -970,7 +970,9 @@ New in 0.5.0:
 
 New in 0.5.0: one class-based strategy trading N instruments against a
 single shared cash pool. Bars from all instruments merge into one
-deterministic schedule (by timestamp, then registration order); `on_bar`
+deterministic schedule (by timestamp, then kind); events that share both are
+one group, applied before any is decided (so the result does not depend on the
+order the symbols are listed in); `on_bar`
 fires once per event with `ctx.symbol` naming the instrument whose bar
 closed. Capital committed to one symbol is unavailable to the rest.
 

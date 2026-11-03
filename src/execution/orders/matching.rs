@@ -403,7 +403,15 @@ impl OrderEngine {
             // placed on an earlier bar are.
             let eligible = match only {
                 Some(ids) => ids.contains(&order.id),
-                None => order.submitted_idx < idx,
+                // `submitted_idx` alone is not enough: an order routed here from
+                // another instrument's event carries this instrument's last
+                // stepped ordinal, which says nothing about which side of the
+                // decision this bar falls on. A bar stamped at or before the
+                // decision closed before it was made and is never met.
+                None => {
+                    order.submitted_idx < idx
+                        && (mode == MatchMode::Trade || bar.timestamp > order.submitted_ts)
+                }
             };
             if order.status.is_terminal() || !eligible || order.is_venue_driven() {
                 continue;

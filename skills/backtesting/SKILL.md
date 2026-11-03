@@ -73,7 +73,14 @@ dated statutory schedule only: transaction tax (STT/CTT), exchange transaction
 charge, SEBI fee, stamp duty and GST, each from the date it took effect (STT
 on options rose from 0.1% to 0.15% on 2026-04-01) and the STT on an option
 exercised at expiry from the settlement row. They carry no brokerage and no
-depository charge: those come from your broker's `RateCard`, per order. The
+depository charge: those come from your broker's `RateCard`, per order. A cash-equity buy is charged provisionally as
+delivery when it is made, as a broker's CNC buy is, because the exit is not
+known: equity, drawdown, day-loss limits and capital-edge sizing carry that
+delivery charge (STT on both sides, stamp duty) until the position is sold the
+same trading date, when the round trip is restated to the intraday row and the
+difference refunded, as the contract note does. Only the components that differ
+between the rows are restated; brokerage stays as booked, so an order charged
+per order is not charged again on each slice of a partly closed position. The
 breakdown is in `trade.fee_breakdown`. `fee_segment` (for example
 `"NSE-INTRADAY"`, `"NFO-OPT"`) is an explicit override that prices every
 instrument on that one row. A schedule without a row for an instrument (or an
@@ -205,7 +212,7 @@ assert set(b) >= {"brokerage", "stt", "exchange_txn", "sebi_fee", "stamp_duty", 
 assert abs(b["total"] - trade.fees) < 1e-9 and b["brokerage"] == 0.0       # a preset is statutory only
 
 card = RateCard.from_dict({
-    "name": "flat-fee-card", "effective_from": "2026-01-01T00:00:00+05:30", "source": "my broker's schedule",
+    "name": "flat-fee-card", "effective_from": "2023-01-01T00:00:00+05:30", "source": "my broker's schedule",
     "rates": [{"exchange": "NSE", "segment": "INTRADAY", "underlying": None,
                "brokerage": {"per_order": "55"},
                "transaction_tax": {"kind": "STT", "percent": "0.025", "sides": ["SELL"]},

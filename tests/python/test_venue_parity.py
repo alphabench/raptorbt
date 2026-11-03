@@ -108,6 +108,7 @@ class Venue:
     """A recording venue: it keeps the requests the node sends it."""
 
     namespace = "T1"
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self):
         self.requests = []
@@ -301,7 +302,7 @@ def test_auto_roll_under_next_bar_open_closes_and_reopens_without_a_panic():
     )[0]
     assert [(t.symbol, round(t.entry_price, 2), round(t.exit_price, 2)) for t in r.result.trades()] == [
         ("FA", 110.05, 111.45),
-        ("FB", 121.55, 122.9),
+        ("FB", 121.45, 122.9),
     ]
 
 
@@ -642,16 +643,18 @@ def _roll_run(policy, lot_new=1.0):
 
 
 def test_a_roll_keeps_the_notional_by_default():
-    """3 units of FA closed at 111.4 are 334.2 of exposure; FB (about 121.4, lot 1) buys
+    """3 units of FA closed at 111.4 are 334.2 of exposure; FB (121.4, lot 1) buys
     floor(334.2 / 121.4) = 2, and the residual is what 2 leaves out."""
     r, sized = _roll_run("notional")
     assert [(t.symbol, t.size) for t in r.result.trades()] == [("FA", 3.0), ("FB", 2.0)]
     (s,) = sized
     assert (s["lots_old"], s["lots_new"]) == (3.0, 2.0)
     assert s["notional_old"] == pytest.approx(334.2)
-    # FB's last close at the decision is 121.3: two lots are 242.6, and 91.6 is left unexposed
-    assert s["notional_new"] == pytest.approx(242.6)
-    assert s["residual"] == pytest.approx(91.6)
+    # The roll is decided on the bar of t, and every instrument's bar of t is visible to it (the
+    # equal-timestamp rule): FB's close there is 121.4, so two lots are 242.8 and 91.4 is left
+    # unexposed. FB listed before or after FA or IDX, the sizing reads the same bar.
+    assert s["notional_new"] == pytest.approx(242.8)
+    assert s["residual"] == pytest.approx(91.4)
 
 
 def test_a_roll_can_keep_the_lot_count():

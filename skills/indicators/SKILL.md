@@ -297,8 +297,18 @@ assert not s.rows[3][1] and s.rows[4][1] and abs(s.rows[4][2] - 1.0) < 1e-12
 - **Registered indicators are read-only.** `update_bar` and `reset` on one the
   runtime owns raise `RuntimeError` (`.linked` is true); read `value` and
   `initialized`.
+- **A registered indicator on another instrument is current as of the timestamp you
+  decide at.** When several instruments print at one timestamp, every one of their
+  indicators has taken that bar before any `on_bar` runs, so
+  `self.fast["OTHER"].value` in the hook for `"THIS"` equals the value computed
+  from OTHER's bars through that timestamp, whatever the symbols are called. Only
+  your own event is revealed in steps: an indicator on the event's own primary
+  stream shows the value before the bar in a composite-bar hook and the value after
+  it in `on_bar`; one on an own composite stream shows the value after the bar
+  the hook is handling (after brick `k` when an event completes several).
 - **Pass `symbol=` to `register_indicator` in a multi-symbol run.** Without it
-  the indicator is fed every symbol's bars interleaved and the runtime warns.
+  the indicator is fed every symbol's bars interleaved and the runtime warns; it has
+  no own stream, so it shows the value after the whole timestamp at every decision.
 - **Only the close** can be the input of a registered indicator (`field="close"`);
   ATR and Donchian read the whole bar.
 - **Periods start at 1.** A period below one raises `InvalidParameter`

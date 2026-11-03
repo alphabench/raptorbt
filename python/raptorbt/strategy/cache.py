@@ -8,6 +8,7 @@ their own.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -86,7 +87,11 @@ class Cache:
         return list(self._closed_trades)
 
     def realized_pnl(self, symbol: str | None = None) -> float:
-        """Sum of closed-trade PnL, optionally for one symbol."""
-        return sum(
+        """Sum of closed-trade PnL, optionally for one symbol.
+
+        Summed exactly (``math.fsum``): the built-in ``sum`` of floats changed
+        its rounding in Python 3.12, so it would differ by an ULP by version.
+        """
+        return math.fsum(
             t.pnl for t in self._closed_trades if symbol is None or t.symbol == symbol
         )

@@ -243,6 +243,7 @@ CONFIG = BacktestConfig(initial_capital=1_000_000.0, fees=0.0)
 
 class Exchange:
     namespace = "N1"
+    keeps_own_records = True  # remembers the node's orders itself, so a restored node need not teach it
     def __init__(self):
         self.orders, self.held, self.cash = {}, {}, 1_000_000.0
 
@@ -329,6 +330,7 @@ class Rhythm(Strategy):
 
 class Quiet:                                        # a venue that takes requests and answers nothing
     namespace = "N1"
+    keeps_own_records = True  # remembers the node's orders itself, so a restored node need not teach it
     def submit(self, request):
         pass
 

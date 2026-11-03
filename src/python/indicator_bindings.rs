@@ -12,35 +12,102 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use super::errors::Fail;
-use crate::indicators::streaming::{
-    StreamingAtr, StreamingBollinger, StreamingDonchian, StreamingEma, StreamingIndicator,
-    StreamingMacd, StreamingRoc, StreamingRsi, StreamingSma, StreamingStdDev, StreamingWma,
-};
-use crate::runtime::{IndKind, IndSpec, IndicatorBank, Reading, SlotId};
-
-#[derive(Debug)]
-enum Core {
-    Sma(StreamingSma),
-    Ema(StreamingEma),
-    Wilder(StreamingEma),
-    Wma(StreamingWma),
-    Roc(StreamingRoc),
-    StdDev(StreamingStdDev),
-    Rsi(StreamingRsi),
-    Atr(StreamingAtr),
-    Donchian(StreamingDonchian),
-    Bollinger(StreamingBollinger),
-    Macd(StreamingMacd),
-}
+use crate::runtime::{CellCore, IndKind, IndSpec, IndicatorBank, Ohlc, Reading, SlotId};
 
 /// Where an indicator's value comes from.
 #[derive(Debug)]
 enum State {
-    /// Its own streaming core, fed by `update_bar`.
-    Private(Box<Core>),
+    /// Its own streaming core, fed by `update_bar` or by the runtime.
+    Private(Box<Private>),
     /// A reader of a shared bank cell: the runtime feeds the cell and decides
     /// which value this reader may see.
     Linked { bank: Arc<IndicatorBank>, slot: SlotId },
+}
+
+/// A privately owned indicator: its core and what a runtime shows of it.
+///
+/// A runtime feeds it when it applies an event, before any strategy decides
+/// the events of the same timestamp group, so a decision on another instrument
+/// reads the value after the event. The strategy's own hooks for the event
+/// that fed it read the same protocol a shared cell has (see
+/// [`crate::runtime::indicators`]): the value before the bar until the
+/// runtime reveals it, the value after emission `k` once it has revealed `k`.
+/// The event being decided is the bank's selected event.
+#[derive(Debug)]
+struct Private {
+    core: CellCore,
+    /// The value after the last emission.
+    cur: Reading,
+    /// The value before the event that last fed it.
+    prev: Reading,
+    /// The values after all but the last emission of that event.
+    hist: Vec<Reading>,
+    /// The event that last fed it (the bank's number), or `NOT_FED`.
+    touched: u64,
+    /// Emissions of that event.
+    emissions: u32,
+    /// The last reveal: the event it was made in and how many emissions it showed.
+    revealed: (u64, u32),
+    /// The runtime whose selected event decides what a read shows. `None`
+    /// for an indicator fed by hand: it always shows its latest value.
+    bank: Option<Arc<IndicatorBank>>,
+    /// Fed by several instruments' streams (registered without a symbol):
+    /// every event of the group is its strategy's own, as for a bank cell
+    /// fed by an instrument set.
+    fleet: bool,
+}
+
+/// The bank's number of an event never fed (and of a hand-fed update).
+const NOT_FED: u64 = 0;
+
+impl Private {
+    fn new(spec: IndSpec) -> Self {
+        Self {
+            core: CellCore::for_spec(spec),
+            cur: Reading::UNINIT,
+            prev: Reading::UNINIT,
+            hist: Vec::new(),
+            touched: 0,
+            emissions: 0,
+            revealed: (NOT_FED, 0),
+            bank: None,
+            fleet: false,
+        }
+    }
+
+    fn feed(&mut self, event: u64, floor: u64, bar: Ohlc) {
+        if event == NOT_FED || self.touched < floor {
+            self.prev = self.cur;
+            self.hist.clear();
+            self.emissions = 0;
+            self.touched = event;
+        } else {
+            self.hist.push(self.cur);
+        }
+        self.cur = self.core.update(bar);
+        self.emissions += 1;
+    }
+
+    /// Emissions of the selected event the strategy has been shown, or `None`
+    /// if the whole latest value is shown.
+    fn visible(&self) -> Option<u32> {
+        let bank = self.bank.as_ref()?;
+        let selected = bank.event_mark();
+        let own = if self.fleet { self.touched >= bank.floor() } else { self.touched == selected };
+        if self.touched == NOT_FED || !own {
+            return None;
+        }
+        Some(if self.revealed.0 == selected { self.revealed.1 } else { 0 })
+    }
+
+    fn shown(&self) -> Reading {
+        match self.visible() {
+            None => self.cur,
+            Some(0) => self.prev,
+            Some(k) if k >= self.emissions => self.cur,
+            Some(k) => self.hist[k as usize - 1],
+        }
+    }
 }
 
 /// Streaming indicator with batch-identical values.
@@ -56,8 +123,13 @@ pub struct PyIndicator {
 }
 
 impl PyIndicator {
-    fn private(core: Core, spec: IndSpec, kind: &str) -> Self {
-        Self { state: State::Private(Box::new(core)), spec, updates: 0, kind: kind.into() }
+    fn private(spec: IndSpec, kind: &str) -> Self {
+        Self {
+            state: State::Private(Box::new(Private::new(spec))),
+            spec,
+            updates: 0,
+            kind: kind.into(),
+        }
     }
 
     /// What a bank needs to key this indicator.
@@ -72,6 +144,43 @@ impl PyIndicator {
 
     pub fn is_linked(&self) -> bool {
         matches!(self.state, State::Linked { .. })
+    }
+
+    /// Mark an indicator fed by several instruments' streams: it is shown
+    /// after the whole group at every decision. No effect when linked.
+    pub fn set_fleet(&mut self) {
+        if let State::Private(p) = &mut self.state {
+            p.fleet = true;
+        }
+    }
+
+    /// Show what the selected event of `bank` has revealed of this indicator.
+    /// No effect when linked.
+    pub fn attach(&mut self, bank: Arc<IndicatorBank>) {
+        if let State::Private(p) = &mut self.state {
+            p.bank = Some(bank);
+        }
+    }
+
+    /// The runtime applies one emission of the selected event: feed the core.
+    /// Counts as an `update_bar` call. A linked indicator is fed by the bank.
+    pub fn feed(&mut self, bar: Ohlc) {
+        if let State::Private(p) = &mut self.state {
+            self.updates += 1;
+            let (event, floor) =
+                p.bank.as_ref().map_or((NOT_FED, 0), |b| (b.event_mark(), b.floor()));
+            p.feed(event, floor, bar);
+        }
+    }
+
+    /// The strategy has processed emission `emission` of the selected event's
+    /// stream (`u32::MAX` for all of them): show the value after it.
+    pub fn reveal(&mut self, emission: u32) {
+        if let State::Private(p) = &mut self.state {
+            if let Some(bank) = &p.bank {
+                p.revealed = (bank.event_mark(), emission);
+            }
+        }
     }
 
     /// Replace the private core with a read of `slot` in `bank`.
@@ -137,80 +246,64 @@ fn reading_value(py: Python<'_>, kind: IndKind, r: Reading) -> PyResult<Option<P
     }
 }
 
-fn scalar(py: Python<'_>, v: Option<f64>) -> PyResult<Option<Py<PyAny>>> {
-    v.map(|x| x.into_py_any(py)).transpose()
-}
-
 #[pymethods]
 impl PyIndicator {
     #[staticmethod]
     fn sma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.sma", "period", period)?;
-        Ok(Self::private(Core::Sma(StreamingSma::new(period)), IndSpec::Sma(period), "sma"))
+        Ok(Self::private(IndSpec::Sma(period), "sma"))
     }
 
     #[staticmethod]
     fn ema(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.ema", "period", period)?;
-        Ok(Self::private(Core::Ema(StreamingEma::new(period)), IndSpec::Ema(period), "ema"))
+        Ok(Self::private(IndSpec::Ema(period), "ema"))
     }
 
     /// Wilder-smoothed moving average (alpha = 1/period).
     #[staticmethod]
     fn wilder_ma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.wilder_ma", "period", period)?;
-        Ok(Self::private(
-            Core::Wilder(StreamingEma::wilder(period)),
-            IndSpec::WilderMa(period),
-            "wilder_ma",
-        ))
+        Ok(Self::private(IndSpec::WilderMa(period), "wilder_ma"))
     }
 
     #[staticmethod]
     fn wma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.wma", "period", period)?;
-        Ok(Self::private(Core::Wma(StreamingWma::new(period)), IndSpec::Wma(period), "wma"))
+        Ok(Self::private(IndSpec::Wma(period), "wma"))
     }
 
     /// Rate of change over `period` bars, in percent.
     #[staticmethod]
     fn roc(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.roc", "period", period)?;
-        Ok(Self::private(Core::Roc(StreamingRoc::new(period)), IndSpec::Roc(period), "roc"))
+        Ok(Self::private(IndSpec::Roc(period), "roc"))
     }
 
     /// Rolling population standard deviation.
     #[staticmethod]
     fn stddev(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.stddev", "period", period)?;
-        Ok(Self::private(
-            Core::StdDev(StreamingStdDev::new(period)),
-            IndSpec::StdDev(period),
-            "stddev",
-        ))
+        Ok(Self::private(IndSpec::StdDev(period), "stddev"))
     }
 
     #[staticmethod]
     fn rsi(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.rsi", "period", period)?;
-        Ok(Self::private(Core::Rsi(StreamingRsi::new(period)), IndSpec::Rsi(period), "rsi"))
+        Ok(Self::private(IndSpec::Rsi(period), "rsi"))
     }
 
     #[staticmethod]
     fn atr(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.atr", "period", period)?;
-        Ok(Self::private(Core::Atr(StreamingAtr::new(period)), IndSpec::Atr(period), "atr"))
+        Ok(Self::private(IndSpec::Atr(period), "atr"))
     }
 
     /// Highest-high / lowest-low channel; value is `(upper, lower)`.
     #[staticmethod]
     fn donchian(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.donchian", "period", period)?;
-        Ok(Self::private(
-            Core::Donchian(StreamingDonchian::new(period)),
-            IndSpec::Donchian(period),
-            "donchian",
-        ))
+        Ok(Self::private(IndSpec::Donchian(period), "donchian"))
     }
 
     /// Bollinger bands; value is `BollingerBands(upper, middle, lower)`.
@@ -228,11 +321,7 @@ impl PyIndicator {
             .value(k)
             .into());
         }
-        Ok(Self::private(
-            Core::Bollinger(StreamingBollinger::new(period, k)),
-            IndSpec::Bollinger { period, k },
-            "bollinger",
-        ))
+        Ok(Self::private(IndSpec::Bollinger { period, k }, "bollinger"))
     }
 
     /// MACD; value is `(macd, signal, histogram)`.
@@ -254,11 +343,7 @@ impl PyIndicator {
             .value(fast)
             .into());
         }
-        Ok(Self::private(
-            Core::Macd(StreamingMacd::new(fast, slow, signal)),
-            IndSpec::Macd { fast, slow, signal },
-            "macd",
-        ))
+        Ok(Self::private(IndSpec::Macd { fast, slow, signal }, "macd"))
     }
 
     /// Feed one bar. Price-series cores consume the close; bar cores (atr,
@@ -266,63 +351,36 @@ impl PyIndicator {
     fn update_bar(
         &mut self,
         py: Python<'_>,
-        _open: f64,
+        open: f64,
         high: f64,
         low: f64,
         close: f64,
     ) -> PyResult<Option<Py<PyAny>>> {
-        let State::Private(core) = &mut self.state else {
+        let State::Private(p) = &mut self.state else {
             return Err(linked_error("update_bar"));
         };
         self.updates += 1;
-        match &mut **core {
-            Core::Sma(c) => scalar(py, c.update(close)),
-            Core::Ema(c) | Core::Wilder(c) => scalar(py, c.update(close)),
-            Core::Wma(c) => scalar(py, c.update(close)),
-            Core::Roc(c) => scalar(py, c.update(close)),
-            Core::StdDev(c) => scalar(py, c.update(close)),
-            Core::Rsi(c) => scalar(py, c.update(close)),
-            Core::Atr(c) => scalar(py, c.update_bar(high, low, close)),
-            Core::Donchian(c) => c.update_bar(high, low).map(|v| v.into_py_any(py)).transpose(),
-            Core::Bollinger(c) => {
-                c.update(close).map(|(m, u, l)| bollinger_bands_obj(py, u, m, l)).transpose()
-            }
-            Core::Macd(c) => c.update(close).map(|v| v.into_py_any(py)).transpose(),
-        }
+        p.feed(NOT_FED, 0, Ohlc { open, high, low, close });
+        reading_value(py, self.spec.kind(), p.cur)
     }
 
     /// Latest value (`None` during warmup).
     #[getter]
     fn value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let core = match &self.state {
-            State::Private(core) => core,
-            State::Linked { bank, slot } => {
-                return reading_value(py, self.spec.kind(), bank.read(*slot));
-            }
+        let reading = match &self.state {
+            State::Private(p) => p.shown(),
+            State::Linked { bank, slot } => bank.read(*slot),
         };
-        match &**core {
-            Core::Sma(c) => scalar(py, c.value()),
-            Core::Ema(c) | Core::Wilder(c) => scalar(py, c.value()),
-            Core::Wma(c) => scalar(py, c.value()),
-            Core::Roc(c) => scalar(py, c.value()),
-            Core::StdDev(c) => scalar(py, c.value()),
-            Core::Rsi(c) => scalar(py, c.value()),
-            Core::Atr(c) => scalar(py, c.value()),
-            Core::Donchian(c) => c.value().map(|v| v.into_py_any(py)).transpose(),
-            Core::Bollinger(c) => {
-                c.value().map(|(m, u, l)| bollinger_bands_obj(py, u, m, l)).transpose()
-            }
-            Core::Macd(c) => c.value().map(|v| v.into_py_any(py)).transpose(),
-        }
+        reading_value(py, self.spec.kind(), reading)
     }
 
     /// Whether the warmup period has completed.
     #[getter]
-    fn initialized(&self, py: Python<'_>) -> PyResult<bool> {
-        if let State::Linked { bank, slot } = &self.state {
-            return Ok(bank.read(*slot).initialized);
+    fn initialized(&self) -> bool {
+        match &self.state {
+            State::Private(p) => p.shown().initialized,
+            State::Linked { bank, slot } => bank.read(*slot).initialized,
         }
-        Ok(self.value(py)?.is_some())
     }
 
     /// Whether a shared runtime owns and updates this indicator.
@@ -336,28 +394,22 @@ impl PyIndicator {
     #[getter(update_count)]
     fn update_count(&self) -> u64 {
         match &self.state {
-            State::Private(_) => self.updates,
+            State::Private(p) => match p.visible() {
+                None => self.updates,
+                Some(k) => self.updates - u64::from(p.emissions) + u64::from(k.min(p.emissions)),
+            },
             State::Linked { bank, slot } => bank.updates_seen(*slot),
         }
     }
 
     /// Forget all state.
     fn reset(&mut self) -> PyResult<()> {
-        let State::Private(core) = &mut self.state else {
+        let State::Private(p) = &mut self.state else {
             return Err(linked_error("reset"));
         };
-        match &mut **core {
-            Core::Sma(c) => c.reset(),
-            Core::Ema(c) | Core::Wilder(c) => c.reset(),
-            Core::Wma(c) => c.reset(),
-            Core::Roc(c) => c.reset(),
-            Core::StdDev(c) => c.reset(),
-            Core::Rsi(c) => c.reset(),
-            Core::Atr(c) => c.reset(),
-            Core::Donchian(c) => c.reset(),
-            Core::Bollinger(c) => c.reset(),
-            Core::Macd(c) => c.reset(),
-        }
+        let (fleet, bank) = (p.fleet, p.bank.take());
+        **p = Private::new(self.spec);
+        (p.fleet, p.bank) = (fleet, bank);
         self.updates = 0;
         Ok(())
     }

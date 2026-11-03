@@ -484,3 +484,34 @@ fn unbooked_fills_are_capped_with_a_structured_error() {
     assert!(matches!(err, VenueError::FillNotBooked { .. }), "{err:?}");
     assert_eq!(k.unbooked_fills().len(), MAX_UNBOOKED_FILLS, "it did not grow past the cap");
 }
+
+#[test]
+fn a_correction_refused_at_the_unbooked_cap_leaves_the_order_position_and_cash_as_they_were() {
+    let mut k = kernel();
+    let entry = open_long(&mut k, 10.0, 100.0);
+    // Reduce-only fills that name a position that is gone cannot book; each is kept, to the cap.
+    for n in 0..MAX_UNBOOKED_FILLS {
+        let id = submit(&mut k, OrderSide::Sell, 1.0, true, &format!("r{n}"));
+        k.set_order_position(id, Some(9_999));
+        accept(&mut k, id);
+        fill(&mut k, id, "E", 1.0, 100.0).unwrap();
+    }
+    assert_eq!(k.unbooked_fills().len(), MAX_UNBOOKED_FILLS);
+    let cash = k.cash();
+    let held = format!("{:?}", k.position_snapshots());
+    let counted = k.order(entry).unwrap().exec_effective("E1");
+
+    let correction =
+        ExecutionReport::Correction { exec_id: "E1".to_string(), qty: 8.0, price: 101.0, ts_ns: 3 };
+    let err = k.apply_venue_report(2, 3, entry, &correction).unwrap_err();
+
+    assert!(matches!(err, VenueError::FillNotBooked { .. }), "{err:?}");
+    assert_eq!(k.cash(), cash, "the cash is as it was");
+    assert_eq!(format!("{:?}", k.position_snapshots()), held, "the position is as it was");
+    assert_eq!(
+        k.order(entry).unwrap().exec_effective("E1"),
+        counted,
+        "the order still counts the original fill"
+    );
+    assert_eq!(k.unbooked_fills().len(), MAX_UNBOOKED_FILLS);
+}

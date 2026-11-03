@@ -267,8 +267,8 @@ class RollEvents:
         """``N_new = floor(N_old * L_old * P_old / (L_new * P_new))`` and what it leaves; ``None``
         when it is no lot. The old price is the close's fill, the new one the new contract's last
         close (a contract with no bar yet cannot be priced: the roll fails loudly)."""
-        last = ctx.data.latest(job["to"])
-        if last is None:
+        p_new = self._price_known_at_fill(ctx, job["to"])
+        if p_new is None:
             raise StateError(
                 f"auto_roll: {job['to']!r} has no price yet, so the roll cannot keep the exposure; "
                 "feed it a bar before the roll, or set roll_sizing = 'lots'",
@@ -278,7 +278,7 @@ class RollEvents:
                 value=job["to"],
             )
         old_mult, new_mult = self._multiplier(ctx, job["from"]), self._multiplier(ctx, job["to"])
-        p_old, p_new = float(event.price), float(last.close)
+        p_old = float(event.price)
         notional_old = qty * p_old * old_mult
         unit_new = to_lot * p_new * new_mult
         lots_new = float(math.floor(notional_old / unit_new + 1e-9))
@@ -286,6 +286,7 @@ class RollEvents:
             return None
         notional_new = lots_new * unit_new
         return {
+            "price_new": p_new,
             "policy": "notional",
             "lots_old": lots_old,
             "lots_new": lots_new,
@@ -293,6 +294,21 @@ class RollEvents:
             "notional_new": notional_new,
             "residual": notional_old - notional_new,
         }
+
+    @staticmethod
+    def _price_known_at_fill(ctx, symbol: str) -> float | None:
+        """The price of ``symbol`` a roll's open can be sized on when the close fills: the close of
+        the bar the fill came in under ``same_bar_close``, the last close before that bar under
+        ``next_bar_open`` (the open fills at the bar's open, before its close exists)."""
+        if not ctx.fills_at_next_open:
+            last = ctx.data.latest(symbol)
+            return None if last is None else float(last.close)
+        recent = ctx.data.history(symbol, count=2)
+        stamp = ctx.timestamp
+        for i in range(len(recent.timestamps) - 1, -1, -1):
+            if recent.timestamps[i] < stamp:
+                return float(recent.close[i])
+        return None
 
     @staticmethod
     def _multiplier(ctx, symbol: str) -> float:
@@ -324,8 +340,30 @@ class RollEvents:
         kind = event.kind
         roll = RollEvent(job["role"], job["from"], job["to"], job["ts"])
         if job.get("open"):
-            # The open is the last step: the job stays until the venue has taken it.
-            if kind in ("order_accepted", "order_filled"):
+            # The open is the last step: the job stays until the venue has taken it. A sized open
+            # stays until it has filled, to report its exposure at the price it filled at.
+            sizing = job.get("sizing")
+            if sizing is not None:
+                if kind == "order_filled":
+                    job["filled"] = job.get("filled", 0.0) + float(event.size)
+                    job["value"] = job.get("value", 0.0) + float(event.size) * float(event.price)
+                    if job["filled"] + 1e-9 >= job["qty"]:
+                        del pending[cid]
+                        notional_new = job["value"] * job["mult"]
+                        self.on_roll_sized(
+                            ctx,
+                            roll,
+                            dict(
+                                sizing,
+                                price_new=job["value"] / job["filled"],
+                                notional_new=notional_new,
+                                residual=sizing["notional_old"] - notional_new,
+                            ),
+                        )
+                elif kind in ("order_rejected", "order_canceled", "order_expired"):
+                    del pending[cid]
+                    self.on_roll_failed(ctx, roll, cid, kind.removeprefix("order_"), getattr(event, "reject_reason", None))
+            elif kind in ("order_accepted", "order_filled"):
                 del pending[cid]
             elif kind in ("order_rejected", "order_canceled", "order_expired"):
                 del pending[cid]
@@ -339,6 +377,7 @@ class RollEvents:
             if job["left"] <= 1e-9 * max(1.0, qty):
                 del pending[cid]
             from_lot, to_lot = job.get("from_lot", 1.0), job.get("to_lot", 1.0)
+            # the open answers the close's fill, so it meets the bar the close filled in
             tags = {"roll": job["role"], "from": job["from"], "to": job["to"]}
             open_qty = qty
             policy = self.roll_sizing
@@ -369,15 +408,18 @@ class RollEvents:
                     roll_sizing="notional",
                     lots=f"{lots_old:g}->{sizing['lots_new']:g}",
                     notional_old=f"{sizing['notional_old']:.2f}",
+                    price_new=f"{sizing['price_new']:.2f}",
                     notional_new=f"{sizing['notional_new']:.2f}",
                     residual=f"{sizing['residual']:.2f}",
                 )
-                self.on_roll_sized(ctx, roll, sizing)
             # One open per fill of the close, for the quantity that fill closed.
             open_id = job["open_id"] if part == 0 else f"{job['open_id']}.{part}"
             pending[open_id] = {
                 "open": True, "role": job["role"], "from": job["from"], "to": job["to"], "ts": job["ts"],
             }  # fmt: skip
+            if policy == "notional":
+                # Reported on ``on_roll_sized`` once the open has filled, at the price it filled at.
+                pending[open_id].update(sizing=sizing, qty=open_qty, mult=self._multiplier(ctx, job["to"]))
             self.submit_order(
                 Market(side=job["side"], quantity=open_qty, instrument=job["to"], tags=tags),
                 client_id=open_id,

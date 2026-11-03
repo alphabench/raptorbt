@@ -328,6 +328,10 @@ pub struct Order {
     pub post_only: bool,
     /// Reject fills that would open a position (closing fills only).
     pub reduce_only: bool,
+    /// Sent by the strategy in answer to a fill it just heard (a roll's open, a structure's sold
+    /// leg): it meets the bar of the step that fill came in, not the next one. Market orders only.
+    #[serde(default)]
+    pub follow_up: bool,
     /// One-triggers-other: held (not matched) until the parent order fills;
     /// canceled if the parent dies unfilled.
     pub parent_id: Option<u64>,
@@ -513,6 +517,7 @@ impl Order {
             target_price: None,
             post_only: false,
             reduce_only: false,
+            follow_up: false,
             parent_id: None,
             algo_id: None,
             oco_group: None,

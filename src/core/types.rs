@@ -1290,7 +1290,7 @@ pub struct BacktestResult {
     /// daily-loss limits). A run that never got into the market shows here
     /// rather than as an empty trade list.
     pub rejected_entries: usize,
-    /// Entries the account could not fund: refused for capital or margin, or
+    /// Entries and orders the account could not fund: refused for capital or margin, or
     /// sized to nothing. Not in `rejected_entries`, which counts risk limits.
     pub unfunded_entries: usize,
 }

@@ -700,17 +700,6 @@ impl PyPortfolioSession {
         Ok(self.session_mut()?.kernel_mut(instrument).cancel_all_orders(idx))
     }
 
-    /// Link working orders on distinct instruments, given as
-    /// `(instrument, order_id)` pairs sized in units, into one atomic group:
-    /// the legs fill together on the event where every one is marketable,
-    /// funded as a whole, or none fills and each is rejected. Returns the
-    /// group id. See ``docs/structures.md``.
-    fn link_group(&mut self, legs: Vec<(usize, u64)>) -> PyResult<u64> {
-        self.session_mut()?.link_group(&legs).map_err(|reason| {
-            Fail::new("invalid_order_group", reason).op("link_group").param("legs").into()
-        })
-    }
-
     fn link_oco(&mut self, instrument: usize, order_ids: Vec<u64>) -> PyResult<()> {
         self.session_mut()?.kernel_mut(instrument).link_oco(&order_ids);
         Ok(())

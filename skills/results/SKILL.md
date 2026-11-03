@@ -253,7 +253,8 @@ assert len(result.trades()) == 1                        # the enter() trade, clo
   report to see the reason for an absent figure.
 - **Annualisation.** Sharpe, Sortino and annual figures use `periods_per_year`
   if set, else bars per session times 252 trading days (or 365 for
-  `SESSION_CONTINUOUS`). The default session is 375 minutes; bars spanning more
+  `SESSION_CONTINUOUS`). Daily bars of a session market (no weekend bars) count
+  252 trading days; only `session_minutes=0` or a seven-day series counts 365. The default session is 375 minutes; bars spanning more
   than that per day inflate the ratio. Set `session_minutes`.
 - **Short samples.** A ratio from tens of bars is noise. The report returns
   `None` with `TOO_FEW_SAMPLES` below its minimum.

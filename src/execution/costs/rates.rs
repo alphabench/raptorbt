@@ -240,12 +240,35 @@ impl FeeRates {
         order_before: f64,
         day_fee_owed: bool,
     ) -> FeeBreakdown {
+        self.charge_inner(is_buy, value, order_before, day_fee_owed, None)
+    }
+
+    /// The charge on one fill with the brokerage given: what was booked, not what the row would
+    /// charge now. The other components are the row's, and GST is taken on the given brokerage.
+    pub fn charge_keeping_brokerage(
+        &self,
+        is_buy: bool,
+        value: f64,
+        brokerage: f64,
+    ) -> FeeBreakdown {
+        self.charge_inner(is_buy, value.abs(), 0.0, false, Some(brokerage))
+    }
+
+    fn charge_inner(
+        &self,
+        is_buy: bool,
+        value: f64,
+        order_before: f64,
+        day_fee_owed: bool,
+        booked_brokerage: Option<f64>,
+    ) -> FeeBreakdown {
         let tax_rate = if is_buy { self.tax_buy_rate } else { self.tax_sell_rate };
         let tax_rate = if self.tax_kind == TaxKind::None { 0.0 } else { tax_rate };
         let round_each = self.rounding == Rounding::PaiseEach;
         let up = |x: f64| if round_each { paise(x, Round::HalfUp) } else { x };
 
-        let brokerage = self.brokerage(value, order_before, round_each);
+        let brokerage =
+            booked_brokerage.unwrap_or_else(|| self.brokerage(value, order_before, round_each));
         let tax = if tax_rate > 0.0 { up(tax_rate * value) } else { 0.0 };
         let exchange = up(self.exchange_rate * value);
         let regulatory = up(self.regulatory_rate * value);

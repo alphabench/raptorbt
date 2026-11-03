@@ -492,6 +492,8 @@ def finish(strategy) -> int:
             calls.append(method)
         strategy.__dict__[channel] = _dispatcher(channel, calls, feed)
     for name, bit in PLAIN_EVENT_BITS.items():
+        # A strategy that places structure groups switches on its order-event hook when it
+        # creates its first group (``StructureBook``), so only an override is registered here.
         if _overridden(strategy, name):
             mask |= bit
     return mask

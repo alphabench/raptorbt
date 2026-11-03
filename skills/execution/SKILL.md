@@ -83,7 +83,7 @@ moves no cash.
 | `raptorbt.execution.OrderRefused`, `Unsupported`, `Fenced`, `AdapterError` | The errors an adapter raises on purpose; the first three are subclasses of `AdapterError`. `Fenced` is for epochs ([live-trading](../live-trading/SKILL.md)). |
 | `raptorbt.execution.SimulatedExecution`, `PaperExecution` | The in-process matcher and the simulated exchange. Neither takes arguments; they follow the node's configuration. |
 | `LiveNode(..., execution=, venue_account=, protective="venue" or "local", order_check=, warmup=)` | Where orders go; the account name written on every request; who holds stops and targets; the host's check; what warm-up bars do. |
-| `LiveNode.push_report(client_order_id, report, *, arrival_ns)` | Apply a report now, as an event in the node's stream. Returns `"applied"`, `"duplicate"` or `"late"`. |
+| `LiveNode.push_report(client_order_id, report, *, arrival_ns)` | Apply a report now, as an event in the node's stream. Returns `"applied"`, `"duplicate"`, `"late"`, `"deferred"` (a fill the book could not book yet: kept, books itself when it can) or `"unbooked"` (a fill on an order the node no longer holds: refused, never booked, reconcile). |
 | `raptorbt.strategy.order_check.OrderProposal`, `OrderRefusal` | What the check sees (`symbol`, `strategy_index`, `client_id`, `side`, `kind`, `units`, `size_frac`, `limit_price`, `trigger_price`, `tif`, `reduce_only`, `post_only`, `tags`, `ts_ns`) and a refusal with a code. |
 | `raptorbt.FeeSchedule`, `raptorbt.RateCard`, `raptorbt.costs.FeeSchedule`, `raptorbt.costs.RateCard`, `raptorbt.indian_cost_schedule` | The fee model the book charges for a venue fill, as for a backtest (see [backtesting](../backtesting/SKILL.md)). |
 
@@ -518,7 +518,7 @@ order is sent, from the book on that event. `enter()` becomes a market order,
 `close_position()` a reduce-only market order, stops and targets (on an order,
 an entry, or configured on the position) become protective orders linked
 one-cancels-other, and the session square-off, `Twap` slices and `halt` send
-their orders. `protective="venue"` (default) has the venue hold them (a leg the
+their orders. `protective="venue"` (default) has the venue hold them (except the stop or target of a bought option on a margin-grouping account, which the engine always holds: when it fires it closes the group's sold legs with reduce-only market orders, then the hedge) (a leg the
 adapter answers `Unsupported` for is watched by the engine instead); `"local"`
 has the engine watch the levels and send a reduce-only market order, which fills
 at the event's price, not at the stop level.

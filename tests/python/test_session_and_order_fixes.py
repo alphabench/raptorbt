@@ -59,7 +59,7 @@ class HaltsAfterBuying(Strategy):
 
 @pytest.mark.parametrize("oms", ["netting", "hedging"])
 @pytest.mark.parametrize("runner", ["single", "shared"])
-def test_a_flattening_halt_books_one_trade_at_the_last_mark(runner, oms):
+def test_a_flattening_halt_books_one_trade_at_the_close_of_its_bar(runner, oms):
     data = _bars([100.0, 100.0, 100.0, 90.0, 90.0, 90.0])
     config = BacktestConfig(fees=0.0)
     if runner == "single":
@@ -70,8 +70,9 @@ def test_a_flattening_halt_books_one_trade_at_the_last_mark(runner, oms):
         res = run_strategies(
             [HaltsAfterBuying()], {"S": data}, config, oms_type=oms, bar_stamp="close"
         )[0]
-    # Halted on bar 3, applied as bar 3 is stepped, at the last mark: bar 2's close.
-    assert [(t.entry_idx, t.exit_idx, t.exit_price) for t in _trades(res)] == [(1, 2, 100.0)]
+    # Corrected (was bar 2's close, 100.0, a bar early): halted while deciding bar 3, it
+    # closes as an ordinary reduce-only market order would, at bar 3's close.
+    assert [(t.entry_idx, t.exit_idx, t.exit_price) for t in _trades(res)] == [(1, 3, 90.0)]
 
 
 # -- 2. the requirements dry run ----------------------------------------------------------

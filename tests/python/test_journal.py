@@ -36,6 +36,7 @@ class MockVenue:
 
     can_fence = True
     namespace = "T1"  # an adapter marks its node's orders; a node refuses one that does not
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self):
         self.orders = {}  # client_order_id -> dict
@@ -874,6 +875,7 @@ def test_unknown_orders_and_position_and_cash_mismatches_are_found():
 def test_an_adapter_that_cannot_reconcile_is_refused_unless_the_host_says_skip():
     class Plain:
         namespace = "P1"
+        keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
         def submit(self, r):
             pass
@@ -948,6 +950,7 @@ class Sink:
     """A venue that takes everything and says nothing; the test speaks for it."""
 
     namespace = "T1"
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self):
         self.sent = []

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Grouped, PortfolioBook};
+use super::{Flatten, Grouped, PortfolioBook};
 use crate::accounts::{LineView, MarginModel, Money};
 use crate::core::types::Timestamp;
 use crate::instruments::InstrumentSpec;
@@ -47,12 +47,84 @@ pub fn model_shares(
     let views: Vec<LineView<'_>> =
         lines.iter().map(|l| LineView::new(l.spec, l.quantity, l.price)).collect();
     match model.group_shares(&views, now) {
-        Ok(shares) => lines.iter().zip(shares).map(|(l, s)| (l.kernel, l.position_id, s)).collect(),
-        Err(_) => Vec::new(),
+        // A requirement without bound (a sold line with no hedge left, for the moment between
+        // two orders of one decision) is not locked: the locks stay as they were.
+        Ok(shares) if shares.iter().all(|s| s.is_finite()) => {
+            lines.iter().zip(shares).map(|(l, s)| (l.kernel, l.position_id, s)).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
+/// Whether the model cannot state a requirement for a group's lines because a sold line's loss
+/// has no bound (it has no hedge left).
+pub fn group_unbounded(model: &MarginModel, lines: &[ModelLine<'_>], now: Timestamp) -> bool {
+    let views: Vec<LineView<'_>> =
+        lines.iter().map(|l| LineView::new(l.spec, l.quantity, l.price)).collect();
+    matches!(model.group_required(&views, now), Ok(required) if !required.is_finite())
+}
+
 impl PortfolioBook {
+    /// A sold option whose hedge is gone, with no hedge on its way, leaves the model unable to
+    /// state what the group requires: the locks it took stay as they were, which is not a
+    /// requirement. Stop the book from adding to it, once: the account halts as a margin call
+    /// does (entries are refused as `margin_call`), the strategy hears `risk_halted` with reason
+    /// `unmarginable_short_option` ahead of the book's next event, and the book keeps the
+    /// group's name (`PortfolioBook::unmarginable`).
+    pub fn flag_unmarginable(&mut self, underlying: &str) {
+        if self.unmarginable.is_some() {
+            return;
+        }
+        self.unmarginable = Some(format!(
+            "a sold option on {underlying} has no hedge left, so its margin has no bound"
+        ));
+        let idx = self.applied;
+        self.account.halt(idx);
+        self.live_each_mut(|k| k.halt_margin());
+        self.deferred
+            .push(EngineEvent::RiskHalted { idx, reason: "unmarginable_short_option".to_string() });
+    }
+
+    /// The sold option positions in the margin group of `kernel`'s option (the same underlying,
+    /// and expiry unless the model groups across expiries), in other instruments of the book:
+    /// `(kernel index, position id, size)`.
+    pub fn sold_legs_with(&self, kernel: usize) -> Vec<(usize, u64, f64)> {
+        let Some((underlying, expiry)) = self.kernels[kernel].option_group_key() else {
+            return Vec::new();
+        };
+        let across =
+            self.config.margin_model.as_deref().is_some_and(|m| m.groups_across_expiries());
+        let mut out = Vec::new();
+        for j in 0..self.kernels.len() {
+            let in_group = j != kernel
+                && self.kernels[j]
+                    .option_group_key()
+                    .is_some_and(|(u, e)| u == underlying && (across || e == expiry));
+            if !in_group {
+                continue;
+            }
+            out.extend(
+                self.kernels[j]
+                    .position_snapshots()
+                    .iter()
+                    .filter(|p| p.direction == crate::core::types::Direction::Short)
+                    .map(|p| (j, p.position_id, p.size)),
+            );
+        }
+        out
+    }
+
+    /// Why the book was stopped for holding a sold option it cannot margin, if it was.
+    pub fn unmarginable(&self) -> Option<&str> {
+        self.unmarginable.as_deref()
+    }
+
+    /// Whether a buying order is working on any option instrument of the book: a hedge on its
+    /// way, so a sold leg without one is only between two orders of a decision.
+    pub fn hedge_on_its_way(&self) -> bool {
+        self.kernels.iter().any(|k| k.has_working_option_buy())
+    }
+
     /// Put the book in a group. `share` is the part of the account's
     /// starting cash the strategy is credited with: its equity curve starts
     /// there. Call before the first event.
@@ -158,7 +230,7 @@ impl PortfolioBook {
 
     /// Close everything, as a halt with `flatten` does.
     pub fn flatten(&mut self) -> Vec<EngineEvent> {
-        self.cleanup_all(false, true)
+        self.cleanup_all(false, Flatten::AfterEvent)
     }
 
     /// Force-close every instrument at its last print and fold the cash into
@@ -218,7 +290,7 @@ impl PortfolioBook {
         groups: &mut ModelLines<'a>,
     ) {
         for (index, kernel) in self.kernels.iter().enumerate() {
-            let Some((spec, lines)) = kernel.model_option_lines() else { continue };
+            let Some((spec, lines)) = kernel.model_option_lines_after_pending() else { continue };
             let Some((underlying, expiry)) = kernel.option_group_key() else { continue };
             let key = (underlying, if across { None } else { expiry });
             for (position_id, quantity, price) in lines {
@@ -242,12 +314,19 @@ impl PortfolioBook {
     pub(super) fn regroup_modelled(&mut self, model: &MarginModel) {
         let now = self.latest_time();
         let mut shares = Vec::new();
+        let mut unbounded = None;
         {
             let mut groups = ModelLines::new();
             self.collect_model_lines(0, model.groups_across_expiries(), &mut groups);
-            for lines in groups.values() {
+            for (key, lines) in &groups {
                 shares.extend(model_shares(model, lines, now));
+                if unbounded.is_none() && group_unbounded(model, lines, now) {
+                    unbounded = Some(key.0.clone());
+                }
             }
+        }
+        if let Some(underlying) = unbounded.filter(|_| !self.hedge_on_its_way()) {
+            self.flag_unmarginable(&underlying);
         }
         let mut delta_locked = 0.0;
         for (kernel, position_id, share) in shares {
@@ -290,7 +369,7 @@ impl PortfolioBook {
             if other_underlying != underlying || (!across && other_expiry != expiry) {
                 continue;
             }
-            let Some((spec, lines)) = kernel.model_option_lines() else { continue };
+            let Some((spec, lines)) = kernel.model_option_lines_after_pending() else { continue };
             context.locked += kernel.locked_margin();
             context.lines.extend(
                 lines.into_iter().map(|(_, quantity, price)| (spec.clone(), quantity, price)),

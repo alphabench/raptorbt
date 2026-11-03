@@ -107,6 +107,12 @@ impl RejectReason {
         )
     }
 
+    /// [`RejectReason::is_unfunded`] for a stable identifier string, as an order's rejection
+    /// carries it.
+    pub fn is_unfunded_str(reason: &str) -> bool {
+        matches!(reason, "zero_size" | "insufficient_capital" | "insufficient_margin")
+    }
+
     /// [`RejectReason::is_risk_limit`] for a stable identifier string.
     pub fn is_risk_limit_str(reason: &str) -> bool {
         matches!(reason, "order_size" | "max_position" | "max_exposure" | "daily_loss" | "killed")

@@ -202,6 +202,13 @@ impl<'a> MergeCursor<'a> {
         }
     }
 
+    /// The `(timestamp, phase)` of the next event, without taking it. Events
+    /// that share it are one group (see `docs/architecture/event-semantics.md`).
+    #[inline]
+    pub fn peek_group(&self) -> Option<(i64, u8)> {
+        self.heap.peek().map(|Reverse(k)| (k.ts, k.phase))
+    }
+
     /// Last row of the instrument's bar stream already yielded.
     #[inline]
     pub fn visible_row(&self, instrument: InstrumentId) -> Option<u32> {

@@ -102,6 +102,108 @@ struct Era {
     windows: [Vec<(u32, u32)>; 7],
 }
 
+/// The classes MCX trades to different hours.
+enum McxClass {
+    /// Cotton, Kapas and Cotton Seed Wash Oil: Mon-Fri 09:00-21:00.
+    SelectAgri,
+    /// Every other agricultural contract: 09:00-17:00.
+    OtherAgri,
+    /// Bullion, base metals and energy: the evening session of [`SessionSchedule::mcx`].
+    Standard,
+}
+
+/// An MCX contract whose name is in no class of the table, so no session is implied for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownMcxClass(pub String);
+
+impl std::fmt::Display for UnknownMcxClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no session is implied for the MCX contract {:?}: its class is not known. Select \
+             agricultural contracts (COTTON, KAPAS, COTWASOIL) trade 09:00-21:00, every other \
+             agricultural contract 09:00-17:00, and bullion, base metals and energy contracts \
+             follow SessionSchedule.mcx(); pass session= (SessionSchedule.mcx_select_agri(), \
+             .mcx_other_agri() or .mcx()) for this contract",
+            self.0
+        )
+    }
+}
+
+/// Which class an MCX contract name (an underlying or a symbol such as `COTTON26DECFUT`)
+/// belongs to, or `None` for a name the table does not list.
+fn mcx_class(name: &str) -> Option<McxClass> {
+    const SELECT: [&str; 3] = ["COTTON", "KAPAS", "COTWASOIL"];
+    const OTHER: [&str; 19] = [
+        "CPO",
+        "RBDPMOLEIN",
+        "MENTHA",
+        "CASTOR",
+        "CARDAMOM",
+        "GUAR",
+        "SOYBEAN",
+        "SOYOIL",
+        "REFSOY",
+        "MUSTARD",
+        "JEERA",
+        "TURMERIC",
+        "CORIANDER",
+        "RUBBER",
+        "SUGAR",
+        "WHEAT",
+        "MAIZE",
+        "BARLEY",
+        "COCUDAKL",
+    ];
+    const STANDARD: [&str; 19] = [
+        "GOLD",
+        "SILVER",
+        "COPPER",
+        "ALUMINIUM",
+        "ALUMINI",
+        "ZINC",
+        "LEAD",
+        "NICKEL",
+        "CRUDEOIL",
+        "NATURALGAS",
+        "NATGAS",
+        "BULLDEX",
+        "METLDEX",
+        "ENERGYDEX",
+        "MCXBULLDEX",
+        "MCXMETLDEX",
+        "MCXENRGDEX",
+        "MCXCOMPDEX",
+        "GOLDPETAL",
+    ];
+    let upper = name.trim().to_ascii_uppercase();
+    let upper = upper.trim_start_matches(|c: char| !c.is_ascii_alphabetic());
+    let starts = |table: &[&str]| table.iter().any(|p| upper.starts_with(p));
+    if starts(&SELECT) {
+        Some(McxClass::SelectAgri)
+    } else if starts(&OTHER) {
+        Some(McxClass::OtherAgri)
+    } else if starts(&STANDARD) {
+        Some(McxClass::Standard)
+    } else {
+        None
+    }
+}
+
+/// The first Sunday of a month plus seven days for each further one: `n` = 1 is the first Sunday.
+fn nth_sunday(year: i64, month: u32, n: i64) -> i64 {
+    let first = days_from_civil(year, month, 1);
+    first + (6 - weekday_of(first) as i64).rem_euclid(7) + 7 * (n - 1)
+}
+
+/// Whether the US is on daylight saving time on a local day, as the exchange follows it: from the
+/// first trading day after the second Sunday of March to the last one before the first Sunday of
+/// November's next trading day (the Monday after each change).
+fn us_dst_in_force(day: i64) -> bool {
+    let (year, _, _) = civil_from_days(day);
+    nth_sunday(year, 3, 2) < day && day <= nth_sunday(year, 11, 1)
+}
+
 /// One venue's trading calendar.
 ///
 /// What trades on a local date is decided in this order: a per-date
@@ -128,6 +230,11 @@ pub struct SessionSchedule {
     /// rather than guessing.
     #[serde(default)]
     covered: Vec<(i64, i64)>,
+    /// A standing rule: while the US is on daylight saving time (`us_dst_in_force`) these weekday
+    /// windows replace the base ones, after overrides, holidays and dated changes. For a venue
+    /// whose hours follow the US clocks.
+    #[serde(default)]
+    us_summer: Option<[Vec<(u32, u32)>; 7]>,
 }
 
 impl SessionSchedule {
@@ -164,6 +271,7 @@ impl SessionSchedule {
             eras: Vec::new(),
             overrides: BTreeMap::new(),
             covered: Vec::new(),
+            us_summer: None,
         };
         schedule.with_squareoff_minute(squareoff_minute)
     }
@@ -231,6 +339,7 @@ impl SessionSchedule {
                 .windows
                 .iter()
                 .chain(self.eras.iter().flat_map(|e| e.windows.iter()))
+                .chain(self.us_summer.iter().flatten())
                 .flatten()
                 .chain(self.overrides.values().flatten())
                 .any(|&(open, close)| open <= m && m <= close);
@@ -278,9 +387,8 @@ impl SessionSchedule {
     }
 
     /// NSE equity derivatives: Mon-Fri 09:15-15:40 IST (the NSE market-timings
-    /// page), 09:15-15:30 before 2026-08-03. That start date has a single source
-    /// (not matched to the original circular, NSE/FAOP/74467), so treat the
-    /// 15:30 close of earlier dates as unverified.
+    /// page), 09:15-15:30 before 2026-08-03 (the Closing Auction Session for F&O
+    /// stocks moves the close; the cash segment keeps 15:30).
     pub fn nse_fo() -> Self {
         Self::nse_equity()
             .with_window_change(
@@ -292,6 +400,42 @@ impl SessionSchedule {
     }
 
     /// BSE cash equities: Mon-Fri 09:15-15:30 IST.
+    /// The preset of an Indian exchange segment, by the venue code an `InstrumentSpec` names, or
+    /// `None` for a venue no preset covers: such an instrument has no session until one is given.
+    pub fn for_venue(venue: &str) -> Option<Self> {
+        match venue.to_ascii_uppercase().as_str() {
+            "NSE" => Some(Self::nse_equity()),
+            "NFO" => Some(Self::nse_fo()),
+            "BSE" => Some(Self::bse_equity()),
+            "BFO" => Some(Self::bse_fo()),
+            "MCX" => Some(Self::mcx()),
+            "CDS" => Some(Self::cds()),
+            "BCD" => Some(Self::bcd()),
+            _ => None,
+        }
+    }
+
+    /// The preset of a venue for one instrument, by the names it carries (its underlying, then its
+    /// symbol). On MCX the contract's class picks the session: Cotton, Kapas and Cotton Seed Wash
+    /// Oil close at 21:00, every other agricultural contract at 17:00, bullion, base metals and
+    /// energy follow [`SessionSchedule::mcx`]. A name in none of those classes is not guessed: it
+    /// is an [`UnknownMcxClass`] error, so the caller gives `session=`. Any other venue is
+    /// [`SessionSchedule::for_venue`].
+    pub fn for_instrument(
+        venue: &str,
+        names: &[&str],
+    ) -> std::result::Result<Option<Self>, UnknownMcxClass> {
+        if !venue.eq_ignore_ascii_case("MCX") {
+            return Ok(Self::for_venue(venue));
+        }
+        match names.iter().find_map(|n| mcx_class(n)) {
+            Some(McxClass::SelectAgri) => Ok(Some(Self::mcx_select_agri())),
+            Some(McxClass::OtherAgri) => Ok(Some(Self::mcx_other_agri())),
+            Some(McxClass::Standard) => Ok(Some(Self::mcx())),
+            None => Err(UnknownMcxClass(names.first().copied().unwrap_or_default().to_string())),
+        }
+    }
+
     pub fn bse_equity() -> Self {
         Self::nse_equity()
     }
@@ -305,31 +449,41 @@ impl SessionSchedule {
     /// an evening session from 17:00 that closes at 23:55 IST while the US is
     /// on standard time and at 23:30 while it is on daylight saving.
     ///
-    /// The close moves on dates the exchange names, not on a rule computed
-    /// here: 2024-11-04 (23:55), 2025-03-10 (23:30), 2025-11-03 (23:55),
-    /// 2026-03-09 (23:30), 2026-11-02 (23:55). The first two are in the original
-    /// exchange circulars (NSE/COM/64245, NSE/COM/66555); the last three were
-    /// not matched to a circular and follow the same seasonal pattern. Dates
-    /// before 2024-11-04 are closed, not guessed: load a calendar document.
-    /// These are normal-session periods, not a holiday calendar.
+    /// The close follows a standing rule with no end: it moves on the first trading day after
+    /// the US clocks change, the Monday after the second Sunday of March (23:30) and the Monday
+    /// after the first Sunday of November (23:55). That reproduces the changes the exchange
+    /// named: 2024-11-04, 2025-03-10, 2025-11-03, 2026-03-09 and 2026-11-02. Coverage starts at
+    /// 2024-11-04, the first of them; a bar before it raises `session_not_covered` (the market is
+    /// not known closed there), so load a calendar document. This is the normal session, not a
+    /// holiday calendar.
     pub fn mcx() -> Self {
-        Self::mcx_closing(23 * 60 + 55, 23 * 60 + 30)
+        Self::mcx_closing(vec![(9 * 60, 17 * 60), (17 * 60, 23 * 60 + 55)], Some(23 * 60 + 30))
     }
 
-    /// MCX internationally referenceable agricultural contracts (cotton and
-    /// similar): the same periods, closing at 21:00 whatever the US clocks do.
+    /// MCX select agricultural contracts (Cotton, Cotton Seed Wash Oil, Kapas): the same days, closing at 21:00 all year.
     pub fn mcx_select_agri() -> Self {
-        Self::mcx_closing(21 * 60, 21 * 60)
+        Self::mcx_closing(vec![(9 * 60, 17 * 60), (17 * 60, 21 * 60)], None)
     }
 
-    fn mcx_closing(winter: u32, summer: u32) -> Self {
-        let evening =
-            |close: u32| Self::monday_to_friday(vec![(9 * 60, 17 * 60), (17 * 60, close)]);
-        Self::new(IST_OFFSET_NS, evening(winter), [], None)
-            .and_then(|s| s.with_window_change(20250310, Some(20251031), evening(summer)))
-            .and_then(|s| s.with_window_change(20260309, Some(20261030), evening(summer)))
-            .and_then(|s| s.with_coverage(20241104, 21991231))
-            .expect("preset is valid")
+    /// All other MCX agricultural contracts: 09:00-17:00 all year.
+    pub fn mcx_other_agri() -> Self {
+        Self::mcx_closing(vec![(9 * 60, 17 * 60)], None)
+    }
+
+    /// Covered from the exchange's first named change, with no end.
+    fn mcx_closing(winter: Vec<(u32, u32)>, summer_close: Option<u32>) -> Self {
+        let mut schedule =
+            Self::new(IST_OFFSET_NS, Self::monday_to_friday(winter.clone()), [], None)
+                .and_then(|s| s.with_coverage(20241104, 22001231))
+                .expect("preset is valid");
+        if let Some(close) = summer_close {
+            let mut summer = winter;
+            if let Some(last) = summer.last_mut() {
+                last.1 = close;
+            }
+            schedule.us_summer = Some(Self::monday_to_friday(summer));
+        }
+        schedule
     }
 
     /// Trading minutes in a regular session: the longest weekday of the base
@@ -460,7 +614,11 @@ impl SessionSchedule {
             .iter()
             .rev()
             .find(|e| e.from <= day && day <= e.to)
-            .map_or(&self.windows[weekday], |e| &e.windows[weekday]);
+            .map(|e| &e.windows[weekday])
+            .or_else(|| {
+                self.us_summer.as_ref().filter(|_| us_dst_in_force(day)).map(|w| &w[weekday])
+            })
+            .unwrap_or(&self.windows[weekday]);
         (!windows.is_empty()).then_some(windows.as_slice())
     }
 
@@ -854,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn mcx_follows_the_exchanges_dated_closes_and_refuses_dates_before_them() {
+    fn mcx_follows_the_us_clock_rule_and_reproduces_every_change_the_exchange_named() {
         let s = SessionSchedule::mcx();
         // Winter 2024-25 (from 2024-11-04), summer 2025 (from 2025-03-10), winter, summer 2026, winter.
         assert!(s.is_open(ist(20241105, 23, 54)) && !s.is_open(ist(20241105, 23, 55)));
@@ -862,15 +1020,62 @@ mod tests {
         assert!(s.is_open(ist(20251201, 23, 54)) && !s.is_open(ist(20251201, 23, 55)));
         assert!(s.is_open(ist(20260615, 23, 29)) && !s.is_open(ist(20260615, 23, 30)));
         assert!(s.is_open(ist(20261102, 23, 54)) && !s.is_open(ist(20261102, 23, 55)));
+        // The first trading day of each named change, and the day before it.
+        for (date, before, close) in [
+            (20241104, 20241101, 23 * 60 + 55),
+            (20250310, 20250307, 23 * 60 + 30),
+            (20251103, 20251031, 23 * 60 + 55),
+            (20260309, 20260306, 23 * 60 + 30),
+            (20261102, 20261030, 23 * 60 + 55),
+        ] {
+            assert_eq!(s.windows_on(date).last().map(|w| w.1), Some(close), "{date}");
+            if date != 20241104 {
+                assert_ne!(s.windows_on(before).last().map(|w| w.1), Some(close), "{before}");
+            }
+        }
         assert_eq!(s.session_close_ns(20251201), Some(ist(20251201, 23, 55)));
         assert!(!s.is_open(ist(20251206, 12, 0)), "Saturday");
-        // Before the first confirmed period nothing is guessed.
+        // Before the first named change nothing is guessed; after the last one the rule goes on.
         assert!(!s.is_open(ist(20241101, 12, 0)));
-        assert_eq!(s.coverage(), vec![(20241104, 21991231)]);
+        assert_eq!(s.coverage(), vec![(20241104, 22001231)]);
+        // 2027: 14 March is the second Sunday of March, 7 November the first of November.
+        assert_eq!(s.windows_on(20270312).last().map(|w| w.1), Some(23 * 60 + 55));
+        assert_eq!(s.windows_on(20270315).last().map(|w| w.1), Some(23 * 60 + 30));
+        assert_eq!(s.windows_on(20271105).last().map(|w| w.1), Some(23 * 60 + 30));
+        assert_eq!(s.windows_on(20271108).last().map(|w| w.1), Some(23 * 60 + 55));
+        // 2030: second Sunday of March is the 10th.
+        assert_eq!(s.windows_on(20300308).last().map(|w| w.1), Some(23 * 60 + 55));
+        assert_eq!(s.windows_on(20300311).last().map(|w| w.1), Some(23 * 60 + 30));
         // Internationally referenceable agricultural contracts close at 21:00 all year.
         let agri = SessionSchedule::mcx_select_agri();
         assert!(agri.is_open(ist(20251201, 20, 59)) && !agri.is_open(ist(20251201, 21, 0)));
         assert!(agri.is_open(ist(20260615, 20, 59)) && !agri.is_open(ist(20260615, 21, 0)));
+        assert!(agri.is_open(ist(20290615, 20, 59)) && !agri.is_open(ist(20290615, 21, 0)));
+        // The other agricultural contracts close at 17:00 all year.
+        let other = SessionSchedule::mcx_other_agri();
+        assert!(other.is_open(ist(20251201, 16, 59)) && !other.is_open(ist(20251201, 17, 0)));
+        assert!(other.is_open(ist(20260615, 16, 59)) && !other.is_open(ist(20260615, 17, 0)));
+    }
+
+    #[test]
+    fn an_mcx_contract_takes_the_session_of_its_class() {
+        let at = |names: &[&str]| SessionSchedule::for_instrument("MCX", names).unwrap().unwrap();
+        let close = |s: &SessionSchedule| s.windows_on(20251201).last().map(|w| w.1);
+        assert_eq!(close(&at(&["CRUDEOIL", "CRUDEOIL26DECFUT"])), Some(23 * 60 + 55));
+        assert_eq!(close(&at(&["COTTON26DECFUT"])), Some(21 * 60));
+        assert_eq!(close(&at(&["COTWASOIL26DECFUT"])), Some(21 * 60));
+        assert_eq!(close(&at(&["CPO"])), Some(17 * 60));
+        assert_eq!(close(&at(&["RBDPMOLEIN"])), Some(17 * 60));
+        assert_eq!(close(&at(&["KAPAS"])), Some(21 * 60));
+        assert_eq!(close(&at(&["MENTHAOIL26DECFUT"])), Some(17 * 60));
+        // A name in no class is not guessed, whatever its first letters look like.
+        let err = SessionSchedule::for_instrument("MCX", &["X", "F"]).unwrap_err();
+        assert!(err.to_string().contains("COTWASOIL") && err.to_string().contains("09:00-17:00"));
+        // Another venue is not read by name.
+        assert_eq!(
+            SessionSchedule::for_instrument("NSE", &["COTTON"]),
+            Ok(SessionSchedule::for_venue("NSE"))
+        );
     }
 
     #[test]

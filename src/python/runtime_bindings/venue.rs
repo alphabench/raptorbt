@@ -83,6 +83,18 @@ struct Ledger {
     /// is sent the moment the entry's fill is booked, so it meets the venue on
     /// the event the batch would stash it on.
     held_exits: std::collections::HashSet<(usize, usize)>,
+    /// Exits of hedge legs the engine holds until the sold legs of their group are closed.
+    covers: Vec<HeldCover>,
+    /// Sold legs a cover has sent a close for: `(strategy, local instrument, position id)`.
+    cover_sent: std::collections::HashSet<(usize, usize, u64)>,
+}
+
+/// The exit of a hedge leg waiting for the sold legs of its group to close.
+#[derive(Clone)]
+struct HeldCover {
+    sid: usize,
+    local: usize,
+    position_id: u64,
 }
 
 /// A protective level the engine watches (`protective="local"`).
@@ -113,6 +125,11 @@ pub(super) struct VenueRoute {
     protective_local: bool,
     /// The adapter said it cannot take the last order sent.
     unsupported_sent: std::cell::Cell<bool>,
+    /// Reports are being booked for a step that matches before any hook hears: the events they
+    /// made are kept in `held` instead of reaching the strategy's hooks.
+    hold: std::cell::Cell<bool>,
+    /// The local instrument and the events a held report made, in the order they were booked.
+    held: RefCell<HeldEvents>,
 }
 
 fn venue_err(e: VenueError) -> PyErr {
@@ -127,6 +144,12 @@ fn venue_err(e: VenueError) -> PyErr {
         other => Fail::new("invalid_execution_report", other.to_string()).into(),
     }
 }
+
+/// The local instrument and the events a booked report made.
+pub(super) type HeldEvents = Vec<(usize, Vec<crate::portfolio::EngineEvent>)>;
+
+/// What a simulated venue reported for an event: the venue's order id and the report.
+pub(super) type VenueReports = Vec<(String, ExecutionReport)>;
 
 impl VenueRoute {
     pub(super) fn new(
@@ -150,6 +173,8 @@ impl VenueRoute {
             }),
             protective_local,
             unsupported_sent: std::cell::Cell::new(false),
+            hold: std::cell::Cell::new(false),
+            held: RefCell::new(Vec::new()),
         }
     }
 
@@ -539,6 +564,7 @@ impl VenueRoute {
         }
         let mut tags = spec.tags.clone();
         tags.insert("client_id".to_string(), client_id.to_string());
+
         let request = OrderRequest {
             client_order_id: venue_id.clone(),
             symbol,
@@ -591,7 +617,15 @@ impl VenueRoute {
         sub_idx: usize,
         request: &OrderRequest,
     ) -> PyResult<()> {
-        let sent = self.adapter.borrow_mut().submit(request);
+        let sent = {
+            let mut adapter = self.adapter.borrow_mut();
+            if let Some(venue) = adapter.as_simulation() {
+                // what the handlers of this event decided meets the bar of the instant (see
+                // `PaperVenue::submit`)
+                venue.set_deciding(sh.deciding.get());
+            }
+            adapter.submit(request)
+        };
         let unsent = matches!(sent, Err(AdapterError::Unavailable(_)));
         if let Some(placed) = self.ledger.borrow_mut().by_venue.get_mut(&request.client_order_id) {
             placed.unsent = unsent;
@@ -825,6 +859,7 @@ impl VenueRoute {
         idx: usize,
         ts: i64,
         position_id: u64,
+        follow_up: bool,
     ) -> PyResult<()> {
         let held = sh.with_book(sid, |b, _| {
             Ok(b.kernel(local)
@@ -864,25 +899,71 @@ impl VenueRoute {
             position_id: if hedging { Some(position_id) } else { None },
             tags: Default::default(),
         };
+        let mut spec = spec;
+        if follow_up {
+            spec.tags.insert(super::FOLLOW_UP_TAG.to_string(), "1".to_string());
+        }
         self.submit(sh, sid, local, &spec, idx, ts, &format!("close-{n}"), None).map(|_| ())
     }
 
     // -- reports ---------------------------------------------------------
 
-    /// A simulated venue's turn: step it with the event the strategy has just
-    /// seen and book what it reports. Returns whether the strategy heard of
-    /// anything.
-    pub(super) fn poll(
+    /// Hear what a simulated venue reported in answer to orders sent after the step's poll (an
+    /// answer to a fill, met on the bar of the step): they are booked and heard in the same step.
+    pub(super) fn hear_same_event(
         &self,
         py: Python<'_>,
         sh: &Shared,
         st: &Strat,
         ev: &Ev<'_, '_>,
         local: usize,
-        atr: f64,
     ) -> PyResult<bool> {
         if !self.simulated {
             return Ok(false);
+        }
+        let mut out: std::collections::VecDeque<_> = {
+            let mut adapter = self.adapter.borrow_mut();
+            adapter
+                .as_simulation()
+                .expect("checked when the route was built")
+                .take_same_event()
+                .into()
+        };
+        let mut heard = false;
+        while let Some((venue_id, report)) = out.pop_front() {
+            sh.jlog_now(jk::SIMULATED_REPORT, jsrc::ENGINE, Some(&venue_id), || {
+                super::report_value(&report)
+            })?;
+            heard |= self.deliver(
+                py,
+                sh,
+                st,
+                &venue_id,
+                &report,
+                ev.event.local_idx as usize,
+                ev.event.ts,
+            )? != ReportOutcome::Duplicate;
+            let mut adapter = self.adapter.borrow_mut();
+            out.extend(adapter.as_simulation().expect("checked").take_same_event());
+        }
+        let _ = local;
+        Ok(heard)
+    }
+
+    /// A simulated venue's turn, first half: step it with the event the strategy's book has just
+    /// stepped on and collect what it reports. Nothing is told to the strategy yet
+    /// ([`VenueRoute::poll_deliver`]), so every instrument of a round is matched before a hook
+    /// hears any fill.
+    pub(super) fn poll_step(
+        &self,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        local: usize,
+        atr: f64,
+    ) -> PyResult<Option<VenueReports>> {
+        if !self.simulated {
+            return Ok(None);
         }
         let (entry, depth) = match &*sh.inner.borrow() {
             Inner::Running(c) => {
@@ -899,14 +980,72 @@ impl VenueRoute {
             _ => return Err(finished()),
         };
         let mut out = Vec::new();
-        {
-            let mut adapter = self.adapter.borrow_mut();
-            let venue = adapter.as_simulation().expect("checked when the route was built");
-            venue.on_market_event(st.sid.index(), &entry, depth, atr, &mut out).map_err(|e| {
-                PyErr::from(Fail::new("paper_unsolicited_position_change", e.to_string()))
-            })?;
-            out.extend(venue.take_same_event());
+        let mut adapter = self.adapter.borrow_mut();
+        let venue = adapter.as_simulation().expect("checked when the route was built");
+        venue.on_market_event(st.sid.index(), &entry, depth, atr, &mut out).map_err(|e| {
+            PyErr::from(Fail::new("paper_unsolicited_position_change", e.to_string()))
+        })?;
+        out.extend(venue.take_same_event());
+        Ok(Some(out))
+    }
+
+    /// Book what the venue reported for the event now, keeping the events for the hooks:
+    /// [`VenueRoute::hear_held`] tells the strategy once the whole round is matched.
+    pub(super) fn poll_book(
+        &self,
+        py: Python<'_>,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        out: VenueReports,
+    ) -> PyResult<(bool, HeldEvents)> {
+        self.hold.set(true);
+        let heard = self.poll_deliver(py, sh, st, ev, out);
+        self.hold.set(false);
+        let held = std::mem::take(&mut *self.held.borrow_mut());
+        Ok((heard?, held))
+    }
+
+    /// Tell the strategy the events a report made, which were booked earlier in the step.
+    pub(super) fn hear_held(
+        &self,
+        py: Python<'_>,
+        sh: &Shared,
+        st: &Strat,
+        held: HeldEvents,
+    ) -> PyResult<()> {
+        for (local, events) in held {
+            let ctx = st.ctx.bind(py);
+            let before = ctx.borrow().local.replace(local);
+            let global = sh.global_of(st.sid, local)?;
+            let symbol = sh.symbol(py, global.index());
+            let dispatched = super::heard(py, sh, st, events, &mut |events| {
+                dispatch_events(
+                    py,
+                    st.strategy.bind(py),
+                    ctx.as_any(),
+                    live_mask(py, &st.queue, st.mask),
+                    events,
+                    Some(&symbol),
+                )
+            });
+            ctx.borrow().local.set(before);
+            dispatched?;
         }
+        Ok(())
+    }
+
+    /// The second half: book what the venue reported and tell the strategy. Returns whether it
+    /// heard of anything.
+    pub(super) fn poll_deliver(
+        &self,
+        py: Python<'_>,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        out: VenueReports,
+    ) -> PyResult<bool> {
+        let local_idx = ev.event.local_idx as usize;
         let mut heard = false;
         let mut out: std::collections::VecDeque<_> = out.into();
         while let Some((venue_id, report)) = out.pop_front() {
@@ -916,7 +1055,7 @@ impl VenueRoute {
             sh.jlog_now(jk::SIMULATED_REPORT, jsrc::ENGINE, Some(&venue_id), || {
                 super::report_value(&report)
             })?;
-            heard |= self.deliver(py, sh, st, &venue_id, &report, entry.local_idx, ev.event.ts)?
+            heard |= self.deliver(py, sh, st, &venue_id, &report, local_idx, ev.event.ts)?
                 != ReportOutcome::Duplicate;
             // Booking a fill sends the position's protective legs, which meet
             // the rest of this same bar: their reports belong to this event.
@@ -1018,19 +1157,23 @@ impl VenueRoute {
         }
         self.after_booking(sh, st.sid, placed.local, idx, ts)?;
         self.note_if_ended(sh, st.sid, placed.local, placed.order_id);
-        if !events.is_empty() {
+        if !events.is_empty() && self.hold.get() {
+            self.held.borrow_mut().push((placed.local, events));
+        } else if !events.is_empty() {
             let ctx = st.ctx.bind(py);
             let before = ctx.borrow().local.replace(placed.local);
             let global = sh.global_of(st.sid, placed.local)?;
             let symbol = sh.symbol(py, global.index());
-            let dispatched = dispatch_events(
-                py,
-                st.strategy.bind(py),
-                ctx.as_any(),
-                st.mask,
-                events,
-                Some(&symbol),
-            );
+            let dispatched = super::heard(py, sh, st, events, &mut |events| {
+                dispatch_events(
+                    py,
+                    st.strategy.bind(py),
+                    ctx.as_any(),
+                    live_mask(py, &st.queue, st.mask),
+                    events,
+                    Some(&symbol),
+                )
+            });
             ctx.borrow().local.set(before);
             dispatched?;
         }
@@ -1096,7 +1239,7 @@ impl VenueRoute {
                     self.ledger.borrow_mut().held_exits.insert((sid.index(), local));
                 }
                 for id in ids {
-                    self.close(sh, sid, local, idx, ts, id)?;
+                    self.close(sh, sid, local, idx, ts, id, false)?;
                 }
             }
         }
@@ -1192,7 +1335,11 @@ impl VenueRoute {
                 Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
             })?;
             for id in ids {
-                self.close(sh, sid, local, idx, ts, id)?;
+                // A hedge leg's square-off closes the sold legs of its group first.
+                match self.hedge_to_cover(sh, sid, local, Some(id))? {
+                    Some(position) => self.cover_hedge(sh, sid, local, position, idx, ts, true)?,
+                    None => self.close(sh, sid, local, idx, ts, id, false)?,
+                }
             }
         }
         self.watch(sh, sid, local, idx, ts)
@@ -1224,11 +1371,15 @@ impl VenueRoute {
                 let target =
                     w.target.is_some_and(|p| if sell { bar.high >= p } else { bar.low <= p });
                 if stop || target {
+                    let level = if stop { w.stop } else { w.target }.unwrap_or(bar.open);
+                    // The bar opened through the level: nothing traded between the open and it.
+                    let through = if sell == stop { bar.open <= level } else { bar.open >= level };
                     hit.push((
                         w.exit,
                         w.qty,
                         w.position_id,
                         if stop { "watch_stop" } else { "watch_target" },
+                        through,
                     ));
                     false
                 } else {
@@ -1236,7 +1387,12 @@ impl VenueRoute {
                 }
             });
         }
-        for (exit, qty, position_id, why) in hit {
+        for (exit, qty, position_id, why, opened_through) in hit {
+            // Under `next_bar_open` a level touched after the open is answered at the next bar's
+            // open; one the bar opened through is answered at this one.
+            let answers_open = !sh
+                .with_book(sid, |b, _| Ok(b.kernel(local).fills_at_next_open()))?
+                || opened_through;
             sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
                 JV::map([
                     ("strategy", JV::Int(sid.index() as i64)),
@@ -1245,11 +1401,122 @@ impl VenueRoute {
                     ("venue", JV::Bool(true)),
                 ])
             })?;
+            if let Some(position) = self.hedge_to_cover(sh, sid, local, position_id)? {
+                self.cover_hedge(sh, sid, local, position, idx, ts, answers_open)?;
+                continue;
+            }
             let n = self.next_prot(sid);
             let mut spec = Self::spec(exit, "market", Some(qty), true);
             spec.position_id = position_id;
             self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
         }
+        Ok(())
+    }
+
+    /// The position to close as a hedge leg, when the instrument's level is the engine's (a
+    /// bought option of a margin group): `position_id`, or the one position held when the account
+    /// nets.
+    fn hedge_to_cover(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        position_id: Option<u64>,
+    ) -> PyResult<Option<u64>> {
+        sh.with_book(sid, |b, _| {
+            let k = b.kernel(local);
+            if !k.engine_holds_levels(crate::core::types::Direction::Long) {
+                return Ok(None);
+            }
+            Ok(k.position_snapshots()
+                .iter()
+                .find(|p| {
+                    p.direction == crate::core::types::Direction::Long
+                        && position_id.is_none_or(|id| id == p.position_id)
+                })
+                .map(|p| p.position_id))
+        })
+    }
+
+    /// Close a hedge leg the way the engine holds it: reduce-only market closes of the sold legs
+    /// of its group first, the hedge's own once none is left (see `release_covers`). Each is an
+    /// ordinary order, sent and heard like any other.
+    #[allow(clippy::too_many_arguments)]
+    fn cover_hedge(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        position_id: u64,
+        idx: usize,
+        ts: i64,
+        follow_up: bool,
+    ) -> PyResult<()> {
+        let sold = sh.with_book(sid, |b, _| Ok(b.sold_legs_with(local)))?;
+        for (j, id, size) in sold {
+            if !self.ledger.borrow_mut().cover_sent.insert((sid.index(), j, id)) {
+                continue;
+            }
+            let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(j).is_hedging()))?;
+            let mut spec = Self::spec(OrderSide::Buy, "market", Some(size), true);
+            spec.position_id = if hedging { Some(id) } else { None };
+            if follow_up {
+                spec.tags.insert(super::FOLLOW_UP_TAG.to_string(), "1".to_string());
+            }
+            let n = self.next_prot(sid);
+            self.submit(sh, sid, j, &spec, idx, ts, &format!("prot-{n}"), None)?;
+        }
+        let key = (sid.index(), local, position_id);
+        let queued =
+            self.ledger.borrow().covers.iter().any(|c| (c.sid, c.local, c.position_id) == key);
+        if !queued {
+            self.ledger.borrow_mut().covers.push(HeldCover { sid: key.0, local, position_id });
+        }
+        self.release_covers(sh, sid, idx, ts)
+    }
+
+    /// Send the close of every held hedge leg whose group has no sold leg left.
+    fn release_covers(&self, sh: &Shared, sid: StrategyId, idx: usize, ts: i64) -> PyResult<()> {
+        let held: Vec<HeldCover> =
+            self.ledger.borrow().covers.iter().filter(|c| c.sid == sid.index()).cloned().collect();
+        for cover in held {
+            let (sold_left, open) = sh.with_book(sid, |b, _| {
+                Ok((
+                    !b.sold_legs_with(cover.local).is_empty(),
+                    b.kernel(cover.local)
+                        .position_snapshots()
+                        .iter()
+                        .any(|p| p.position_id == cover.position_id),
+                ))
+            })?;
+            if open && sold_left {
+                continue;
+            }
+            self.ledger.borrow_mut().covers.retain(|c| {
+                (c.sid, c.local, c.position_id) != (cover.sid, cover.local, cover.position_id)
+            });
+            if open {
+                self.close(sh, sid, cover.local, idx, ts, cover.position_id, true)?;
+            }
+        }
+        // A sold leg that has closed no longer waits on its close.
+        let live: Vec<(usize, usize, u64)> = {
+            let sent: Vec<_> = self.ledger.borrow().cover_sent.iter().copied().collect();
+            let mut live = Vec::new();
+            for (s, l, p) in sent {
+                if s != sid.index() {
+                    continue;
+                }
+                let held = sh.with_book(sid, |b, _| {
+                    Ok(b.kernel(l).position_snapshots().iter().any(|x| x.position_id == p))
+                })?;
+                if held {
+                    live.push((s, l, p));
+                }
+            }
+            live
+        };
+        self.ledger.borrow_mut().cover_sent.retain(|k| k.0 != sid.index() || live.contains(k));
         Ok(())
     }
 
@@ -1262,6 +1529,7 @@ impl VenueRoute {
         idx: usize,
         ts: i64,
     ) -> PyResult<()> {
+        self.release_covers(sh, sid, idx, ts)?;
         let (requests, flat) = sh.with_book_mut(sid, |b, _| {
             let k = b.kernel_mut(local);
             Ok((k.take_protect_requests(), k.position_snapshots().is_empty()))
@@ -1303,7 +1571,7 @@ impl VenueRoute {
                     Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
                 })?;
                 for id in ids {
-                    self.close(sh, sid, local, idx, ts, id)?;
+                    self.close(sh, sid, local, idx, ts, id, false)?;
                 }
             } else {
                 let entering = sh.with_book(sid, |b, _| {
@@ -1368,7 +1636,11 @@ impl VenueRoute {
         };
         for (level, kind) in [(r.stop, "stop"), (r.target, "target")] {
             let Some(level) = level else { continue };
-            if self.protective_local {
+            // The level of a hedge leg is the engine's whatever the venue could hold: it closes the
+            // group's sold legs first, which a resting order at the venue could not.
+            let engine_holds =
+                sh.with_book(sid, |b, _| Ok(b.kernel(local).engine_holds_levels(r.direction)))?;
+            if self.protective_local || engine_holds {
                 if kind == "stop" {
                     watch.stop = Some(level)
                 } else {
@@ -1451,13 +1723,17 @@ impl VenueRoute {
         reason: &str,
         flatten: bool,
     ) -> PyResult<()> {
+        // A simulated venue keeps no orders of its own to close with: the strategy's book flattens
+        // at its last marks, as it does without a venue, and the venue's copy does the same. A
+        // real venue is sent the closes as orders.
+        let book_flattens = flatten && self.simulated;
         sh.with_book_mut(sid, |b, _| {
-            b.halt(reason, false);
+            b.halt(reason, book_flattens);
             Ok(())
         })?;
         if self.simulated {
             if let Some(venue) = self.adapter.borrow_mut().as_simulation() {
-                venue.halt(sid.index(), reason);
+                venue.halt(sid.index(), reason, flatten);
             }
         }
         let ts = match &*sh.inner.borrow() {
@@ -1468,12 +1744,12 @@ impl VenueRoute {
             let global = sh.global_of(sid, local)?;
             let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(global)))?;
             self.cancel_adding(sh, sid, local, idx)?;
-            if flatten {
+            if flatten && !book_flattens {
                 let ids: Vec<u64> = sh.with_book(sid, |b, _| {
                     Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
                 })?;
                 for id in ids {
-                    self.close(sh, sid, local, idx, ts, id)?;
+                    self.close(sh, sid, local, idx, ts, id, false)?;
                 }
             }
         }

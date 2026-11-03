@@ -392,6 +392,11 @@ run_strategy_backtest(object(), np.arange(5, dtype=np.int64), x, x, x, x, x, bar
 - `register_indicator` without `symbol=` in a portfolio run feeds the indicator
   every symbol's bars interleaved, and `check_requirements` warns about it.
   Pass `symbol=`.
+- Assuming an indicator on another symbol is a bar behind: when instruments share
+  a timestamp every registered indicator, on every symbol, is current as of that
+  timestamp before any `on_bar` runs, whatever the symbols are called. Your own
+  symbol's primary-stream indicator is the one revealed late: it shows the value
+  before the bar until `on_bar`.
 
 ## 9. Validation
 

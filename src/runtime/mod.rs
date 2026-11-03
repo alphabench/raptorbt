@@ -43,7 +43,7 @@ pub use atr_cache::{AtrCache, AtrStats};
 pub use cursor::{EventKind, EventRef, MergeCursor};
 pub use ids::{AggId, IndId, InstrumentId, InstrumentTable, StrategyId};
 pub use indicators::{
-    IndInput, IndKey, IndKind, IndSpec, IndicatorBank, IndicatorRegistry, InputField,
+    CellCore, IndInput, IndKey, IndKind, IndSpec, IndicatorBank, IndicatorRegistry, InputField,
     LocalStreamId, Ohlc, PrimaryOrder, Reading, Registration, Reveal, SlotId,
 };
 pub use live::{LiveFeed, RingKind};

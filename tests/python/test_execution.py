@@ -74,17 +74,30 @@ def make_bars(symbols, n=300, seed=3):
 
 
 def push_bars(node, data, symbols):
-    """Every bar of every symbol, in time order, ties by symbol order."""
+    """Every bar of every symbol, in time order. The bars of one time are one
+    group, as a batch run delivers them (the equal-timestamp rule), so a node
+    and ``run_strategies`` see the same market at every decision."""
     rows = sorted(
         (int(data[s]["timestamps"][i]), k, i)
         for k, s in enumerate(symbols)
         for i in range(len(data[s]["timestamps"]))
     )
-    for ts, k, i in rows:
-        a = data[symbols[k]]
-        node.push_bar(
-            symbols[k], ts, a["open"][i], a["high"][i], a["low"][i], a["close"][i], a["volume"][i]
-        )
+    at = 0
+    while at < len(rows):
+        end = at
+        while end < len(rows) and rows[end][0] == rows[at][0]:
+            end += 1
+        grouped = end - at > 1
+        if grouped:
+            node.begin_group(rows[at][0])
+        for ts, k, i in rows[at:end]:
+            a = data[symbols[k]]
+            node.push_bar(
+                symbols[k], ts, a["open"][i], a["high"][i], a["low"][i], a["close"][i], a["volume"][i]
+            )
+        if grouped:
+            node.flush()
+        at = end
 
 
 def push_ops(node, ops):
@@ -351,6 +364,7 @@ class Venue:
     """Records what it is sent. It answers nothing: the test does that."""
 
     namespace = "T1"
+    keeps_own_records = True  # a test venue: it remembers the node's orders itself
 
     def __init__(self, refuse=None, fail=None):
         self.requests, self.cancels, self.modifies, self.links = [], [], [], []
@@ -1047,9 +1061,11 @@ def test_option_structures_give_run_strategies_results_on_a_paper_node(structure
     symbols = list(data)
     node = LiveNode([paper_strategy], symbols, cfg, instruments=inst, account_type="margin", leverage=1.0, bar_stamp="close", execution=PaperExecution())
     for i in range(ts.N_BARS):
+        node.begin_group()  # the bars of one time are one group, as the batch run delivers them
         for sym in symbols:
             b = data[sym]
             node.push_bar(sym, int(b["timestamps"][i]), float(b["open"][i]), float(b["high"][i]), float(b["low"][i]), float(b["close"][i]), float(b["volume"][i]))
+        node.flush()
     d1, d2 = ts.digest(batch), ts.digest(node.finish()[0])
     assert d1["orders"], "the structure placed nothing"
     assert d1 == d2

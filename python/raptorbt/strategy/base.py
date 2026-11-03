@@ -15,6 +15,26 @@ from raptorbt.strategy.orders import Market
 from raptorbt.strategy.orders.types import Twap, _OrderBase
 
 
+def _structures_first(hook):
+    """Wrap a subclass's ``on_order_event`` so the structure groups hear the event first."""
+    import functools
+
+    @functools.wraps(hook)
+    def wrapped(self, ctx, event):
+        self._structure_event(ctx, event)
+        # a handler that calls ``super().on_order_event`` reaches the base class's forward
+        # inside this call; the event has been heard already
+        outer = self.__dict__.get("_structure_heard")
+        self.__dict__["_structure_heard"] = event
+        try:
+            hook(self, ctx, event)
+        finally:
+            self.__dict__["_structure_heard"] = outer
+
+    wrapped._raptorbt_structures = True  # type: ignore[attr-defined]
+    return wrapped
+
+
 class Strategy:
     """Base class for event-driven strategies.
 
@@ -35,6 +55,9 @@ class Strategy:
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         api.check_class(cls)
+        own = cls.__dict__.get("on_order_event")
+        if own is not None and not getattr(own, "_raptorbt_structures", False):
+            setattr(cls, "on_order_event", _structures_first(own))
 
     def __init__(self, config: StrategyConfig | None = None) -> None:
         self.config = config if config is not None else StrategyConfig()
@@ -220,7 +243,21 @@ class Strategy:
         """Called when an order's time-in-force lapses."""
 
     def on_order_event(self, ctx: StrategyContext, event) -> None:
-        """Called for every order/account event, after its granular hook."""
+        """Called for every order/account event, after its granular hook. The base class
+        forwards the event to the strategy's structure groups (hedge-first sequencing and the
+        leg-failure close run here, in the step of the fill); a subclass's own handler runs
+        after that."""
+        self._structure_event(ctx, event)
+
+    def _structure_event(self, ctx, event) -> None:
+        if self.__dict__.get("_structure_heard") is event:
+            return
+        book = self.__dict__.get("_structures")
+        if book is not None and book.cache is self.cache:
+            # A fill's rules of time use the fill's instant: under next_bar_open the bar's open,
+            # not the stamp of the bar's close.
+            fill_ns = getattr(ctx, "fill_ns", None)
+            book.on_event(event, fill_ns if fill_ns is not None else self._event_ns(ctx, None))
 
     def on_algo_started(self, ctx: StrategyContext, event) -> None:
         """An execution schedule was registered. Slices arrive afterwards
@@ -416,6 +453,14 @@ class Strategy:
     ):
         """Auto-update a streaming indicator (``raptorbt.Indicator``) from
         bar data, *before* handlers see the bar.
+
+        When several instruments print at one timestamp, every instrument's
+        indicators are current as of that timestamp before any handler of it
+        runs, so a handler reads another symbol's indicator at the value after
+        that symbol's bar, whatever the symbols are called. The event's own
+        primary-stream indicator shows the value before the bar until
+        ``on_bar``; one on a composite stream shows the value after the bar the
+        handler is on (``docs/architecture/event-semantics.md``).
 
         ``stream_id=None`` feeds it primary-stream bars; a handle from
         :meth:`subscribe_bars` feeds it that composite stream instead.
@@ -626,12 +671,18 @@ class Strategy:
 
     def submit_structure(self, ctx, structure, *, now_ns: int | None = None, **kwargs):
         """Resolve a :class:`~raptorbt.structures.Structure` against an option chain at the event
-        time and place its legs as one group of ordinary orders. Keyword arguments:
-        ``chain``, ``underlying``, ``spot``, ``lots``, ``underlying_spec``, ``order_type``
-        (``"market"``/``"limit"``), ``prices``, ``net_limit``, ``exit``, ``on_leg_failure``,
-        ``margin_model``, ``available``, ``tif``, ``group_id``. Returns the
-        :class:`~raptorbt.structures.StructureGroup`. See ``docs/structures.md``."""
-        return self._structure_book().submit(structure, now_ns=self._event_ns(ctx, now_ns), **kwargs)
+        time and place its legs as one group of ordinary orders, hedge-first: the bought legs go
+        out at once and each sold leg once the hedges covering it have filled (for the quantity
+        they cover). Keyword arguments: ``chain``, ``underlying``, ``spot``, ``lots``,
+        ``underlying_spec``, ``order_type`` (``"market"``/``"limit"``), ``prices``, ``net_limit``,
+        ``exit``, ``on_leg_failure``, ``margin_model``, ``available``, ``tif`` and ``group_id``.
+        The same sequencing runs in a backtest, on ``PaperExecution`` and on a broker adapter.
+        Returns the :class:`~raptorbt.structures.StructureGroup`. See ``docs/structures.md``."""
+        return self._structure_book().submit(
+            structure,
+            now_ns=self._event_ns(ctx, now_ns),
+            **kwargs,
+        )
 
     def update_structures(self, ctx, marks=None, *, exits: bool = True, now_ns: int | None = None):
         """Advance every structure group: leg-failure policy, exits (``marks`` maps leg symbol to

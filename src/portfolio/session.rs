@@ -503,12 +503,6 @@ impl EventSession {
         self.book.set_corporate_actions(actions, policy)
     }
 
-    /// Link working orders on distinct instruments into one atomic group:
-    /// they fill together or not at all; see [`PortfolioBook::link_group`].
-    pub fn link_group(&mut self, legs: &[(usize, u64)]) -> Result<u64, String> {
-        self.book.link_group(legs)
-    }
-
     /// The registered symbols, in instrument order.
     pub fn symbols(&self) -> &[String] {
         &self.symbols

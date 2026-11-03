@@ -64,6 +64,12 @@ pub mod kind {
     pub const INSTRUMENT_ADD: &str = "instrument_add";
     /// An instrument was retired from the running node.
     pub const INSTRUMENT_RETIRE: &str = "instrument_retire";
+    /// A timestamp group opened: the pushes that follow, up to `group_end`,
+    /// are delivered as groups (all applied before any is decided). A journal
+    /// without these records replays every push alone, as it ran.
+    pub const GROUP_BEGIN: &str = "group_begin";
+    /// The group closed; written before the engine acts on what it holds.
+    pub const GROUP_END: &str = "group_end";
 }
 
 /// Who produced a record.

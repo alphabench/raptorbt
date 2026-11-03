@@ -368,7 +368,7 @@ CODES: dict[str, Code] = {
     ),
     "order_validity_unsupported": _c(
         InvalidOrder, "orders",
-        "A gtc or gtd order on an instrument whose exchange segment holds only day orders (NSE equity derivatives, currency, BSE, MCX), or a gtd dated past the contract's maturity where the segment holds them.",
+        "A gtc or gtd order on an instrument whose exchange segment holds only day orders (NSE equity derivatives, currency, BSE, MCX), or a gtd dated past the contract's maturity where the segment holds them, or a day order on an instrument whose venue no session preset covers and that has no session.",
         ["day", "ioc", "fok"],
     ),
     "invalid_order_kind": _c(
@@ -488,10 +488,6 @@ CODES: dict[str, Code] = {
         InvalidParameter, "execution",
         "Corporate actions were given without an adjustment_policy, or the policy is not raw or adjusted.",
     ),
-    "invalid_order_group": _c(
-        InvalidOrder, "orders",
-        "An atomic order group cannot be formed: fewer than two legs, two legs on one instrument, an order that is unknown, finished, reduce-only or not sized in units, or a venue-managed instrument.",
-    ),
     "unsupported_corporate_actions": _c(
         UnsupportedOperation, "execution",
         "corporate_actions were given to a runner that cannot apply them; they are refused, never ignored.",
@@ -507,7 +503,7 @@ CODES: dict[str, Code] = {
     ),
     "fee_schedule_gap": _c(
         InvalidParameter, "execution",
-        "A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from; the run is refused rather than charged nothing.",
+        "A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from, or a fill or settlement falls on a date before the schedule's first row (the error names the earliest date); the run is refused rather than charged nothing or charged a rate that was not in force.",
     ),
     "squareoff_needs_timezone": _c(
         InvalidParameter, "execution",
@@ -542,6 +538,10 @@ CODES: dict[str, Code] = {
     ),
     "invalid_instrument_metadata": _c(
         InvalidParameter, "instruments", "An instrument's venue or currency is an empty string."
+    ),
+    "mcx_session_unknown": _c(
+        InvalidParameter, "instruments",
+        "An MCX instrument with no session names no known contract class (select agricultural COTTON, KAPAS, COTWASOIL at 09:00-21:00; other agricultural at 09:00-17:00; bullion, base metals, energy), so no session is implied: pass session=.",
     ),
     "invalid_option_right": _c(
         InvalidParameter, "instruments", "An option's right is not call or put.", ["call", "put"]
@@ -691,6 +691,10 @@ CODES: dict[str, Code] = {
         StateError, "live-trading",
         "The instrument was already retired from the node.",
     ),
+    "group_open": _c(
+        StateError, "live-trading",
+        "A timestamp group is open: flush() it before opening another, reconciling, resuming, reading health, taking a checkpoint or a state digest.",
+    ),
     "invalid_strategies": _c(
         InvalidParameter, "live-trading",
         "strategies must name existing strategies of the node, each once.",
@@ -775,6 +779,18 @@ CODES: dict[str, Code] = {
     ),
     "run_finished": _c(
         StateError, "backtesting", "The strategy's run is finished."
+    ),
+    "group_timestamp_mismatch": _c(
+        StateError, "live-trading",
+        "A bar was pushed into an open group declared at one timestamp with another timestamp; it is not part of the group and is refused.",
+    ),
+    "duplicate_bar": _c(
+        StateError, "live-trading",
+        "A bar was pushed again for a symbol and timestamp that already has an identical bar; the retry is refused, not delivered twice.",
+    ),
+    "conflicting_bar": _c(
+        StateError, "live-trading",
+        "A bar was pushed for a symbol and timestamp that already has a bar with other values; a delivered bar is not revised.",
     ),
     "node_poisoned": _c(
         StateError, "live-trading",
