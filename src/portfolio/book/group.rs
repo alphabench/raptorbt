@@ -114,6 +114,54 @@ impl PortfolioBook {
         out
     }
 
+    /// The sold option positions of `kernel`'s margin group that closing its position
+    /// `position_id` would leave without cover: `(kernel index, position id, size)`. A sold leg is
+    /// bare when, with the bought legs that remain, the account's model cannot state what its
+    /// loss requires (it has no bound). Sold legs that share what remains of the cover are all
+    /// returned when together they still have no bound. Empty when closing it leaves the group
+    /// marginable, which is when its stop or target is an ordinary order.
+    pub fn sold_legs_left_bare(&self, kernel: usize, position_id: u64) -> Vec<(usize, u64, f64)> {
+        let sold = self.sold_legs_with(kernel);
+        let Some(model) = self.config.margin_model.as_deref().filter(|m| m.groups_options()) else {
+            return sold;
+        };
+        let Some((underlying, expiry)) = self.kernels[kernel].option_group_key() else {
+            return sold;
+        };
+        let across = model.groups_across_expiries();
+        let mut groups = ModelLines::new();
+        self.collect_model_lines(0, across, &mut groups);
+        let Some(lines) = groups.get(&(underlying, if across { None } else { expiry })) else {
+            return sold;
+        };
+        let now = self.latest_time();
+        let held: Vec<ModelLine<'_>> = lines
+            .iter()
+            .filter(|l| !(l.kernel == kernel && l.position_id == position_id))
+            .copied()
+            .collect();
+        let is_leg = |l: &ModelLine<'_>, (j, id, _): &(usize, u64, f64)| {
+            l.kernel == *j && l.position_id == *id
+        };
+        let mut bare = Vec::new();
+        for leg in &sold {
+            let alone: Vec<ModelLine<'_>> =
+                held.iter().filter(|l| l.quantity > 0.0 || is_leg(l, leg)).copied().collect();
+            if group_unbounded(model, &alone, now) {
+                bare.push(*leg);
+            }
+        }
+        let rest: Vec<ModelLine<'_>> = held
+            .iter()
+            .filter(|l| l.quantity > 0.0 || !bare.iter().any(|leg| is_leg(l, leg)))
+            .copied()
+            .collect();
+        if group_unbounded(model, &rest, now) {
+            return sold;
+        }
+        bare
+    }
+
     /// Why the book was stopped for holding a sold option it cannot margin, if it was.
     pub fn unmarginable(&self) -> Option<&str> {
         self.unmarginable.as_deref()

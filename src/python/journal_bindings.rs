@@ -231,30 +231,33 @@ impl PyJournal {
         memory: Option<&Bound<'_, PyAny>>,
         sink: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        let header = match header {
-            Some(h) => py_to_value(h)?,
-            None => Value::Null,
-        };
-        let policy = parse_fsync(fsync)?;
-        let mut j = Journal::new(header.clone(), seq_base, chain.clone());
-        if let Some(path) = &file {
-            let sink = FileSink::open(path, policy, &header, seq_base, chain.as_deref())
-                .map_err(|e| PyErr::from(Fail::new("journal_failed", e)))?;
-            j.add_sink(Box::new(sink));
-        }
-        if let Some(cb) = sink {
-            j.add_sink(Box::new(CallbackSink(cb)));
-        }
-        if let Some(m) = memory {
-            if let Ok(b) = m.cast::<PyBool>() {
-                if b.is_true() {
-                    j.keep_in_memory(None);
-                }
-            } else if !m.is_none() {
-                j.keep_in_memory(Some(m.extract::<usize>()?.max(1)));
+        (|| -> PyResult<Self> {
+            let header = match header {
+                Some(h) => py_to_value(h)?,
+                None => Value::Null,
+            };
+            let policy = parse_fsync(fsync)?;
+            let mut j = Journal::new(header.clone(), seq_base, chain.clone());
+            if let Some(path) = &file {
+                let sink = FileSink::open(path, policy, &header, seq_base, chain.as_deref())
+                    .map_err(|e| PyErr::from(Fail::new("journal_failed", e)))?;
+                j.add_sink(Box::new(sink));
             }
-        }
-        Ok(PyJournal { inner: Rc::new(RefCell::new(j)) })
+            if let Some(cb) = sink {
+                j.add_sink(Box::new(CallbackSink(cb)));
+            }
+            if let Some(m) = memory {
+                if let Ok(b) = m.cast::<PyBool>() {
+                    if b.is_true() {
+                        j.keep_in_memory(None);
+                    }
+                } else if !m.is_none() {
+                    j.keep_in_memory(Some(m.extract::<usize>()?.max(1)));
+                }
+            }
+            Ok(PyJournal { inner: Rc::new(RefCell::new(j)) })
+        })()
+        .map_err(|e| super::errors::with_op(e, "Journal"))
     }
 
     /// Records with `seq >= seq`, oldest first. Raises `journal_evicted` when

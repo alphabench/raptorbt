@@ -341,3 +341,22 @@ Frontmatter fields are fixed: `name`, `description`, `version`, `api_version`,
 `depends_on`, `status` (`draft` or `stable`). They must equal the manifest
 entry. Keep skills free of any reference to a particular broker, platform or
 deployment; examples use generic symbols.
+
+## Examples
+
+Complete, runnable scripts in `examples/`, one folder per kind of
+strategy. Each runs offline on deterministic synthetic data, passes `bar_stamp`
+explicitly, prints a short result, and names the skills it uses in its header.
+`tests/python/test_examples.py` runs every one on each test run. Find the task, read
+the skills it names, then copy the script.
+
+| Task | Example |
+| --- | --- |
+| A single-instrument strategy with indicators, fees, a stop and a target, and its results | `examples/single-instrument/sma_cross.py` |
+| Two instruments read together in one decision (the equal-timestamp group rule) | `examples/multi-instrument/relative_value.py` |
+| 1-minute entries confirmed by a 15-minute trend (composite bars) | `examples/multi-timeframe/trend_confirmation.py` |
+| An options strategy on a chain: strike and expiry picks, ATR stops, sizing, account limits | `examples/options/nifty_momentum.py` |
+| A hedge-first multi-leg structure (bear call spread) with a defined-risk margin model | `examples/options/bear_call_spread.py` |
+| Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
+| A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |
+| The same strategy on a paper `LiveNode`, matching the batch run, with a journal checkpoint and restore | `examples/live-trading/paper_node.py` |

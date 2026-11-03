@@ -210,6 +210,7 @@ assert s.quotes == n and s.last_quote.symbol == "AAA"
   [indicators](../indicators/SKILL.md).
 - The hooks themselves, and order placement from them, are the
   [strategy](../strategy/SKILL.md) skill.
+- Runnable examples: `examples/multi-timeframe/trend_confirmation.py`.
 
 ## 7. Constraints and correctness
 

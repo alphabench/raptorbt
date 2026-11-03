@@ -384,6 +384,7 @@ assert sides == {"IDX90PE": 1, "IDX95PE": -1, "IDX105CE": -1, "IDX110CE": 1}   #
 - Option chains and structure definitions: [instruments](../instruments/SKILL.md).
 - A live venue answers with execution reports instead of the simulated
   matcher: [execution](../execution/SKILL.md).
+- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/tick-level/passive_quotes.py`.
 
 ## 7. Constraints and correctness
 

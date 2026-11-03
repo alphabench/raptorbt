@@ -1,12 +1,11 @@
 """Focused checks of ``run_strategies`` against ``run_portfolio_strategy``."""
 
-import warnings
-
 import numpy as np
 import pytest
 
 import raptorbt
 from raptorbt import BacktestConfig, Indicator, Strategy, run_portfolio_strategy, run_strategies
+from raptorbt.errors import InvalidParameter
 from raptorbt.strategy.orders import Limit
 
 MIN = 60_000_000_000
@@ -319,11 +318,8 @@ def test_bad_inputs():
         run_strategies([Recorder()], {}, **KW)
     with pytest.raises(ValueError, match="strategies is empty"):
         run_strategies([], data, **KW)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with pytest.raises(InvalidParameter, match="bar_stamp is required"):
         run_strategies([Recorder()], data)
-    assert any(issubclass(w.category, DeprecationWarning) and w.filename == __file__
-               for w in caught)
 
 
 def test_exports():

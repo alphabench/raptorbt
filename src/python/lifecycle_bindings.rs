@@ -77,7 +77,15 @@ impl PyCorporateAction {
         amount: Option<f64>,
         pay_ts: Option<i64>,
     ) -> PyResult<Self> {
-        let kind = CorporateKind::parse(kind).map_err(action_err)?;
+        let kind = CorporateKind::parse(kind).map_err(|e| {
+            PyErr::from(
+                Fail::new("invalid_corporate_action", e.to_string())
+                    .op(OP)
+                    .param("kind")
+                    .value(kind)
+                    .valid(["split", "bonus", "dividend"]),
+            )
+        })?;
         let inner = CorporateAction {
             instrument,
             kind,
@@ -270,7 +278,10 @@ pub fn adjust_history<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let col = |name: &str| -> PyResult<Bound<'py, PyAny>> {
         bars.get_item(name)?.ok_or_else(|| {
-            Fail::new("invalid_data", format!("adjust_history: bars needs a {name:?} array")).into()
+            Fail::new("invalid_data", format!("adjust_history: bars needs a {name:?} array"))
+                .param(name)
+                .valid(["timestamps", "open", "high", "low", "close", "volume"])
+                .into()
         })
     };
     let ts_key = if bars.contains("timestamps")? { "timestamps" } else { "timestamp" };
@@ -283,8 +294,9 @@ pub fn adjust_history<'py>(
     }
     let acts: Vec<CorporateAction> = actions.into_iter().map(|a| a.inner).collect();
     let [open, high, low, close, volume] = &mut cols[..] else { unreachable!() };
-    adjust_bars(instrument, &acts, &timestamps, open, high, low, close, volume)
-        .map_err(|e| Fail::new("invalid_data", e.to_string()).op("adjust_history"))?;
+    adjust_bars(instrument, &acts, &timestamps, open, high, low, close, volume).map_err(|e| {
+        Fail::new("invalid_data", e.to_string()).op("adjust_history").param("actions")
+    })?;
     let out = PyDict::new(py);
     for (name, values) in ["open", "high", "low", "close", "volume"].iter().zip(cols) {
         out.set_item(name, vec_to_numpy_f64(py, values))?;

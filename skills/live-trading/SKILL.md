@@ -42,7 +42,7 @@ latest `history` rows per symbol; `curve_samples` bounds the equity curves).
 `push_bar(symbol, ts, o, h, l, c, v, arrival_ns=)`, `push_depth(...)`,
 `advance_time(ts)` (fires due timers and alerts with no data) and
 `push_report(...)`. Timestamps must not decrease per symbol. A pushed bar is
-stamped as the node's `bar_stamp` says (`"open"` or `"close"`); always pass it.
+stamped as the node's `bar_stamp` says (`"open"` or `"close"`); it is required.
 
 **Groups.** By default each push is delivered on arrival, alone. To deliver the
 bars of several symbols for one timestamp the way a batch run does, use
@@ -791,6 +791,7 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
 - Feeds: [market-data](../market-data/SKILL.md), [subscriptions](../subscriptions/SKILL.md)
   and [timeframes](../timeframes/SKILL.md) (`primary_bars=`, `bar_stamp`).
 - The shipped mappings are for Kite Connect v3, Upstox v3 and DhanHQ v2 only.
+- Runnable examples: `examples/live-trading/paper_node.py`.
 
 ## 7. Constraints and correctness
 

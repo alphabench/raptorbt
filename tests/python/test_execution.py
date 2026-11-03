@@ -963,11 +963,8 @@ def test_hedging_equals_in_process_on_a_paper_node_because_a_close_names_its_pos
 
 
 def _declared_warnings(sc, kw):
-    """The warnings a scenario is meant to raise: a run that names no bar stamp
-    is the legacy form and says so, and an unrouted indicator says so too."""
+    """The warnings a scenario is meant to raise: an unrouted indicator says so."""
     stack = contextlib.ExitStack()
-    if "bar_stamp" not in kw:
-        stack.enter_context(pytest.warns(DeprecationWarning, match="bar_stamp not given"))
     if sc["script"]["args"].get("unrouted"):
         stack.enter_context(pytest.warns(UserWarning, match="register_indicator"))
     return stack
@@ -1007,7 +1004,7 @@ PORTFOLIO_OK = [
     "pf_composites_indicators", "pf_fill_same_bar_open_lookahead", "pf_margin_netting_shorts",
     "pf_stops_targets_legacy", "pf_typed_exits", "pf_timers", "pf_twap", "pf_max_positions_rejections",
     "pf_drawdown_halt", "pf_margin_call_halt", "pf_bar_stamp_close",
-    "pf_bar_stamp_dict_tz", "pf_legacy_stamp_warning",
+    "pf_bar_stamp_dict_tz", "pf_unrouted_indicator_warning",
 ]
 @pytest.mark.parametrize("name", PORTFOLIO_OK)
 def test_the_portfolio_corpus_equals_run_strategies_on_a_paper_node(name):

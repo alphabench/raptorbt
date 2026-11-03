@@ -1,9 +1,10 @@
 """The stop of a hedge leg is the engine's, in every mode: sold legs close first, then the hedge.
 
 One event, one outcome: the same trades in a batch run, on a node, on the paper venue, whichever
-fill timing and whichever strike is the sold one. On a broker the stop is never sent as a resting
-order; the engine sends reduce-only market closes, the sold leg first and the hedge once the
-broker has said the sold leg is closed.
+fill timing and whichever strike is the sold one. On a broker the stop of a hedge is an ordinary
+resting order only while no sold leg depends on it; once one does, the order is withdrawn and the
+engine sends reduce-only market closes, the sold leg first and the hedge once the broker has said
+the sold leg is closed (a level that uncovers nothing is not the engine's).
 """
 import numpy as np
 import pytest
@@ -125,13 +126,15 @@ class _Broker:
 
 
 @pytest.mark.parametrize("strikes", [(100, 105), (95, 100)])
-def test_a_broker_is_never_sent_the_stop_of_a_hedge_leg_and_is_sent_the_sold_close_first(strikes):
+def test_a_broker_holds_no_stop_of_a_hedge_leg_once_a_sold_leg_depends_on_it_and_is_sent_the_sold_close_first(
+    strikes,
+):
     data, inst, S, H = _build(*strikes, True)
     s = _Spread(S, H)
     broker = _Broker()
     node = LiveNode([s], list(data), _cfg("same_bar_close"), execution=broker, instruments=inst,
                     account_type="margin", leverage=1.0, bar_stamp="close")
-    done, order_of_close = set(), []
+    done, acked, order_of_close = set(), set(), []
     for i in range(N):
         ts = int(data[U]["timestamps"][i])
         node.push_group(ts, {x: tuple(float(data[x][c][i]) for c in ("open", "high", "low", "close", "volume"))
@@ -144,12 +147,22 @@ def test_a_broker_is_never_sent_the_stop_of_a_hedge_leg_and_is_sent_the_sold_clo
                     continue
                 done.add(r.client_order_id)
                 progressed = True
-                if r.symbol in (S, H) and getattr(r, "reduce_only", False):
+                resting = "stop" in str(getattr(r, "order_type", getattr(r, "kind", ""))).lower()
+                if r.symbol in (S, H) and getattr(r, "reduce_only", False) and not resting:
                     order_of_close.append((r.symbol, str(r.side)))
                 node.push_report(r.client_order_id, ExecutionReport.accepted("V" + r.client_order_id, ts), arrival_ns=ts)
+                if resting:
+                    continue  # a resting stop does not trade: the market has not reached it
                 node.push_report(r.client_order_id, ExecutionReport.fill(
                     "F" + r.client_order_id, r.quantity, float(data[r.symbol]["close"][i]), ts), arrival_ns=ts)
-    kinds = {str(getattr(r, "order_type", getattr(r, "kind", ""))).lower() for r in broker.requests}
-    assert not any("stop" in k for k in kinds), kinds
+            for cid in broker.cancelled:
+                if cid not in acked:
+                    acked.add(cid)
+                    progressed = True
+                    node.push_report(cid, ExecutionReport.cancel_ack(ts), arrival_ns=ts)
+    stops = {r.client_order_id for r in broker.requests
+             if "stop" in str(getattr(r, "order_type", getattr(r, "kind", ""))).lower()}
+    # the stop sent while the hedge stood alone was withdrawn when the sold leg opened
+    assert stops <= set(broker.cancelled), (stops, broker.cancelled)
     assert [sym for sym, _ in order_of_close] == [S, H], order_of_close
     assert [side.lower() for _, side in order_of_close] == ["buy", "sell"], order_of_close

@@ -536,7 +536,8 @@ impl PyInstrumentSpec {
 
     #[setter]
     fn set_settlement_style(&mut self, style: &str) -> PyResult<()> {
-        self.inner.settlement.style = super::lifecycle_bindings::parse_style(style)?;
+        self.inner.settlement.style = super::lifecycle_bindings::parse_style(style)
+            .map_err(|e| super::errors::with_op(e, "InstrumentSpec.settlement_style"))?;
         Ok(())
     }
 
@@ -549,7 +550,8 @@ impl PyInstrumentSpec {
 
     #[setter]
     fn set_settlement_price(&mut self, price: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.inner.settlement.price = super::lifecycle_bindings::parse_price(price)?;
+        self.inner.settlement.price = super::lifecycle_bindings::parse_price(price)
+            .map_err(|e| super::errors::with_op(e, "InstrumentSpec.settlement_price"))?;
         Ok(())
     }
 

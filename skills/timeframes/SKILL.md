@@ -230,6 +230,7 @@ assert right["close"].tolist() == [101.0, 102.0]        # the edge print closes 
   are cut on the clock grid of the zone given.
 - Bars from ticks with signed flow: `raptorbt.bars_from_ticks`
   ([market-data](../market-data/SKILL.md)).
+- Runnable examples: `examples/multi-timeframe/trend_confirmation.py`.
 
 ## 7. Constraints and correctness
 

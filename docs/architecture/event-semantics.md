@@ -449,11 +449,39 @@ strategy is halted with `follow_up_loop` on the journal; the node keeps running.
 the strategy: the runtime records the fill it is delivering, and its timing comes from that record,
 never from anything on the order (the `after_fill` tag is refused on a strategy's order, and there is
 no helper to mark one). Under `next_bar_open` an answer meets the bar its fill came in only when that fill was at
-the bar's open; after an event inside the bar (a limit filled, an expiry) it goes to the next bar's open.
+the bar's open *and was heard at it* (see "The open of a bar" below); a fill heard after the strategy
+decided on the bar (a limit filled, a stop, an expiry, even at the open price) is answered at the
+next bar's open.
 
 On a simulated venue an order decided on one instrument for another whose bar of the same instant
 is already stepped meets that bar under `same_bar_close`, as in a batch run (`PaperVenue::set_deciding`), so
 the result no longer depends on which symbol sorts first.
+
+### The open of a bar
+
+Under `next_bar_open` a venue reports what was decided on the previous bar at the open of this
+one, before the bar has traded. For each timestamp the runtime therefore runs the open first, in
+the order apply, **open**, decide, match:
+
+1. every book of the group matches its opens (`EngineKernel::step_open`): the intents the previous
+   bar stashed and the market orders decided on earlier bars fill at the bar's open. Nothing else of
+   the bar is touched: stops, targets, resting orders, this bar's decisions and the equity sample
+   stay with the step (`PortfolioBook::open_bar`, `RuntimeCore::open_event`; on a simulated venue
+   `PaperVenue::on_open` steps the shadow book the same way);
+2. only then do the hooks hear those fills (every book is matched before any hook hears, as above).
+   The strategy has not seen the bar: `on_bar` has not run, the indicators and objects it owns
+   (`feed_owned`) are not fed, and its market data is hidden as for any hook at an open. What the hook
+   queues as an answer to the fill (a market order) fills at this open, as an answer to the bar
+   it came in; an intent it queues rides this bar's step and fills at the next open;
+3. then the bar is applied to the strategy (the indicators it owns, the composites), `on_bar(t)`
+   decides, and the rest of the bar is matched: the step carries on from the open and does not sweep
+   the market orders again.
+
+A fill the rest of the bar brings is heard after `on_bar(t)`: what its hook sends is an ordinary
+order and meets the next bar's open; it is never marked as an answer to a fill. Under
+`same_bar_close` a fill is at the close and the order of the phases is unchanged. A book that
+cannot be opened ahead (one in an account group, or with a halt waiting to take effect) is stepped
+whole, and its hooks hear after the decision as before.
 
 ### When hooks hear a match, and what they know
 
@@ -462,9 +490,11 @@ books included); only then do the hooks hear what happened, and the commands the
 the next bar of every instrument. A hook therefore cannot reach a bar of the group that has not been
 matched, and the result does not depend on the symbols' names. Under `next_bar_open` a fill is at
 the open, so a hook hearing a match reads `ctx.bar`, `ctx.data` and `ctx.series` as of the bars
-before the instant (`ctx.fill_ns` is the instant, the previous bar's stamp). Indicators and
-strategy-owned objects fed in phase 1 show the whole group (the rule above) and are not hidden; a
-strategy that wants to be causal at an open must not size an answer from them.
+before the instant (`ctx.fill_ns` is the instant, the previous bar's stamp). A hook that hears a
+fill at an open runs before the bar reaches the strategy (below), so what the strategy and its
+own indicators and objects hold there is as of the previous bar. A shared indicator on *another*
+instrument's stream still shows its value after the group (the rule above) at that hook; a strategy
+that wants to be causal at an open must not size an answer from it.
 Time rules in the fill path (a structure's `entry_timeout`) use `ctx.fill_ns` when it is set.
 
 ### A flattening halt

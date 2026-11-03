@@ -308,6 +308,7 @@ assert w[0] > w[3]                                  # the higher alpha gets the 
   [instruments](../instruments/SKILL.md).
 - Exchange charges that hit the booked cash: [backtesting](../backtesting/SKILL.md).
 - Reading P&L and the curves: [results](../results/SKILL.md).
+- Runnable examples: `examples/portfolio/shared_account.py`, `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 

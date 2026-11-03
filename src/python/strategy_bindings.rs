@@ -439,80 +439,83 @@ impl PyKernelSession {
         account_type: &str,
         leverage: f64,
     ) -> PyResult<Self> {
-        let direction = match direction {
-            1 => Direction::Long,
-            -1 => Direction::Short,
-            other => {
-                return Err(Fail::new(
-                    "invalid_direction",
-                    format!("direction must be 1 (long) or -1 (short), got {other}"),
-                )
-                .param("direction")
-                .value(other)
-                .into())
-            }
-        };
-
-        let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
-        let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
-
-        let policy = match oms_type {
-            "netting" => crate::portfolio::ledger::PositionPolicy::Net,
-            "hedging" => crate::portfolio::ledger::PositionPolicy::Independent,
-            other => {
-                return Err(Fail::new(
-                    "invalid_oms_type",
-                    format!("oms_type must be 'netting' or 'hedging', got {other:?}"),
-                )
-                .param("oms_type")
-                .value(other)
-                .into())
-            }
-        };
-        let account = parse_account_mode(account_type, leverage)?;
-        check_margin_model(&rust_config, account)?;
-
-        let spec = match instrument {
-            Some(spec) => {
-                let spec = crate::instruments::InstrumentSpec::from(spec);
-                if !spec.kind.tradable() {
+        (|| -> PyResult<Self> {
+            let direction = match direction {
+                1 => Direction::Long,
+                -1 => Direction::Short,
+                other => {
                     return Err(Fail::new(
-                        "untradable_instrument",
-                        format!(
-                            "instrument {:?} is not tradable (kind={:?})",
-                            spec.symbol, spec.kind
-                        ),
+                        "invalid_direction",
+                        format!("direction must be 1 (long) or -1 (short), got {other}"),
                     )
-                    .param("instrument")
-                    .value(spec.symbol.to_string())
-                    .into());
+                    .param("direction")
+                    .value(other)
+                    .into())
                 }
-                Some(spec)
-            }
-            None => None,
-        };
-        // The runner books the initial capital: one that cannot be booked is
-        // the structured `money_overflow`, not a panic out of the constructor.
-        let mut rust_config = rust_config;
-        if rust_config.session_minutes.is_none() {
-            rust_config.session_minutes =
-                spec.as_ref().and_then(|s| s.session.as_ref()).map(|s| s.trading_minutes());
-        }
-        check_market(&rust_config, symbol, spec.as_ref())?;
-        let runner = super::errors::guard_money("KernelSession", || {
-            let mut runner = SingleRunner::from_config(
-                rust_config,
-                symbol.to_string(),
-                direction,
-                inst.as_ref(),
-            );
-            if let Some(spec) = spec {
-                runner = runner.with_instrument(spec);
-            }
-            runner.with_position_policy(policy).with_account_mode(account)
-        })?;
+            };
 
-        Ok(Self { runner: Some(runner) })
+            let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
+            let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
+
+            let policy = match oms_type {
+                "netting" => crate::portfolio::ledger::PositionPolicy::Net,
+                "hedging" => crate::portfolio::ledger::PositionPolicy::Independent,
+                other => {
+                    return Err(Fail::new(
+                        "invalid_oms_type",
+                        format!("oms_type must be 'netting' or 'hedging', got {other:?}"),
+                    )
+                    .param("oms_type")
+                    .value(other)
+                    .into())
+                }
+            };
+            let account = parse_account_mode(account_type, leverage)?;
+            check_margin_model(&rust_config, account)?;
+
+            let spec = match instrument {
+                Some(spec) => {
+                    let spec = crate::instruments::InstrumentSpec::from(spec);
+                    if !spec.kind.tradable() {
+                        return Err(Fail::new(
+                            "untradable_instrument",
+                            format!(
+                                "instrument {:?} is not tradable (kind={:?})",
+                                spec.symbol, spec.kind
+                            ),
+                        )
+                        .param("instrument")
+                        .value(spec.symbol.to_string())
+                        .into());
+                    }
+                    Some(spec)
+                }
+                None => None,
+            };
+            // The runner books the initial capital: one that cannot be booked is
+            // the structured `money_overflow`, not a panic out of the constructor.
+            let mut rust_config = rust_config;
+            if rust_config.session_minutes.is_none() {
+                rust_config.session_minutes =
+                    spec.as_ref().and_then(|s| s.session.as_ref()).map(|s| s.trading_minutes());
+            }
+            check_market(&rust_config, symbol, spec.as_ref())?;
+            let runner = super::errors::guard_money("KernelSession", || {
+                let mut runner = SingleRunner::from_config(
+                    rust_config,
+                    symbol.to_string(),
+                    direction,
+                    inst.as_ref(),
+                );
+                if let Some(spec) = spec {
+                    runner = runner.with_instrument(spec);
+                }
+                runner.with_position_policy(policy).with_account_mode(account)
+            })?;
+
+            Ok(Self { runner: Some(runner) })
+        })()
+        .map_err(|e| super::errors::with_op(e, "KernelSession"))
     }
 
     /// Advance the session by one bar.
@@ -1044,6 +1047,7 @@ pub(crate) fn parse_order(
             return Err(Fail::new("invalid_order_value", "size_frac must be in (0, 1]")
                 .param("size_frac")
                 .value(f)
+                .valid(["size_frac in (0, 1]"])
                 .into())
         }
         (None, Some(f)) => QtySpec::CapitalFrac(f),
@@ -1271,7 +1275,8 @@ pub(crate) fn submit_order_checked(
         offset_kind,
         limit_offset,
         post_only,
-    )?;
+    )
+    .map_err(|e| super::errors::with_op(e, "submit_order"))?;
     // A protective child (a bracket's stop or target) reduces the position
     // its parent opened. Under hedging every order opens its own position and
     // a reduce-only order is always refused at its fill, so the bracket would

@@ -273,49 +273,52 @@ impl PyBacktestConfig {
         money_decimals: u32,
         margin_model: Option<super::margin_bindings::PyMarginModel>,
     ) -> PyResult<Self> {
-        check_money_decimals(money_decimals)?;
-        let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
-        let fill_timing = parse_fill_timing(fill_timing.as_deref())?;
-        let fee_rates = Self::resolve_fee_rates(fee_schedule.as_ref(), fee_segment.as_deref())?;
-        Ok(Self {
-            initial_capital,
-            fees,
-            slippage,
-            upon_bar_close,
-            apply_slippage,
-            periods_per_year,
-            risk_free_rate,
-            session_minutes,
-            fee_segment,
-            max_positions,
-            max_drawdown_pct,
-            legacy_annualization,
-            fill_prob_limit,
-            queue_fill_model,
-            partial_fills,
-            order_latency_ns,
-            session_tz_offset_ns,
-            limit_slippage,
-            liquidate_on_margin_call,
-            fill_prob_slippage,
-            fill_seed,
-            bar_path_adaptive,
-            max_order_qty,
-            max_order_notional,
-            max_position_qty,
-            max_gross_exposure,
-            max_daily_loss,
-            max_daily_loss_pct,
-            flatten_on_daily_loss,
-            fee_rates,
-            fee_schedule,
-            money_decimals,
-            margin_model,
-            stop_config: StopConfig::None,
-            target_config: TargetConfig::None,
-            squareoff_time_minutes,
-            fill_timing,
-        })
+        (|| -> PyResult<Self> {
+            check_money_decimals(money_decimals)?;
+            let squareoff_time_minutes = parse_squareoff_time(squareoff_time.as_deref())?;
+            let fill_timing = parse_fill_timing(fill_timing.as_deref())?;
+            let fee_rates = Self::resolve_fee_rates(fee_schedule.as_ref(), fee_segment.as_deref())?;
+            Ok(Self {
+                initial_capital,
+                fees,
+                slippage,
+                upon_bar_close,
+                apply_slippage,
+                periods_per_year,
+                risk_free_rate,
+                session_minutes,
+                fee_segment,
+                max_positions,
+                max_drawdown_pct,
+                legacy_annualization,
+                fill_prob_limit,
+                queue_fill_model,
+                partial_fills,
+                order_latency_ns,
+                session_tz_offset_ns,
+                limit_slippage,
+                liquidate_on_margin_call,
+                fill_prob_slippage,
+                fill_seed,
+                bar_path_adaptive,
+                max_order_qty,
+                max_order_notional,
+                max_position_qty,
+                max_gross_exposure,
+                max_daily_loss,
+                max_daily_loss_pct,
+                flatten_on_daily_loss,
+                fee_rates,
+                fee_schedule,
+                money_decimals,
+                margin_model,
+                stop_config: StopConfig::None,
+                target_config: TargetConfig::None,
+                squareoff_time_minutes,
+                fill_timing,
+            })
+        })()
+        .map_err(|e| super::errors::with_op(e, "BacktestConfig"))
     }
 
     /// A copy whose `squareoff_time` is `hhmm` (`None` disables it): how a

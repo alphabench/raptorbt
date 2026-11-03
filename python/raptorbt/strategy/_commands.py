@@ -484,6 +484,7 @@ class CommandPath:
         return InvalidOrder(
             message,
             code="unknown_order",
+            operation=what,
             parameter="client_id",
             value=client_id,
             valid=list(self._id_map),

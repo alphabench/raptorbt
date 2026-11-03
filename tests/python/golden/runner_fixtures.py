@@ -915,8 +915,8 @@ def scenario_table():
         data={**bars_all, "n": 46}, config=_zero_fee(session_tz_offset_ns=19_800 * NS),
         run={"bar_stamp": "open", "bar_ns": {S0: MIN_NS, S1: MIN_NS, S2: MIN_NS}},
         script={"name": "legacy", "args": {"drive": "on_bar", "subs": [[1, "d"], [15, "m"]], "every": 9, "enter_at": 2, "exit_at": 6}})
-    add("pf_legacy_stamp_warning", P, ["bar_stamp unset DeprecationWarning", "unrouted indicator warning"],
-        data=bars_2, config=_zero_fee(), run={},
+    add("pf_unrouted_indicator_warning", P, ["unrouted indicator warning"],
+        data=bars_2, config=_zero_fee(), run=_bars_run(),
         script={"name": "legacy", "args": {"drive": "on_bar", "every": 9, "enter_at": 2, "exit_at": 6,
                                            "unrouted": [["sma", 3]]}})
 

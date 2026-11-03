@@ -144,6 +144,13 @@ class WalkForward:
 
 
 class Welford:
+    """Running count, mean, sample standard deviation, minimum and maximum of numbers added one at a time.
+
+    ``add(x)`` updates all five in constant memory (Welford's method); ``std()`` is the sample
+    deviation (n - 1), ``0.0`` before a second value; ``as_dict()`` gives ``n``, ``mean``, ``std``,
+    ``min`` and ``max``.
+    """
+
     __slots__ = ("m2", "max", "mean", "min", "n")
 
     def __init__(self) -> None:

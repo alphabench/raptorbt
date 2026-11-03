@@ -8,21 +8,33 @@ shifts the stamps it hands to the engine:
 
 - ``bar_stamp="close"``: the stamp is already the close time.
 - ``bar_stamp="open"``: close time is ``stamp + bar_ns``.
-- ``bar_stamp=None``: the legacy path. Nothing is shifted, composite bars are
-  built as if input stamps were open stamps and the feed merge as if they were
-  close stamps. A ``DeprecationWarning`` says so.
+
+``bar_stamp`` is required wherever bars are given: leaving it out raises
+``missing_bar_stamp``. The one run that takes no bars (a tick-only run or node)
+has nothing to stamp and resolves with ``bar_stamp=None``; it fails the moment a
+bar is pushed.
 """
 
 from __future__ import annotations
 
 import math
-import warnings
 
 import numpy as np
 
 from raptorbt.errors import InvalidParameter
 
 BAR_STAMPS = ("open", "close")
+
+
+def _missing(call: str) -> InvalidParameter:
+    return InvalidParameter(
+        f"{call}: bar_stamp is required: say whether the bar timestamps are bar opens "
+        "('open', with bar_ns, the bar width in nanoseconds) or bar closes ('close')",
+        code="missing_bar_stamp",
+        operation=call,
+        parameter="bar_stamp",
+        value=None,
+    )
 
 
 def _bad_width(message: str, where: str, value) -> InvalidParameter:
@@ -60,7 +72,6 @@ class BarStamps:
         self.bar_stamp = bar_stamp
         self._offsets = offsets
         self._call = call
-        self._warned = False
 
     @classmethod
     def resolve(
@@ -69,17 +80,20 @@ class BarStamps:
         bar_ns,
         symbols,
         call: str,
-        warn: bool = True,
-        stacklevel: int = 4,
+        require: bool = True,
     ) -> "BarStamps":
-        """Validate ``bar_stamp`` / ``bar_ns`` for ``symbols`` and warn if unset.
+        """Validate ``bar_stamp`` / ``bar_ns`` for ``symbols``.
 
-        ``bar_ns`` is read only when ``bar_stamp == "open"``.
+        ``bar_stamp`` is required when ``require`` (the call takes bars); a call that
+        may take none passes ``require=False`` and :meth:`require_given` fires at the
+        first bar. ``bar_ns`` is read only when ``bar_stamp == "open"``.
         """
+        if bar_stamp is None and require:
+            raise _missing(call)
         if bar_stamp is not None and bar_stamp not in BAR_STAMPS:
             raise InvalidParameter(
-                f"{call}: bar_stamp must be one of {', '.join(map(repr, BAR_STAMPS))} "
-                f"or None, got {bar_stamp!r}",
+                f"{call}: bar_stamp must be one of {', '.join(map(repr, BAR_STAMPS))}, "
+                f"got {bar_stamp!r}",
                 code="invalid_bar_stamp",
                 operation=call,
                 parameter="bar_stamp",
@@ -113,30 +127,19 @@ class BarStamps:
             else:
                 width = _width(bar_ns, f"{call}: bar_ns")
                 offsets = {symbol: width for symbol in symbols}
-        stamps = cls(bar_stamp, offsets, call)
-        if warn:
-            stamps.warn_missing(stacklevel=stacklevel)
-        return stamps
+        return cls(bar_stamp, offsets, call)
 
-    def warn_missing(self, call: str | None = None, stacklevel: int = 3) -> None:
-        """Emit the deprecation warning once, if no ``bar_stamp`` was given."""
-        if self.bar_stamp is not None or self._warned:
-            return
-        self._warned = True
-        warnings.warn(
-            f"{call or self._call}: bar_stamp not given; assuming today's behaviour "
-            "(composite bars built from open-stamped input, event ordering "
-            "assuming close-stamped input). bar_stamp will be required in 1.0; "
-            "pass bar_stamp='open' with bar_ns=<bar width in ns>, or 'close'.",
-            DeprecationWarning,
-            stacklevel=stacklevel,
-        )
+    def require_given(self, call: str | None = None) -> None:
+        """Raise ``missing_bar_stamp`` if a bar arrives and no ``bar_stamp`` was given."""
+        if self.bar_stamp is None:
+            raise _missing(call or self._call)
 
     @property
     def aggregator_stamp(self) -> str:
         """The ``stamp`` composite aggregators are built with.
 
-        Input is normalised to close time whenever ``bar_stamp`` is given.
+        Input is normalised to close time whenever ``bar_stamp`` is given. ``None``
+        only occurs on a run that took no bars, and keeps the aggregator's default.
         """
         return "open" if self.bar_stamp is None else "close"
 

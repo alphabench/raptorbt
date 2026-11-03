@@ -81,7 +81,7 @@ can fill no earlier than that close (`fill_timing`, see core). Never read
 | `raptorbt.Strategy` | Base class. Override hooks. Defining a hook under both its current and its deprecated name raises `TypeError` at class creation. |
 | `raptorbt.StrategyConfig` | Frozen dataclass base. `order_id_tag="O"` prefixes auto client ids (`"O-0"`); `params` is a free `dict`. |
 | `raptorbt.StrategyContext`, `raptorbt.Bar` | The context, and the `Bar(timestamp, open, high, low, close, volume)` tuple. |
-| `raptorbt.run_strategy_backtest(strategy, timestamps, open, high, low, close, volume, direction=1, symbol="ASSET", config=None, instrument_config=None, instrument=None, oms_type="netting", account_type="cash", leverage=1.0, bar_stamp=None, bar_ns=None)` | One strategy, one instrument; returns a `BacktestResult`. Accepts the class or an instance. |
+| `raptorbt.run_strategy_backtest(strategy, timestamps, open, high, low, close, volume, direction=1, symbol="ASSET", config=None, instrument_config=None, instrument=None, oms_type="netting", account_type="cash", leverage=1.0, bar_stamp=, bar_ns=None)` | One strategy, one instrument; returns a `BacktestResult`. Accepts the class or an instance. |
 | `raptorbt.run_strategies(strategies, data, config=None, *, ticks=, depth=, directions=, instruments=, instrument_configs=, oms_type=, account_type=, leverage=, accounts=, bar_stamp=, bar_ns=, keep_curves=True, share=True, batch_size=None, corporate_actions=, adjustment_policy=)` | Many strategies over shared data; returns `list[PortfolioResult]` in input order (`.result` is the `BacktestResult`). |
 | `raptorbt.KernelSession`, `raptorbt.PortfolioSession`, `raptorbt.EngineEvent`, `raptorbt.PositionSnapshot` | The engine objects behind the runners. Read events (`EngineEvent.kind`, `.idx`, `.price`, `.size`, `.reject_reason`, `.trade`) and positions from them; do not drive a run by hand. |
 
@@ -321,6 +321,7 @@ assert all(r.result.metrics.total_trades == 1 for r in results)
   [instruments](../instruments/SKILL.md).
 - The same class runs live through `LiveNode` ([live-trading](../live-trading/SKILL.md)).
   Write it so nothing in `on_bar` depends on the run being a backtest.
+- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 
@@ -339,8 +340,8 @@ assert all(r.result.metrics.total_trades == 1 for r in results)
 - A run is deterministic. Do not read the wall clock, an unseeded `random`, or
   global mutable state: backtest and live must see the same decisions.
 - `bar_stamp` says whether your timestamps are bar opens (`"open"`, which also
-  needs `bar_ns`) or closes (`"close"`). Omitting it works today with a
-  `DeprecationWarning` and is an error from 1.0.
+  needs `bar_ns`) or closes (`"close"`). It is required: omitting it raises
+  `missing_bar_stamp`.
 - `check_requirements` reads the imported class, not source text. Importing a
   module runs its top level, so a host that must not import untrusted code
   reads the JSON that `to_dict()` exported from a trusted build.

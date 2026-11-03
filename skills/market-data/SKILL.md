@@ -287,6 +287,7 @@ assert result.metrics.total_trades > 0
   [timeframes](../timeframes/SKILL.md).
 - Symbols need matching specs (lots, sessions): [instruments](../instruments/SKILL.md).
 - Indicators over bars: [indicators](../indicators/SKILL.md).
+- Runnable examples: `examples/tick-level/passive_quotes.py`, `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 

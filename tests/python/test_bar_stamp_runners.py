@@ -18,13 +18,13 @@ import pytest
 
 import raptorbt
 from raptorbt import BacktestConfig, Indicator, Strategy
+from raptorbt.errors import InvalidParameter
 from raptorbt.strategy import TickStrategyStream, orders
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benches" / "runtime"))
 import synthetic  # noqa: E402
 
 MIN_NS = 60 * 10**9
-WARN = "bar_stamp not given"
 
 
 @pytest.fixture(scope="module")
@@ -222,36 +222,23 @@ def test_declaring_the_wrong_convention_is_visible(ds):
     assert wrong.trace != right.trace
 
 
-def test_missing_stamp_warns_and_names_the_call(ds, portfolio_runner):
+def test_missing_stamp_is_refused_and_names_the_parameter(ds, portfolio_runner):
     sym = next(iter(ds.bars["1m"]))
     b = _series(ds.bars["1m"][sym], "close")
-    with pytest.warns(DeprecationWarning, match=WARN) as rec:
+    with pytest.raises(InvalidParameter, match="bar_stamp is required") as err:
         raptorbt.run_strategy_backtest(_Det(), **b, config=_config("same_bar_close"))
-    assert "run_strategy_backtest" in str(rec[0].message)
-    assert rec[0].filename == __file__
-    with pytest.warns(DeprecationWarning, match="run_portfolio_strategy|run_strategies"):
+    assert (err.value.code, err.value.parameter, err.value.valid) == (
+        "missing_bar_stamp", "bar_stamp", ["open", "close"],
+    )
+    assert err.value.operation == "run_strategy_backtest"
+    with pytest.raises(InvalidParameter, match="bar_stamp is required") as err:
         portfolio_runner(_Det(), {sym: b}, config=_config("same_bar_close"))
+    assert err.value.code == "missing_bar_stamp"
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         raptorbt.run_strategy_backtest(
             _Det(), **b, config=_config("same_bar_close"), bar_stamp="close"
         )
-
-
-def test_unset_stamp_keeps_todays_behaviour(ds):
-    """Unset treats stamps as open for composites, so a close-stamped run
-    cut at window ends differs from the declared one -- the legacy ambiguity
-    the declaration exists to remove."""
-    sym = next(iter(ds.bars["1m"]))
-    b = _series(ds.bars["1m"][sym], "close")
-    legacy, declared = _Det(), _Det()
-    with pytest.warns(DeprecationWarning):
-        raptorbt.run_strategy_backtest(legacy, **b, config=_config("same_bar_close"))
-    raptorbt.run_strategy_backtest(
-        declared, **b, config=_config("same_bar_close"), bar_stamp="close"
-    )
-    comps = lambda s: [t for t in s.trace if t[0] == "comp"]  # noqa: E731
-    assert comps(legacy) != comps(declared)
 
 
 BAD = [
@@ -324,8 +311,11 @@ def test_tick_stream_bar_stamp(ds):
     assert [(r, v) for _, r, v in a.raw] != [(r, v) for _, r, v in c.raw]
     assert all(v - r == MIN_NS for _, r, v in a.raw)
 
-    with pytest.warns(DeprecationWarning, match="TickStrategyStream"):
+    with pytest.raises(InvalidParameter, match="TickStrategyStream.*bar_stamp is required"):
         TickStrategyStream(_Det(), [sym], warmup_bars=warm("close"))
+    pushed = TickStrategyStream(_Det(), [sym])  # no bars supplied, nothing to declare yet
+    with pytest.raises(InvalidParameter, match="bar_stamp is required"):
+        pushed.push_bar(sym, 60 * 10**9, 1.0, 2.0, 0.5, 1.5, 10.0)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         TickStrategyStream(_Det(), [sym])  # no bars supplied, nothing to declare

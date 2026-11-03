@@ -296,6 +296,8 @@ def _teach_adapter(node) -> None:
             "working: it has no restore_orders(rows) to adopt them and does not declare "
             "keeps_own_records = True. A restored node must be able to cancel and follow them",
             code="adapter_cannot_adopt", operation="LiveNode.restore",
+            parameter="execution", value=type(node._execution).__name__,
+            valid=["an adapter with restore_orders(rows)", "an adapter with keeps_own_records = True"],
         )
     rows = [
         {"request": req, "status": status, "filled_qty": filled, "avg_price": avg}
@@ -309,6 +311,8 @@ def _teach_adapter(node) -> None:
             f"the adapter cannot account for the orders this node holds as working: {e}. "
             "A restored node must be able to cancel and follow them",
             code="adapter_cannot_adopt", operation="LiveNode.restore",
+            parameter="execution", value=type(node._execution).__name__,
+            valid=["an adapter with restore_orders(rows)", "an adapter with keeps_own_records = True"],
         ) from e
 
 
@@ -325,6 +329,7 @@ def _check_namespace(start_payload: dict, adapter) -> None:
             f"given to restore() is in {getattr(adapter, 'namespace', None)!r}. It cannot "
             "recognise this node's working orders",
             code="adapter_namespace_mismatch", operation="LiveNode.restore",
+            parameter="execution", value=getattr(adapter, "namespace", None), valid=[written],
         )
 
 

@@ -12,7 +12,6 @@ A second, separate check covers a leak that poisoning cannot see: under
 ``next_bar_open`` a decision must never fill inside the event that made it.
 """
 
-import contextlib
 import sys
 from pathlib import Path
 
@@ -156,7 +155,13 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
 
         def _rec(self, ctx, kind, *payload, ets=None):
             if ets is None and not self.ticks:
-                ets = int(ctx.timestamp)
+                # A fill at a bar's open is heard before the strategy sees that bar: its event
+                # is the next bar's, however far ahead of the last bar seen the engine's instant is.
+                ahead = 0
+                ns, seen = getattr(ctx, "event_ns", None), getattr(ctx, "bar_close_ts", None)
+                if ns is not None and seen is not None:
+                    ahead = int(ns) - int(seen)
+                ets = int(ctx.timestamp) + ahead
             self.trace.append((kind, ets, payload))
 
         def _decide(self, ctx, kind, *detail):
@@ -165,7 +170,7 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
             if kind in ("enter", "exit"):
                 if key in self._decided:
                     return False
-                self._decided[key] = None if self.ticks else int(ctx.timestamp)
+                self._decided[key] = None if self.ticks else self._instant(ctx)
             self._rec(ctx, "decide", kind, self._key(ctx), *detail)
             return True
 
@@ -177,9 +182,17 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
             self._decided.pop(("enter", self._key(ctx)), None)
             self._decided.pop(("exit", self._key(ctx)), None)
 
+        @staticmethod
+        def _instant(ctx):
+            # The instant of the event being delivered. A fill at a bar's open is heard before
+            # the strategy sees that bar, so ``ctx.timestamp`` (the last bar it saw) is the
+            # previous bar there; ``event_ns`` is the instant of the fill itself.
+            ns = getattr(ctx, "event_ns", None)
+            return int(ctx.timestamp) if ns is None else int(ns)
+
         def _check_same_event(self, ctx, decision, what):
             decided_at = self._decided.pop((decision, self._key(ctx)), None)
-            if self.nbo and not self.ticks and decided_at == int(ctx.timestamp):
+            if self.nbo and not self.ticks and decided_at == self._instant(ctx):
                 self.violations.append(
                     f"{what} of {self._key(ctx)} filled in the event that decided it "
                     f"(ts {int(ctx.timestamp)})"
@@ -322,32 +335,21 @@ def _cfg(timing):
 
 
 def _stamp_kwargs(stamp):
-    """Keyword arguments declaring how the bars are stamped (none: legacy)."""
-    if stamp is None:
-        return {}
+    """Keyword arguments declaring how the bars are stamped."""
     return {"bar_stamp": "open", "bar_ns": MIN_NS} if stamp == "open" else {"bar_stamp": "close"}
 
 
-def _legacy_warns(stamp):
-    """Legacy bars (no declared stamp) run with the deprecation warning, which is
-    part of what this test exercises; a declared stamp must not warn."""
-    if stamp is None:
-        return pytest.warns(DeprecationWarning, match="bar_stamp not given")
-    return contextlib.nullcontext()
-
-
-def _run(runner, strategy, data, timing, stamp=None, portfolio_runner=None, tick_runner=None):
+def _run(runner, strategy, data, timing, stamp="close", portfolio_runner=None, tick_runner=None):
     cfg = _cfg(timing)
     if runner == "tick":
         return tick_runner(strategy, data, config=cfg, primary_bars=(5, "m")).result.trades()
-    with _legacy_warns(stamp):
-        if runner == "single":
-            sym = next(iter(data))
-            result = raptorbt.run_strategy_backtest(
-                strategy, **data[sym], config=cfg, **_stamp_kwargs(stamp)
-            )
-        else:
-            result = portfolio_runner(strategy, data, config=cfg, **_stamp_kwargs(stamp)).result
+    if runner == "single":
+        sym = next(iter(data))
+        result = raptorbt.run_strategy_backtest(
+            strategy, **data[sym], config=cfg, **_stamp_kwargs(stamp)
+        )
+    else:
+        result = portfolio_runner(strategy, data, config=cfg, **_stamp_kwargs(stamp)).result
     return result.trades()
 
 
@@ -390,7 +392,7 @@ def _cut_time(data, frac):
 
 
 def _check(
-    runner, probe_cls, data, timing, mode, frac, poison, stamp=None, portfolio_runner=None,
+    runner, probe_cls, data, timing, mode, frac, poison, stamp="close", portfolio_runner=None,
     tick_runner=None,
 ):
     cut = _cut_time(data, frac)
@@ -419,17 +421,6 @@ def _check(
 
 def _bar_params():
     return [(mode, timing) for mode in ("intent", "orders", "targeted") for timing in TIMINGS]
-
-
-@pytest.mark.parametrize("frac", CUTS)
-@pytest.mark.parametrize("mode,timing", _bar_params())
-@pytest.mark.parametrize("dataset", sorted(BAR_DATA))
-@pytest.mark.parametrize("runner", ["single", "portfolio"])
-def test_bar_runners_ignore_the_future(runner, dataset, mode, timing, frac, portfolio_runner):
-    _check(
-        runner, _BarProbe, BAR_DATA[dataset](), timing, mode, frac, _poison_bars,
-        portfolio_runner=portfolio_runner,
-    )
 
 
 @pytest.mark.parametrize("frac", CUTS)

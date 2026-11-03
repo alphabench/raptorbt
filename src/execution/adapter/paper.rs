@@ -189,6 +189,30 @@ impl PaperVenue {
         self.report(strategy, entry.instrument, &events, entry.timestamp(), out)
     }
 
+    /// Under `next_bar_open`, step strategy `strategy`'s shadow book to the open of the bar it is
+    /// about to see: what was decided on earlier bars fills at this open, and the venue reports
+    /// it before the strategy has seen the bar. [`PaperVenue::on_market_event`] carries on from
+    /// here. Reports nothing when the bar cannot be opened ahead (another fill timing, a halt
+    /// waiting), which `on_market_event` then does whole.
+    pub fn on_open(
+        &mut self,
+        strategy: usize,
+        entry: &ScheduleEntry,
+        out: &mut Vec<Report>,
+    ) -> Result<(), PaperError> {
+        let Some(shadow) = self.shadows.get_mut(strategy).and_then(Option::as_mut) else {
+            return Ok(());
+        };
+        if !shadow.book.can_open(entry) {
+            return Ok(());
+        }
+        self.now_ns = entry.timestamp();
+        out.append(&mut self.queued);
+        let mut events = shadow.book.begin_event(entry.timestamp(), entry.instrument);
+        events.extend(shadow.book.open_bar(entry));
+        self.report(strategy, entry.instrument, &events, entry.timestamp(), out)
+    }
+
     /// Turn what the shadow book did into the venue's reports.
     fn report(
         &mut self,

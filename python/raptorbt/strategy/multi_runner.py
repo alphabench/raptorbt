@@ -30,6 +30,7 @@ from typing import Iterable, Literal
 
 import numpy as np
 
+from raptorbt import errors
 from raptorbt.errors import (
     InvalidData,
     InvalidParameter,
@@ -91,15 +92,57 @@ _DEPTH_FIELDS = ("bid_prices", "bid_sizes", "ask_prices", "ask_sizes")
 
 
 def _as_arrays(arrays: dict, symbol: str, call: str) -> dict[str, np.ndarray]:
-    out = {
-        "timestamps": np.ascontiguousarray(arrays["timestamps"], dtype=np.int64),
-    }
-    for key in ("open", "high", "low", "close", "volume"):
-        out[key] = np.ascontiguousarray(arrays[key], dtype=np.float64)
+    where = f"data[{symbol!r}]"
+    if not isinstance(arrays, dict):
+        raise InvalidData(
+            f"{where}: expected a dict of arrays, got {type(arrays).__name__}",
+            code="invalid_input_type",
+            operation=call,
+            parameter=where,
+            value=type(arrays).__name__,
+            valid=["dict"],
+        )
+    out = {}
+    for key in ("timestamps", "open", "high", "low", "close", "volume"):
+        value = arrays.get(key)
+        if value is None:
+            raise InvalidData(
+                f"{where}: missing {key!r}; bars need timestamps, open, high, low, close and volume",
+                code="missing_field",
+                operation=call,
+                parameter=f"{where}[{key!r}]",
+                valid=["timestamps", "open", "high", "low", "close", "volume"],
+            )
+        try:
+            col = np.ascontiguousarray(value, dtype=np.int64 if key == "timestamps" else np.float64)
+        except (TypeError, ValueError) as ex:
+            raise InvalidData(
+                f"{where}: {key!r} is not a numeric array ({ex})",
+                code="invalid_array",
+                operation=call,
+                parameter=f"{where}[{key!r}]",
+            ) from None
+        if col.ndim != 1:
+            raise InvalidData(
+                f"{where}: {key!r} must be 1-D, got {col.ndim}-D",
+                code="invalid_array",
+                operation=call,
+                parameter=f"{where}[{key!r}]",
+                value=col.ndim,
+                valid=[1],
+            )
+        out[key] = col
     n = len(out["timestamps"])
     for key, arr in out.items():
         if len(arr) != n:
-            raise ValueError(f"{key} has length {len(arr)}, expected {n}")
+            raise InvalidData(
+                f"{where}: {key!r} has length {len(arr)}, expected {n} (len of 'timestamps')",
+                code="length_mismatch",
+                operation=call,
+                parameter=f"{where}[{key!r}]",
+                value=len(arr),
+                valid=[n],
+            )
     ensure_prices_finite(f"{symbol} bars", call, out)
     return out
 
@@ -219,7 +262,7 @@ def _depth_arrays(symbol, arrays):
     return out
 
 
-def _primary_bars(primary_bars):
+def _primary_bars(primary_bars, call="run_strategies"):
     if primary_bars is None:
         return None
     ok = (
@@ -233,8 +276,10 @@ def _primary_bars(primary_bars):
         raise InvalidSubscription(
             f"primary_bars must be (step, unit), e.g. (5, 'm'), got {primary_bars!r}",
             code="invalid_primary_bars",
+            operation=call,
             parameter="primary_bars",
             value=primary_bars,
+            valid=["(step, unit) with step >= 1 and unit a bar unit, e.g. (5, 'm')"],
         )
     try:
         BarAggregator(*primary_bars)
@@ -242,6 +287,7 @@ def _primary_bars(primary_bars):
         raise InvalidSubscription(
             f"primary_bars {tuple(primary_bars)!r}: {ex}",
             code="invalid_primary_bars",
+            operation=call,
             parameter="primary_bars",
             value=tuple(primary_bars),
         ) from None
@@ -399,7 +445,9 @@ def _run_group(
     ``strategies`` of an account result are positions in ``entries``.
     """
     config = config_for_holding(config, [strategy for strategy, _ in entries], "run_strategies")
-    rt = Runtime(
+    rt = errors.call_as(
+        "run_strategies",
+        Runtime,
         market,
         [(directions or {}).get(s, 1) for s in used],
         [(instrument_configs or {}).get(s) for s in used],
@@ -599,7 +647,8 @@ def run_strategies(
     ATR-based stops and targets are refused on a symbol that has ticks or depth,
     as ``run_tick_strategy`` refuses them: tick events carry no bar series to
     compute ATR from. ``bar_stamp`` and ``bar_ns`` apply to the symbols that
-    have bars.
+    have bars; ``bar_stamp`` is required when any symbol has them
+    (``missing_bar_stamp``).
 
     The contract: for every strategy ``s`` over ``syms``,
     ``run_strategies([(s, syms)], data, **kw)[0]`` equals
@@ -747,7 +796,7 @@ def run_strategies(
             value=unknown,
             valid=list(ticks),
         )
-    primary_bars = _primary_bars(primary_bars)
+    primary_bars = _primary_bars(primary_bars, call)
     if primary_bars is not None and not ticks:
         raise InvalidSubscription(
             "primary_bars aggregates trade prints, but no ticks were given",
@@ -767,7 +816,7 @@ def run_strategies(
     bar_symbols = [s for s in used if s in data]
     reject_bar_only_settings(config, [s for s in bar_symbols if s not in ticks], call)
     stamps = BarStamps.resolve(
-        bar_stamp, bar_ns, bar_symbols, call, warn=bool(bar_symbols), stacklevel=4 + extra
+        bar_stamp, bar_ns, bar_symbols, call, require=bool(bar_symbols)
     )
     arrays = {s: _as_arrays(data[s], s, call) for s in bar_symbols}
     ensure_sessions_cover(arrays, instruments, call)

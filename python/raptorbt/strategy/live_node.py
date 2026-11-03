@@ -47,6 +47,7 @@ from raptorbt._raptorbt import (
     Runtime,
 )
 from raptorbt.execution import ExecutionAdapter, PaperExecution, SimulatedExecution
+from raptorbt import errors
 from raptorbt.errors import (
     InvalidData,
     InvalidParameter,
@@ -138,6 +139,8 @@ class LiveNode:
 
     ``bar_stamp`` / ``bar_ns`` say what the timestamps of warmup and pushed
     bars mean, as in :class:`~raptorbt.TickStrategyStream`. Ticks are instants.
+    ``bar_stamp`` is required for bars: warmup bars, ``push_bar``, ``push_group``
+    and ``warm_up`` raise ``InvalidParameter`` (``missing_bar_stamp``) without it.
 
     ``history`` is the number of rows each symbol's rings hold, for bars, tick
     rows and depth snapshots separately (default :data:`DEFAULT_HISTORY`). It
@@ -320,7 +323,7 @@ class LiveNode:
                 value=curve_samples,
                 valid=["a positive integer", None],
             )
-        primary_bars = _primary_bars(primary_bars)
+        primary_bars = _primary_bars(primary_bars, name)
         execution_kind = _execution_kind(execution, name)
         if oms_type == "hedging" and execution_kind == "adapter" and getattr(execution, "supports_hedging", True) is False:
             raise InvalidParameter(
@@ -409,13 +412,15 @@ class LiveNode:
         self._holders: dict[str, list[int]] = {}
         self._finished = False
         self._stamps = BarStamps.resolve(
-            bar_stamp, bar_ns, symbols, name, warn=bool(warmup_bars), stacklevel=4 + extra
+            bar_stamp, bar_ns, symbols, name, require=bool(warmup_bars)
         )
         warmup = _warmup(warmup_bars, self._index_of, self._stamps)
 
         market = MarketData.live(symbols, [self._stamps.offset(s) for s in symbols], history)
         config = config_for_holding(config, [strategy for strategy, _ in entries], name)
-        rt = Runtime(
+        rt = errors.call_as(
+            name,
+            Runtime,
             market,
             [(directions or {}).get(s, 1) for s in symbols],
             [(instrument_configs or {}).get(s) for s in symbols],
@@ -602,7 +607,7 @@ class LiveNode:
         """
         self._check_open(push=True)
         self._check_bar(symbol, timestamp, open, high, low, close, volume, "push_bar")
-        self._stamps.warn_missing(f"{self._name}.push_bar", stacklevel=3 + self._extra)
+        self._stamps.require_given(f"{self._name}.push_bar")
         self._note_push(symbol, timestamp)
         index = self._index(symbol, "push_bar")
         try:
@@ -630,6 +635,7 @@ class LiveNode:
         for the rest).
         """
         self._check_open()
+        self._stamps.require_given(f"{self._name}.warm_up")
         pushes = _warmup(bars, self._index_of, self._stamps)
         self._rt.set_warmup(True, True)
         self._muted_now = True
@@ -705,6 +711,7 @@ class LiveNode:
         # ring full, the journal's sink) leaves the group open with the pushes it took, and
         # nothing is flushed: ``open_group`` says what it holds, and the host sends the rest.
         self._check_open(push=True)
+        self._stamps.require_given(f"{self._name}.push_group")
         rows = []
         for symbol, bar in bars.items():
             o, h, l, c, v = (

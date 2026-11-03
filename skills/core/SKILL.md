@@ -192,6 +192,7 @@ assert entry_bar["next_bar_open"] == entry_bar["same_bar_close"] + 1
 - Fees and slippage models live in [execution](../execution/SKILL.md); limits
   in [risk](../risk/SKILL.md).
 - Reading a result is the [results](../results/SKILL.md) skill.
+- Runnable examples: `examples/single-instrument/sma_cross.py`.
 
 ## 7. Constraints and correctness
 
@@ -223,8 +224,8 @@ BacktestConfig(fill_timing="soon")  # InvalidParameter: supported are listed
 - Treating `fees=0.05` as five rupees. It is 5% of traded value.
 - Reading `total_return_pct` from a run on future-peeking signals. Compute
   every signal from bars up to and including the current one.
-- Forgetting `bar_stamp` on class-based runs (a `DeprecationWarning` today, an
-  error in 1.0).
+- Forgetting `bar_stamp` on class-based runs: it is required, and omitting it
+  raises `missing_bar_stamp`.
 - Comparing runs with different `fill_timing`, `fees` or `session_minutes` as
   if only the strategy changed.
 

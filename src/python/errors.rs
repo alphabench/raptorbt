@@ -171,3 +171,15 @@ pub fn guard_money<T>(operation: &str, f: impl FnOnce() -> T) -> PyResult<T> {
 pub fn invalid_input(message: impl std::fmt::Display) -> PyErr {
     Fail::new("invalid_input", message.to_string()).into()
 }
+
+/// Name the call on a refusal that names none (a constructor, whose frame the Python guard does
+/// not wrap). A refusal that already names its operation keeps it.
+pub fn with_op(err: PyErr, operation: &str) -> PyErr {
+    Python::attach(|py| {
+        let value = err.value(py);
+        if value.getattr("operation").is_ok_and(|op| op.is_none()) {
+            let _ = value.setattr("operation", operation);
+        }
+    });
+    err
+}

@@ -95,21 +95,24 @@ impl PyBarAggregator {
         stamp: &str,
         session: Option<&PySessionSchedule>,
     ) -> PyResult<Self> {
-        let bar_stamp = parse_stamp(stamp)?;
-        Ok(Self {
-            builder: make_builder_with(
+        (|| -> PyResult<Self> {
+            let bar_stamp = parse_stamp(stamp)?;
+            Ok(Self {
+                builder: make_builder_with(
+                    step,
+                    unit,
+                    tz_offset_ns,
+                    brick_size,
+                    session.map(|s| &s.inner),
+                )?,
                 step,
-                unit,
-                tz_offset_ns,
-                brick_size,
-                session.map(|s| &s.inner),
-            )?,
-            step,
-            unit: unit.to_string(),
-            stamp: stamp.to_string(),
-            unit_kind: parse_spec(step, unit)?.unit,
-            bar_stamp,
-        })
+                unit: unit.to_string(),
+                stamp: stamp.to_string(),
+                unit_kind: parse_spec(step, unit)?.unit,
+                bar_stamp,
+            })
+        })()
+        .map_err(|e| super::errors::with_op(e, "BarAggregator"))
     }
 
     /// Push one bar; returns the completed coarser bar, if any.

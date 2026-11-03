@@ -16,10 +16,6 @@ pub enum RaptorError {
     #[error("Invalid parameter: {message}")]
     InvalidParameter { message: String },
 
-    /// Insufficient data for calculation.
-    #[error("Insufficient data: need at least {required} elements, got {available}")]
-    InsufficientData { required: usize, available: usize },
-
     /// Invalid configuration.
     #[error("Invalid configuration: {message}")]
     InvalidConfig { message: String },
@@ -56,11 +52,6 @@ impl RaptorError {
         Self::InvalidParameter { message: message.into() }
     }
 
-    /// Create an insufficient data error.
-    pub fn insufficient_data(required: usize, available: usize) -> Self {
-        Self::InsufficientData { required, available }
-    }
-
     /// Create an invalid config error.
     pub fn invalid_config(message: impl Into<String>) -> Self {
         Self::InvalidConfig { message: message.into() }
@@ -83,7 +74,6 @@ impl From<RaptorError> for pyo3::PyErr {
         let code = match &err {
             RaptorError::LengthMismatch { .. } => "length_mismatch",
             RaptorError::InvalidParameter { .. } => "invalid_parameter",
-            RaptorError::InsufficientData { .. } => "insufficient_data",
             RaptorError::InvalidConfig { .. } => "invalid_config",
             RaptorError::EmptyData { .. } => "empty_data",
             RaptorError::NonFinitePrice { .. } => "non_finite_price",
@@ -94,7 +84,6 @@ impl From<RaptorError> for pyo3::PyErr {
         let fail = Fail::new(code, err.to_string());
         match err {
             RaptorError::LengthMismatch { actual, .. } => fail.value(actual),
-            RaptorError::InsufficientData { available, .. } => fail.value(available),
             RaptorError::NonFinitePrice { column, index, .. } => fail.param(column).value(index),
             _ => fail,
         }

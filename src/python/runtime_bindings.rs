@@ -152,8 +152,12 @@ fn unknown_symbol(symbol: &str) -> PyErr {
         .into()
 }
 
+/// The runtime's own call order was broken. `Runtime` is not public: `LiveNode` and the runners
+/// finalize it before anything else can reach it, so this is an internal fault, not a code.
 fn not_ready(message: &str) -> PyErr {
-    Fail::new("runtime_not_ready", message).into()
+    pyo3::exceptions::PyRuntimeError::new_err(format!(
+        "internal error (runtime not ready): {message}"
+    ))
 }
 
 /// The loop state held for one push. If the push unwinds, the node is marked
@@ -394,6 +398,13 @@ struct Shared {
     blind: RefCell<Vec<InstrumentId>>,
     /// The hooks that hear what a step matched are running (not the lifecycle ahead of a decision).
     matching: Cell<bool>,
+    /// The hooks that hear the fills at the open of a bar are running, before the strategy has
+    /// seen the bar (`next_bar_open`, see [`open_phase`]): what they answer fills at that open.
+    opening: Cell<bool>,
+    /// Intents a hook queued while hearing a fill at an open, before the strategy saw the bar:
+    /// `(strategy, local instrument)` -> the close they were decided at (the previous bar's),
+    /// which sizes them when the bar's step stashes them.
+    open_intents: RefCell<std::collections::HashMap<(usize, usize), f64>>,
     /// The latest bar the feed took for each instrument, as pushed: a bar taken is delivered
     /// whatever a hook then raised, and a retry of it is a duplicate.
     delivered: RefCell<std::collections::HashMap<usize, PushedBar>>,
@@ -2397,6 +2408,8 @@ impl PyRuntime {
             times: Cell::new(None),
             blind: RefCell::new(Vec::new()),
             matching: Cell::new(false),
+            opening: Cell::new(false),
+            open_intents: RefCell::new(Default::default()),
             delivered: RefCell::new(Default::default()),
             processing_latency_ns: Cell::new(0),
             poisoned: Cell::new(false),
@@ -2524,6 +2537,7 @@ impl PyRuntime {
                 "unsupported_in_venue_run",
                 "halting an account is not supported when orders go to an execution adapter",
             )
+            .param("account")
             .into());
         }
         let all: Vec<usize> = self.shared.strats.borrow().iter().map(|st| st.sid.index()).collect();
@@ -3602,13 +3616,7 @@ impl PyRuntime {
                 run_group(py, sh, &mut ls, &group)?;
             } else {
                 // A group of one: the event is applied, decided and matched.
-                let cur = {
-                    let mut inner = sh.inner.borrow_mut();
-                    let Inner::Running(core) = &mut *inner else { return Err(finished()) };
-                    core.advance_pushed(event, payload).map_err(runtime_err)?;
-                    *core.current().expect("advance sets the current event")
-                };
-                dispatch(py, sh, &mut ls, &event, &cur, None)?;
+                run_one(py, sh, &mut ls, GroupEvent { event, payload, times: None })?;
                 n += 1;
             }
             if n >= SIGNAL_EVERY {
@@ -4099,7 +4107,9 @@ impl PyRuntime {
             return Err(poisoned());
         }
         if self.shared.live_history.is_none() {
-            return Err(PyErr::from(Fail::new("not_live_node", "this runtime is not a live node")));
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "internal error: a live-node call reached a runtime that is not a live node",
+            ));
         }
         let guard = self
             .live_state
@@ -4346,10 +4356,10 @@ impl PyRuntime {
             .into());
         };
         if sh.retired.get()[g.index()] {
-            return Err(Fail::new("instrument_retired", format!("{symbol:?} is already retired"))
-                .param("symbol")
-                .value(symbol)
-                .into());
+            // `LiveNode.retire_instrument` refuses a retired symbol as an unknown one first.
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "internal error: {symbol:?} is already retired"
+            )));
         }
         let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
         let mut holding = Vec::new();
@@ -4555,6 +4565,7 @@ fn run_one(py: Python<'_>, sh: &Shared, ls: &mut LoopState, e: GroupEvent) -> Py
         core.advance_pushed(e.event, e.payload).map_err(runtime_err)?;
         *core.current().expect("advance sets the current event")
     };
+    open_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     dispatch(py, sh, ls, &e.event, &cur, None)
 }
 
@@ -4662,6 +4673,123 @@ fn select_event(sh: &Shared, i: usize, times: Option<Times>) -> PyResult<(Curren
     Ok((*core.group_event(i), i))
 }
 
+/// Under `next_bar_open`, meet the open of the bars of a round before any strategy has seen them.
+///
+/// A venue reports the fills of what was decided on the previous bar at the open of this one,
+/// before the bar has traded. So for each bar of the round, first every book matches its open (the
+/// intents and market orders of earlier bars fill at it), and only then do the hooks hear those
+/// fills, while the strategy, its indicators and everything it owns know only the bars up to the
+/// previous one. What a hook answers fills at that same open. The strategy sees the bar, and
+/// decides, afterwards; a fill the rest of the bar brings is heard after that decision, and what
+/// it is answered with goes to the next bar.
+///
+/// Every book of the round is matched before any hook hears a fill, so an answer for another
+/// instrument meets that instrument's open whichever symbol sorts first. `grouped` says the
+/// events are the round's, selected one by one; a lone event is the one in flight.
+fn open_phase(
+    py: Python<'_>,
+    sh: &Shared,
+    ls: &mut LoopState,
+    events: &[GroupEvent],
+    grouped: bool,
+) -> PyResult<()> {
+    if !ls.opens || sh.warmup_muted.get() {
+        return Ok(());
+    }
+    let mut met: Vec<(usize, StrategyId, usize, Matched)> = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        if e.event.kind != EventKind::Bar {
+            continue;
+        }
+        if grouped {
+            select_event(sh, i, e.times)?;
+        }
+        let subs: Vec<StrategyId> = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.subscribers(e.event.instrument).to_vec(),
+            _ => return Err(finished()),
+        };
+        let ts_obj = e.event.ts.into_pyobject(py)?;
+        let symbols = sh.symbols.get();
+        let symbol = symbols[e.event.instrument.index()].bind(py);
+        let with_ticks = sh.has_ticks.get()[e.event.instrument.index()];
+        let ev = Ev { event: &e.event, ts_obj: &ts_obj, symbol, with_ticks, pos: Cell::new(0) };
+        for (pos, &sid) in subs.iter().enumerate() {
+            ev.pos.set(pos);
+            let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
+            let local = match &*sh.inner.borrow() {
+                Inner::Running(c) => c.local_of(sid, e.event.instrument).expect("subscribed"),
+                _ => return Err(finished()),
+            };
+            if let Some(matched) = open_match(py, sh, st, &ev, local)? {
+                met.push((i, sid, local, matched));
+            }
+        }
+    }
+    for (i, sid, local, matched) in met {
+        let e = &events[i];
+        if grouped {
+            select_event(sh, i, e.times)?;
+        }
+        let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
+        let ts_obj = e.event.ts.into_pyobject(py)?;
+        let symbols = sh.symbols.get();
+        let symbol = symbols[e.event.instrument.index()].bind(py);
+        let with_ticks = sh.has_ticks.get()[e.event.instrument.index()];
+        let pos = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.subscribers(e.event.instrument).iter().position(|s| *s == sid),
+            _ => return Err(finished()),
+        }
+        .expect("subscribed");
+        let ev = Ev { event: &e.event, ts_obj: &ts_obj, symbol, with_ticks, pos: Cell::new(pos) };
+        {
+            let ctx = st.ctx.bind(py).borrow();
+            ctx.local.set(local);
+            ctx.idx.set(e.event.local_idx as usize);
+        }
+        if let Inner::Running(c) = &mut *sh.inner.borrow_mut() {
+            c.decide_view(sid, pos, true);
+        }
+        sh.opening.set(true);
+        let heard = step_deliver(py, sh, st, &ev, local, false, false, &mut None, matched);
+        sh.opening.set(false);
+        heard?;
+        if st.has_held(py) {
+            let close = sh.with_book(sid, |b, _| Ok(b.kernel(local).last_close))?;
+            if let Some(close) = close {
+                sh.open_intents.borrow_mut().insert((sid.index(), local), close);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The match half of the open of one bar for one strategy: its book (or, on a simulated venue,
+/// the venue's shadow of it) fills what was decided earlier at the open. `None` when there is
+/// nothing to hear or the bar cannot be opened ahead of the strategy.
+fn open_match(
+    py: Python<'_>,
+    sh: &Shared,
+    st: &Strat,
+    ev: &Ev<'_, '_>,
+    local: usize,
+) -> PyResult<Option<Matched>> {
+    if sh.venue_on.get() {
+        let venue = sh.venue.borrow().clone();
+        let Some(venue) = venue else { return Ok(None) };
+        let Some(out) = venue.poll_open(sh, st, ev, local)? else { return Ok(None) };
+        let (venue_heard, venue_held) = venue.poll_book(py, sh, st, ev, out)?;
+        return Ok(Some(Matched { events: Vec::new(), venue_held, venue_heard }));
+    }
+    let events = match &mut *sh.inner.borrow_mut() {
+        Inner::Running(c) => c.open_event(st.sid).map_err(runtime_err)?,
+        _ => return Err(finished()),
+    };
+    if events.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Matched { events, venue_held: Vec::new(), venue_heard: false }))
+}
+
 /// The three phases over events of one timestamp and kind, each instrument
 /// once, in the order they are to be decided and matched.
 fn run_round(
@@ -4679,6 +4807,9 @@ fn run_round(
     let mut decided = std::mem::take(&mut ls.decided);
     decided.resize_with(events.len(), Vec::new);
     let phases = (|| -> PyResult<()> {
+        // 1b. Under `next_bar_open` the open of every bar is met before any strategy has seen
+        // the bars: the fills at the open are heard by hooks that know only what was known then.
+        open_phase(py, sh, ls, events, true)?;
         // The indicators strategies own are fed with every event of the group
         // too, so a decision reads each instrument's indicators as of the group.
         for (i, e) in events.iter().enumerate() {
@@ -4776,6 +4907,9 @@ struct LoopState {
     remaining: Vec<u32>,
     /// Some strategy owns an `Indicator` the loop feeds when an event is applied.
     natives: bool,
+    /// Some strategy's book fills at the next bar's open: its bars are opened ahead of the
+    /// strategy (see [`open_phase`]).
+    opens: bool,
 }
 
 impl LoopState {
@@ -4823,6 +4957,9 @@ impl LoopState {
                     || t.primary_private.iter().any(|v| !v.is_empty())
                     || t.streams.iter().any(|i| !i.native.is_empty())
             }),
+            opens: strats
+                .iter()
+                .any(|s| core.book(s.sid).is_some_and(|b| b.kernel(0).fills_at_next_open())),
         })
     }
 }
@@ -5371,14 +5508,8 @@ fn refusal(error: CmdError) -> PyErr {
         Some(valid) if !valid.is_empty() => fail.valid(valid),
         _ => fail,
     };
-    let err = PyErr::from(fail);
-    if matches!(&error.valid, Some(valid) if valid.is_empty()) {
-        // An explicit empty list, not the registry's default.
-        Python::attach(|py| {
-            let _ = err.value(py).setattr("valid", Vec::<String>::new());
-        });
-    }
-    err
+    // An empty list of alternatives is the code's rule from the registry, never an empty answer.
+    PyErr::from(fail)
 }
 
 /// The order tag that marks a market order as the strategy's answer to a fill it just heard: it
@@ -6369,7 +6500,11 @@ fn heard(
         _ => None,
     };
     let blind = fill_at.is_some() || sh.matching.get();
-    if fill_at.is_some() {
+    // Under `next_bar_open` only the fills at the open of a bar, heard before the strategy has
+    // seen the bar, can be answered at that open; a fill the bar brings is answered at the next.
+    let at_open = fill_at.is_some()
+        && sh.with_book(st.sid, |b, _| Ok(b.kernel(0).fills_at_next_open())).unwrap_or(false);
+    if fill_at.is_some() && (!at_open || sh.opening.get()) {
         st.queue.bind(py).borrow_mut().answering = fill_at;
     }
     if blind {
@@ -6565,7 +6700,8 @@ fn step_match(
         && fold
         && (any_held || (stash.is_none() && has_intents(py, st)))
     {
-        let input = fold_step(py, st, symbol, local, local_idx, atr)?;
+        let mut input = fold_step(py, st, symbol, local, local_idx, atr)?;
+        input.size_ref = sh.open_intents.borrow_mut().remove(&(sid.index(), local));
         refuse_intents(sh, &input)?;
         check_intent_grid(sh, sid, local, &input)?;
         input

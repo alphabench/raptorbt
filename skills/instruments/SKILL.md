@@ -280,6 +280,7 @@ assert settle(None) == ("Settlement", 5.0)
   segment are [execution](../execution/SKILL.md).
 - Daily and longer bars follow a symbol's schedule; see
   [timeframes](../timeframes/SKILL.md).
+- Runnable examples: `examples/options/nifty_momentum.py`, `examples/options/bear_call_spread.py`.
 
 ## 7. Constraints and correctness
 

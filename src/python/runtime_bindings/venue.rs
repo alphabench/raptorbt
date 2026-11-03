@@ -95,6 +95,9 @@ struct HeldCover {
     sid: usize,
     local: usize,
     position_id: u64,
+    /// The sold legs left bare by closing the hedge, `(local instrument, position id)`: the
+    /// hedge's close waits until none is open.
+    sold: Vec<(usize, u64)>,
 }
 
 /// A protective level the engine watches (`protective="local"`).
@@ -350,6 +353,7 @@ impl VenueRoute {
                  an order made on history: do not trade on warmup bars (warmup_bars= is for \
                  priming indicators), or run on PaperExecution",
             )
+            .param("warmup")
             .into());
         }
         let global = sh.global_of(sid, local)?;
@@ -982,11 +986,48 @@ impl VenueRoute {
         let mut out = Vec::new();
         let mut adapter = self.adapter.borrow_mut();
         let venue = adapter.as_simulation().expect("checked when the route was built");
+        // The shadow book moves a position only on an order: a change it makes on its own is a
+        // fault of the engine, not of the caller's input, so it stops the run as an internal error.
         venue.on_market_event(st.sid.index(), &entry, depth, atr, &mut out).map_err(|e| {
-            PyErr::from(Fail::new("paper_unsolicited_position_change", e.to_string()))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("internal error (paper venue): {e}"))
         })?;
         out.extend(venue.take_same_event());
         Ok(Some(out))
+    }
+
+    /// A simulated venue's turn at the open of a bar, before the strategy has seen it
+    /// (`next_bar_open`): what was decided earlier fills at the open, and the venue reports it.
+    /// [`VenueRoute::poll_step`] carries on with the rest of the bar. `None` when there is
+    /// nothing to report.
+    pub(super) fn poll_open(
+        &self,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        local: usize,
+    ) -> PyResult<Option<VenueReports>> {
+        if !self.simulated {
+            return Ok(None);
+        }
+        let entry = match &*sh.inner.borrow() {
+            Inner::Running(c) => {
+                let cur = c.current().ok_or_else(finished)?;
+                ScheduleEntry {
+                    instrument: local,
+                    local_idx: ev.event.local_idx as usize,
+                    data: cur.data,
+                }
+            }
+            _ => return Err(finished()),
+        };
+        let mut out = Vec::new();
+        let mut adapter = self.adapter.borrow_mut();
+        let venue = adapter.as_simulation().expect("checked when the route was built");
+        venue.on_open(st.sid.index(), &entry, &mut out).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("internal error (paper venue): {e}"))
+        })?;
+        out.extend(venue.take_same_event());
+        Ok((!out.is_empty()).then_some(out))
     }
 
     /// Book what the venue reported for the event now, keeping the events for the hooks:
@@ -1434,7 +1475,10 @@ impl VenueRoute {
                     p.direction == crate::core::types::Direction::Long
                         && position_id.is_none_or(|id| id == p.position_id)
                 })
-                .map(|p| p.position_id))
+                .map(|p| p.position_id)
+                // Only a hedge whose close leaves a sold leg without cover is the engine's to
+                // close; any other level is an ordinary order.
+                .filter(|&id| !b.sold_legs_left_bare(local, id).is_empty()))
         })
     }
 
@@ -1452,7 +1496,8 @@ impl VenueRoute {
         ts: i64,
         follow_up: bool,
     ) -> PyResult<()> {
-        let sold = sh.with_book(sid, |b, _| Ok(b.sold_legs_with(local)))?;
+        let sold = sh.with_book(sid, |b, _| Ok(b.sold_legs_left_bare(local, position_id)))?;
+        let legs: Vec<(usize, u64)> = sold.iter().map(|&(j, id, _)| (j, id)).collect();
         for (j, id, size) in sold {
             if !self.ledger.borrow_mut().cover_sent.insert((sid.index(), j, id)) {
                 continue;
@@ -1470,19 +1515,35 @@ impl VenueRoute {
         let queued =
             self.ledger.borrow().covers.iter().any(|c| (c.sid, c.local, c.position_id) == key);
         if !queued {
-            self.ledger.borrow_mut().covers.push(HeldCover { sid: key.0, local, position_id });
+            self.ledger.borrow_mut().covers.push(HeldCover {
+                sid: key.0,
+                local,
+                position_id,
+                sold: legs,
+            });
         }
-        self.release_covers(sh, sid, idx, ts)
+        self.release_covers(sh, sid, idx, ts, follow_up)
     }
 
-    /// Send the close of every held hedge leg whose group has no sold leg left.
-    fn release_covers(&self, sh: &Shared, sid: StrategyId, idx: usize, ts: i64) -> PyResult<()> {
+    /// Send the close of every held hedge leg whose group has no sold leg left. `follow_up` says
+    /// whether the close meets the bar of the event it answers (the open under `next_bar_open`,
+    /// when the level was touched at it); a close sent after the sold legs' own fills always does.
+    fn release_covers(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        idx: usize,
+        ts: i64,
+        follow_up: bool,
+    ) -> PyResult<()> {
         let held: Vec<HeldCover> =
             self.ledger.borrow().covers.iter().filter(|c| c.sid == sid.index()).cloned().collect();
         for cover in held {
             let (sold_left, open) = sh.with_book(sid, |b, _| {
                 Ok((
-                    !b.sold_legs_with(cover.local).is_empty(),
+                    cover.sold.iter().any(|&(j, id)| {
+                        b.kernel(j).position_snapshots().iter().any(|p| p.position_id == id)
+                    }),
                     b.kernel(cover.local)
                         .position_snapshots()
                         .iter()
@@ -1496,7 +1557,7 @@ impl VenueRoute {
                 (c.sid, c.local, c.position_id) != (cover.sid, cover.local, cover.position_id)
             });
             if open {
-                self.close(sh, sid, cover.local, idx, ts, cover.position_id, true)?;
+                self.close(sh, sid, cover.local, idx, ts, cover.position_id, follow_up)?;
             }
         }
         // A sold leg that has closed no longer waits on its close.
@@ -1520,6 +1581,139 @@ impl VenueRoute {
         Ok(())
     }
 
+    /// Keep each hedge leg's stop and target where its group needs them. A level is the engine's
+    /// while closing the leg would leave a sold leg of its margin group without cover: the venue
+    /// holds no order for it, so a level that trips closes the sold legs left bare first
+    /// ([`VenueRoute::cover_hedge`]). Any other level is an ordinary resting order at the venue.
+    /// What a group needs changes as its legs open and close, so the levels move between the two
+    /// with it: the venue's orders are cancelled and the levels watched when a sold leg comes to
+    /// depend on a hedge, and sent back as orders once none does.
+    fn reconcile_hedge_levels(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        if self.protective_local {
+            return Ok(());
+        }
+        // (local instrument, position id, size, whether a sold leg depends on it)
+        let legs: Vec<(usize, u64, f64, bool)> = sh.with_book(sid, |b, _| {
+            let mut out = Vec::new();
+            for m in 0..b.kernel_count() {
+                let k = b.kernel(m);
+                if !k.engine_holds_levels(crate::core::types::Direction::Long) {
+                    continue;
+                }
+                for p in k.position_snapshots() {
+                    if p.direction == crate::core::types::Direction::Long {
+                        let needed = !b.sold_legs_left_bare(m, p.position_id).is_empty();
+                        out.push((m, p.position_id, p.size, needed));
+                    }
+                }
+            }
+            Ok(out)
+        })?;
+        for (m, position_id, size, needed) in legs {
+            let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(m).is_hedging()))?;
+            let named = if hedging { Some(position_id) } else { None };
+            let watched = self.ledger.borrow().watchers.iter().any(|w| {
+                w.sid == sid.index()
+                    && w.local == m
+                    && w.exit == OrderSide::Sell
+                    && w.position_id == named
+            });
+            if needed && !watched {
+                self.take_levels(sh, sid, m, position_id, size, named, idx)?;
+            } else if !needed && watched {
+                let watch = {
+                    let mut ledger = self.ledger.borrow_mut();
+                    let at = ledger.watchers.iter().position(|w| {
+                        w.sid == sid.index()
+                            && w.local == m
+                            && w.exit == OrderSide::Sell
+                            && w.position_id == named
+                    });
+                    at.map(|at| ledger.watchers.remove(at))
+                };
+                if let Some(w) = watch {
+                    let request = crate::portfolio::kernel::ProtectRequest {
+                        direction: crate::core::types::Direction::Long,
+                        size: w.qty,
+                        entry_price: 0.0,
+                        stop: w.stop,
+                        target: w.target,
+                        trail: None,
+                        position_id,
+                    };
+                    self.protect(sh, sid, m, &request, idx, ts)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The venue's resting stop and target of a hedge leg become the engine's: the orders are
+    /// cancelled and their levels watched.
+    #[allow(clippy::too_many_arguments)]
+    fn take_levels(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        position_id: u64,
+        size: f64,
+        named: Option<u64>,
+        idx: usize,
+    ) -> PyResult<()> {
+        let orders: Vec<(u64, Option<u64>, crate::execution::orders::OrderKind)> =
+            sh.with_book(sid, |b, _| {
+                Ok(b.kernel(local)
+                    .open_orders()
+                    .iter()
+                    .filter(|o| {
+                        o.client_id.starts_with("prot-")
+                            && o.reduce_only
+                            && o.status != OrderStatus::PendingCancel
+                    })
+                    .map(|o| (o.id, o.position_id, o.kind))
+                    .collect())
+            })?;
+        let mut watch = Watch {
+            sid: sid.index(),
+            local,
+            exit: OrderSide::Sell,
+            qty: size,
+            stop: None,
+            target: None,
+            position_id: named,
+        };
+        let mut taken = Vec::new();
+        for (order_id, order_position, kind) in orders {
+            if order_position.is_some_and(|p| p != position_id) {
+                continue;
+            }
+            match kind {
+                crate::execution::orders::OrderKind::StopMarket { trigger } => {
+                    watch.stop = Some(trigger)
+                }
+                crate::execution::orders::OrderKind::Limit { price } => watch.target = Some(price),
+                // A trailing level the engine cannot watch stays with the venue.
+                _ => continue,
+            }
+            taken.push(order_id);
+        }
+        if taken.is_empty() {
+            return Ok(());
+        }
+        for order_id in taken {
+            self.cancel(sh, sid, local, idx, order_id)?;
+        }
+        self.ledger.borrow_mut().watchers.push(watch);
+        Ok(())
+    }
+
     /// Protection for the positions opened, and none for a flat instrument.
     fn after_booking(
         &self,
@@ -1529,7 +1723,8 @@ impl VenueRoute {
         idx: usize,
         ts: i64,
     ) -> PyResult<()> {
-        self.release_covers(sh, sid, idx, ts)?;
+        self.release_covers(sh, sid, idx, ts, true)?;
+        self.reconcile_hedge_levels(sh, sid, idx, ts)?;
         let (requests, flat) = sh.with_book_mut(sid, |b, _| {
             let k = b.kernel_mut(local);
             Ok((k.take_protect_requests(), k.position_snapshots().is_empty()))
@@ -1636,10 +1831,14 @@ impl VenueRoute {
         };
         for (level, kind) in [(r.stop, "stop"), (r.target, "target")] {
             let Some(level) = level else { continue };
-            // The level of a hedge leg is the engine's whatever the venue could hold: it closes the
-            // group's sold legs first, which a resting order at the venue could not.
-            let engine_holds =
-                sh.with_book(sid, |b, _| Ok(b.kernel(local).engine_holds_levels(r.direction)))?;
+            // The level of a hedge leg whose close would leave a sold leg bare is the engine's
+            // whatever the venue could hold: it closes the sold legs left bare first, which a
+            // resting order at the venue could not. Any other level is an ordinary resting order
+            // (`reconcile_hedge_levels` moves the levels as the group changes).
+            let engine_holds = sh.with_book(sid, |b, _| {
+                Ok(b.kernel(local).engine_holds_levels(r.direction)
+                    && !b.sold_legs_left_bare(local, r.position_id).is_empty())
+            })?;
             if self.protective_local || engine_holds {
                 if kind == "stop" {
                     watch.stop = Some(level)
@@ -1816,6 +2015,8 @@ impl VenueRoute {
                 "unsupported_in_venue_run",
                 format!("{venue_id:?} is an order the venue makes itself (an exit rule it holds): it cannot be resent"),
             )
+            .param("client_order_id")
+            .value(venue_id)
             .into());
         }
         let sent = self.adapter.borrow_mut().submit(&placed.request);

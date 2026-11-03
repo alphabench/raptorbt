@@ -1287,6 +1287,35 @@ impl RuntimeCore {
         self.lifecycle_of_current(strategy)
     }
 
+    /// Under `next_bar_open`, meet the open of the current bar for `strategy` before it has seen
+    /// the bar: the lifecycle of the instant (corporate actions, expiries) and then the fills at
+    /// this open of what it decided earlier, as events for its hooks. Empty when the bar is not
+    /// one the strategy's book can open ahead of the strategy (another fill timing, a book in
+    /// an account group, a halt waiting), in which case [`RuntimeCore::apply`] does it all.
+    /// [`RuntimeCore::apply`] carries on from the open, and `begin_event` finds nothing left.
+    pub fn open_event(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
+        let Some(cur) = self.current else { return Ok(Vec::new()) };
+        if self.group_of[strategy.index()].is_some() || !matches!(cur.data, ScheduleData::Bar(_)) {
+            return Ok(Vec::new());
+        }
+        let Some(local) = local_of(&self.slots, &self.strat_insts, strategy, cur.event.instrument)
+        else {
+            return Ok(Vec::new());
+        };
+        let entry = ScheduleEntry {
+            instrument: local,
+            local_idx: cur.event.local_idx as usize,
+            data: cur.data,
+        };
+        if !self.books[strategy.index()].as_ref().is_some_and(|b| b.can_open(&entry)) {
+            return Ok(Vec::new());
+        }
+        let mut events = self.begin_event(strategy)?;
+        let book = self.books[strategy.index()].as_mut().expect("checked above");
+        events.extend(book.open_bar(&entry));
+        Ok(events)
+    }
+
     fn lifecycle_of_current(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
         // The common case, a book with no expiry and no action to apply,
         // costs one flag read per event.

@@ -36,7 +36,10 @@ fn weekday_index(key: &Bound<'_, PyAny>) -> PyResult<usize> {
 }
 
 fn value_err(e: crate::core::RaptorError) -> PyErr {
-    Fail::new("invalid_session_schedule", e.to_string()).op("SessionSchedule").into()
+    Fail::new("invalid_session_schedule", e.to_string())
+        .op("SessionSchedule")
+        .param("windows")
+        .into()
 }
 
 #[pymethods]

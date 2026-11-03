@@ -229,6 +229,7 @@ assert len(result.trades()) == 1                        # the enter() trade, clo
   multiple testing and bootstrap in [optimization](../optimization/SKILL.md).
 - Several accounts or instruments: `PortfolioResult` is in [portfolio](../portfolio/SKILL.md).
 - A run that behaves oddly: [troubleshooting](../troubleshooting/SKILL.md).
+- Runnable examples: `examples/single-instrument/sma_cross.py`.
 
 ## 7. Constraints and correctness
 

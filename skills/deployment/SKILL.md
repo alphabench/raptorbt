@@ -382,6 +382,7 @@ assert preflight() == []
   specs: [instruments](../instruments/SKILL.md). Feeds and timeframes:
   [market-data](../market-data/SKILL.md), [timeframes](../timeframes/SKILL.md).
 - What goes wrong and what it is called: [troubleshooting](../troubleshooting/SKILL.md).
+- Runnable examples: `examples/live-trading/paper_node.py`.
 
 ## 7. Constraints and correctness
 

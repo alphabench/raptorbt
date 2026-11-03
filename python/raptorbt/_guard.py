@@ -1,4 +1,4 @@
-"""Turn the engine's money and fee-schedule faults into their structured errors.
+"""Turn the engine's money and fee-schedule faults into their structured errors, and name the call.
 
 The kernel books amounts as integers. When one cannot be booked (not finite,
 past the range) or a sum would overflow, it stops with a panic whose message
@@ -52,6 +52,11 @@ def _wrap(fn, operation: str):
     def guarded(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except errors.RaptorBTError as exc:
+            # A refusal that names no operation is the wrapped call's.
+            if exc.operation is None:
+                exc.operation = operation
+            raise
         except BaseException as exc:  # PanicException derives from BaseException
             converted = _convert(exc, operation)
             if converted is None:

@@ -848,6 +848,32 @@ impl PortfolioBook {
         events
     }
 
+    /// Whether the open of the bar `entry` carries has something to meet ahead of the strategy
+    /// ([`PortfolioBook::open_bar`]): a bar under `next_bar_open`, on a book of its own account
+    /// with no halt waiting to take effect first, where an intent or a market order waits for
+    /// its open.
+    pub fn can_open(&self, entry: &ScheduleEntry) -> bool {
+        matches!(entry.data, ScheduleData::Bar(_))
+            && self.grouped.is_none()
+            && self.pending_halt.is_none()
+            && self.kernels[entry.instrument].fills_at_next_open()
+            && self.kernels[entry.instrument].has_open_work()
+    }
+
+    /// Under `next_bar_open`, meet the open of the bar `entry` carries before the strategy has
+    /// seen the bar: what was decided on earlier bars fills at this open, and the events of those
+    /// fills are returned for the strategy to hear knowing only what was known at that open. The
+    /// book's own bookkeeping of the bar (the mark, the equity sample, the account's limits)
+    /// stays with [`PortfolioBook::apply`], which carries on from here. Only for an entry
+    /// [`PortfolioBook::can_open`] allows; the lifecycle of the instant has run first
+    /// ([`PortfolioBook::begin_event`]).
+    pub fn open_bar(&mut self, entry: &ScheduleEntry) -> Vec<EngineEvent> {
+        let ScheduleData::Bar(bar) = entry.data else { return Vec::new() };
+        self.lent_step(entry.instrument, entry.timestamp(), |kernel| {
+            kernel.step_open(entry.local_idx, &bar)
+        })
+    }
+
     /// [`PortfolioBook::apply`] for the commonest book: one instrument on a
     /// cash account with no portfolio-wide limit, no option margin groups, no
     /// expiry, no corporate action and no group, fed a bar. Every step the
@@ -1004,8 +1030,9 @@ impl PortfolioBook {
     }
 
     /// The exit of a hedge leg on `instrument` was held back (its stop or target fired, or a
-    /// forced exit reached it): close the sold legs of its margin group first, with reduce-only
-    /// market orders, then the hedge. This sends the sold legs' orders; the hedge's follows once
+    /// forced exit reached it, and closing it alone would leave a sold leg of its margin group
+    /// without cover): close the sold legs left bare first, with reduce-only market orders, then
+    /// the hedge. This sends the sold legs' orders; the hedge's follows once
     /// they are done ([`PortfolioBook::advance_covers`]), so no instant holds a sold option
     /// without its hedge.
     fn start_cover(&mut self, instrument: usize, position_id: u64, ts: Timestamp) {
@@ -1013,7 +1040,7 @@ impl PortfolioBook {
             return;
         }
         let mut sold = Vec::new();
-        for (j, id, size) in self.sold_legs_with(instrument) {
+        for (j, id, size) in self.sold_legs_left_bare(instrument, position_id) {
             if let Some(order) = self.send_cover(j, id, size, ts) {
                 sold.push((j, order));
             }

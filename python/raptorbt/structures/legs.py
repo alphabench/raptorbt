@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from raptorbt.errors import InvalidParameter
+from raptorbt.errors import InvalidParameter, StateError
 
 if TYPE_CHECKING:
     from raptorbt._raptorbt import InstrumentSpec, OptionChain
@@ -280,7 +280,7 @@ def _price(prices: Mapping[str, float], leg: ResolvedLeg) -> float:
     try:
         p = float(prices[leg.instrument])
     except KeyError:
-        raise InvalidParameter(
+        raise StateError(
             f"no price for {leg.instrument}",
             code="structure_missing_mark",
             operation="ResolvedStructure",

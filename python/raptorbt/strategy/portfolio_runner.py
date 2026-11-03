@@ -80,10 +80,8 @@ def run_portfolio_strategy(
     schedule, fills, ``DAY`` expiry, session square-off and the strategy
     clock use ``ctx.bar_close_ts``, while ``ctx.timestamp`` and
     ``ctx.bar.timestamp`` stay the stamps you passed. Composite bars are
-    stamped at their window end, a close time. ``None`` keeps the pre-1.0
-    behaviour (composites built as if stamps were open stamps, event order as
-    if they were close stamps) and emits a ``DeprecationWarning``; it will be
-    required in 1.0.
+    stamped at their window end, a close time. ``bar_stamp`` is required:
+    leaving it out raises ``InvalidParameter`` (``missing_bar_stamp``).
 
     This is :func:`~raptorbt.run_strategies` with one strategy, on the shared
     runtime. ``ctx.series()`` returns read-only views cut at the bars that

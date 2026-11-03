@@ -63,7 +63,7 @@ def test_str_leads_with_legacy_message_then_blocks():
     assert text.splitlines()[0] == "bar_stamp must be one of 'open', 'close', got 'start'"
     assert "Operation:\n    run_strategies" in text
     assert "Requested:\n    bar_stamp = 'start'" in text
-    assert "Supported:\n    'open', 'close', None" in text
+    assert "Supported:\n    'open', 'close'" in text
     assert "Related skill:\n    raptorbt-timeframes" in text
     assert re.search(r"one of 'open'", text)  # legacy match= regexes still hit
 
@@ -177,7 +177,12 @@ ROWS = [
     (
         "bad-bar-stamp",
         lambda: run_strategies([Noop()], {"A": _bars()}, bar_stamp="start"),
-        InvalidParameter, ValueError, "invalid_bar_stamp", "bar_stamp", ["open", "close", None], "timeframes",
+        InvalidParameter, ValueError, "invalid_bar_stamp", "bar_stamp", ["open", "close"], "timeframes",
+    ),
+    (
+        "missing-bar-stamp",
+        lambda: run_strategies([Noop()], {"A": _bars()}),
+        InvalidParameter, ValueError, "missing_bar_stamp", "bar_stamp", ["open", "close"], "timeframes",
     ),
     (
         "bad-account-type",

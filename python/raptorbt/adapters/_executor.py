@@ -12,6 +12,13 @@ from typing import Protocol
 
 
 class Executor(Protocol):
+    """What an adapter needs from whoever runs its broker calls.
+
+    ``bind(pump)`` hands over the adapter's drain function once; ``kick()`` says the outbox has work and
+    must not block on I/O; ``close()`` stops whatever the executor started. ``InlineExecutor``,
+    ``ManualExecutor`` and ``ThreadExecutor`` are the three provided.
+    """
+
     def bind(self, pump: Callable[[], int]) -> None:
         """Called once with the adapter's ``pump``."""
 

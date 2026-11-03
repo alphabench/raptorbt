@@ -64,8 +64,8 @@ Where to look, by what you saw.
 | --- | --- | --- |
 | `non_finite_price` | `InvalidData` | A bar's open, high, low or close is NaN or infinite; the message names the column and first index. Clean the data; a pushed tick or bar with a NaN price is refused the same way and changes nothing. |
 | `decreasing_timestamps` | `InvalidData` | A batch tape goes backwards. A pushed event older than its symbol's latest raises `invalid_parameter` ("timestamps must not decrease"). |
-| `length_mismatch`, `missing_field`, `empty_data`, `invalid_array`, `invalid_input_type`, `no_symbols`, `duplicate_symbols`, `insufficient_data` | `InvalidData` / `InvalidParameter` | The arrays are not the same length, a field is absent, there is nothing to run on, or the argument is not a dict of numeric arrays. See [market-data](../market-data/SKILL.md). |
-| `invalid_bar_stamp`, `missing_bar_ns` | `InvalidParameter` | `bar_stamp` is `"open"`, `"close"` or `None`; `"open"` needs `bar_ns`. Not passing `bar_stamp` at all warns (`bar_stamp not given`); pass it. |
+| `length_mismatch`, `missing_field`, `empty_data`, `invalid_array`, `invalid_input_type`, `no_symbols`, `duplicate_symbols` | `InvalidData` / `InvalidParameter` | The arrays are not the same length, a field is absent, there is nothing to run on, or the argument is not a dict of numeric arrays. See [market-data](../market-data/SKILL.md). |
+| `missing_bar_stamp`, `invalid_bar_stamp`, `missing_bar_ns` | `InvalidParameter` | `bar_stamp` is required and is `"open"` or `"close"`; `"open"` needs `bar_ns`. Any entry that takes bars refuses a missing `bar_stamp`; pass it. |
 | `invalid_fill_timing`, `invalid_oms_type`, `invalid_account_type`, `invalid_leverage`, `invalid_money_decimals`, `invalid_squareoff_time`, `invalid_config`, `invalid_parameter` | `InvalidParameter` | A `BacktestConfig` or run argument is out of range. `valid` lists the alternatives. See [core](../core/SKILL.md). |
 | `fee_schedule_gap`, `invalid_fee_schedule` | `InvalidParameter` | A fee schedule has no row for an instrument's venue and segment, or the instrument has no `venue`, or a fill falls before the schedule's first row (the error names the earliest date; presets start 2023-04-01 for NSE cash and NFO, 2024-10-01 elsewhere) (the run is refused rather than charged nothing; `valid` lists the venues the schedule prices), or a card is malformed. Give the `InstrumentSpec` a `venue`, add the row, or set `fee_segment`. See [backtesting](../backtesting/SKILL.md). |
 | `squareoff_needs_timezone` | `InvalidParameter` | `squareoff_time` is a local time of day and the instrument has no `SessionSchedule` and the config no `session_tz_offset_ns`. Name the zone (`IST_OFFSET_NS`, or `0` for UTC) or attach a schedule. |
@@ -75,6 +75,75 @@ Where to look, by what you saw.
 | `invalid_calendar` | `InvalidParameter` | A document given to `SessionSchedule.from_calendars` is not valid JSON, has no `utc_offset`, names no entry for the venue, has a bad time or date, or uses another zone than the first document. The message names the document. |
 | `money_overflow` | `MoneyOverflow` (an `ArithmeticError`) | A booked amount is not finite or is past the integer range of minor units at `money_decimals`; the run stops instead of wrapping. Lower the amount, or lower `money_decimals`. |
 | `unknown_symbol`, `no_instrument_spec`, `unknown_account` | `UnknownSymbol` / `InvalidParameter` | A name that is not in this run. `valid` lists the names. |
+
+**A call was refused before it ran, by what it was given.** Every row is a
+`RaptorBTError` whose `valid` lists the alternatives or states the rule; the
+state is as it was before the call.
+
+*Strategies, accounts and runs.*
+
+| Code | Class | Cause and fix |
+| --- | --- | --- |
+| `invalid_strategy`, `duplicate_strategy`, `empty_strategies`, `invalid_strategy_entry` | `InvalidParameter` | An entry is not a `Strategy` instance, subclass, `(strategy, symbols)` pair or entry dict; the same instance is listed twice (pass the class, or a new instance each); or the list is empty. See [strategy](../strategy/SKILL.md). |
+| `invalid_accounts`, `invalid_account_spec`, `account_too_large` | `InvalidParameter` | `accounts` is not `dict[str, AccountSpec]`, a spec field is out of range (capital, leverage and limits are positive; percentages at most 100), or more than 500 strategies share one account. See [portfolio](../portfolio/SKILL.md). |
+| `invalid_batch_size`, `invalid_curve_samples`, `invalid_history` | `InvalidParameter` | A count that must be a positive integer (or `None`). |
+| `invalid_bar_ns`, `invalid_bar_spec`, `invalid_bar_step`, `invalid_primary_bars`, `primary_bars_without_ticks` | `InvalidParameter` / `InvalidSubscription` | A bar width is not a positive whole number of nanoseconds, a `(step, unit)` pair is wrong (step at least 1; unit one of the bar units in `valid`), or `primary_bars` was given with no `ticks` to aggregate. See [timeframes](../timeframes/SKILL.md). |
+| `invalid_timeframe`, `invalid_data_type`, `not_subscribed_timeframe`, `not_subscribed_data`, `invalid_indicator_input`, `declaration_outside_run` | `InvalidSubscription` / `InvalidParameter` / `StateError` | `subscribe()` or a `ctx.data` view named a timeframe or data type that is not listed in `valid`, asked for what the strategy never subscribed to, or was called after `on_start`. Subscribe in `on_init` / `on_start`. Indicators read `close` only. See [subscriptions](../subscriptions/SKILL.md). |
+| `portfolio_total_unavailable` | `UnsupportedOperation` | A `ctx.portfolio` total needs the shared runtime: use `run_strategies`, not `run_strategy_backtest`. |
+| `invalid_input` | `InvalidParameter` | An array or number was refused by the computation (an indicator period, a covariance shape); the message names it. |
+| `invalid_parameter`, `invalid_config` | `InvalidParameter` | A value is out of range in the engine's own check; the message names it (a stop or target percent is a fraction in (0, 1], so 5% is `0.05`). |
+| `invalid_direction`, `invalid_combine_mode`, `invalid_allocation`, `invalid_option_type`, `invalid_strike_selection`, `invalid_size_type` | `InvalidParameter` | An enumerated argument is not one of the values in `valid`. See [backtesting](../backtesting/SKILL.md). |
+| `unsupported_short_ticks` | `UnsupportedOperation` | `run_tick_backtest` is long-only: `quantity` is zero or more. Use `run_strategies` with ticks for shorts. |
+| `unsupported_corporate_actions`, `invalid_corporate_action`, `invalid_adjustment_policy` | `UnsupportedOperation` / `InvalidParameter` | Corporate actions went to a runner that cannot apply them (the runners that can are in `valid`), an action has an unknown kind or a bad ratio, amount or pay date, or actions came without `adjustment_policy` (`raw` or `adjusted`). See [execution](../execution/SKILL.md). |
+| `unsupported_on_bars` | `UnsupportedOperation` | `order_latency_ns` and `partial_fills` are tick-path settings; on bars they would change nothing. Run on ticks or leave them off. |
+| `invalid_strategies`, `invalid_instrument_spec`, `instrument_in_use` | `InvalidParameter` / `StateError` | `add_instrument` named strategies the node does not have, or a spec for another symbol; `retire_instrument` met an open position or working order (close and cancel first). |
+| `invalid_exit_rule` | `InvalidParameter` | An `ExitRule` has no condition, a non-positive threshold, or `stop_loss_pct` above 100. |
+| `invalid_expiry_pick`, `invalid_option_right` | `InvalidParameter` | `OptionChain.pick_expiry` or an option's right is not one of the values in `valid`. |
+
+*Market data.*
+
+| Code | Class | Cause and fix |
+| --- | --- | --- |
+| `misaligned_legs` | `InvalidData` | The legs of a basket or pair do not share their timestamps: trade only on bars every leg has. |
+| `depth_without_ticks` | `InvalidData` | `depth` names a symbol with no `ticks`. |
+| `invalid_data` | `InvalidData` | `adjust_history` or a resample was given a field it cannot use; the message and `parameter` name it. |
+| `invalid_adjust`, `no_continuous_bars` | `InvalidParameter` / `InvalidData` | `continuous_series` needs `adjust` of `raw`, `back` or `ratio`, and bars for each contract inside its own window. |
+
+*Orders.*
+
+| Code | Class | Cause and fix |
+| --- | --- | --- |
+| `invalid_order_side`, `invalid_time_in_force`, `invalid_order_kind`, `invalid_offset_kind` | `InvalidOrder` | An order term is not one of the values in `valid`. See [orders](../orders/SKILL.md). |
+| `invalid_order_value`, `missing_order_field`, `incompatible_order_options` | `InvalidOrder` | A price, size, offset or count is out of range; a field the kind needs is missing (`limit_price`, `trigger_price`, `offset`, `expire_ns` for `gtd`); or two options do not go together (`at_open` with a limit, `post_only` with a market). |
+| `invalid_order_link`, `invalid_order_intent`, `invalid_order_tags` | `InvalidOrder` | An OCO or parent link names too few or unknown orders; a bar queued two `enter()` or two `close_position()`; or `tags` is not at most 16 `str` pairs (no `client_id` key). |
+| `invalid_order_reference`, `unknown_order` | `InvalidOrder` | A position id or client id the run does not hold. A submitted order that has finished is a no-op, not this error. |
+| `off_lot_quantity`, `off_tick_price` | `InvalidOrder` | A quantity is not whole lots, or a price not whole ticks; `valid` lists the nearest. Round before submitting. |
+| `bracket_under_hedging` | `InvalidOrder` | A reduce-only child order cannot close a position under `hedging`: attach `stop_price` and `target_price` to the entry, or use `netting`. |
+
+*Instruments, sessions, margin and sizing.*
+
+| Code | Class | Cause and fix |
+| --- | --- | --- |
+| `untradable_instrument` | `UnsupportedOperation` | An index or other untradable kind was given to trade. |
+| `invalid_session_schedule`, `invalid_session_date`, `invalid_instrument_metadata`, `mcx_session_unknown`, `invalid_settlement` | `InvalidParameter` | A schedule window, weekday or date is wrong; a `venue` or `currency` is empty; an MCX contract of no known class has no `session=`; a settlement style or price is not in `valid`. See [instruments](../instruments/SKILL.md). |
+| `invalid_roll_sizing`, `roll_price_missing` | `InvalidParameter` / `StateError` | `roll_sizing` is `notional` or `lots`; a notional roll needs the new contract to have a bar before the roll (feed one, or size by lots). |
+| `invalid_margin_model` | `InvalidParameter` | A margin model name, rule or leg does not fit, or a `margin_model` was given to a cash account. See [risk](../risk/SKILL.md). |
+| `invalid_structure`, `structure_contract_missing`, `structure_missing_mark` | `InvalidParameter` / `StateError` | A leg, selector or submission argument is invalid; the chain lists no contract the leg selects at the event time; or a price or mark a structure needs was not supplied (`prices` or `marks`). |
+| `structure_limit_breached`, `structure_margin_exceeded` | `InvalidParameter` | The legs' prices make the net premium worse than `net_limit`; the margin model needs more than `available`. Nothing was queued. |
+| `below_one_lot`, `invalid_sizing_input` | `InvalidParameter` | A sizing rule yields under one lot (nothing is rounded up), or an input is not a positive finite number. |
+| `unknown_role_binding`, `unknown_role`, `no_requirements`, `unresolved_role`, `no_instrument_spec` | `InvalidParameter` / `UnknownSymbol` | A `bindings` key or `ctx.role` name no strategy declares, a strategy with no `requirements`, a role the data cannot resolve at this time, or a symbol with no `InstrumentSpec`. |
+
+*Live node, journal and venue, not listed above.*
+
+| Code | Class | What happened and what to do |
+| --- | --- | --- |
+| `adoption_refused`, `invalid_initial_positions` | `InvalidParameter` | A seeded position does not fit the account (a short or a posted margin on a cash account, a cost basis on a margin one) or names a strategy or symbol the node lacks. |
+| `history_exhausted` | `StateError` | The history ring is full of rows a strategy asked to keep, or a depth row was overwritten. Raise `history`, or keep fewer rows. |
+| `group_open`, `group_timestamp_mismatch`, `duplicate_bar`, `conflicting_bar` | `StateError` | A timestamp group is open (`flush()` it first), a bar was pushed into a group at another time, or a bar was pushed again (identical: a retry, refused; different: a delivered bar is not revised). |
+| `stale_epoch`, `epoch_required`, `fence_unsupported` | `StateError` / `InvalidParameter` | `restore()` needs an `epoch` newer than the journal's; an `epoch` was given with an adapter whose `can_fence` is not true. |
+| `adapter_cannot_adopt`, `adapter_namespace_missing`, `adapter_namespace_mismatch`, `hedging_unsupported_by_venue` | `StateError` / `InvalidParameter` | The adapter cannot account for the orders the node holds (`restore_orders` or `keeps_own_records`), has no `namespace`, is not the namespace the journal was written for, or nets positions under a hedging node. |
+| `exit_rule_unconfirmed`, `exit_rule_not_cancellable`, `exit_close_failed` | `StateError` | The venue did not say what it holds for an exit rule (ask it: reconcile), cannot take a held rule back, or refused the closes of a rule the allowed number of times. |
+| `roll_close_failed`, `roll_open_failed` | `StateError` | An auto-roll's close or open ended without filling: the position is still in the old contract (close failed) or in neither (open failed). Override `on_roll_failed` to handle it. |
 
 **An order was rejected** (`order_rejected`, `event.reject_reason`).
 
@@ -116,7 +185,6 @@ can. See [execution](../execution/SKILL.md).
 | `order_check_intent` | `InvalidOrder` | `enter()` or `close_position()` with an `order_check` installed. Use `submit_order`. |
 | `invalid_order_refusal`, `invalid_order_check` | `InvalidParameter` | The check returned something other than `None`, a code (1 to 64 bytes) or an object with a `str` `code`; or more than 1024 distinct codes; or it is not callable. An exception the check raises propagates and stops the run. |
 | `unsupported_in_venue_run`, `venue_requires_units` | `UnsupportedOperation` / `InvalidOrder` | The request has no equivalent on a venue (for example an order made on warm-up history against a real venue), or its size could not be resolved to units. |
-| `paper_unsolicited_position_change` | `StateError` | The simulated venue changed a position with no order behind it (stops, targets or the square-off configured on the position itself). |
 | `invalid_initial_positions`, `invalid_warmup`, `invalid_execution`, `invalid_adjustment_policy`, `invalid_corporate_action`, `unknown_role_binding`, `roll_target_not_subscribed` | `InvalidParameter` / `InvalidSubscription` | A node argument does not fit: see [live-trading](../live-trading/SKILL.md). |
 
 **A requirements check or resolution found a problem** (these are `Issue`
@@ -424,8 +492,8 @@ except ValueError as e:
     assert "invalid" in str(e).lower(), "the message says 'is not finite'; e.code says non_finite_price"
 ```
 
-- Not passing `bar_stamp`: bars are stamped by an implicit convention and the
-  run warns. State it (`"open"` or `"close"`).
+- Not passing `bar_stamp`: it is required (`missing_bar_stamp`). State it
+  (`"open"` or `"close"`).
 - Keying a venue report by the strategy's id (`"O-0"`) instead of the request's
   `client_order_id` (`"s0-0"`): `unknown_client_order_id`.
 - Treating `order_rejected` as an error to catch. It is an event: read

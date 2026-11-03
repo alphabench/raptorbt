@@ -60,9 +60,9 @@ class TickStrategyStream:
     ``bar_stamp`` / ``bar_ns`` say what the timestamps of warmup and pushed
     *bars* mean, as in :func:`raptorbt.run_portfolio_strategy`: ``"close"``,
     or ``"open"`` with ``bar_ns`` (the bar width in ns, or a ``{symbol: ns}``
-    dict covering every symbol). Ticks are instants and ignore both. Leaving
-    ``bar_stamp`` unset while supplying bars keeps the pre-1.0 behaviour and
-    emits a ``DeprecationWarning``.
+    dict covering every symbol). Ticks are instants and ignore both. Supplying
+    bars (warmup or pushed) without ``bar_stamp`` raises ``InvalidParameter``
+    (``missing_bar_stamp``); a stream that takes only ticks needs neither.
 
     Everything else — account type, leverage, risk limits, OMS type —
     behaves as in :func:`raptorbt.run_tick_strategy`.

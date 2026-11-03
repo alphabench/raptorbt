@@ -507,6 +507,7 @@ assert [t.exit_reason for t in paper] == ["Order", "EndOfData"]
 - What a host must provide and decide before it relies on any of this:
   [deployment](../deployment/SKILL.md). Errors by symptom:
   [troubleshooting](../troubleshooting/SKILL.md).
+- Runnable examples: `examples/live-trading/paper_node.py`, `examples/tick-level/passive_quotes.py`.
 
 ## 7. Constraints and correctness
 
@@ -545,8 +546,8 @@ does not reject what it has traded).
 
 **Refused when the node is built:** ATR-based stops on a live node,
 `liquidate_on_margin_call`, and shared account groups with a venue. Position
-stops, targets and the square-off are venue-managed; a paper run that changes a
-position without an order raises `paper_unsolicited_position_change`.
+stops, targets and the square-off are venue-managed; the shadow book
+never changes a position without an order.
 
 - `quantity` in an `OrderRequest` is always units. A mapping to a venue that
   counts lots converts at its edge.

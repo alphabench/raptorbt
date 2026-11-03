@@ -79,9 +79,8 @@ def run_strategy_backtest(
     strategy clock and ``ctx.datetime`` use ``ctx.bar_close_ts``, while
     ``ctx.timestamp`` and ``ctx.bar.timestamp`` stay the stamps you passed.
     Composite bars (``subscribe_bars``) are stamped at their window end, a
-    close time. ``None`` keeps the pre-1.0 behaviour (composites built as if
-    stamps were open stamps, event order as if they were close stamps) and
-    emits a ``DeprecationWarning``; it will be required in 1.0.
+    close time. ``bar_stamp`` is required: leaving it out raises
+    ``InvalidParameter`` (``missing_bar_stamp``).
 
     ``corporate_actions`` (:class:`~raptorbt.CorporateAction` for ``symbol``)
     are the splits, bonuses and cash dividends of the run; they need
@@ -91,7 +90,7 @@ def run_strategy_backtest(
     one-instrument book, so they apply exactly as in ``run_strategies``.
 
     Raises:
-        ValueError: on an invalid ``bar_stamp``, on ``bar_stamp="open"``
+        ValueError: on a missing or invalid ``bar_stamp``, on ``bar_stamp="open"``
             without a positive ``bar_ns``, on inconsistent array lengths, on decreasing
             timestamps (equal timestamps are allowed), on conflicting same-bar
             intents (enter and close while in position), or on duplicate

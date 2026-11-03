@@ -170,13 +170,16 @@ impl PyPortfolioSession {
     #[new]
     #[pyo3(signature = (config=None, account_type="cash", leverage=1.0))]
     fn new(config: Option<&PyBacktestConfig>, account_type: &str, leverage: f64) -> PyResult<Self> {
-        let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
-        let account = parse_account_mode(account_type, leverage)?;
-        super::strategy_bindings::check_margin_model(&rust_config, account)?;
-        let session = super::errors::guard_money("KernelSession", || {
-            EventSession::with_account(rust_config.clone(), account)
-        })?;
-        Ok(Self { session: Some(session), config: rust_config })
+        (|| -> PyResult<Self> {
+            let rust_config: BacktestConfig = config.map(BacktestConfig::from).unwrap_or_default();
+            let account = parse_account_mode(account_type, leverage)?;
+            super::strategy_bindings::check_margin_model(&rust_config, account)?;
+            let session = super::errors::guard_money("KernelSession", || {
+                EventSession::with_account(rust_config.clone(), account)
+            })?;
+            Ok(Self { session: Some(session), config: rust_config })
+        })()
+        .map_err(|e| super::errors::with_op(e, "PortfolioSession"))
     }
 
     /// Register an instrument; returns its index for routing.

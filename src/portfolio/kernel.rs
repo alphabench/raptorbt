@@ -274,6 +274,10 @@ pub struct StepInput {
     /// what the account has free. How a book gives each entry its share of a
     /// pool (see `strategies::portfolio::CapitalAllocation`); `None` is all of it.
     pub budget: Option<f64>,
+    /// The close an entry decided on this step is sized against under `NextBarOpen`; `None` is
+    /// this bar's close. A decision made before the bar was seen (a hook that heard a fill at its
+    /// open) names the previous bar's.
+    pub size_ref: Option<Price>,
 }
 
 /// Signal intents carried from one bar to the next under
@@ -493,6 +497,11 @@ pub struct EngineKernel {
     /// bar's open (a fill away from the open price, an expiry, a cancel). A follow-up answering
     /// such an event must not be priced at that bar's open (see [`Order::follow_up`]).
     pub(crate) off_open_at: Option<i64>,
+    /// The bar whose open [`EngineKernel::step_open`] has met and [`EngineKernel::step`] has not
+    /// yet finished, with what the open swept for the step to carry on from.
+    opened_at: Option<i64>,
+    open_swept: Vec<u64>,
+    open_held_before: Vec<u64>,
     /// Exits of a hedge leg the engine holds back, for the book to carry out as orders, sold legs
     /// first (see [`EngineKernel::take_held_triggers`]).
     pub(crate) held_triggers: Vec<HeldTrigger>,
@@ -623,6 +632,9 @@ impl EngineKernel {
             group_context: None,
             hedge_pending: false,
             off_open_at: None,
+            opened_at: None,
+            open_swept: Vec::new(),
+            open_held_before: Vec::new(),
             held_triggers: Vec::new(),
             entry_budget: None,
             spec: None,
@@ -1795,6 +1807,9 @@ impl EngineKernel {
             }
         }
         let events = self.step_events(idx, bar, input, mode);
+        if mode == StepMode::Bar {
+            self.opened_at = None;
+        }
         if self.limits.is_active() || self.risk.is_killed() || self.risk.daily_active() {
             return with_risk_events(events);
         }
@@ -1809,12 +1824,15 @@ impl EngineKernel {
         mode: StepMode,
     ) -> Vec<EngineEvent> {
         self.stepping_trade = mode == StepMode::Trade;
+        // The open of this bar was already met (`step_open`): the fills at its open are done and
+        // the step goes on from there.
+        let opened = mode == StepMode::Bar && self.opened_at == Some(bar.timestamp);
         // A fill on this step is priced on the fee row in force on its date.
         self.fee_model.set_time(bar.timestamp);
         // Carried for order-path opens, which have no StepInput of their own.
         self.last_atr = input.atr;
         self.last_close = Some(bar.close);
-        if mode == StepMode::Bar {
+        if mode == StepMode::Bar && !opened {
             self.prev_bar_ts = self.last_step.map(|(_, b)| b.timestamp);
             self.last_step = Some((idx, *bar));
         }
@@ -1846,98 +1864,8 @@ impl EngineKernel {
         // order below; the entry then participates in this bar's own
         // stop/target checks, since a position opened at the open lives
         // through the rest of the bar.
-        if mode == StepMode::Bar {
-            if let Some(intent) = self.deferred.take() {
-                if intent.exit {
-                    let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-                    for position_id in open_ids {
-                        let direction = match self.ledger.get(position_id) {
-                            Some(managed) => managed.position.direction,
-                            None => continue,
-                        };
-                        let price = self.fill_price_for(bar, direction, false);
-                        if let Some(event) =
-                            self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
-                        {
-                            events.push(event);
-                        }
-                    }
-                }
-                for position_id in intent.closes {
-                    let Some(managed) = self.ledger.get(position_id) else {
-                        continue; // already closed by a stop, target or exit
-                    };
-                    let price = self.fill_price_for(bar, managed.position.direction, false);
-                    if let Some(event) =
-                        self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
-                    {
-                        events.push(event);
-                    }
-                }
-                if let Some(reason) = intent.flatten {
-                    let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-                    for position_id in open_ids {
-                        let Some(managed) = self.ledger.get(position_id) else { continue };
-                        let price = self.fill_price_for(bar, managed.position.direction, false);
-                        if let Some(event) =
-                            self.close_at(idx, bar, position_id, price, reason, false)
-                        {
-                            events.push(event);
-                        }
-                    }
-                }
-                if let Some(entry) = intent.entry {
-                    // Gates run at fill time, against the state the fill bar
-                    // actually sees; a refusal surfaces on this bar. No early
-                    // return: a refused deferred entry must not skip the rest
-                    // of the bar.
-                    if !self.ledger.is_in_position() {
-                        let active = self
-                            .spec
-                            .as_ref()
-                            .and_then(|s| s.activation_ns)
-                            .is_none_or(|act| bar.timestamp >= act);
-                        if !active {
-                            self.risk.record_rejection();
-                            events.push(EngineEvent::EntryRejected {
-                                idx,
-                                reason: RejectReason::Inactive,
-                            });
-                        } else if let Some(reason) = self.session_refusal(gate.data_open) {
-                            self.risk.record_rejection();
-                            events.push(EngineEvent::EntryRejected { idx, reason });
-                        } else if self.margin.is_halted() {
-                            self.risk.record_rejection();
-                            events.push(EngineEvent::EntryRejected {
-                                idx,
-                                reason: RejectReason::MarginCall,
-                            });
-                        } else {
-                            match self.risk.check_entry(self.gating_open_count()) {
-                                Ok(()) => {
-                                    let entry_input = StepInput {
-                                        entry: true,
-                                        atr: entry.atr,
-                                        size_mult: entry.size_mult,
-                                        units: entry.units,
-                                        stop_price_override: entry.stop_price_override,
-                                        target_price_override: entry.target_price_override,
-                                        ..StepInput::default()
-                                    };
-                                    self.sizing_ref = entry.size_ref;
-                                    if let Some(event) = self.try_enter(idx, bar, entry_input) {
-                                        events.push(event);
-                                    }
-                                }
-                                Err(reason) => {
-                                    self.risk.record_rejection();
-                                    events.push(EngineEvent::EntryRejected { idx, reason });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if mode == StepMode::Bar && !opened {
+            self.fill_deferred(idx, bar, gate.data_open, &mut events);
         }
 
         // Track running extremes for trailing stops.
@@ -2080,7 +2008,7 @@ impl EngineKernel {
                 atr: input.atr,
                 stop_price_override: input.stop_price_override,
                 target_price_override: input.target_price_override,
-                size_ref: Some(bar.close),
+                size_ref: input.size_ref.or(Some(bar.close)),
             });
         } else if !self.ledger.is_in_position() && input.entry {
             // Not-yet-active instruments refuse entries the same way expired
@@ -2137,12 +2065,7 @@ impl EngineKernel {
         // ordinal is unrelated to this one's), never lands on a print with
         // exactly its ordinal. Requiring equality left such orders working
         // forever, unfilled and unacknowledged.
-        let is_plain_market = |o: &&crate::execution::orders::Order| {
-            matches!(o.kind, OrderKind::Market)
-                && o.parent_id.is_none()
-                && !o.is_venue_driven()
-                && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
-        };
+        let is_plain_market = is_plain_market_order;
         if defer_signals {
             // Acknowledge this bar's new market orders now; their fill
             // arrives on the next bar step.
@@ -2205,12 +2128,177 @@ impl EngineKernel {
                 );
             }
         }
+        let (swept, held_before) = if opened {
+            (std::mem::take(&mut self.open_swept), std::mem::take(&mut self.open_held_before))
+        } else {
+            self.sweep_market(idx, bar, gate.data_open, mode, defer_signals, &mut events)
+        };
+
+        // Entry-bar protection (`next_bar_open`): an entry filled at this
+        // bar's open lives through the rest of the bar, so its protective
+        // levels trade against this bar too — as the working legs of a real
+        // venue would, whichever way they were attached (the position's own
+        // stop and target, a typed order's `stop_price`/`target_price`, or a
+        // bracket's child orders). Without this, a stop set on the entry bar
+        // was honoured or skipped depending on the API that set it.
+        if defer_signals && mode == StepMode::Bar && !swept.is_empty() {
+            let opened: Vec<u64> = self
+                .ledger
+                .positions()
+                .iter()
+                .map(|p| p.id)
+                .filter(|id| !held_before.contains(id))
+                .collect();
+            // The entry was at this bar's open, so the whole bar is part of the
+            // position's life: its range counts toward the excursions, as it
+            // does for a signal entry filled at the top of the step.
+            if !opened.is_empty() {
+                self.ledger.update_price(bar.high, bar.low);
+            }
+            for position_id in opened {
+                if let Some(event) = self.try_exit_position(idx, bar, position_id, false, true) {
+                    events.push(event);
+                }
+            }
+            let children: Vec<u64> = self
+                .orders
+                .working()
+                .filter(|o| o.parent_id.is_some_and(|p| swept.contains(&p)))
+                .filter(|o| o.status == OrderStatus::Accepted)
+                .map(|o| o.id)
+                .collect();
+            if !children.is_empty() {
+                let outcomes =
+                    self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &children);
+                for outcome in outcomes {
+                    self.apply_match_outcome(idx, bar, outcome, &mut events);
+                }
+            }
+        }
+
+        events
+    }
+
+    /// Fill the intents the previous bar's signals stashed (`NextBarOpen`) at this bar's open:
+    /// exits, then the entry, which then lives through the rest of the bar.
+    fn fill_deferred(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        data_open: bool,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        if let Some(intent) = self.deferred.take() {
+            if intent.exit {
+                let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+                for position_id in open_ids {
+                    let direction = match self.ledger.get(position_id) {
+                        Some(managed) => managed.position.direction,
+                        None => continue,
+                    };
+                    let price = self.fill_price_for(bar, direction, false);
+                    if let Some(event) =
+                        self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
+                    {
+                        events.push(event);
+                    }
+                }
+            }
+            for position_id in intent.closes {
+                let Some(managed) = self.ledger.get(position_id) else {
+                    continue; // already closed by a stop, target or exit
+                };
+                let price = self.fill_price_for(bar, managed.position.direction, false);
+                if let Some(event) =
+                    self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
+                {
+                    events.push(event);
+                }
+            }
+            if let Some(reason) = intent.flatten {
+                let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+                for position_id in open_ids {
+                    let Some(managed) = self.ledger.get(position_id) else { continue };
+                    let price = self.fill_price_for(bar, managed.position.direction, false);
+                    if let Some(event) = self.close_at(idx, bar, position_id, price, reason, false)
+                    {
+                        events.push(event);
+                    }
+                }
+            }
+            if let Some(entry) = intent.entry {
+                // Gates run at fill time, against the state the fill bar
+                // actually sees; a refusal surfaces on this bar. No early
+                // return: a refused deferred entry must not skip the rest
+                // of the bar.
+                if !self.ledger.is_in_position() {
+                    let active = self
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.activation_ns)
+                        .is_none_or(|act| bar.timestamp >= act);
+                    if !active {
+                        self.risk.record_rejection();
+                        events.push(EngineEvent::EntryRejected {
+                            idx,
+                            reason: RejectReason::Inactive,
+                        });
+                    } else if let Some(reason) = self.session_refusal(data_open) {
+                        self.risk.record_rejection();
+                        events.push(EngineEvent::EntryRejected { idx, reason });
+                    } else if self.margin.is_halted() {
+                        self.risk.record_rejection();
+                        events.push(EngineEvent::EntryRejected {
+                            idx,
+                            reason: RejectReason::MarginCall,
+                        });
+                    } else {
+                        match self.risk.check_entry(self.gating_open_count()) {
+                            Ok(()) => {
+                                let entry_input = StepInput {
+                                    entry: true,
+                                    atr: entry.atr,
+                                    size_mult: entry.size_mult,
+                                    units: entry.units,
+                                    stop_price_override: entry.stop_price_override,
+                                    target_price_override: entry.target_price_override,
+                                    ..StepInput::default()
+                                };
+                                self.sizing_ref = entry.size_ref;
+                                if let Some(event) = self.try_enter(idx, bar, entry_input) {
+                                    events.push(event);
+                                }
+                            }
+                            Err(reason) => {
+                                self.risk.record_rejection();
+                                events.push(EngineEvent::EntryRejected { idx, reason });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The market sweep of a bar: every plain market order decided on an earlier bar fills at the
+    /// configured fill-price model (the next open, under `NextBarOpen`). Returns the orders it
+    /// swept and the positions held before it, for the entry-bar protection that follows.
+    fn sweep_market(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        data_open: bool,
+        mode: StepMode,
+        defer_signals: bool,
+        events: &mut Vec<EngineEvent>,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let is_plain_market = is_plain_market_order;
         let market_ids: Vec<u64> = self
             .orders
             .working()
             .filter(is_plain_market)
             // Nothing sweeps while the session is closed; the order waits.
-            .filter(|_| gate.data_open)
+            .filter(|_| data_open)
             .filter(|o| match (defer_signals, mode) {
                 // The timestamp test is what keeps an order routed here from
                 // another instrument's event off a bar that closed at or before
@@ -2258,52 +2346,50 @@ impl EngineKernel {
                 idx,
                 bar,
                 MatchOutcome::Fill { order_id: id, price: f64::NAN },
-                &mut events,
+                events,
             );
         }
+        (swept, held_before)
+    }
 
-        // Entry-bar protection (`next_bar_open`): an entry filled at this
-        // bar's open lives through the rest of the bar, so its protective
-        // levels trade against this bar too — as the working legs of a real
-        // venue would, whichever way they were attached (the position's own
-        // stop and target, a typed order's `stop_price`/`target_price`, or a
-        // bracket's child orders). Without this, a stop set on the entry bar
-        // was honoured or skipped depending on the API that set it.
-        if defer_signals && mode == StepMode::Bar && !swept.is_empty() {
-            let opened: Vec<u64> = self
-                .ledger
-                .positions()
-                .iter()
-                .map(|p| p.id)
-                .filter(|id| !held_before.contains(id))
-                .collect();
-            // The entry was at this bar's open, so the whole bar is part of the
-            // position's life: its range counts toward the excursions, as it
-            // does for a signal entry filled at the top of the step.
-            if !opened.is_empty() {
-                self.ledger.update_price(bar.high, bar.low);
-            }
-            for position_id in opened {
-                if let Some(event) = self.try_exit_position(idx, bar, position_id, false, true) {
-                    events.push(event);
-                }
-            }
-            let children: Vec<u64> = self
-                .orders
-                .working()
-                .filter(|o| o.parent_id.is_some_and(|p| swept.contains(&p)))
-                .filter(|o| o.status == OrderStatus::Accepted)
-                .map(|o| o.id)
-                .collect();
-            if !children.is_empty() {
-                let outcomes =
-                    self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &children);
-                for outcome in outcomes {
-                    self.apply_match_outcome(idx, bar, outcome, &mut events);
-                }
+    /// Whether there is anything for [`EngineKernel::step_open`] to meet: an intent the previous
+    /// bar stashed or a market order waiting for its open.
+    pub(crate) fn has_open_work(&self) -> bool {
+        self.deferred.is_some() || self.orders.working().any(|o| is_plain_market_order(&o))
+    }
+
+    /// Meet the open of a bar before the strategy has seen the bar (`NextBarOpen`): the intents
+    /// the previous bar stashed and the market orders decided on earlier bars fill at this
+    /// bar's open, and what they produced is returned for the strategy to hear while it knows
+    /// only what was known at that open. The rest of the bar (stops, targets, resting orders,
+    /// this bar's decisions) is [`EngineKernel::step`], which carries on from here. Returns
+    /// nothing, and the bar is left whole for `step`, when the fill timing is another one or
+    /// the bar ends the contract.
+    pub(crate) fn step_open(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
+        if self.fill_timing != FillTiming::NextBarOpen
+            || self.spec.as_ref().is_some_and(|s| s.is_expired_at(bar.timestamp))
+        {
+            return Vec::new();
+        }
+        self.entry_budget = None;
+        if self.risk.daily_active() {
+            if let Some(day) = self.risk_day(bar.timestamp) {
+                self.risk.roll_day(day);
             }
         }
-
+        self.stepping_trade = false;
+        self.fee_model.set_time(bar.timestamp);
+        self.prev_bar_ts = self.last_step.map(|(_, b)| b.timestamp);
+        self.last_step = Some((idx, *bar));
+        self.opened_at = Some(bar.timestamp);
+        let mut events = std::mem::take(&mut self.pending_events);
+        // The session gate keeps state (the square-off is due once): it is read by `step`.
+        let data_open = self.schedule().is_none_or(|s| s.is_open(bar.timestamp.saturating_sub(1)));
+        self.fill_deferred(idx, bar, data_open, &mut events);
+        let (swept, held_before) =
+            self.sweep_market(idx, bar, data_open, StepMode::Bar, true, &mut events);
+        self.open_swept = swept;
+        self.open_held_before = held_before;
         events
     }
 
@@ -2398,9 +2484,13 @@ impl EngineKernel {
         let reason = exit_reason?;
         if matches!(reason, ExitReason::StopLoss | ExitReason::TakeProfit)
             && self.engine_holds_levels(direction)
+            && self
+                .close_leaves_unmarginable(position_id, self.ledger.get(position_id)?.position.size)
         {
-            // The level of a hedge leg is the engine's, in every mode: it closes the group's sold
-            // legs first and then this one with ordinary orders, never this leg alone.
+            // The level of a hedge leg whose close would leave a sold leg of the group without
+            // its cover is the engine's, in every mode: it closes the sold legs left bare first
+            // and then this one with ordinary orders, never this leg alone. Any other level is an
+            // ordinary resting order and fills at its price.
             self.held_triggers.push(HeldTrigger { position_id, reason });
             self.set_stop_price_for(position_id, None);
             self.set_target_price_for(position_id, None);
@@ -2413,9 +2503,10 @@ impl EngineKernel {
         self.close_at(idx, bar, position_id, exit_price, reason, reason == ExitReason::TakeProfit)
     }
 
-    /// Whether a stop or target of a position held `direction` here is the engine's to carry
-    /// out: a bought option of a margin group, a leg that may hedge a sold one. Never sent to a
-    /// venue as a resting order.
+    /// Whether a position held `direction` here is a leg that may hedge a sold one: a bought
+    /// option of a margin group. Its stop or target is the engine's to carry out only when
+    /// closing it would leave a sold leg without its cover
+    /// ([`EngineKernel::close_leaves_unmarginable`]); otherwise it is an ordinary resting order.
     pub fn engine_holds_levels(&self, direction: Direction) -> bool {
         direction == Direction::Long
             && self.option_group_key().is_some()
@@ -3510,3 +3601,11 @@ mod partial_tests;
 #[cfg(test)]
 #[path = "kernel_venue_tests.rs"]
 mod venue_tests;
+
+/// A market order the matcher sweeps on its own: no parent, no venue, no auction time-in-force.
+fn is_plain_market_order(o: &&crate::execution::orders::Order) -> bool {
+    matches!(o.kind, OrderKind::Market)
+        && o.parent_id.is_none()
+        && !o.is_venue_driven()
+        && !matches!(o.tif, TimeInForce::AtOpen | TimeInForce::AtClose)
+}

@@ -209,8 +209,9 @@ that remain are all about what a venue can say:
 
 The shadow book may never change a position without an order. Its stops,
 targets, schedules and square-off are venue-managed like the strategy's book
-(the runtime sends the orders); a position it still changes on its own raises
-`paper_unsolicited_position_change`. A contract's end is not an order's doing
+(the runtime sends the orders); a position it still changes on its own would be
+a fault of the engine, not of the caller's input, and stops the run with an
+internal `RuntimeError`. A contract's end is not an order's doing
 but the instrument's declared terms: a position settled at expiry, delivered
 against or assigned is settled alike by the strategy's book and the shadow's
 copy, from the same events, and is not a change without an order.
