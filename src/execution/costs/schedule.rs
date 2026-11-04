@@ -401,7 +401,10 @@ const UNVERIFIED_MCX: &str = "MCX/F&A/631/2024 (2024-09-24) as reported (futures
      lakh, options Rs 41.80 per lakh of premium); circular text not confirmed; IPFT not \
      published and not charged";
 
-const AGRI: [&str; 6] = ["CASTORSEED", "COTTONCNDY", "CPO", "KAPAS", "MENTHAOIL", "RUBBER"];
+/// The key of the MCX agricultural fee row. Which contracts it covers is not listed here: a
+/// contract is agricultural when [`crate::core::session_schedule::mcx_class`], the table that
+/// picks its session, says so, so a name has one class for its hours and its charges.
+pub const MCX_AGRI: &str = "class:AGRI";
 
 /// The sell-side transaction tax of a row dated `date`, from `[until 2024-10-01, until
 /// 2026-04-01, from 2026-04-01]`.
@@ -676,20 +679,18 @@ fn statutory() -> Vec<Stat> {
             ..Cr::NONE
         },
     });
-    for underlying in AGRI {
-        push(Stat {
-            venue: "MCX",
-            segment: Futures,
-            underlying: Some(underlying),
-            settlement: false,
-            from: START,
-            until: None,
-            base: FeeBase::Turnover,
-            status: RowStatus::Unverified,
-            source: UNVERIFIED_MCX,
-            cr: Cr { exchange: 210.0, sebi: 1.0, stamp_buy: 200.0, ..Cr::NONE },
-        });
-    }
+    push(Stat {
+        venue: "MCX",
+        segment: Futures,
+        underlying: Some(MCX_AGRI),
+        settlement: false,
+        from: START,
+        until: None,
+        base: FeeBase::Turnover,
+        status: RowStatus::Unverified,
+        source: UNVERIFIED_MCX,
+        cr: Cr { exchange: 210.0, sebi: 1.0, stamp_buy: 200.0, ..Cr::NONE },
+    });
     push(Stat {
         venue: "MCX",
         segment: Options,

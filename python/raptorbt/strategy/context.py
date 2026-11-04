@@ -9,6 +9,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from raptorbt.strategy.orders.types import check_term
+
 
 class Bar(NamedTuple):
     """The bar currently being processed."""
@@ -69,10 +71,12 @@ class _Positions:
 class StrategyContext:
     """Read/act surface a strategy sees inside its hooks.
 
-    Data access contract: the full OHLCV arrays are exposed for indicator
-    precomputation in ``on_start``, but decision logic inside ``on_bar`` must
-    only read values at ``idx`` or earlier. Indexing past ``idx`` reads the
-    future and invalidates the backtest.
+    Data access contract: in ``on_start`` the OHLCV arrays hold the whole run, for indicator
+    precomputation. In a bar hook (``on_bar`` and the others) ``open``, ``high``, ``low``,
+    ``close``, ``volume`` and ``timestamps`` end at the current bar, so ``ctx.close[-1]`` is this
+    bar's close and ``ctx.close[ctx.idx + 1]`` raises ``IndexError``: the future cannot be read by
+    mistake. (The guard is a view, not a copy; it stops accidents, not a deliberate read of
+    ``.base``.)
     """
 
     def __init__(
@@ -87,18 +91,34 @@ class StrategyContext:
         close_timestamps: np.ndarray | None = None,
     ) -> None:
         self._session = session
-        #: The caller's own bar stamps, exactly as passed in.
-        self.timestamps = timestamps
-        #: Bar close times, the engine's clock. Equal to ``timestamps`` unless
-        #: the run declared ``bar_stamp="open"``.
-        self.close_timestamps = timestamps if close_timestamps is None else close_timestamps
-        self.open = open_
-        self.high = high
-        self.low = low
-        self.close = close
-        self.volume = volume
+        self._w_timestamps = timestamps
+        self._w_close_timestamps = timestamps if close_timestamps is None else close_timestamps
+        self._w_open = open_
+        self._w_high = high
+        self._w_low = low
+        self._w_close = close
+        self._w_volume = volume
+        #: How many bars of the arrays are visible: the whole run in ``on_start``, up to and
+        #: including the current bar once a bar is being processed.
+        self._end = len(close)
         #: Index of the bar currently being processed.
         self.idx: int = 0
+
+    def _advance(self, i: int) -> None:
+        """Make bar ``i`` the current one: the arrays now end at it."""
+        self.idx = i
+        self._end = i + 1
+
+    #: The caller's own bar stamps, exactly as passed in.
+    timestamps = property(lambda s: s._w_timestamps[: s._end])
+    #: Bar close times, the engine's clock. Equal to ``timestamps`` unless the run declared
+    #: ``bar_stamp="open"``.
+    close_timestamps = property(lambda s: s._w_close_timestamps[: s._end])
+    open = property(lambda s: s._w_open[: s._end])
+    high = property(lambda s: s._w_high[: s._end])
+    low = property(lambda s: s._w_low[: s._end])
+    close = property(lambda s: s._w_close[: s._end])
+    volume = property(lambda s: s._w_volume[: s._end])
 
     # -- current bar -------------------------------------------------------
 
@@ -151,7 +171,7 @@ class StrategyContext:
     @property
     def n_bars(self) -> int:
         """Total number of bars in the run."""
-        return len(self.close)
+        return len(self._w_close)
 
     # -- portfolio state ---------------------------------------------------
 
@@ -228,6 +248,7 @@ class StrategyContext:
         No-op when flat. Called from ``on_bar``, the new stop is already
         checked against the current bar's range.
         """
+        check_term("stop_price", price)
         self._session.set_stop_price(price)
 
     def set_target_price(self, price: float | None) -> None:
@@ -236,6 +257,7 @@ class StrategyContext:
         No-op when flat. Called from ``on_bar``, the new target is already
         checked against the current bar's range.
         """
+        check_term("target_price", price)
         self._session.set_target_price(price)
 
 

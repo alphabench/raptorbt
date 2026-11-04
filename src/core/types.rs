@@ -774,7 +774,9 @@ impl BacktestConfig {
         symbol: &str,
         spec: Option<&crate::instruments::InstrumentSpec>,
     ) -> std::result::Result<(), MarketSettingError> {
-        if let Some(b) = self.fee_binding.as_ref().filter(|b| b.fixed.is_none()) {
+        // A reference (an index) takes no orders, so no fee row is chosen for it.
+        let reference = spec.is_some_and(|s| !s.kind.tradable());
+        if let Some(b) = self.fee_binding.as_ref().filter(|b| b.fixed.is_none() && !reference) {
             let refuse = |message: String| {
                 let mut venues: Vec<String> =
                     b.schedule.rows.iter().map(|r| r.venue.clone()).collect();

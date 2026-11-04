@@ -460,6 +460,9 @@ impl ExecutionAdapter for PaperVenue {
         if req.position_id.is_some() {
             shadow.book.kernel_mut(instrument).set_order_position(order_id, req.position_id);
         }
+        if req.tags.get("client_id").is_some_and(|c| c.starts_with("enter-")) {
+            shadow.book.kernel_mut(instrument).set_order_entry_intent(order_id);
+        }
         self.now_ns = self.now_ns.max(req.submitted_ns);
         if req.size_frac.is_some() {
             self.quantity.insert(req.client_order_id.clone(), req.quantity);

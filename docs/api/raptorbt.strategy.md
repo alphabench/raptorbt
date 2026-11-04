@@ -24,7 +24,11 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`Instrument`](#instrument) | class | A fixed symbol the strategy always uses (a hedge, a benchmark). |
 | [`InstrumentPlan`](#instrumentplan) | class | What a host does to a running :class:`~raptorbt.LiveNode` so its symbols cover what the strategies' roles mean now. |
 | [`Issue`](#issue) | class | One thing wrong with a declaration. ``code`` is stable; ``path`` says where (``roles.options.strikes``); ``message`` is for people. |
-| [`Legs`](#legs) | class | The largest structure the strategy may hold at once: ``n`` legs of up to ``lots`` lots each. A host sizes margin and capital from it. |
+| [`LegContracts`](#legcontracts) | class | The contracts one declared leg can mean at a time. An ``offset`` leg is one contract; a ``delta`` leg is any contract of its right within ``window`` strikes of the money (the run picks the one nearest the delta), so ``symbols`` are the candidates to subscribe to and to margin (the host takes the dearest). ``quantity`` is the leg's units, ``lots`` times the lot size of the first contract; ``sign`` is +1 for a buy and -1 for a sell, the sign margin models read. |
+| [`LegPlan`](#legplan) | class | :func:`resolve_legs`: the contracts of every declared leg at ``now_ns``. ``symbols`` is all of them, without repeats. ``issues`` lists what could not be resolved; a plan with issues is partial. |
+| [`Legs`](#legs) | class | The shape of the structure the strategy holds: one :class:`OptionLeg` per leg of the largest structure it may hold at once, written ``Legs(OptionLeg(...), OptionLeg(...))``. |
+| [`MaxPosition`](#maxposition) | class | The largest position a strategy takes in one role, so a host can estimate the capital without asking: ``lots`` (per instrument the role resolves to: per contract of a chain, per member of a universe), ``notional`` (currency; per such instrument) and/or ``fraction`` of the capital (``0 < fraction <= 1``; per such instrument). At least one is given; when more are, the position is bounded by each. |
+| [`OptionLeg`](#optionleg) | class | One option leg of the structure the strategy holds, as data: ``side`` (``buy`` or ``sell``), ``right`` (``call`` or ``put``), ``lots``, the strike and the expiry. |
 | [`ParamSchema`](#paramschema) | class | The typed parameters of a ``StrategyConfig`` subclass. |
 | [`ParamSpec`](#paramspec) | class | ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = False, min: 'float \| None' = None, max: 'float \| None' = None, choices: 'tuple[Any, ...] \| None' = None, nullable: 'bool' = False, description: 'str \| None' = None) |
 | [`Requirements`](#requirements) | class | Everything a deployer must know about a strategy before it runs. |
@@ -33,12 +37,14 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`StrikeWindow`](#strikewindow) | class | The strikes a chain may use, as listed-strike offsets from the one at the money: ``low`` to ``high`` inclusive (``StrikeWindow(-2, 6)``; ``StrikeWindow.around(4)`` is -4..4). |
 | [`SymbolPlan`](#symbolplan) | class | The concrete symbols of every role at ``now_ns``. ``symbols`` is all of them, in role order without repeats. ``issues`` lists what could not be resolved; a plan with issues is partial. |
 | [`Underlying`](#underlying) | class | An instrument the deployer binds to a symbol (a share, ETF, index, ...). |
+| [`Universe`](#universe) | class | A basket: a role that holds ``min`` to ``max`` instruments of one asset class, chosen by the deployer (one strategy over a list, such as a top-N momentum book). ``data`` is what each member needs (a subset of the manifest's ``data``). A host binds it to a list of symbols (``bindings={"basket": ["A", "B"]}``); the strategy reads the list with ``ctx.role("basket")``. |
 | [`check_requirements`](#check_requirements) | function | Validate a Strategy class's declaration; an empty list means it is consistent. |
 | [`param`](#param) | function | A ``StrategyConfig`` field with bounds or choices, read by :func:`params_schema`:: |
 | [`params_schema`](#params_schema) | function | The parameters of a ``StrategyConfig`` subclass, from its dataclass fields: the annotation gives the type (``int``, ``float``, ``str``, ``bool``, ``Literal[...]``, each optionally ``\| None``), the default gives the default, and :func:`param` gives bounds, choices and a description. Raises :class:`RequirementsError` for a field it cannot describe (an unsupported type, a mutable or factory default, a bad bound). |
 | [`plan_instruments`](#plan_instruments) | function | Which instruments to add to and retire from a running node at ``now_ns`` (default: the node's clock), so every strategy that declares ``requirements`` trades the symbols its roles resolve to. Pure: it reads the node (its strategies, symbols, specs, bindings and last prices) and changes nothing; the host applies the plan. |
 | [`requirements_hash`](#requirements_hash) | function | The fingerprint of a declaration under this raptorbt version: the SHA-256 (hex) of the canonical JSON (sorted keys, no whitespace) of ``{"raptorbt": <version>, "requirements": <to_dict()>}``. Equal declarations hash equal whatever order roles, timeframes or data were written in. A platform stores it and refuses a run when the engine or the declaration differs. ``strategy`` is a Strategy class or a ``Requirements``. |
 | [`resolve`](#resolve) | function | Which concrete symbols each role means at ``now_ns``, so a host and a backtest resolve roles the same way. Never raises for data it lacks: that is an entry in ``issues`` and the role resolves to nothing. |
+| [`resolve_legs`](#resolve_legs) | function | The contracts the declared ``max_structure`` legs can mean at ``now_ns``, so a host can subscribe to them and margin the structure without running the strategy. Roles resolve as in :func:`resolve`; never raises for data it lacks (an ``Issue``, and that leg is left out). |
 | [`AccountSpec`](#accountspec) | class | One account that several strategies share; see :mod:`raptorbt.strategy.accounts`. |
 | [`ExitEvents`](#exitevents) | class | Mix into a strategy (before ``Strategy``) to have the engine evaluate its exit rules on every price it sees, after the strategy's own hook has run:: |
 | [`ExitHandle`](#exithandle) | class | The handle ``set_exit`` returns. Read it; do not mutate it. |
@@ -445,21 +451,71 @@ One thing wrong with a declaration. ``code`` is stable; ``path`` says where
 | --- | --- |
 | `to_dict(self) -> 'dict[str, str]'` | *No docstring.* |
 
+### `LegContracts`
+
+*class*
+
+```python
+class LegContracts
+LegContracts(index: 'int', leg: 'OptionLeg', symbols: 'tuple[str, ...]', specs: 'tuple[Any, ...]', quantity: 'float', expiry_ns: 'int') -> None
+```
+
+The contracts one declared leg can mean at a time. An ``offset`` leg is one contract;
+a ``delta`` leg is any contract of its right within ``window`` strikes of the money (the run
+picks the one nearest the delta), so ``symbols`` are the candidates to subscribe to and to
+margin (the host takes the dearest). ``quantity`` is the leg's units, ``lots`` times the
+lot size of the first contract; ``sign`` is +1 for a buy and -1 for a sell, the sign margin
+models read.
+
+| Member | What it is |
+| --- | --- |
+| `sign` | *No docstring.* |
+
+### `LegPlan`
+
+*class*
+
+```python
+class LegPlan
+LegPlan(now_ns: 'int', legs: 'tuple[LegContracts, ...]', symbols: 'tuple[str, ...]', issues: 'tuple[Issue, ...]' = ()) -> None
+```
+
+:func:`resolve_legs`: the contracts of every declared leg at ``now_ns``. ``symbols`` is all
+of them, without repeats. ``issues`` lists what could not be resolved; a plan with issues is
+partial.
+
+| Member | What it is |
+| --- | --- |
+| `issues` | *No docstring.* |
+| `lines(self, prices: 'Mapping[str, float]') -> 'list[tuple[Any, float, float]]'` | ``(spec, signed units, price)`` of the first candidate of each leg, the argument of ``MarginModel.required_legs``. A delta leg's other candidates are ``LegContracts.specs``; margin each when the dearest matters. |
+| `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
+
 ### `Legs`
 
 *class*
 
 ```python
 class Legs
-Legs(n: 'int', lots: 'int' = 1) -> None
+Legs(*legs: 'OptionLeg', **old: 'Any') -> 'None'
 ```
 
-The largest structure the strategy may hold at once: ``n`` legs of up to ``lots`` lots
-each. A host sizes margin and capital from it.
+The shape of the structure the strategy holds: one :class:`OptionLeg` per leg of the
+largest structure it may hold at once, written ``Legs(OptionLeg(...), OptionLeg(...))``.
+
+It is enough for a host to margin the structure (:meth:`structure` builds a
+:class:`~raptorbt.structures.Structure`, whose ``resolve(...).margin(model, prices)`` is the
+group margin of a ``MarginModel``) and to list the contracts to subscribe to
+(:func:`resolve_legs`).
+
+``Legs(4, lots=2)``, the earlier count-only form, is refused (``legs_need_shape``): a count
+cannot say which side or strike, so it cannot be margined. Declare the legs, and the largest
+position with ``Requirements(max_position=...)``.
 
 | Member | What it is |
 | --- | --- |
-| `lots` | *No docstring.* |
+| `from_dict(d: 'Mapping[str, Any]') -> 'Legs'` | *No docstring.* |
+| `legs` | *No docstring.* |
+| `structure(self, chain: 'str | None' = None, *, vol: 'float | None' = None, name: 'str' = 'manifest')` | The legs on one chain role as a :class:`~raptorbt.structures.Structure`, one lot of the structure per leg ``lots``. ``chain`` selects the legs of that role (default: all); a ``delta`` leg needs ``vol``, the flat volatility the delta is priced at. Resolve it against an option chain and margin it:: |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
 
 ### `LiveNode`
@@ -468,7 +524,7 @@ each. A host sizes margin and capital from it.
 
 ```python
 class LiveNode
-LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, bindings: 'dict[str, str] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
+LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
 ```
 
 Many strategies over the symbols of one pushed feed.
@@ -581,8 +637,9 @@ action the node will see; without a policy there must be none.
 :func:`~raptorbt.run_strategies` takes: every typed order passes it before
 the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
 
-``bindings`` maps a requirements role name to the symbol it means; with
-``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
+``bindings`` maps a requirements role name to the symbol it means, or, for a
+:class:`~raptorbt.strategy.requirements.Universe` role, to the list of symbols chosen for it;
+with ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
 ``ctx.option_chain`` answer from, identically to
 :func:`~raptorbt.run_strategies` (see :mod:`raptorbt.strategy.context_host`).
 
@@ -628,7 +685,7 @@ there.
 | `annotate(self, ts: 'int', kind: 'str', detail=None) -> 'None'` | Write a note of your own into the journal at event time ``ts`` (an adoption, an unattributed fill, an operator command): record kind ``annotation``, payload ``{"kind", "detail"}``. Refused without a journal. |
 | `apply_plan(self, plan) -> 'None'` | Apply a :func:`~raptorbt.strategy.requirements.plan_instruments` plan: retire what it says to retire, then add what it says to add, each as its own journaled step. Stops at the first refusal; what was applied stays applied. |
 | `begin_group(self, timestamp: 'int | None' = None) -> 'None'` | Open a timestamp group: the pushes that follow are held and delivered together, as a batch run delivers the events that share a timestamp. |
-| `bindings` | The role bindings the node was built with. A copy. |
+| `bindings` | The role bindings the node was built with (a Universe role's symbols as a tuple). A copy. |
 | `checkpoint(self, include_log: 'bool' = True) -> 'bytes'` | A versioned snapshot to rebuild this node from: the journal head, a digest of the state to check the rebuild against, each strategy's ``state()``, the epoch and (``include_log``) every journal record since the journal's ``seq_base``. Taken between pushes. See :meth:`restore`. |
 | `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. |
 | `epoch` | *No docstring.* |
@@ -638,7 +695,7 @@ there.
 | `flush(self) -> 'None'` | Close the open timestamp group and deliver what it holds. With none open, nothing happens. |
 | `halt(self, strategy_index: 'int', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt one strategy from outside it, like ``ctx.halt``: its new entries are refused with ``killed``, its working orders are cancelled and, with ``flatten=True``, its positions are closed at the last prices seen. ``is_halted`` reads True at once; the cancels and closes happen when that strategy's next event is applied. |
 | `halt_account(self, account: 'str', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt every strategy on ``account`` from outside, as ``halt`` halts one: their new entries are refused with ``killed``, their working orders are cancelled and, with ``flatten=True``, their positions are closed at the last prices seen. Each strategy's cancels and closes happen when its next event is applied. The account's ``halted_at`` is the number of events applied to its strategies so far. Strategies not on the account are untouched. |
-| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, and the orders with no confirmed outcome. |
+| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
 | `heartbeat(self) -> 'dict'` | Check the execution epoch with the adapter now and return :meth:`health`. Raises ``fenced`` when a newer epoch owns the account. Call it on a timer; the node also checks before every request. |
 | `holders_of(self, symbol: 'str') -> 'tuple[int, ...]'` | The strategy indices that traded ``symbol`` when it was last added or revived. |
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
@@ -691,6 +748,58 @@ Attributes:
 | `size_frac` | *No docstring.* |
 | `stop_price` | *No docstring.* |
 | `target_price` | *No docstring.* |
+
+### `MaxPosition`
+
+*class*
+
+```python
+class MaxPosition
+MaxPosition(lots: 'int | None' = None, notional: 'float | None' = None, fraction: 'float | None' = None) -> None
+```
+
+The largest position a strategy takes in one role, so a host can estimate the capital
+without asking: ``lots`` (per instrument the role resolves to: per contract of a chain, per
+member of a universe), ``notional`` (currency; per such instrument) and/or ``fraction`` of
+the capital (``0 < fraction <= 1``; per such instrument). At least one is given; when more
+are, the position is bounded by each.
+
+| Member | What it is |
+| --- | --- |
+| `fraction` | *No docstring.* |
+| `from_dict(d: 'Mapping[str, Any]') -> 'MaxPosition'` | *No docstring.* |
+| `lots` | *No docstring.* |
+| `notional` | *No docstring.* |
+| `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
+
+### `OptionLeg`
+
+*class*
+
+```python
+class OptionLeg
+OptionLeg(*, side: 'str', right: 'str', expiry: 'Expiry', lots: 'int' = 1, offset: 'int | None' = None, delta: 'float | None' = None, window: 'int | None' = None, chain: 'str | None' = None) -> None
+```
+
+One option leg of the structure the strategy holds, as data: ``side`` (``buy`` or
+``sell``), ``right`` (``call`` or ``put``), ``lots``, the strike and the expiry.
+
+The strike is ``offset`` (listed strikes from the money strike, up positive; ``0`` is at the
+money) or ``delta`` (an absolute delta target in (0, 1); a call's delta is positive, a put's
+negative). A ``delta`` leg also gives ``window``: the most listed strikes from the money its
+strike may be, which bounds the contracts a host subscribes to. ``expiry`` picks the expiry
+(:class:`~raptorbt.structures.Expiry`). ``chain`` names the :class:`Chain` role the leg is on;
+it may be left out when the strategy declares exactly one chain.
+
+| Member | What it is |
+| --- | --- |
+| `chain` | *No docstring.* |
+| `delta` | *No docstring.* |
+| `from_dict(d: 'Mapping[str, Any]') -> 'OptionLeg'` | *No docstring.* |
+| `lots` | *No docstring.* |
+| `offset` | *No docstring.* |
+| `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
+| `window` | *No docstring.* |
 
 ### `OrderProposal`
 
@@ -786,7 +895,7 @@ stops, or mark equity. The next trade print does all three.
 
 ```python
 class Requirements
-Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None) -> None
+Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None, max_position: 'Mapping[str, MaxPosition] | None' = None) -> None
 ```
 
 Everything a deployer must know about a strategy before it runs.
@@ -794,8 +903,10 @@ Everything a deployer must know about a strategy before it runs.
 ``roles`` maps a role name to a role kind; ``timeframes`` lists every bar series the
 strategy reads (strings of ``raptorbt.strategy.api.TIMEFRAMES``, or ``Timeframe``); ``data``
 is a subset of ``bar, trade, quote, book`` (the ``data_type`` of ``Strategy.subscribe``);
-``warmup`` is :class:`Bars` or :class:`Duration`; ``max_structure`` is :class:`Legs`;
-``params`` is a ``StrategyConfig`` subclass or a :class:`ParamSchema`.
+``warmup`` is :class:`Bars` or :class:`Duration`; ``max_structure`` is :class:`Legs`, the
+option legs of the structure the strategy holds; ``max_position`` maps a role name to a
+:class:`MaxPosition`, the largest position the strategy takes in it; ``params`` is a
+``StrategyConfig`` subclass or a :class:`ParamSchema`.
 
 Construction validates each part on its own; :meth:`issues` checks them against each other.
 
@@ -806,6 +917,7 @@ Construction validates each part on its own; :meth:`issues` checks them against 
 | `from_dict(d: 'Mapping[str, Any]') -> 'Requirements'` | The inverse of :meth:`to_dict`. ``params`` comes back as a :class:`ParamSchema`. |
 | `holding` | *No docstring.* |
 | `issues(self) -> 'list[Issue]'` | The declaration checked against itself: role references, role cycles, a chain on a chain, warm-up and timeframes. |
+| `max_position` | *No docstring.* |
 | `max_structure` | *No docstring.* |
 | `params` | *No docstring.* |
 | `timeframes` | *No docstring.* |
@@ -1197,6 +1309,30 @@ An instrument the deployer binds to a symbol (a share, ETF, index, ...).
 | `refs(self) -> 'tuple[str, ...]'` | *No docstring.* |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
 
+### `Universe`
+
+*class*
+
+```python
+class Universe
+Universe(asset: 'str' = 'equity', min: 'int' = 1, max: 'int' = 1, data: 'tuple[str, ...]' = ('bar',)) -> None
+```
+
+A basket: a role that holds ``min`` to ``max`` instruments of one asset class, chosen by
+the deployer (one strategy over a list, such as a top-N momentum book). ``data`` is what each
+member needs (a subset of the manifest's ``data``). A host binds it to a list of symbols
+(``bindings={"basket": ["A", "B"]}``); the strategy reads the list with ``ctx.role("basket")``.
+
+| Member | What it is |
+| --- | --- |
+| `asset` | *No docstring.* |
+| `data` | *No docstring.* |
+| `kind` | *No docstring.* |
+| `max` | *No docstring.* |
+| `min` | *No docstring.* |
+| `refs(self) -> 'tuple[str, ...]'` | *No docstring.* |
+| `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
+
 ### `check_requirements`
 
 *function*
@@ -1210,8 +1346,9 @@ Validate a Strategy class's declaration; an empty list means it is consistent.
 Always checks that ``requirements`` is a :class:`Requirements`, that it is consistent
 with itself (:meth:`Requirements.issues`) and that its parameters describe. With
 ``dry_run`` it also runs the strategy briefly on a synthetic tape built from the
-declaration (every role bound to a synthetic symbol, a synthetic option universe for each
-chain, default config) and reports any subscription outside it: an instrument no role
+declaration (every role bound to a synthetic symbol, so ``ctx.role`` answers for each of them,
+a universe to a few synthetic ones, a synthetic option universe for each chain, default
+config) and reports any subscription outside it: an instrument no role
 declares (``undeclared_instrument``), a timeframe not in ``timeframes``
 (``undeclared_timeframe``) or a data type not in ``data`` (``undeclared_data``). A
 strategy that raises in the dry run is reported as ``dry_run_failed`` (it may need
@@ -1313,14 +1450,16 @@ differs. ``strategy`` is a Strategy class or a ``Requirements``.
 *function*
 
 ```python
-resolve(requirements: 'Requirements', *, now_ns: 'int', bindings: 'Mapping[str, str] | None' = None, specs: 'Iterable[Any]' = (), prices: 'Mapping[str, float] | None' = None, vols: 'Mapping[str, float] | None' = None, chain: 'Any' = None) -> 'SymbolPlan'
+resolve(requirements: 'Requirements', *, now_ns: 'int', bindings: 'Mapping[str, str | Sequence[str]] | None' = None, specs: 'Iterable[Any]' = (), prices: 'Mapping[str, float] | None' = None, vols: 'Mapping[str, float] | None' = None, chain: 'Any' = None) -> 'SymbolPlan'
 ```
 
 Which concrete symbols each role means at ``now_ns``, so a host and a backtest resolve
 roles the same way. Never raises for data it lacks: that is an entry in ``issues`` and the
 role resolves to nothing.
 
-- ``bindings`` maps each :class:`Underlying` role to its symbol.
+- ``bindings`` maps each :class:`Underlying` role to its symbol and each :class:`Universe`
+  role to its list of symbols (``unbound_role`` if missing, ``invalid_binding`` for the wrong
+  shape, ``universe_size`` for a count outside the role's min..max).
 - ``specs`` are the listed ``InstrumentSpec`` (futures and options); ``chain`` is an
   ``OptionChain`` already built from them (otherwise one is built from ``specs``).
 - ``prices`` maps an underlying symbol to its last price (the at-the-money reference);
@@ -1330,6 +1469,22 @@ A :class:`Future` takes the unexpired futures contracts of its base symbol, orde
 expiry: ``front`` is the first, ``next`` the second, ``continuous`` the first with the
 second in ``detail["roll_to"]``. A :class:`Chain` on a Future is of that future's resolved
 symbol. :class:`StrikeWindow` offsets index the strikes listed for the expiry.
+
+### `resolve_legs`
+
+*function*
+
+```python
+resolve_legs(requirements: 'Requirements', *, now_ns: 'int', bindings: 'Mapping[str, str | Sequence[str]] | None' = None, specs: 'Iterable[Any]' = (), prices: 'Mapping[str, float] | None' = None, chain: 'Any' = None) -> 'LegPlan'
+```
+
+The contracts the declared ``max_structure`` legs can mean at ``now_ns``, so a host can
+subscribe to them and margin the structure without running the strategy. Roles resolve as in
+:func:`resolve`; never raises for data it lacks (an ``Issue``, and that leg is left out).
+
+An ``offset`` leg is the contract that many listed strikes from the money strike (the strike
+nearest ``prices[underlying]``, the lower on a tie) at the leg's expiry. A ``delta`` leg is
+every contract of its right within ``window`` strikes of the money.
 
 ### `run_portfolio_strategy`
 
@@ -1382,7 +1537,7 @@ own future.
 *function*
 
 ```python
-run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, bindings: 'dict[str, str] | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
+run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, trade_from: 'int | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
 ```
 
 Run many strategies over shared market data.
@@ -1490,9 +1645,20 @@ holder at the ex-date; a short pays it. See ``docs/architecture/lifecycle.md``.
 backtest and live; see :mod:`raptorbt.strategy.order_check`.
 
 ``bindings`` maps a requirements role name to the symbol it means
-(``{"index": "NSE:NIFTY"}``); with ``instruments=`` it is what
-``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer from, as on a
-:class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+(``{"index": "NSE:NIFTY"}``), or, for a :class:`~raptorbt.strategy.requirements.Universe`
+role, to the list of symbols chosen for it (``{"basket": ["A", "B", "C"]}``); with
+``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer
+from, as on a :class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+
+``trade_from`` (ns since the epoch, an event time) is the first moment the strategies may
+trade. The bars before it are run in full, so the strategies' hooks and indicators warm up on
+them, but every order decided at an event before it is refused with the reason ``warmup``:
+a typed order is recorded as rejected (the strategy hears ``on_order_rejected`` with
+``reject_reason == "warmup"``), an ``enter()`` intent is a refused entry, and the refusal is
+journaled and counted like any other. Orders decided at ``trade_from`` or later are not
+affected. ``None`` (the default) trades from the first bar. A host that wants the history
+without the trades uses this instead of an ``order_check`` that also refuses ``enter()``
+and ``close_position()``.
 
 ``keep_curves=False`` drops the equity, drawdown and returns curves from
 the results (the final equity value stays as a one-element curve); trades,

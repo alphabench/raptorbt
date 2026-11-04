@@ -127,6 +127,7 @@ Hooks a mapping implements: ``translate``, ``check_modify``, ``place``,
 | `cancel(self, client_order_id: 'str') -> 'None'` | *No docstring.* |
 | `cancel_exit_rule(self, request: 'Any') -> 'None'` | Take back an exit rule :meth:`place_exit_rule` accepted (``request`` is the one that was placed). Return when the venue no longer holds it; raise ``Unsupported`` when it cannot be taken back, and the engine will not report the rule cancelled. |
 | `cancel_remote(self, rec: '_Rec') -> 'None'` | *No docstring.* |
+| `catch_up(self) -> 'list[QueuedReport]'` | Read the venue's order book (and its trades, for ``fill_source="trades"``) now and return the reports of everything the node has not heard: a fill, a cancel or a rejection that happened while no node was listening. Blocking: call it from the node's thread before it compares itself with the venue (``LiveNode.reconcile`` does). |
 | `check_modify(self, rec: '_Rec', quantity: 'float | None', limit_price: 'float | None', trigger_price: 'float | None') -> 'None'` | Pure: raise ``Unsupported`` if the broker cannot make this change. |
 | `close(self) -> 'None'` | *No docstring.* |
 | `connection_lost(self, reason: 'str' = '') -> 'None'` | *No docstring.* |
@@ -147,6 +148,7 @@ Hooks a mapping implements: ``translate``, ``check_modify``, ``place``,
 | `handle_payload(self, payload: 'Any', *, arrival_ns: 'int | None' = None, authenticated: 'bool' = False) -> 'None'` | A raw feed message (postback, websocket frame already decoded). |
 | `handle_trade(self, *, exec_id: 'str', qty: 'float', price: 'float', venue_order_id: 'str | None' = None, client_order_id: 'str | None' = None, fee: 'float' = 0.0, ts_ns: 'int' = 0, arrival_ns: 'int | None' = None, wire: 'bool' = False) -> 'None'` | A real execution with the venue's own id (for ``fill_source="trades"``). |
 | `handle_update(self, u: 'OrderStatusUpdate', *, arrival_ns: 'int | None' = None) -> 'None'` | Fold one order row into reports. Safe to repeat and to reorder. |
+| `health(self) -> 'dict[str, Any]'` | What a supervisor needs to know the adapter is working: whether the outbox is paused (an expired token), how many jobs wait, how many raised an unexpected error and the last few, and the executor's own state (a thread that died is ``alive: False``). |
 | `import_state(self, state: 'dict[str, Any]') -> 'None'` | Load ``export_state()`` into a fresh adapter. Unsent jobs are queued again and run. |
 | `instrument(self, symbol: 'str') -> 'Instrument'` | *No docstring.* |
 | `know_symbols(self, symbols: 'Iterable[str]') -> 'None'` | Learn which broker key is which of ``symbols`` (a node calls this when it is built), so a position or row the broker reports under its own key is read as the engine's symbol even when no order has been sent yet. A symbol the mapping does not know is skipped here and refused when an order for it is sent. |
@@ -198,7 +200,8 @@ What an adapter needs from whoever runs its broker calls.
 
 ``bind(pump)`` hands over the adapter's drain function once; ``kick()`` says the outbox has work and
 must not block on I/O; ``close()`` stops whatever the executor started. ``InlineExecutor``,
-``ManualExecutor`` and ``ThreadExecutor`` are the three provided.
+``ManualExecutor`` and ``ThreadExecutor`` are the three provided. An executor that runs a
+thread may also have ``health()``, a dict the adapter's ``health()`` carries.
 
 | Member | What it is |
 | --- | --- |
@@ -420,6 +423,7 @@ node's thread.
 | --- | --- |
 | `bind(self, pump: 'Callable[[], int]') -> 'None'` | *No docstring.* |
 | `close(self) -> 'None'` | *No docstring.* |
+| `health(self) -> 'dict[str, Any]'` | Whether the worker is running and what, if anything, made a drain fail. |
 | `kick(self) -> 'None'` | *No docstring.* |
 
 ### `TokenBucket`

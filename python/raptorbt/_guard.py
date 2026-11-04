@@ -21,7 +21,7 @@ import functools
 import inspect
 import re
 
-from raptorbt import errors
+from raptorbt import crash_report, errors
 
 _FAULT = re.compile(r"money_overflow:\s*(.*)", re.S)
 _GAP = re.compile(r"fee_schedule_gap:\s*(.*)", re.S)
@@ -60,6 +60,11 @@ def _wrap(fn, operation: str):
         except BaseException as exc:  # PanicException derives from BaseException
             converted = _convert(exc, operation)
             if converted is None:
+                # An engine panic that is not a structured fault. Opt-in and a no-op unless the
+                # user enabled crash reporting; it never raises. Only a PanicException: anything
+                # else is the caller's own code.
+                if type(exc).__name__ == "PanicException":
+                    crash_report.report_panic(operation, exc)
                 raise
             raise converted from None
 

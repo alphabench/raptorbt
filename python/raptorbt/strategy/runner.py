@@ -241,7 +241,7 @@ def run_strategy_backtest(
         driver = KernelDriver(session, strategy, ctx, mask, atr_values)
 
     for i in range(n):
-        ctx.idx = i
+        ctx._advance(i)
 
         # Clock first: scheduled times precede the bar revealing them.
         for time_event in strategy.clock._advance(int(visible[i])):

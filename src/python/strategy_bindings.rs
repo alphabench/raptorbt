@@ -1002,6 +1002,18 @@ pub(crate) fn check_grid(
     })
 }
 
+/// An order price or level must be a finite number above zero: a NaN compares false against every
+/// bound, and a level of zero or less would exit the position at once.
+fn finite_positive(name: &'static str, value: f64) -> PyResult<()> {
+    if value.is_finite() && value > 0.0 {
+        return Ok(());
+    }
+    Err(Fail::new("invalid_order_value", format!("{name} must be a finite number > 0"))
+        .param(name)
+        .value(value)
+        .into())
+}
+
 /// Parse Python order arguments. `price_increment` is the instrument's tick
 /// size (`0.0` without one), which a trailing offset in ticks needs.
 #[allow(clippy::too_many_arguments)]
@@ -1036,14 +1048,14 @@ pub(crate) fn parse_order(
                 .param("units, size_frac")
                 .into())
         }
-        (Some(u), None) if u <= 0.0 => {
-            return Err(Fail::new("invalid_order_value", "units must be > 0")
+        (Some(u), None) if !(u.is_finite() && u > 0.0) => {
+            return Err(Fail::new("invalid_order_value", "units must be a finite number > 0")
                 .param("units")
                 .value(u)
                 .into())
         }
         (Some(u), None) => QtySpec::Units(u),
-        (None, Some(f)) if f <= 0.0 || f > 1.0 => {
+        (None, Some(f)) if !(f > 0.0 && f <= 1.0) => {
             return Err(Fail::new("invalid_order_value", "size_frac must be in (0, 1]")
                 .param("size_frac")
                 .value(f)
@@ -1054,27 +1066,31 @@ pub(crate) fn parse_order(
         (None, None) => QtySpec::FullPosition,
     };
     let need_limit = || {
-        limit_price.ok_or_else(|| {
+        let price = limit_price.ok_or_else(|| {
             PyErr::from(
                 Fail::new("missing_order_field", format!("{kind} needs limit_price"))
                     .param("limit_price"),
             )
-        })
+        })?;
+        finite_positive("limit_price", price)?;
+        Ok::<f64, PyErr>(price)
     };
     let need_trigger = || {
-        trigger_price.ok_or_else(|| {
+        let price = trigger_price.ok_or_else(|| {
             PyErr::from(
                 Fail::new("missing_order_field", format!("{kind} needs trigger_price"))
                     .param("trigger_price"),
             )
-        })
+        })?;
+        finite_positive("trigger_price", price)?;
+        Ok::<f64, PyErr>(price)
     };
     let trail_offset = || -> PyResult<TrailOffset> {
         let raw = offset.ok_or_else(|| {
             Fail::new("missing_order_field", format!("{kind} needs offset")).param("offset")
         })?;
-        if raw <= 0.0 {
-            return Err(Fail::new("invalid_order_value", "offset must be > 0")
+        if !(raw.is_finite() && raw > 0.0) {
+            return Err(Fail::new("invalid_order_value", "offset must be a finite number > 0")
                 .param("offset")
                 .value(raw)
                 .into());
@@ -1117,6 +1133,15 @@ pub(crate) fn parse_order(
         "market_to_limit" => OrderKind::MarketToLimit,
         "trailing_stop_market" => OrderKind::TrailingStopMarket { offset: trail_offset()? },
         "trailing_stop_limit" => {
+            if !(limit_offset.is_finite() && limit_offset >= 0.0) {
+                return Err(Fail::new(
+                    "invalid_order_value",
+                    "limit_offset must be a finite number >= 0",
+                )
+                .param("limit_offset")
+                .value(limit_offset)
+                .into());
+            }
             OrderKind::TrailingStopLimit { offset: trail_offset()?, limit_offset }
         }
         other => {
@@ -1241,6 +1266,11 @@ pub(crate) fn submit_order_checked(
     parent_id: Option<u64>,
     refusal: Option<&'static str>,
 ) -> PyResult<u64> {
+    for (name, level) in [("stop_price", stop_price), ("target_price", target_price)] {
+        if let Some(level) = level {
+            finite_positive(name, level).map_err(|e| super::errors::with_op(e, "submit_order"))?;
+        }
+    }
     check_grid(
         &kernel.order_grid(),
         units,

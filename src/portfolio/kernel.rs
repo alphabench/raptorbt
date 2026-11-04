@@ -178,7 +178,7 @@ pub enum EngineEvent {
     RiskRejected { idx: usize, reason: &'static str, order_id: Option<u64>, client_id: String },
     /// A venue fill was booked although it went past one of the book's
     /// limits (`order_size`, `max_position`, `max_exposure`,
-    /// `insufficient_capital`, `position_open`, `reduce_only`): the venue
+    /// `insufficient_capital`, `reduce_only`): the venue
     /// executed it, so the position follows the venue and this reports the
     /// breach.
     FillBreach { idx: usize, reason: &'static str, order_id: u64, client_id: String },
@@ -473,10 +473,10 @@ pub struct EngineKernel {
     /// it. `None` (the default) means count this kernel's own ledger.
     external_open_count: Option<usize>,
     /// Order-size, position-size and exposure limits from the config.
-    limits: SizeLimits,
+    pub(crate) limits: SizeLimits,
     /// Gross notional held by the *other* instruments of a portfolio, when a
     /// portfolio owns this kernel and `max_gross_exposure` is set.
-    external_exposure: Option<f64>,
+    pub(crate) external_exposure: Option<f64>,
 
     effective_stop: StopConfig,
     effective_target: TargetConfig,
@@ -1281,7 +1281,7 @@ impl EngineKernel {
     }
 
     /// Signed net size of this kernel's open positions.
-    fn net_size(&self) -> f64 {
+    pub(crate) fn net_size(&self) -> f64 {
         self.ledger
             .positions()
             .iter()
@@ -1355,6 +1355,18 @@ impl EngineKernel {
             Direction::Short => before - units,
         };
         self.limits.check_position(before, after)
+    }
+
+    /// Whether orders may be placed on the instrument: not a reference such as an index.
+    pub fn is_tradable(&self) -> bool {
+        self.spec.as_ref().is_none_or(|s| s.kind.tradable())
+    }
+
+    /// Report an entry the host refused before the book saw it, counted like any other
+    /// refused entry.
+    pub fn refuse_entry(&mut self, idx: usize, reason: RejectReason) {
+        self.risk.record_rejection();
+        self.pending_events.push(EngineEvent::EntryRejected { idx, reason });
     }
 
     /// Refuse a would-be fill, counting it like any other constraint refusal.
@@ -3370,9 +3382,53 @@ impl EngineKernel {
         Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
     }
 
-    /// Add a fill slice to the position an order already opened: charge
-    /// entry fees and cash or margin for the slice, average the entry. A
-    /// derived stop/target follows the new average; an explicit one stays.
+    /// The units a capital-fraction order adds to a held position: sized by the rule
+    /// [`Self::open_at`] sizes an opening with (the fraction of the capital on hand, at the
+    /// decision price under `next_bar_open` but never more than the fill price buys). `0.0`
+    /// when the fraction buys nothing.
+    pub(crate) fn capital_units(
+        &self,
+        bar: &KernelBar,
+        direction: Direction,
+        entry_price: Price,
+        fraction: f64,
+        size_ref: Option<Price>,
+        limit_priced: bool,
+    ) -> f64 {
+        let sizing_ref = size_ref.filter(|_| !limit_priced);
+        let price = self.executed_price(entry_price, direction, true, limit_priced, bar);
+        let free = self.entry_budget.map_or(self.free_capital(), |b| b.min(self.free_capital()));
+        let available = self.alloted_capital.map(|cap| cap.min(free)).unwrap_or(free);
+        let value = price * self.multiplier();
+        let Ok(funding) = self.entry_funding(direction, price) else { return 0.0 };
+        let (sizing_value, sizing_funding) = match sizing_ref {
+            Some(reference) => {
+                let at = self.executed_price(reference, direction, true, limit_priced, bar);
+                (at * self.multiplier(), self.entry_funding(direction, at).unwrap_or(funding))
+            }
+            None => (value, funding),
+        };
+        let fit = |budget: f64, value: f64, funding: Option<EntryFunding>| {
+            let size = self.sized_units(budget, value, direction, funding);
+            if funding.is_none() {
+                self.fit_booked_debit(size, budget, available, value, direction, funding)
+            } else {
+                size
+            }
+        };
+        let decided = fit(fraction * available, sizing_value, sizing_funding);
+        if sizing_ref.is_some() {
+            decided.min(fit(available, value, funding))
+        } else {
+            decided
+        }
+    }
+
+    /// Add a fill slice to a held position (a later slice of the order that opened it, or,
+    /// under netting, any other order on its side): charge entry fees and cash or margin for
+    /// the slice, average the entry. A level derived from the entry (percent, ATR) follows the
+    /// new average; a level the order names (`stop_attach`, `target_attach`) becomes the
+    /// position's level, so the net position is protected at it, and the other is kept.
     /// Returns `(price, size)` of the slice, or `None` when the slice cannot
     /// be funded.
     #[allow(clippy::too_many_arguments)]
@@ -3436,6 +3492,16 @@ impl EngineKernel {
         // Either level explicit: leave both, as the caller fixed them.
         let shift = stop_attach.is_none() && target_attach.is_none();
         self.ledger.add_to_position(position_id, price, size, entry_fees, shift)?;
+        if !self.venue_managed {
+            if let Some(managed) = self.ledger.get_mut(position_id) {
+                if stop_attach.is_some() {
+                    managed.position.stop_price = stop_attach;
+                }
+                if target_attach.is_some() {
+                    managed.position.target_price = target_attach;
+                }
+            }
+        }
         let fees_money = self.ledger.book(entry_fees);
         match funding {
             None => self.move_cash(-(self.ledger.notional(price, size) + fees_money)),

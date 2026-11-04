@@ -416,8 +416,8 @@ CODES: dict[str, Code] = {
         InvalidOrder, "orders", "Trailing offset kind is not recognised.", ["price", "bps", "ticks"]
     ),
     "invalid_order_value": _c(
-        InvalidOrder, "orders", "A price, size, offset or count is out of range.",
-        ["price, trigger, quantity, offset, slices and every > 0", "size_frac in (0, 1]", "limit_offset >= 0"],
+        InvalidOrder, "orders", "A price, size, offset, protective level or count is out of range, NaN or infinite.",
+        ["price, trigger, quantity, offset, stop_price, target_price, slices and every > 0 and finite", "size_frac in (0, 1]", "limit_offset >= 0"],
     ),
     "missing_order_field": _c(
         InvalidOrder, "orders", "A field this order kind or time in force needs was not given.",
@@ -675,6 +675,25 @@ CODES: dict[str, Code] = {
     "unknown_role_binding": _c(
         InvalidParameter, "live-trading", "bindings names a role that no strategy declares.",
         ["a role some strategy declares in requirements"],
+    ),
+    "invalid_binding": _c(
+        InvalidParameter, "live-trading",
+        "A role is bound to the wrong shape: a Universe to anything but a list of distinct symbols, any other role to anything but one symbol.",
+        ["one symbol (str) for an Underlying", "a list of distinct symbols for a Universe"],
+    ),
+    "universe_size": _c(
+        InvalidParameter, "live-trading",
+        "A Universe role is bound to fewer symbols than its min or more than its max.",
+        ["a list with between the role's min and max symbols"],
+    ),
+    "universe_instrument": _c(
+        InvalidParameter, "instruments",
+        "ctx.instrument was given a Universe role, which names many symbols; ask for one of them.",
+        ["one symbol of the role: ctx.role(name) lists them"],
+    ),
+    "invalid_trade_from": _c(
+        InvalidParameter, "backtesting", "trade_from is not an integer event time in nanoseconds.",
+        ["integer nanoseconds since the epoch", None],
     ),
     "no_instrument_spec": _c(
         UnknownSymbol, "instruments", "ctx.instrument was asked for a symbol with no InstrumentSpec.",

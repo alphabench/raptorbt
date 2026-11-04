@@ -138,16 +138,16 @@ section 3 and 7.
 | `positions(i, symbol=None)`, `equity(i)`, `ctx(i)`, `is_halted(i)`, `halt(i, flatten=, reason=)`, `halt_account(name, ...)`, `memory_report()`, `finish()` | State and control. `finish()` ends the node and returns one `PortfolioResult` per strategy (`.result.trades()`, `.result.equity_curve()`); a finished node raises `node_finished`. |
 | `raptorbt.journal.Journal(header, *, seq_base=0, chain=None, file=None, fsync="orders", memory=None, sink=None)` | The journal. `since(seq)`, `head()` returns `(count, chain, header)`, `count`, `sync()`. |
 | `raptorbt.journal.read(path)`, `verify(records, header, chain=None)`, `open_for_recovery(path, ...)`, `chain_step`, `chain_start`, `canonical`, `report_from_payload`, `Record`, `Discrepancy` | Read a file (`header, seq_base, chain_from, records, torn_bytes`, checksums and chain verified), recompute the chain, reopen to recover. |
-| `LiveNode.checkpoint(include_log=True)`, `LiveNode.restore(checkpoint, strategies, symbols, config, *, journal=, records=, execution=, reconcile=True, accept=None, on_discrepancy=, **the node's arguments)` | A versioned snapshot (journal head, state digest, each strategy's `state()`, the log) and the rebuild. `checkpoint=None` restores from `journal=` and `records=`. `reconcile="skip"` skips the venue and says so in the journal. |
+| `LiveNode.checkpoint(include_log=True)`, `LiveNode.restore(checkpoint, strategies, symbols, config, *, journal=, records=, execution=, reconcile=True, accept=None, cash_tolerance=0.0, on_discrepancy=, **the node's arguments)` | A versioned snapshot (journal head, state digest, each strategy's `state()`, the log) and the rebuild. `checkpoint=None` restores from `journal=` and `records=`. `reconcile="skip"` skips the venue and says so in the journal. `cash_tolerance` is the cash difference from the venue's balance that still counts as equal; a broker's balance rarely matches to the paisa. |
 | `LiveNode.reconcile(cash_tolerance=0.0)`, `resume(accept=())`, `resend(client_order_id)`, `annotate(ts, kind, detail)`, `state`, `state_digest()` | Compare with the venue, leave `recovering`, send an unanswered order again under its first id, write a note in the journal. |
-| `LiveNode.heartbeat()`, `health()`, `fenced`, `epoch` | Check the epoch now; a dict for a supervisor: `state`, `epoch`, `fenced`, `finished`, `journal_count`, `chain`, `unconfirmed` (orders with no confirmed outcome; needs a journal), `clock_ns`. |
+| `LiveNode.heartbeat()`, `health()`, `fenced`, `epoch` | Check the epoch now; a dict for a supervisor: `state`, `epoch`, `fenced`, `finished`, `journal_count`, `chain`, `unconfirmed` (orders with no confirmed outcome; needs a journal), `clock_ns`, and `adapter` when the adapter has a `health()` (a `BrokerAdapter`: `paused`, `outbox`, `faults`, `recent_faults`, `executor` with `alive`). |
 | `Strategy.state()`, `Strategy.load_state(state)`, `Strategy.on_discrepancy(ctx, d)` | Your own JSON-serialisable state across runs (`strategy_states=` hands it back before `on_start`); the recovery hook. |
 | `raptorbt.CorporateAction.split/bonus/dividend` | Corporate actions as data. |
 | `raptorbt.adapters.{KiteAdapter, UpstoxAdapter, DhanAdapter}` (modules `kite`, `upstox`, `dhan`), `BrokerAdapter`, `Session`, `Secret`, `Instrument`, `new_namespace`, `Executor`, `InlineExecutor`, `ThreadExecutor`, `ManualExecutor`, `RateLimiter`, `TokenBucket`, `Backoff`, `reconnect_loop`, `IdCodec`, `AdapterEvent`, `QueuedReport`, `OrderStatusUpdate`, `TradeRow`, `VenueOrder`, `VenuePosition`, `VenueBalances`, `VenueRefusal`, `Transient`, `Ambiguous`, `AuthExpired`, `MalformedRow` | The broker layer. A mapping translates and reads; the base owns everything else. |
 | `raptorbt.adapters.conformance.run_conformance(factory)`, `ReferenceBinding`, `ScriptedVenue`, `assert_conforms` | Drives any adapter against a hostile scripted venue. Returns failures (empty means conforming). |
 | `raptorbt.strategy.exits.ExitRule`, `ExitEvents`, `ExitRuleRequest`, `ExitHandle`; `Strategy.set_exit(ctx, rule, symbol= / symbols=, name= / group=)`, `cancel_exit(handle)` | Percent and absolute exits on a position or a named group of legs. |
 | `raptorbt.strategy.RollEvent`, `RollEvents`, `continuous_series(contracts, specs, roll_days=, adjust=)`, `Future(of=, contract="continuous", roll_days=)` | Continuous futures with a roll rule, roll events, optional auto-roll, and one adjusted history. |
-| `ctx.instrument(key=None)`, `ctx.option_chain(underlying=None)`, `ctx.role(name)` | The instruments of the run (`instruments={symbol: InstrumentSpec}`) and role bindings (`bindings={role: symbol}`) a strategy reads through its context. |
+| `ctx.instrument(key=None)`, `ctx.option_chain(underlying=None)`, `ctx.role(name)` | The instruments of the run (`instruments={symbol: InstrumentSpec}`) and role bindings (`bindings={role: symbol}`, or `{role: [symbols]}` for a `Universe` role) a strategy reads through its context. |
 
 Adapter construction (all three): `Adapter(Session(token, api_key=?, refresh=?),
 {engine_symbol: Instrument(exchange, symbol, key=?, lot_size=?, tick_size=?,
@@ -802,7 +802,18 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
   result stays `Submitted` until the venue's report or a reconciliation settles
   it. `resend` is for an order reconcile reported `missing_order` after the
   venue was asked; it uses the first request's id, so a venue that deduplicates
-  on the client id takes it once.
+  on the client id takes it once. Through a `BrokerAdapter` a resend reads the
+  day's book by tag first and places the order only if it is not there: an order
+  that is there is adopted, and a book that cannot be read places nothing.
+- **A fill while the node was down is booked by the reconcile.** `reconcile()`
+  (and so `restore()`) asks an adapter with `catch_up()` (a `BrokerAdapter`) for
+  what happened at the venue that the node has not heard, and takes those reports
+  before it compares, so such an order is booked as filled, not reported
+  `missing_order`.
+- **A flattening halt closes sold legs first.** `halt(i, flatten=True)` on a
+  real venue sends the buy-backs of the sold options of a margin group, and the
+  bought wing once they are closed, as a stop on a wing does; every other
+  position is closed in the same pass.
 - **Determinism is a requirement.** A strategy that reads the wall clock, a
   random source or the environment fails the replay (`replay_diverged`). So does
   a different feed, symbol list or warm-up. Seed any randomness from the
@@ -842,8 +853,10 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
 - **`ctx.option_chain()`** holds only contracts listed (`activation_ns <= now`)
   and unexpired at `ctx.event_ns`; pass `ctx.event_ns` as `now_ns`.
   `ctx.instrument(key)` accepts a symbol or a role bound in `bindings`; a derived
-  role is resolved with `ctx.role(...)` first. A symbol with no spec raises
-  `no_instrument_spec`.
+  role is resolved with `ctx.role(...)` first, and a `Universe` role names many
+  symbols (`universe_instrument`: ask for one of them). A symbol with no spec raises
+  `no_instrument_spec`. An index spec is data only: it may be a node symbol, and
+  an order on it is refused `not_tradable`.
 
 **Broker support** ("no" means `Unsupported` at `submit`; nothing is dropped
 silently):
@@ -875,7 +888,10 @@ after `resend_delay` and a second lookup that again finds nothing). A token that
 expired (`AuthExpired`) calls `Session(refresh=)` once, or pauses the outbox
 with a `session_expired` event until `set_token()`. A cancel or modify that
 cannot be confirmed becomes `cancel_rejected` or `replace_rejected`
-("unconfirmed") so the strategy can act. Log in from one process only: a new
+("unconfirmed") so the strategy can act. A job that raises anything that is not
+an adapter error (a bug in a mapping) is recorded in `adapter.health()["faults"]`
+and `node.health()["adapter"]`, the outbox goes on, and a submit that failed this
+way stays unconfirmed for the reconcile. Log in from one process only: a new
 login revokes the previous token on some brokers.
 
 ## 8. Common mistakes

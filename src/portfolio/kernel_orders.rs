@@ -473,7 +473,7 @@ impl EngineKernel {
         if let MatchOutcome::Fill { order_id, .. } = &outcome {
             self.fee_model.begin_order(*order_id);
         }
-        self.apply_match_outcome_inner(idx, bar, outcome, events);
+        self.apply_match_outcome_inner(idx, bar, outcome, events, false);
         let orders = &self.orders;
         self.fee_model.end_order(|id| orders.get(id).is_some_and(|o| !o.status.is_terminal()));
     }
@@ -484,7 +484,10 @@ impl EngineKernel {
         bar: &KernelBar,
         outcome: MatchOutcome,
         events: &mut Vec<EngineEvent>,
+        continuation: bool,
     ) {
+        // `continuation`: the rest of a fill already applied (the open leg of a flip). The
+        // fill was drawn once; its stochastic draws and queue verdict are not repeated.
         // `match_bar` computed every outcome for the bar before any was
         // applied, so an earlier one can have finished an order whose own
         // outcome is still queued (a bracket leg canceled by its sibling's
@@ -545,6 +548,7 @@ impl EngineKernel {
         let stop_attach = order.stop_price;
         let target_attach = order.target_price;
         let reduce_only = order.reduce_only;
+        let entry_intent = order.entry_intent;
         let target_position = order.position_id;
         let size_ref = order.size_ref;
 
@@ -580,7 +584,7 @@ impl EngineKernel {
                     | OrderKind::TrailingStopLimit { .. }
             ) && matches!(status, OrderStatus::Triggered | OrderStatus::PartiallyFilled));
         let mut queue_granted = false;
-        if is_limit_fill {
+        if is_limit_fill && !continuation {
             // The queue model reads the tape; it consumes no randomness, so
             // enabling it must not shift the RNG stream for other orders.
             let verdict = self.queue_verdict(id, kind, status, side, bar);
@@ -611,6 +615,7 @@ impl EngineKernel {
             _ => matched_price,
         };
         let matched_price = if !is_limit_fill
+            && !continuation
             && !matched_price.is_nan()
             && self.config.fill_prob_slippage > 0.0
             && self.fill_rng.next_f64() < self.config.fill_prob_slippage
@@ -641,6 +646,24 @@ impl EngineKernel {
             reason: &'static str,
         ) {
             if let Some(order) = orders.get_mut(id) {
+                if order.flipped {
+                    // The close leg of a flip filled and the rest cannot open: the order is
+                    // done at what it closed, its quantity cut to that, so no order ends
+                    // rejected with fills.
+                    if let QtySpec::Units(from) = order.qty {
+                        let to = order.filled_qty;
+                        order.qty = QtySpec::Units(to);
+                        let _ = order.transition(OrderStatus::Filled);
+                        events.push(EngineEvent::OrderResized {
+                            idx,
+                            order_id: id,
+                            client_id: client_id.to_string(),
+                            from,
+                            to,
+                        });
+                        return;
+                    }
+                }
                 let _ = order.transition(OrderStatus::Rejected);
             }
             events.push(EngineEvent::OrderRejected {
@@ -702,7 +725,7 @@ impl EngineKernel {
             match held {
                 // Opposing an open position is a close.
                 Some(dir) if dir != order_direction => (false, order_direction),
-                // Agreeing with one: netting refuses to add (below).
+                // Agreeing with one: netting adds to it (below).
                 Some(_) => (true, order_direction),
                 // Flat: the order's own side decides the direction.
                 None => (true, order_direction),
@@ -737,38 +760,118 @@ impl EngineKernel {
                 );
                 return;
             }
-            // A later slice of the order that opened the position adds to
-            // it (partial fills); any other order is a second entry.
-            let adds_to =
-                self.ledger.first().filter(|m| m.entry_order_id == Some(id)).map(|m| m.id);
-            if !hedging && self.ledger.is_in_position() && adds_to.is_none() {
-                reject(
-                    &mut self.orders,
-                    &mut self.risk,
-                    events,
-                    idx,
-                    id,
-                    &client_id,
-                    "position_open",
-                );
+            // Under netting the instrument has one position, and an order on its side adds
+            // to it. Under hedging only a later slice of the order that opened a position
+            // adds to it; any other order opens a position of its own.
+            let adds_to = if hedging {
+                self.ledger.first().filter(|m| m.entry_order_id == Some(id)).map(|m| m.id)
+            } else {
+                self.ledger.first().map(|m| m.id)
+            };
+            let add_price = if matched_price.is_nan() {
+                self.fill_price_for(bar, open_direction, true)
+            } else {
+                matched_price
+            };
+            // `enter()` means "be in this position": with one held it is a no-op, never an add.
+            if adds_to.is_some() && !hedging && entry_intent {
+                reject_uncounted(&mut self.orders, events, idx, id, &client_id, "entry_held");
                 return;
             }
-            if let (Some(position_id), QtySpec::Units(u)) = (adds_to, qty) {
-                let remaining = u - filled_so_far;
-                let slice = slice_of(remaining);
-                if slice <= 0.0 {
+            if adds_to.is_some() && filled_so_far == 0.0 && !hedging {
+                // The first fill of an order that adds is gated like an entry. It adds to a
+                // position that already counts, so the position-count limit does not bind.
+                if self.margin.is_halted() {
+                    reject(
+                        &mut self.orders,
+                        &mut self.risk,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        "margin_call",
+                    );
                     return;
                 }
-                if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Fok))
-                    && slice < remaining
-                {
-                    self.cancel_remainder(idx, id, events);
+                if let Err(reason) = self.risk.check_entry(0) {
+                    reject(
+                        &mut self.orders,
+                        &mut self.risk,
+                        events,
+                        idx,
+                        id,
+                        &client_id,
+                        reason.as_str(),
+                    );
                     return;
                 }
-                let raw_price = if matched_price.is_nan() {
-                    self.fill_price_for(bar, open_direction, true)
-                } else {
-                    matched_price
+                if let QtySpec::Units(whole) = qty {
+                    if let Err(reason) = self.check_whole_order(open_direction, whole, add_price) {
+                        reject(
+                            &mut self.orders,
+                            &mut self.risk,
+                            events,
+                            idx,
+                            id,
+                            &client_id,
+                            reason.as_str(),
+                        );
+                        return;
+                    }
+                }
+            }
+            if let Some(position_id) = adds_to {
+                let raw_price = add_price;
+                let (u, slice) = match qty {
+                    QtySpec::Units(u) => {
+                        let remaining = u - filled_so_far;
+                        let slice = slice_of(remaining);
+                        if slice <= 0.0 {
+                            return;
+                        }
+                        if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Fok))
+                            && slice < remaining
+                        {
+                            self.cancel_remainder(idx, id, events);
+                            return;
+                        }
+                        (u, slice)
+                    }
+                    // A fraction of the capital is sized once, whole, as an opening is.
+                    QtySpec::CapitalFrac(f) => {
+                        let size = self.capital_units(
+                            bar,
+                            open_direction,
+                            raw_price,
+                            f,
+                            size_ref.filter(|_| !is_limit_fill),
+                            is_limit_fill,
+                        );
+                        if size <= 0.0 {
+                            reject_uncounted(
+                                &mut self.orders,
+                                events,
+                                idx,
+                                id,
+                                &client_id,
+                                RejectReason::ZeroSize.as_str(),
+                            );
+                            return;
+                        }
+                        (size, size)
+                    }
+                    QtySpec::FullPosition => {
+                        reject(
+                            &mut self.orders,
+                            &mut self.risk,
+                            events,
+                            idx,
+                            id,
+                            &client_id,
+                            "invalid_qty",
+                        );
+                        return;
+                    }
                 };
                 match self.add_at(
                     idx,
@@ -974,9 +1077,16 @@ impl EngineKernel {
             } else {
                 matched_price
             };
-            // How much this order still wants, capped at what is held: an
-            // exit larger than the position never reverses into a new one.
+            // How much this order still wants. A reduce-only or named-position exit is capped
+            // at what is held: it never reverses into a new position. Any other order against
+            // a netting position flips it: it closes what is held and opens the rest on its
+            // own side, as a broker's net position moves.
+            let flips = !hedging
+                && !reduce_only
+                && target_position.is_none()
+                && matches!(qty, QtySpec::Units(u) if u - filled_so_far > held * (1.0 + 1e-12));
             let wanted = match qty {
+                QtySpec::Units(u) if flips => u - filled_so_far,
                 QtySpec::Units(u) => (u - filled_so_far).min(held),
                 _ => held,
             };
@@ -990,6 +1100,7 @@ impl EngineKernel {
                 self.cancel_remainder(idx, id, events);
                 return;
             }
+            let slice = if flips { slice.min(held) } else { slice };
             // Taking a hedge off would leave a sold option the account's model cannot margin at
             // all (a loss without bound): the close is refused, as a broker's risk system
             // refuses an exit that leaves the account short of margin, rather than booked.
@@ -1014,6 +1125,22 @@ impl EngineKernel {
                 ExitReason::Order,
                 is_limit_fill,
             ) {
+                Some(EngineEvent::Exited { trade, .. }) if flips => {
+                    // The close leg of a flip: the order stays open for the rest, which opens
+                    // the other way. Without volume slicing the rest is applied now, as the
+                    // same fill; with it, on the prints that follow.
+                    let (price, size) = (trade.exit_price, trade.size);
+                    let exited = EngineEvent::Exited { idx, trade };
+                    self.record_leg(idx, id, &client_id, price, size, exited, events);
+                    if slicing {
+                        if matches!(self.orders.get(id).map(|o| o.tif), Some(TimeInForce::Ioc)) {
+                            self.cancel_remainder(idx, id, events);
+                        }
+                    } else {
+                        let rest = MatchOutcome::Fill { order_id: id, price: matched_price };
+                        self.apply_match_outcome_inner(idx, bar, rest, events, true);
+                    }
+                }
                 Some(EngineEvent::Exited { trade, .. }) => {
                     // The order is done once it has what it asked for, or
                     // once nothing is left to close; the surplus of an
@@ -1031,6 +1158,35 @@ impl EngineKernel {
                 _ => reject_uncounted(&mut self.orders, events, idx, id, &client_id, "unfillable"),
             }
         }
+    }
+
+    /// Book a fill that is not the order's last: advance `filled_qty` and leave the order
+    /// partly filled, with the position event right after the fill event. The close leg of a
+    /// flip is one; the open leg that follows completes the order with [`Self::record_fill`].
+    #[allow(clippy::too_many_arguments)]
+    fn record_leg(
+        &mut self,
+        idx: usize,
+        id: u64,
+        client_id: &str,
+        price: Price,
+        size: f64,
+        position: EngineEvent,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        if let Some(order) = self.orders.get_mut(id) {
+            order.filled_qty += size;
+            order.flipped = true;
+            let _ = order.transition(OrderStatus::PartiallyFilled);
+        }
+        events.push(EngineEvent::OrderFilled {
+            idx,
+            order_id: id,
+            client_id: client_id.to_string(),
+            price,
+            size,
+        });
+        events.push(position);
     }
 
     /// Book one fill slice on an order: advance `filled_qty`, move the order

@@ -218,6 +218,53 @@ def test_partial_hedge_fills_cap_the_sold_quantity():
     assert sold_quantities == [[50.0], [50.0, 50.0]], "a lot sold per lot of hedge, never ahead of it"
 
 
+def _sold_after_each_hedge_fill(structure, fills, lots):
+    """Open ``structure`` on a broker that fills only the hedge, ``fills`` units at a time, and say
+    what sold quantities had been sent after each fill. Returns ``(hedge units, sold per step)``."""
+    strategy = make(structure, lots=lots)
+    data, inst = universe()
+    broker = Broker()
+    node = LiveNode([strategy], list(data), config(100_000.0, margin=False), instruments=inst,
+                    account_type="margin", leverage=1.0, bar_stamp="close", execution=broker)
+    for i in range(N_BARS):
+        push_bar(node, data, i)
+        if strategy.group is None:
+            continue
+        ts = int(data[U]["timestamps"][i])
+        hedge = broker.requests[0]
+        assert hedge.side == "buy"
+        price = float(data[hedge.symbol]["close"][i])
+        node.push_report(hedge.client_order_id, ExecutionReport.accepted("V1", ts), arrival_ns=ts)
+        steps = []
+        for n, units in enumerate(fills):
+            node.push_report(hedge.client_order_id, ExecutionReport.fill(f"x{n}", units, price, ts),
+                             arrival_ns=ts)
+            steps.append(sorted(r.quantity for r in broker.requests if r.side == "sell"))
+        return hedge.quantity, steps
+    raise AssertionError("the structure was never submitted")
+
+
+def test_a_ratio_structure_sells_only_the_quantity_its_hedge_covers_as_the_hedge_fills():
+    """Buy 1 lot / sell 3 lots, 2 lots designed: hedge 100 units, sold 300. A hedge
+    half filled (50 units) covers 50 sold units, not half of 300; the part no hedge covers goes
+    out once the whole hedge has filled."""
+    hedge, steps = _sold_after_each_hedge_fill(
+        st.ratio_spread("call", 0, 1, long_ratio=1, short_ratio=3), [50.0, 50.0], lots=2
+    )
+    assert hedge == 100.0
+    assert steps == [[50.0], [50.0, 250.0]]
+
+
+def test_a_back_spread_sells_nothing_until_the_whole_designed_hedge_has_filled():
+    """Buy 3 lots / sell 1 lot, 2 lots designed: hedge 300 units, sold 100. The sold
+    leg waits for all 300 hedge units."""
+    hedge, steps = _sold_after_each_hedge_fill(
+        st.ratio_spread("call", 0, 1, long_ratio=3, short_ratio=1), [100.0, 100.0, 100.0], lots=2
+    )
+    assert hedge == 300.0
+    assert steps == [[], [], [100.0]]
+
+
 def test_the_iron_condor_at_capital_300_is_closed_by_its_unfunded_hedge_without_reduce_only_noise():
     for mode in ("batch", "node", "paper"):
         strategy, result, _ = run_mode(mode, make(iron_condor()), 300.0)

@@ -325,6 +325,35 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
                 self._exit(ctx, pos)
 
 
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _OpenHookProbe(_BarProbe):
+        """Reads every symbol's indicators, own stream and composite, in the hooks that hear a
+        fill, and queues an entry from the hook that hears an exit (an ATR stop is configured:
+        the stop it gets is logged when the entry fills). Under ``next_bar_open`` those hooks run
+        at a bar's open, before the strategy has seen the bar."""
+
+        def _open_read(self, ctx, what):
+            self._rec(
+                ctx, what, self._key(ctx),
+                tuple((s, self.fast[s].value, self.slow[s].value, self.comp[s].value)
+                      for s in sorted(self.fast)),
+            )
+
+        def on_fill(self, ctx, e):
+            super().on_fill(ctx, e)
+            self._open_read(ctx, "openread")
+
+        def on_position_opened(self, ctx, e):
+            super().on_position_opened(ctx, e)
+            pos = ctx.position
+            self._rec(ctx, "stop", self._key(ctx), None if pos is None else pos.stop_price)
+
+        def on_position_closed(self, ctx, e):
+            super().on_position_closed(ctx, e)
+            if self.mode == "intent" and ctx.idx % 3 == 0:
+                self.enter(size_frac=0.1)
+
+
 # ---------------------------------------------------------------------------
 # harness
 # ---------------------------------------------------------------------------
@@ -465,3 +494,26 @@ def test_the_harness_catches_a_strategy_that_peeks(portfolio_runner):
     peeks = [p for kind, _, p in probe.trace if kind == "peek"]
     assert peeks, "the probe never ran"
     assert all(p[1] is None for p in peeks), "series() exposed a future bar"
+
+
+def _atr_cfg(timing):
+    cfg = _cfg(timing)
+    cfg.set_atr_stop(2.0, 5)
+    return cfg
+
+
+@pytest.mark.parametrize("frac", CUTS)
+@pytest.mark.parametrize("mode", ["intent", "orders"])
+@pytest.mark.parametrize("dataset", sorted(BAR_DATA))
+@pytest.mark.parametrize("stamp", ["open", "close"])
+def test_a_fill_hook_at_the_open_sees_no_indicator_or_atr_of_the_bar_opening(
+    stamp, dataset, mode, frac, portfolio_runner, monkeypatch
+):
+    """F-16: under next_bar_open the hook that hears a fill at a bar's open reads every symbol's
+    indicators (a shared one fed by another symbol's bar, a composite one) as they stood before
+    the bar, and an entry it queues takes its ATR stop from the bar before."""
+    monkeypatch.setattr(sys.modules[__name__], "_cfg", _atr_cfg)
+    _check(
+        "portfolio", _OpenHookProbe, BAR_DATA[dataset](), "next_bar_open", mode, frac,
+        _poison_bars, stamp, portfolio_runner,
+    )

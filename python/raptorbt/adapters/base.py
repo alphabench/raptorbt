@@ -338,7 +338,7 @@ class _Rec:
 
 @dataclass
 class _Job:
-    kind: str  # submit, cancel, modify, resync
+    kind: str  # submit, recheck, cancel, modify, resync
     client_order_id: str | None = None
     epoch: int = 0
     change: tuple[float | None, float | None, float | None] | None = None
@@ -473,6 +473,8 @@ class BrokerAdapter:
         self._events: deque[AdapterEvent] = deque(maxlen=10_000)
         self._evicted: dict[str, None] = {}  # ids of finished orders forgotten after the retention
         self._paused = False
+        self._faults: deque[dict[str, Any]] = deque(maxlen=20)
+        self._fault_count = 0
         self._epoch = 0
         self._fenced = False
         self._lease = self._lease_check(lease)
@@ -617,9 +619,20 @@ class BrokerAdapter:
                 raise OrderRefused("duplicate_client_order_id: the id belongs to a finished order")
             have = self._orders.get(request.client_order_id)
             if have is not None:
-                if have.fingerprint == fp:
-                    return  # the same order again: already queued or sent
-                raise OrderRefused("duplicate_client_order_id: the id was used for different terms")
+                if have.fingerprint != fp:
+                    raise OrderRefused("duplicate_client_order_id: the id was used for different terms")
+                if have.terminal or any(
+                    j.kind in ("submit", "recheck") and j.client_order_id == have.client_order_id
+                    for j in self._outbox
+                ):
+                    return  # the same order again: already queued, or over
+                # The same order again, asked for after it was sent: the node's resend of an
+                # order its reconcile found missing. Never a second order blindly: the venue's
+                # book is read by tag first, and the order is placed only if it is not there.
+                have.wire = wire
+                self._outbox.append(_Job("recheck", have.client_order_id, self._epoch))
+                self._executor.kick()
+                return
             self._orders[request.client_order_id] = _Rec(
                 request.client_order_id, tag, request.symbol, request.side, request.quantity,
                 request.order_type, request.limit_price, request.trigger_price,
@@ -683,7 +696,12 @@ class BrokerAdapter:
                         job = self._outbox[0] if self._outbox else None
                     if job is None:
                         break
-                    if not self._run(job):
+                    try:
+                        finished = self._run(job)
+                    except Exception as exc:  # noqa: BLE001 - a bug in a mapping must not stop the outbox
+                        self._job_failed(job, exc)
+                        finished = True
+                    if not finished:
                         break
                     with self._lock:
                         if self._outbox and self._outbox[0] is job:
@@ -787,6 +805,73 @@ class BrokerAdapter:
         else:
             self._bind(rec, vid)
         return True
+
+    def _do_recheck(self, rec: _Rec, job: _Job) -> bool:
+        """The node sent an order again that this adapter already knows (its reconcile found the
+        order missing). Read the day's book by tag: an order that is there is adopted, whatever
+        state it is in, and nothing is placed; an order that is not there is placed once more
+        under the same tag. A book that cannot be read, or shows several fits, places nothing."""
+        if rec.terminal:
+            return True
+        row, state = self._try_lookup(rec)
+        if state == "found" and row is not None:
+            self.handle_update(row)
+        elif state == "absent":
+            rec.venue_order_id = None
+            rec.attempted = False
+            rec.unconfirmed = False
+            self._event("resend", rec.client_order_id, "absent from the venue's book: placed again")
+            return self._do_submit(rec, job)
+        else:
+            rec.unconfirmed = True
+            self._event("unconfirmed", rec.client_order_id, f"resend not placed: the venue's book is {state}")
+        return True
+
+    def _job_failed(self, job: _Job, exc: Exception) -> None:
+        """A job raised something that is not an adapter error: a bug in a mapping, or a broker
+        answer it did not expect. It is recorded (``health()``), the strategy is told what it can
+        be told, and the outbox goes on. A submit that failed this way may have reached the venue:
+        the order is left unconfirmed for the node's reconcile, never rejected or placed again."""
+        detail = f"{job.kind} raised {type(exc).__name__}: {exc}"
+        log.error("%s %s %s", "job_failed", job.client_order_id or "-", detail, exc_info=exc)
+        with self._lock:
+            self._fault_count += 1
+            self._faults.append({"job": job.kind, "client_order_id": job.client_order_id, "error": detail})
+            rec = self._orders.get(job.client_order_id or "")
+            if rec is not None and not rec.terminal:
+                if job.kind in ("submit", "recheck"):
+                    rec.unconfirmed = True
+                elif job.kind == "cancel":
+                    rec.cancel_requested = False
+                    self._push(rec, ExecutionReport.cancel_rejected(f"adapter error: {detail}", self._now()))
+                elif job.kind == "modify":
+                    rec.pending_modify = None
+                    self._push(rec, ExecutionReport.replace_rejected(f"adapter error: {detail}", self._now()))
+        self._event("job_failed", job.client_order_id, detail)
+
+    def health(self) -> dict[str, Any]:
+        """What a supervisor needs to know the adapter is working: whether the outbox is paused
+        (an expired token), how many jobs wait, how many raised an unexpected error and the last
+        few, and the executor's own state (a thread that died is ``alive: False``)."""
+        with self._lock:
+            out = {
+                "paused": self._paused,
+                "outbox": len(self._outbox),
+                "faults": self._fault_count,
+                "recent_faults": list(self._faults),
+            }
+        executor_health = getattr(self._executor, "health", None)
+        if callable(executor_health):
+            out["executor"] = executor_health()
+        return out
+
+    def catch_up(self) -> list[QueuedReport]:
+        """Read the venue's order book (and its trades, for ``fill_source="trades"``) now and
+        return the reports of everything the node has not heard: a fill, a cancel or a rejection
+        that happened while no node was listening. Blocking: call it from the node's thread
+        before it compares itself with the venue (``LiveNode.reconcile`` does)."""
+        self._resync_now()
+        return self.drain_reports()
 
     def _bind(self, rec: _Rec, vid: str) -> None:
         with self._lock:

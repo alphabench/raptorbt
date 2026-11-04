@@ -161,7 +161,19 @@ pub fn guard_money<T>(operation: &str, f: impl FnOnce() -> T) -> PyResult<T> {
                 )
                 .op(operation),
             ),
-            None => std::panic::resume_unwind(payload),
+            None => {
+                // A constructor has no Python guard: hand any other engine panic to the opt-in
+                // crash reporter (a no-op unless the user enabled it) before it keeps unwinding.
+                // The fee-schedule gap is a refusal the user sees as an error, not a crash.
+                if !message.is_some_and(|m| m.starts_with(crate::execution::fees::FEE_GAP_PREFIX)) {
+                    Python::attach(|py| {
+                        let _ = py
+                            .import("raptorbt.crash_report")
+                            .and_then(|m| m.call_method1("report_panic", (operation,)));
+                    });
+                }
+                std::panic::resume_unwind(payload)
+            }
         }
     })
 }

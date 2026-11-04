@@ -623,6 +623,10 @@ struct OrderRun {
     /// Signed position implied by events after each step, and what the
     /// kernel reports.
     tracked: Vec<(f64, f64)>,
+    /// Bars during which the open position had been added to: a trade record keeps one
+    /// average entry price for the whole position, so the trade-built model cannot mark it
+    /// before it closes (netting adds, covered by the unit tests).
+    grown: Vec<bool>,
 }
 
 fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> OrderRun {
@@ -636,6 +640,8 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
     let mut equity = Vec::new();
     let mut cash = Vec::new();
     let mut tracked = Vec::new();
+    let mut grown = vec![false; bars.len()];
+    let (mut start, mut grew) = (0usize, false);
     let mut signed = 0.0f64;
 
     let price_at = |close: f64, off: f64| -> f64 {
@@ -822,6 +828,12 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
                     while k < events.len() {
                         match &events[k] {
                             EngineEvent::Entered { size, direction, .. } => {
+                                if signed != 0.0 && signed.signum() == dir_sign(*direction).signum()
+                                {
+                                    grew = true;
+                                } else if signed == 0.0 {
+                                    start = i;
+                                }
                                 signed += dir_sign(*direction) * size;
                                 entered = true;
                             }
@@ -841,6 +853,10 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
                             }
                             EngineEvent::Exited { trade, .. } => {
                                 signed -= dir_sign(trade.direction) * trade.size;
+                                if signed.abs() < 1e-12 && grew {
+                                    grown[start..=i].iter_mut().for_each(|g| *g = true);
+                                    grew = false;
+                                }
                                 exited = true;
                                 closed.push((**trade).clone());
                             }
@@ -853,10 +869,19 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
                     continue;
                 }
                 EngineEvent::Entered { size, direction, .. } => {
+                    if signed != 0.0 && signed.signum() == dir_sign(*direction).signum() {
+                        grew = true;
+                    } else if signed == 0.0 {
+                        start = i;
+                    }
                     signed += dir_sign(*direction) * size;
                 }
                 EngineEvent::Exited { trade, .. } => {
                     signed -= dir_sign(trade.direction) * trade.size;
+                    if signed.abs() < 1e-12 && grew {
+                        grown[start..=i].iter_mut().for_each(|g| *g = true);
+                        grew = false;
+                    }
                     closed.push((**trade).clone());
                 }
                 _ => {}
@@ -868,10 +893,16 @@ fn run_orders(env: &Env, base: BacktestConfig, scn: &[(RawBar, Vec<Cmd>)]) -> Or
         let held: f64 =
             kernel.position_snapshots().iter().map(|p| dir_sign(p.direction) * p.size).sum();
         tracked.push((signed, held));
+        if grew {
+            grown[start..=i].iter_mut().for_each(|g| *g = true);
+        }
+        if signed.abs() < 1e-12 {
+            grew = false;
+        }
     }
     let last = bars.len() - 1;
     let finalized = kernel.finalize_all(last, &bars[last]);
-    OrderRun { bars, kernel, fills, closed, finalized, equity, cash, groups, tracked }
+    OrderRun { bars, kernel, fills, closed, finalized, equity, cash, groups, tracked, grown }
 }
 
 fn orders_env() -> impl Strategy<Value = Env> {
@@ -1052,6 +1083,9 @@ fn check_grid_and_limits(env: &Env, scn: &Scenario) -> Result<(), TestCaseError>
 fn check_order_path_accounting(env: &Env, scn: &Scenario) -> Result<(), TestCaseError> {
     let run = run_orders(env, BacktestConfig::default(), scn);
     for i in 0..run.bars.len() {
+        if run.grown[i] {
+            continue;
+        }
         let want = model_equity(&run.closed, &run.finalized, &run.bars, env.mult, i);
         prop_assert!(
             near_booked(run.equity[i], want, INITIAL, run.closed.len() + run.finalized.len()),
@@ -1061,6 +1095,20 @@ fn check_order_path_accounting(env: &Env, scn: &Scenario) -> Result<(), TestCase
             want
         );
     }
+    // Whatever the path, once everything is closed the account is capital plus the PnL of
+    // every trade (adds, reductions and flips included).
+    let pnl: f64 = run.closed.iter().chain(run.finalized.iter()).map(|t| t.pnl).sum();
+    prop_assert!(
+        near_booked(
+            run.kernel.cash(),
+            INITIAL + pnl,
+            INITIAL,
+            run.closed.len() + run.finalized.len()
+        ),
+        "end: cash {} vs capital plus trade PnL {}",
+        run.kernel.cash(),
+        INITIAL + pnl
+    );
     if env.is_cash() {
         for c in &run.cash {
             prop_assert!(*c >= -MONEY_TOL * INITIAL, "cash {}", c);

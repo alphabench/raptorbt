@@ -10,9 +10,11 @@ Hedge-first
 The bought legs (shares and bought options, the hedges) are sent first. A sold leg is sent only
 once the hedges that cover it have filled (a sold call is covered by bought calls and bought
 shares, a sold put by bought puts; a sold leg nothing covers is sent with the hedges). With
-partial fills a sold leg is sent for the share of its planned quantity that its hedges have filled
-(the least filled of them, in whole lots), and again as more of them fill, so a sold quantity
-never runs ahead of its hedge cover. The sequencing runs from the order events the strategy
+partial fills a sold leg is sent for the quantity its hedges have filled and so cover (the least
+filled of them, in whole lots), and again as more of them fill, so a sold quantity never runs ahead
+of its hedge cover. In a ratio spread (more sold than bought) the covered quantity is the hedge's
+size and the uncovered rest goes out with the last of the hedge; in a back spread (more bought than
+sold) the sold leg waits until the whole designed hedge has filled. The sequencing runs from the order events the strategy
 hears (the strategy base class forwards them here), so it needs no call from the strategy and
 no capability of the venue.
 
@@ -347,7 +349,8 @@ class StructureBook:
 
     def _release(self, g: StructureGroup, after_fill: bool) -> None:
         """Send what the hedges allow: the bought legs at once, each sold leg for the part of its
-        planned quantity its covering hedges have filled."""
+        planned quantity its covering hedges have filled (a back spread's sold leg: all of it, once
+        the whole hedge has filled)."""
         resolved = g.structure
         for i in resolved.submission_order():
             ls = g.legs[i]
@@ -359,11 +362,17 @@ class StructureBook:
                 allowed = leg.quantity
             else:
                 frac = min(min(g.legs[h].filled / g.legs[h].leg.quantity, 1.0) for h in hedges)
+                hedge_qty = min(g.legs[h].leg.quantity for h in hedges)
                 if frac >= 1 - 1e-9:
                     allowed = leg.quantity
+                elif hedge_qty > leg.quantity * (1 + 1e-9):
+                    # a back spread (more bought than sold) waits for its whole designed hedge
+                    allowed = 0.0
                 else:
+                    # the sold units the hedge filled so far covers; in a ratio spread (more sold
+                    # than bought) the rest goes out with the last of the hedge
                     lot = float(leg.spec.lot_size) or 1.0
-                    allowed = math.floor(leg.quantity * frac / lot + 1e-9) * lot
+                    allowed = math.floor(min(leg.quantity, hedge_qty) * frac / lot + 1e-9) * lot
             qty = allowed - ls.sent
             if qty > 1e-9:
                 self._send_entry(g, ls, qty, after_fill)

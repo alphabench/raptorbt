@@ -157,7 +157,10 @@ pinned by a test that asserts exactly what differs:
    sits. A venue cannot reproduce that, because it only sees orders in the order
    they were sent. The two agree unless one step mixes a signal and a typed order
    for one instrument that fill at the same moment; a strategy that does so asks
-   for an ordering it has not stated. State the order by using one form.
+   for an ordering it has not stated. State the order by using one form. (Under
+   netting `enter()` means "be in this position" and never adds: whichever order
+   finds the position held does nothing for an entry, so a venue and a backtest
+   differ only in which of the two opened it.)
 
 **Hedging on a venue.** Under `oms_type="hedging"` every order opens a position
 and a close names the position it ends. The engine sets

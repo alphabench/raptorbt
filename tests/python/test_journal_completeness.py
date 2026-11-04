@@ -79,7 +79,7 @@ PLAN = {
     4: lambda s: s.modify_order("L1", limit_price=91.0),
     5: lambda s: s.cancel_order("L1"),
     6: lambda s: s.submit_order(orders.Market(side="buy", units=5.0), client_id="M1"),
-    7: lambda s: s.submit_order(orders.Limit(side="buy", price=90.0, units=5.0), client_id="R1"),
+    7: lambda s: s.submit_order(orders.Limit(side="buy", price=90.0, units=5.0, reduce_only=True), client_id="R1"),
     8: lambda s: s.submit_order(orders.Limit(side="buy", price=90.0, units=6.0), client_id="P1"),
 }
 
@@ -171,10 +171,10 @@ def test_every_change_a_venue_node_makes_leaves_a_record():
 
     tape.step("fill", market, "bar", "command", "adapter_request", "report")
     m1 = venue.sent[-1]
-    # The book refuses a second entry on the side the position holds.
+    # The book refuses a reduce-only order on the side the position holds.
     tape.step("book rejection", bar, "bar", "command", "rejection")
     rej = [r for r in j.since(0) if r.kind == "rejection"][-1]
-    assert (rej.client_order_id, rej.payload["reason"]) == ("R1", "position_open")
+    assert (rej.client_order_id, rej.payload["reason"]) == ("R1", "reduce_only")
     corrected = ExecutionReport.correction(f"X-{m1}", 5.0, 100.5, t[0] * MIN + 5)
     tape.step("correction", lambda: node.push_report(m1, corrected, arrival_ns=t[0] * MIN + 5), "report", "restatement")
     bust = ExecutionReport.bust(f"X-{m1}", t[0] * MIN + 6)

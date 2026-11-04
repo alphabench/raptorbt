@@ -95,8 +95,9 @@ stamped on different clocks; each sees only what has closed.
 ## 5. Examples
 
 `ctx.data` and the stamps. The same bars stamped by close and by open give the
-same strategy view; only `ctx.timestamp` differs. `ctx.close` on the
-single-symbol runner holds **all** the bars, future included, so use `ctx.data`:
+same strategy view; only `ctx.timestamp` differs. In a bar hook `ctx.close` on the
+single-symbol runner ends at the current bar (in `on_start` it holds the whole run);
+`ctx.data` gives the same view with the symbol and the timeframes:
 
 ```python
 import numpy as np
@@ -119,7 +120,7 @@ class Spy(Strategy):
 
     def on_bar(self, ctx):
         h = ctx.data.history("ASSET")
-        assert len(ctx.close) == n              # the whole array, future included
+        assert len(ctx.close) == ctx.idx + 1    # ends at this bar; ctx.close[ctx.idx + 1] raises
         assert len(h) == ctx.idx + 1            # ctx.data stops at this bar
         assert h.close[-1] == ctx.bar.close == ctx.data.latest("ASSET").close
         self.rows.append((ctx.timestamp, ctx.bar_close_ts))
@@ -302,10 +303,11 @@ assert result.metrics.total_trades > 0
   bad bars); the engine never fills them for you.
 - **`float32` is coerced** by the strategy runners and refused by the array
   runners (`TypeError`). Convert once with `np.asarray(x, dtype=np.float64)`.
-- **`ctx.data` is the only guaranteed-safe read.** On the single-symbol runner
+- **A bar hook sees up to the current bar.** On the single-symbol runner
   `ctx.open`, `ctx.high`, `ctx.low`, `ctx.close`, `ctx.volume` and
-  `ctx.timestamps` are the full arrays; reading `ctx.close[ctx.idx + 1]` is a
-  lookahead the engine cannot see. On the multi-symbol runner `ctx.series(symbol)`
+  `ctx.timestamps` end at `ctx.idx` inside a bar hook, so `ctx.close[-1]` is
+  this bar's close and `ctx.close[ctx.idx + 1]` raises `IndexError`; in `on_start`
+  they hold the whole run. On the multi-symbol runner `ctx.series(symbol)`
   is cut at the latest bar.
 - **`on_start` precomputation.** The full arrays are visible in `on_start` for
   vectorised indicators. An array computed there from `close` is only safe if
@@ -360,8 +362,8 @@ run_strategy_backtest(Writer, timestamps=np.arange(1, 5, dtype=np.int64) * MIN,
                       symbol="ASSET", bar_stamp="close")
 ```
 
-- Reading `ctx.close[ctx.idx + 1]`, or any full-array statistic, inside
-  `on_bar`.
+- Computing a full-array statistic (`ctx.close.mean()` over a run you precomputed in
+  `on_start`) and using it inside `on_bar`: the statistic includes the future.
 - Treating `ctx.timestamp` as the clock in a run stamped by bar open. Use
   `ctx.bar_close_ts`.
 - Reading `ctx.data.quote(symbol)` without subscribing to quotes:

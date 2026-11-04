@@ -190,8 +190,9 @@ assert np.isclose(sharpe(periods_per_year=252.0 * 1440), day)   # the explicit f
 ```
 
 Typed orders in a strategy run. Only typed orders appear in `orders()`, and a
-refused one is recorded with its reason. Here a second buy while long is
-refused (`position_open`) and the `enter()` intent leaves no record:
+refused one is recorded with its reason. Here a reduce-only buy while long
+cannot reduce anything and is refused (`reduce_only`), and the `enter()` intent
+leaves no record:
 
 ```python
 import numpy as np
@@ -210,7 +211,7 @@ class OneOfEach(Strategy):
         if ctx.idx == 3:
             self.enter(size_frac=0.1)                   # an intent: no Order record
         if ctx.idx == 10:
-            self.submit_order(orders.Market(side="buy", size_frac=0.1))   # typed, but already long
+            self.submit_order(orders.Market(side="buy", units=10.0, reduce_only=True))   # typed, but already long
         if ctx.idx == 20:
             self.close_position()
 
@@ -218,8 +219,8 @@ result = run_strategy_backtest(OneOfEach, **bars, symbol="A", bar_stamp="close",
                                config=BacktestConfig(fees=0.0))
 rows = result.orders()
 assert len(rows) == 1 and rows[0].submitted_idx == 10
-assert (rows[0].status, rows[0].reject_reason) == ("rejected", "position_open")
-assert rows[0].requested_qty is None                    # asked for a capital fraction, not units
+assert (rows[0].status, rows[0].reject_reason) == ("rejected", "reduce_only")
+assert rows[0].requested_qty == 10.0                    # units asked for (None for a capital fraction)
 assert len(result.trades()) == 1                        # the enter() trade, closed at index 20
 ```
 

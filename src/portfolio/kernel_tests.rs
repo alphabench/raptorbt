@@ -792,27 +792,42 @@ fn a_resting_sell_limit_gapped_through_by_a_session_open_fills_at_the_open() {
 }
 
 #[test]
-fn opening_order_rejected_while_in_position() {
+fn an_order_on_the_side_held_adds_to_the_position_under_netting() {
     let mut kernel = zero_fee_kernel();
-    enter(&mut kernel, 0, 100.0);
+    kernel.submit_order(
+        OrderSide::Buy,
+        QtySpec::Units(10.0),
+        OrderKind::Limit { price: 100.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "first".into(),
+        None,
+        None,
+    );
+    kernel.step(1, &bar(1, 99.5), StepInput::default());
+    assert_eq!(kernel.position_snapshot().unwrap().size, 10.0);
 
     kernel.submit_order(
         OrderSide::Buy,
         QtySpec::Units(1.0),
         OrderKind::Limit { price: 99.0 },
         TimeInForce::Gtc,
-        0,
-        0,
+        1,
+        1,
         "dup-1".into(),
         None,
         None,
     );
-
-    let events = kernel.step(1, &bar(1, 98.5), StepInput::default());
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, EngineEvent::OrderRejected { reason: "position_open", .. })));
-    assert_eq!(kernel.position_snapshot().unwrap().entry_idx, 0);
+    let events = kernel.step(2, &bar(2, 98.5), StepInput::default());
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderRejected { .. })), "{events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e, EngineEvent::Entered { size, .. } if *size == 1.0)),
+        "{events:?}"
+    );
+    let snap = kernel.position_snapshot().unwrap();
+    assert_eq!(snap.entry_idx, 1);
+    assert_eq!(snap.size, 11.0);
 }
 
 #[test]

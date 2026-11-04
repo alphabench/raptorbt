@@ -18,6 +18,8 @@ from raptorbt.strategy import (
     Holding,
     Instrument,
     Legs,
+    MaxPosition,
+    OptionLeg,
     Requirements,
     RequirementsError,
     Strategy,
@@ -46,6 +48,16 @@ class Config(StrategyConfig):
     must: int = 3
 
 
+def condor() -> Legs:
+    wk = Expiry.weekly()
+    return Legs(
+        OptionLeg(side="sell", right="call", offset=1, expiry=wk),
+        OptionLeg(side="buy", right="call", offset=2, expiry=wk),
+        OptionLeg(side="sell", right="put", offset=-1, expiry=wk),
+        OptionLeg(side="buy", right="put", offset=-2, expiry=wk, lots=2),
+    )
+
+
 def full() -> Requirements:
     return Requirements(
         roles={
@@ -58,7 +70,8 @@ def full() -> Requirements:
         holding=Holding.intraday(flatten_before="15:15"),
         data=["bar"],
         warmup=Bars(50),
-        max_structure=Legs(4, lots=2),
+        max_structure=condor(),
+        max_position={"opts": MaxPosition(lots=2), "hedge": MaxPosition(fraction=0.5)},
         params=Config,
     )
 
@@ -95,7 +108,8 @@ def test_declaration_is_data_on_the_class():
         (lambda: Holding.intraday("25:00"), "invalid_value"),
         (lambda: StrikeWindow(3, 1), "invalid_value"),
         (lambda: ByDelta(0.0, 0.5), "invalid_value"),
-        (lambda: Legs(0), "invalid_value"),
+        (lambda: Legs(4, lots=2), "legs_need_shape"),
+        (lambda: Legs(), "invalid_value"),
         (lambda: Bars(5, "7m"), "invalid_timeframe"),
         (lambda: Requirements(timeframes=["7m"]), "invalid"),
         (lambda: Requirements(data=["ticks"]), "invalid_data"),
@@ -189,7 +203,8 @@ def test_hash_is_stable_and_order_free():
         holding=Holding.intraday("15:15"),
         data=("bar",),
         warmup=Bars(50),
-        max_structure=Legs(4, 2),
+        max_structure=condor(),
+        max_position={"hedge": MaxPosition(fraction=0.5), "opts": MaxPosition(lots=2)},
         params=Config,
     )
     assert requirements_hash(a) == requirements_hash(b) == requirements_hash(a)
@@ -218,9 +233,9 @@ def test_json_round_trip():
     back = Requirements.from_dict(json.loads(json.dumps(d)))
     assert back.to_dict() == d
     assert requirements_hash(back) == requirements_hash(r)
-    assert d["schema"] == 1 and d["roles"]["opts"]["strikes"] == {"by": "window", "low": -2, "high": 2}
+    assert d["schema"] == 2 and d["roles"]["opts"]["strikes"] == {"by": "window", "low": -2, "high": 2}
     with pytest.raises(RequirementsError):
-        Requirements.from_dict({**d, "schema": 2})
+        Requirements.from_dict({**d, "schema": 1})
 
 
 def test_json_round_trip_variants():

@@ -71,8 +71,9 @@ hashes them with the saved strategy.
 
 **Event time.** A decision on bar `i` sees bar `i` complete, close included. It
 can fill no earlier than that close (`fill_timing`, see core). Never read
-`ctx.close[ctx.idx + 1]`: the arrays hold the whole run, but only indexes up to
-`ctx.idx` are the past.
+`ctx.close[ctx.idx + 1]`: in a bar hook the arrays end at `ctx.idx` and that read
+raises `IndexError`. In `on_start` they hold the whole run, so a statistic computed
+there over all of it is the future too.
 
 ## 3. API reference
 
@@ -116,15 +117,18 @@ Declarations, from `raptorbt.strategy`:
 
 | Name | What it is |
 | --- | --- |
-| `Requirements(roles, timeframes, holding, data=("bar",), warmup=None, max_structure=None, params=None)` | The manifest. `.to_dict()`, `Requirements.from_dict(d)`. |
-| `Underlying(asset=)`, `Instrument(symbol, asset=)`, `Future(of, contract=)`, `Chain(of, expiry, strikes, rights=)` | Roles: bound by the deployer, fixed, derived future, derived option chain. |
+| `Requirements(roles, timeframes, holding, data=("bar",), warmup=None, max_structure=None, params=None, max_position=None)` | The manifest. `.to_dict()`, `Requirements.from_dict(d)`. |
+| `Underlying(asset=)`, `Instrument(symbol, asset=)`, `Universe(asset=, min=, max=, data=)`, `Future(of, contract=)`, `Chain(of, expiry, strikes, rights=)` | Roles: bound by the deployer to one symbol, fixed, bound by the deployer to a list of `min` to `max` symbols (a basket; `bindings={"basket": ["A", "B"]}`, read with `ctx.role("basket")`, a tuple), derived future, derived option chain. |
 | `StrikeWindow(low, high)`, `StrikeWindow.around(n)`, `ByDelta(low, high)` | Which strikes of a chain. |
 | `Holding.intraday(flatten_before="HH:MM")`, `Holding.overnight()` | Holding style. |
-| `Bars(n, timeframe=None)`, `Duration.minutes/hours/days(n)`, `Legs(n, lots=1)` | Warm-up, and the largest structure held at once. |
+| `Bars(n, timeframe=None)`, `Duration.minutes/hours/days(n)` | Warm-up. |
+| `Legs(OptionLeg(side=, right=, offset= or delta=+window=, expiry=, lots=1, chain=None), ...)` | The legs of the structure held at once: side (`buy`/`sell`), right, strike as listed strikes from the money (`offset`, up positive) or a `delta` target with the `window` of strikes it may sit in, expiry selector. Validated against the chain role. `Legs(4, lots=2)` is refused (`legs_need_shape`). |
+| `MaxPosition(lots=None, notional=None, fraction=None)` | The largest position in a role (`Requirements(max_position={role: MaxPosition(...)})`), per instrument the role resolves to; at least one field; `fraction` is of the capital in (0, 1]. A host sizes capital from it without asking. |
 | `param(default, min=, max=, choices=, description=)`, `params_schema(Config)`, `ParamSchema.validate(values)`, `ParamSpec`, `Issue` | Parameter declaration and validation; `validate` returns `list[Issue]` (`code`, `path`, `message`). |
-| `check_requirements(StrategyClass, dry_run=True)` | Static checks, then a dry run on a synthetic tape; returns `list[Issue]`. |
+| `check_requirements(StrategyClass, dry_run=True)` | Static checks, then a dry run on a synthetic tape with every `Underlying` and `Universe` role bound (so `ctx.role` works in it); returns `list[Issue]`. |
 | `requirements_hash(StrategyClass or Requirements)` | SHA-256 of the canonical declaration plus the engine version. |
 | `resolve(requirements, *, now_ns, bindings, specs, prices=None, vols=None, chain=None)` | A `SymbolPlan`: concrete symbols per role at a time. Gaps are `Issue`s, never guesses. |
+| `resolve_legs(requirements, *, now_ns, bindings, specs, prices, chain=None)` | A `LegPlan`: the contracts each declared leg can mean, their units and signs, for subscribing and margining (`plan.lines(prices)` feeds `MarginModel.required_legs`). `Legs.structure(vol=)` builds the `Structure` of the legs. |
 | `RequirementsError` | A declaration that cannot be built. |
 
 ## 4. Standard workflow
@@ -398,6 +402,7 @@ run_strategy_backtest(object(), np.arange(5, dtype=np.int64), x, x, x, x, x, bar
   timestamp before any `on_bar` runs, whatever the symbols are called. Your own
   symbol's primary-stream indicator is the one revealed late: it shows the value
   before the bar until `on_bar`.
+- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: a quantity or level you compute in a fill hook (`on_fill`, `on_position_opened`, `on_position_closed`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation
 

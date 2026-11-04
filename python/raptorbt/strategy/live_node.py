@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import weakref
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Sequence
 
 import numpy as np
 
@@ -69,7 +69,7 @@ from raptorbt.strategy._commands import (
     session_tz_offset_ns,
 )
 from raptorbt.strategy._stamps import BarStamps
-from raptorbt.strategy import context_host
+from raptorbt.strategy import api, context_host
 from raptorbt.strategy import order_check as order_check_mod
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.context import (
@@ -203,8 +203,9 @@ class LiveNode:
     :func:`~raptorbt.run_strategies` takes: every typed order passes it before
     the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
 
-    ``bindings`` maps a requirements role name to the symbol it means; with
-    ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
+    ``bindings`` maps a requirements role name to the symbol it means, or, for a
+    :class:`~raptorbt.strategy.requirements.Universe` role, to the list of symbols chosen for it;
+    with ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
     ``ctx.option_chain`` answer from, identically to
     :func:`~raptorbt.run_strategies` (see :mod:`raptorbt.strategy.context_host`).
 
@@ -273,7 +274,7 @@ class LiveNode:
         epoch: int | None = None,
         strategy_states: list | None = None,
         order_check=None,
-        bindings: dict[str, str] | None = None,
+        bindings: dict[str, str | Sequence[str]] | None = None,
         warmup: Literal["live", "muted"] | None = None,
         _via: str | None = None,
         _replay=None,
@@ -444,6 +445,7 @@ class LiveNode:
         self._rt = rt
         if _replay is not None:
             rt.set_replay(True)
+        self._strategies: list[Strategy] = []
         try:
             order_check_mod.install(rt, order_check, name)
             if execution_kind is not None:
@@ -466,7 +468,6 @@ class LiveNode:
             if journal is not None or epoch is not None:
                 rt.set_journal(journal, epoch)
             self._journal_start(symbols, len(entries), strategy_states)
-            self._strategies: list[Strategy] = []
             self._sids: list[int] = []
             self._ctxs = []
             self._views = []
@@ -528,6 +529,8 @@ class LiveNode:
                 rt.release_boot()
         except BaseException:
             rt.close()
+            for strategy in self._strategies:
+                api.release(strategy)
             raise
 
     # -- feeding -------------------------------------------------------------
@@ -909,8 +912,9 @@ class LiveNode:
         ``symbol`` becomes a symbol of the node (``node.symbols``, ``ctx.symbols``) for
         ``strategies``, a list of strategy indices, or by default every strategy that was given
         no symbols of its own. ``spec`` is its :class:`~raptorbt.InstrumentSpec` (also what
-        ``ctx.instrument`` and ``ctx.option_chain`` then answer from); it must be tradable and
-        name ``symbol``. ``history`` is how many rows its rings hold (default: the node's
+        ``ctx.instrument`` and ``ctx.option_chain`` then answer from); it is tradable, or an
+        index (a data-only reference: its orders are refused, ``not_tradable``), and names
+        ``symbol``. ``history`` is how many rows its rings hold (default: the node's
         ``history``), always at least what the node's indicators read. ``bar_ns`` is its bar
         width under ``bar_stamp="open"`` when the node's symbols do not share one.
 
@@ -1018,8 +1022,8 @@ class LiveNode:
         return dict(self._host.specs)
 
     @property
-    def bindings(self) -> dict[str, str]:
-        """The role bindings the node was built with. A copy."""
+    def bindings(self) -> dict[str, str | tuple[str, ...]]:
+        """The role bindings the node was built with (a Universe role's symbols as a tuple). A copy."""
         return dict(self._host.bindings)
 
     @property
@@ -1201,6 +1205,8 @@ class LiveNode:
             return results, owned
         finally:
             self._rt.close()
+            for strategy in self._strategies:
+                api.release(strategy)
             if self._journal is not None:
                 self._journal.sync()
 
@@ -1277,7 +1283,10 @@ class LiveNode:
         ``state == "recovering"`` (market data is refused; reports, ``resend``
         and ``reconcile`` are not) until you :meth:`resume`, accepting them.
         ``reconcile="skip"`` skips the venue and says so in the journal.
-        ``on_discrepancy`` is called with each :class:`~raptorbt.journal.Discrepancy`.
+        ``cash_tolerance`` is the largest difference between the node's cash
+        and the venue's balance that still counts as equal (default ``0.0``;
+        a broker's balance rarely matches to the paisa). ``on_discrepancy``
+        is called with each :class:`~raptorbt.journal.Discrepancy`.
         """
         from raptorbt.strategy import _recovery
 
@@ -1287,7 +1296,13 @@ class LiveNode:
         """Ask the adapter what the venue holds (``open_orders()``,
         ``positions()``, ``balances()``, each optional) and compare it with
         the node. Returns the list of :class:`~raptorbt.journal.Discrepancy`
-        and delivers each to the strategy's ``on_discrepancy``."""
+        and delivers each to the strategy's ``on_discrepancy``.
+
+        An adapter with ``catch_up()`` (a ``BrokerAdapter``) is read first and
+        the node takes the reports it returns, so an order that filled while
+        no node was listening is booked and compared as filled, not reported
+        as ``missing_order``. ``cash_tolerance`` is the largest difference
+        between the node's cash and the venue's balance that counts as equal."""
         self._check_open()
         if self._state != "recovering":
             self._no_open_group()
@@ -1344,8 +1359,10 @@ class LiveNode:
 
     def health(self) -> dict:
         """State for a supervisor: ``state``, ``epoch``, ``fenced``, the
-        journal's ``count`` and ``chain``, and the orders with no confirmed
-        outcome."""
+        journal's ``count`` and ``chain``, the orders with no confirmed
+        outcome and, when the adapter has a ``health()``, its own state under
+        ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``,
+        ``recent_faults`` and its executor's ``alive``)."""
         if not self._finished:
             self._no_open_group()
         out = {
@@ -1370,6 +1387,11 @@ class LiveNode:
         if not self._finished:
             out["unconfirmed"] = sorted(self._rt.unconfirmed())
             out["clock_ns"] = self._rt.clock()[0]
+            # an adapter that can say how it is doing (a paused outbox, a dead worker thread,
+            # jobs that raised) is asked, so a supervisor sees it here
+            adapter_health = getattr(self._execution, "health", None)
+            if callable(adapter_health):
+                out["adapter"] = adapter_health()
         return out
 
     def state_digest(self) -> str:

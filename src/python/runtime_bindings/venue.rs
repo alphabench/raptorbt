@@ -112,6 +112,17 @@ struct Watch {
     target: Option<f64>,
     /// Under hedging, the position the level protects.
     position_id: Option<u64>,
+    /// A trailing stop the engine carries: the fraction of the highest price since entry it
+    /// stands below, as a backtest trails it (ratcheted after each bar's check), with the entry
+    /// price and the highest price so far.
+    trail: Option<Trail>,
+}
+
+#[derive(Clone, Copy)]
+struct Trail {
+    fraction: f64,
+    entry: f64,
+    high: f64,
 }
 
 /// The venue a node sends its orders to, and what it has sent.
@@ -550,8 +561,18 @@ impl VenueRoute {
         // so they are applied here, before anything is sent.
         if !self.simulated {
             let price = parsed.kind.limit_price().or(parsed.kind.trigger_price());
+            // An order that names no price is priced at the last one seen.
+            let mark = sh.current_bar(sid, local).map(|bar| bar.close).filter(|c| *c > 0.0);
             let verdict = sh.with_book_mut(sid, |book, _| {
-                Ok(book.venue_pretrade(local, parsed.side, units, spec.reduce_only, price))
+                Ok(book.venue_pretrade(
+                    local,
+                    Some(order_id),
+                    parsed.side,
+                    units,
+                    spec.reduce_only,
+                    price,
+                    mark,
+                ))
             })?;
             if let Err(reason) = verdict {
                 self.book_silently(
@@ -1402,7 +1423,7 @@ impl VenueRoute {
         let mut hit = Vec::new();
         {
             let mut ledger = self.ledger.borrow_mut();
-            ledger.watchers.retain(|w| {
+            ledger.watchers.retain_mut(|w| {
                 if w.sid != sid.index() || w.local != local {
                     return true;
                 }
@@ -1424,6 +1445,15 @@ impl VenueRoute {
                     ));
                     false
                 } else {
+                    // A trailing level stands where a backtest's would after this bar: below the
+                    // highest price since entry, never lower than it was.
+                    if let Some(t) = w.trail.as_mut() {
+                        t.high = t.high.max(bar.high);
+                        let level = t.high * (1.0 - t.fraction);
+                        if w.stop.is_none_or(|p| level > p) {
+                            w.stop = Some(level);
+                        }
+                    }
                     true
                 }
             });
@@ -1641,10 +1671,10 @@ impl VenueRoute {
                     let request = crate::portfolio::kernel::ProtectRequest {
                         direction: crate::core::types::Direction::Long,
                         size: w.qty,
-                        entry_price: 0.0,
+                        entry_price: w.trail.map_or(0.0, |t| t.entry),
                         stop: w.stop,
                         target: w.target,
-                        trail: None,
+                        trail: w.trail.map(|t| t.entry * t.fraction),
                         position_id,
                     };
                     self.protect(sh, sid, m, &request, idx, ts)?;
@@ -1667,7 +1697,7 @@ impl VenueRoute {
         named: Option<u64>,
         idx: usize,
     ) -> PyResult<()> {
-        let orders: Vec<(u64, Option<u64>, crate::execution::orders::OrderKind)> =
+        let orders: Vec<(u64, Option<u64>, crate::execution::orders::OrderKind, Option<f64>)> =
             sh.with_book(sid, |b, _| {
                 Ok(b.kernel(local)
                     .open_orders()
@@ -1677,9 +1707,16 @@ impl VenueRoute {
                             && o.reduce_only
                             && o.status != OrderStatus::PendingCancel
                     })
-                    .map(|o| (o.id, o.position_id, o.kind))
+                    .map(|o| (o.id, o.position_id, o.kind, o.trail_watermark))
                     .collect())
             })?;
+        let entry = sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local)
+                .position_snapshots()
+                .iter()
+                .find(|p| p.position_id == position_id)
+                .map(|p| p.entry_price))
+        })?;
         let mut watch = Watch {
             sid: sid.index(),
             local,
@@ -1688,9 +1725,10 @@ impl VenueRoute {
             stop: None,
             target: None,
             position_id: named,
+            trail: None,
         };
         let mut taken = Vec::new();
-        for (order_id, order_position, kind) in orders {
+        for (order_id, order_position, kind, watermark) in orders {
             if order_position.is_some_and(|p| p != position_id) {
                 continue;
             }
@@ -1699,6 +1737,17 @@ impl VenueRoute {
                     watch.stop = Some(trigger)
                 }
                 crate::execution::orders::OrderKind::Limit { price } => watch.target = Some(price),
+                // The trailing stop of a hedge the engine carries trails as a backtest's does:
+                // the offset sent with the order is the entry price times the stop's fraction.
+                crate::execution::orders::OrderKind::TrailingStopMarket {
+                    offset: crate::execution::orders::TrailOffset::Price(offset),
+                } if entry.is_some_and(|e| e > 0.0) => {
+                    let entry = entry.unwrap_or_default();
+                    let fraction = offset / entry;
+                    let high = watermark.unwrap_or(entry).max(entry);
+                    watch.stop = Some(high * (1.0 - fraction));
+                    watch.trail = Some(Trail { fraction, entry, high });
+                }
                 // A trailing level the engine cannot watch stays with the venue.
                 _ => continue,
             }
@@ -1828,6 +1877,7 @@ impl VenueRoute {
             stop: None,
             target: None,
             position_id,
+            trail: None,
         };
         for (level, kind) in [(r.stop, "stop"), (r.target, "target")] {
             let Some(level) = level else { continue };
@@ -1841,7 +1891,14 @@ impl VenueRoute {
             })?;
             if self.protective_local || engine_holds {
                 if kind == "stop" {
-                    watch.stop = Some(level)
+                    watch.stop = Some(level);
+                    if let Some(trail) = r.trail.filter(|_| r.entry_price > 0.0) {
+                        watch.trail = Some(Trail {
+                            fraction: trail / r.entry_price,
+                            entry: r.entry_price,
+                            high: r.entry_price,
+                        });
+                    }
                 } else {
                     watch.target = Some(level)
                 }
@@ -1939,17 +1996,46 @@ impl VenueRoute {
             Inner::Running(c) => c.current().map_or(0, |cur| cur.event.ts),
             _ => 0,
         };
+        let mut idx_of = Vec::new();
         for local in 0..sh.locals(sid) {
             let global = sh.global_of(sid, local)?;
             let idx = with_feed(sh, |feed| Ok(feed.last_ordinal(global)))?;
             self.cancel_adding(sh, sid, local, idx)?;
-            if flatten && !book_flattens {
-                let ids: Vec<u64> = sh.with_book(sid, |b, _| {
-                    Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
-                })?;
-                for id in ids {
-                    self.close(sh, sid, local, idx, ts, id, false)?;
-                }
+            idx_of.push(idx);
+        }
+        if flatten && !book_flattens {
+            self.flatten(sh, sid, &idx_of, ts)?;
+        }
+        Ok(())
+    }
+
+    /// Close every position of the strategy with orders. A hedge leg whose close would leave a
+    /// sold leg of its margin group without cover goes through [`VenueRoute::cover_hedge`]: the
+    /// sold legs are closed first and the hedge once they are, so a flatten never sends a
+    /// broker the hedge's close ahead of the legs it covers. `idx_of` is each local
+    /// instrument's event ordinal.
+    fn flatten(&self, sh: &Shared, sid: StrategyId, idx_of: &[usize], ts: i64) -> PyResult<()> {
+        let mut held = Vec::new();
+        for (local, &idx) in idx_of.iter().enumerate() {
+            let ids: Vec<u64> = sh.with_book(sid, |b, _| {
+                Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
+            })?;
+            held.extend(ids.into_iter().map(|id| (local, idx, id)));
+        }
+        // The hedges first: covering one sends the close of the sold legs it protects.
+        let mut covered = std::collections::HashSet::new();
+        for &(local, idx, id) in &held {
+            if let Some(position) = self.hedge_to_cover(sh, sid, local, Some(id))? {
+                self.cover_hedge(sh, sid, local, position, idx, ts, false)?;
+                covered.insert((local, id));
+            }
+        }
+        for (local, idx, id) in held {
+            // A hedge waits on its cover; a sold leg a cover has closed is not closed twice.
+            let closing = covered.contains(&(local, id))
+                || self.ledger.borrow().cover_sent.contains(&(sid.index(), local, id));
+            if !closing {
+                self.close(sh, sid, local, idx, ts, id, false)?;
             }
         }
         Ok(())

@@ -337,6 +337,45 @@ print(result.metrics.total_return_pct, [t.pnl for t in trades])
 - **Honest numbers.** No performance figure is published here without a harness that reproduces it: see
   `benches/runtime/README.md` and [docs/release-criteria.md](docs/release-criteria.md).
 
+## Crash reporting (optional)
+
+Off by default. raptorbt sends nothing about crashes unless you turn this on and give it a collector: it has
+no built-in destination. Enabled without an endpoint and key, it sends nothing and logs one line to the
+`raptorbt` logger.
+
+```bash
+export RAPTORBT_CRASH_REPORTING=1
+```
+
+or in code, `raptorbt.enable_crash_reporting(endpoint=..., key=...)`. Point it at your own collector with
+`RAPTORBT_CRASH_ENDPOINT` (base URL; reports go to `<endpoint>/batch`; an address already ending in `/batch` or `/e` is used as given) and `RAPTORBT_CRASH_KEY` (a
+project key; the collector must accept the JSON batch described below), or pass `endpoint=` and `key=`. To disable, unset the variable (or
+do not call the function); nothing else is needed.
+
+Only an internal engine panic is reported, once per distinct (function, source line), at most five per
+process. A `RaptorBTError`, an error you can fix, and an exception raised by your own strategy callback are
+never reported. A report is one HTTPS POST from a background thread with a two second timeout; it never
+raises into your program or delays it. It holds exactly these fields:
+
+| Field | Value |
+| --- | --- |
+| `project`, `error_type` | `raptorbt`, `PanicException` |
+| `version` | the raptorbt version |
+| `operation` | the raptorbt function or constructor that crashed |
+| `location` | the engine source `file:line` of the panic |
+| `os`, `arch`, `python` | for example `Linux`, `x86_64`, `3.12` |
+| `$exception_list` | one entry, `panic in <operation> at <location>` (so the collector can group issues) |
+| `distinct_id` | a random id made when the process starts; not stored, not linked to you |
+| `$process_person_profile`, `$geoip_disable` | `false`, `true`: ask the collector to keep no profile and no location |
+
+Never sent: the panic message, argument values, data, symbols, prices, your code or file paths, local
+variables, environment variables, the host name.
+
+**Version check.** Separately from crash reporting, `import raptorbt` starts a background thread that asks
+pypi.org, at most once a day, for the newest release and logs one line if yours is older. It sends no data
+beyond an ordinary HTTPS request to pypi.org. Set `RAPTORBT_NO_VERSION_CHECK=1` to open no socket (CI
+environments are skipped automatically).
+
 ## Documentation
 
 | Where | What |

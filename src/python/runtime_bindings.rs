@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::portfolio::RejectReason;
+
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyAttributeError, PyKeyError};
 use pyo3::intern;
@@ -416,6 +418,9 @@ struct Shared {
     poisoned: Cell<bool>,
     /// The bars being pushed are history, replayed to prime the strategies.
     warmup: Cell<bool>,
+    /// Orders decided at an event time before this (ns) are refused, `warmup`. The bars
+    /// before it still feed data and indicators.
+    trade_from: Cell<i64>,
     /// The journal of a live node, when it keeps one (see `crate::journal`).
     journal: RefCell<Option<Rc<RefCell<Journal>>>>,
     /// `journal` is set: one flag read per event, no borrow.
@@ -634,6 +639,16 @@ impl Shared {
         client_id: &str,
         ts: i64,
     ) -> PyResult<Option<&'static str>> {
+        if let Some(reason) = self.host_refusal(sid, local, ts)? {
+            self.jlog_now(jk::REFUSAL, jsrc::ENGINE, Some(client_id), || {
+                JV::map([
+                    ("strategy", JV::Int(sid.index() as i64)),
+                    ("code", JV::str(reason.as_str())),
+                    ("message", JV::str(reason.as_str())),
+                ])
+            })?;
+            return Ok(Some(reason.as_str()));
+        }
         let Some((check, proposal)) = self
             .order_check
             .borrow()
@@ -694,6 +709,20 @@ impl Shared {
             })?;
             Ok(Some(code))
         })
+    }
+
+    /// Why an order decided at `ts` on a strategy's `local` instrument may not trade at all:
+    /// the instrument is a reference (an index), or the run has not reached its `trade_from`.
+    fn host_refusal(
+        &self,
+        sid: StrategyId,
+        local: usize,
+        ts: i64,
+    ) -> PyResult<Option<RejectReason>> {
+        if !self.with_book(sid, |b, _| Ok(b.kernel(local).is_tradable()))? {
+            return Ok(Some(RejectReason::NotTradable));
+        }
+        Ok((ts < self.trade_from.get()).then_some(RejectReason::Warmup))
     }
 
     fn with_book<R>(
@@ -2328,7 +2357,7 @@ impl PyRuntime {
         for i in 0..n {
             sym_ids.insert(symbols[i].clone(), InstrumentId::new(i as u32));
             let (direction, p, spec) =
-                parse_instrument_args(directions[i], instruments[i].as_deref(), oms_type)?;
+                parse_instrument_args(directions[i], instruments[i].as_deref(), oms_type, true)?;
             policy = Some(p);
             super::strategy_bindings::check_market(&rust_config, &symbols[i], spec.as_ref())?;
             let inst_cfg: Option<InstrumentConfig> =
@@ -2414,6 +2443,7 @@ impl PyRuntime {
             processing_latency_ns: Cell::new(0),
             poisoned: Cell::new(false),
             warmup: Cell::new(false),
+            trade_from: Cell::new(i64::MIN),
             journal: RefCell::new(None),
             journal_on: Cell::new(false),
             control: Rc::new(Control::default()),
@@ -3405,6 +3435,13 @@ impl PyRuntime {
         self.shared.warmup_muted.set(warmup && muted);
     }
 
+    /// Refuse every order decided before `ns` (an event time, ns since the epoch) with the
+    /// reason `warmup`; `None` lifts it.
+    #[pyo3(signature = (ns=None))]
+    fn set_trade_from(&self, ns: Option<i64>) {
+        self.shared.trade_from.set(ns.unwrap_or(i64::MIN));
+    }
+
     /// Set aside what every strategy has queued so far (its `on_start`), so
     /// muted warm-up history, which discards queued work, does not take an
     /// order the strategy made at start. `release_boot` queues it again.
@@ -4164,7 +4201,7 @@ impl PyRuntime {
         }
         let spec_py = spec.as_ref().map(|s| Py::new(py, PyInstrumentSpec::clone(s))).transpose()?;
         let (direction, policy, spec) =
-            parse_instrument_args(direction, spec.as_deref(), &sh.oms_type)?;
+            parse_instrument_args(direction, spec.as_deref(), &sh.oms_type, true)?;
         let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
         if strategies.is_empty() || strategies.windows(2).any(|w| w[0] >= w[1]) {
             return Err(Fail::new(
@@ -4332,6 +4369,10 @@ impl PyRuntime {
         }
         let ls = guard.as_mut().expect("checked by live_loop");
         ls.wanted.push(mask);
+        // The group loop indexes `rank` and `seen` by instrument: they grow with the node. A
+        // new name can fall between old ones, so the ranks are taken again (their order is kept).
+        ls.seen.push(0);
+        ls.rank = symbol_ranks(sh);
         ls.natives |= natives;
         if let Some(route) = sh.venue.borrow().clone() {
             for sid in &sids {
@@ -4750,7 +4791,9 @@ fn open_phase(
             c.decide_view(sid, pos, true);
         }
         sh.opening.set(true);
+        ls.bank.set_opening(true);
         let heard = step_deliver(py, sh, st, &ev, local, false, false, &mut None, matched);
+        ls.bank.set_opening(false);
         sh.opening.set(false);
         heard?;
         if st.has_held(py) {
@@ -4912,6 +4955,21 @@ struct LoopState {
     opens: bool,
 }
 
+/// Each instrument's place in ascending symbol order (equal symbols share a rank).
+fn symbol_ranks(sh: &Shared) -> Vec<u32> {
+    let symbols = sh.symbols.get();
+    let names: Vec<String> = Python::attach(|py| {
+        symbols.iter().map(|s| s.bind(py).to_str().unwrap_or("").to_owned()).collect()
+    });
+    let mut sorted: Vec<&str> = names.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    names
+        .iter()
+        .map(|n| sorted.binary_search(&n.as_str()).expect("a name is in its own list") as u32)
+        .collect()
+}
+
 impl LoopState {
     fn new(sh: &Shared) -> PyResult<Self> {
         let inner = sh.inner.borrow();
@@ -4927,17 +4985,8 @@ impl LoopState {
                 }
             }
         }
-        let symbols = sh.symbols.get();
-        let names: Vec<String> = Python::attach(|py| {
-            symbols.iter().map(|s| s.bind(py).to_str().unwrap_or("").to_owned()).collect()
-        });
-        let mut sorted: Vec<&str> = names.iter().map(String::as_str).collect();
-        sorted.sort_unstable();
-        sorted.dedup();
-        let rank = names
-            .iter()
-            .map(|n| sorted.binary_search(&n.as_str()).expect("a name is in its own list") as u32)
-            .collect();
+        let rank = symbol_ranks(sh);
+        let n_ranked = rank.len();
         Ok(Self {
             by_sid,
             wanted,
@@ -4945,7 +4994,7 @@ impl LoopState {
             subs: Vec::new(),
             scratch: Scratch::default(),
             rank,
-            seen: vec![0; names.len()],
+            seen: vec![0; n_ranked],
             epoch: 0,
             order: Vec::new(),
             round: Vec::new(),
@@ -5481,6 +5530,35 @@ fn refuse_intents(sh: &Shared, input: &StepInput) -> PyResult<()> {
         .into());
     }
     Ok(())
+}
+
+/// An `enter()` intent on an instrument that takes no orders, or decided before the run's
+/// `trade_from`, is refused: it is dropped, and the book reports it as a rejected entry
+/// (`not_tradable`, `warmup`) like any other refused entry.
+fn refuse_entry_intent(
+    sh: &Shared,
+    sid: StrategyId,
+    local: usize,
+    local_idx: usize,
+    ts: i64,
+    input: &mut StepInput,
+) -> PyResult<()> {
+    if !input.entry {
+        return Ok(());
+    }
+    let Some(reason) = sh.host_refusal(sid, local, ts)? else { return Ok(()) };
+    input.entry = false;
+    sh.with_book_mut(sid, |b, _| {
+        b.kernel_mut(local).refuse_entry(local_idx, reason);
+        Ok(())
+    })?;
+    sh.jlog_now(jk::REFUSAL, jsrc::ENGINE, None, || {
+        JV::map([
+            ("strategy", JV::Int(sid.index() as i64)),
+            ("code", JV::str(reason.as_str())),
+            ("message", JV::str(reason.as_str())),
+        ])
+    })
 }
 
 /// Drop everything the strategy queued, held intents included: muted warmup
@@ -6662,9 +6740,16 @@ fn step_match(
     // the entry and close intents go first: in-process they fill ahead of
     // the market orders the step sweeps.
     let mut venue_intents = None;
+    // An intent an open hook queued was decided at the open, before this bar traded: its ATR is
+    // the previous bar's.
+    let atr_idx = if sh.open_intents.borrow().contains_key(&(sid.index(), local)) {
+        local_idx.saturating_sub(1)
+    } else {
+        local_idx
+    };
     if sh.venue_on.get() && fold && (has_intents(py, st) || st.has_held(py)) {
         let atr = match &*sh.inner.borrow() {
-            Inner::Running(c) => c.atr_at(sid, local, local_idx),
+            Inner::Running(c) => c.atr_at(sid, local, atr_idx),
             _ => return Err(finished()),
         };
         let input = fold_step(py, st, symbol, local, local_idx, atr)?;
@@ -6681,7 +6766,7 @@ fn step_match(
     }
     let atr = if fold {
         match &*sh.inner.borrow() {
-            Inner::Running(c) => c.atr_at(sid, local, local_idx),
+            Inner::Running(c) => c.atr_at(sid, local, atr_idx),
             _ => return Err(finished()),
         }
     } else {
@@ -6703,6 +6788,7 @@ fn step_match(
         let mut input = fold_step(py, st, symbol, local, local_idx, atr)?;
         input.size_ref = sh.open_intents.borrow_mut().remove(&(sid.index(), local));
         refuse_intents(sh, &input)?;
+        refuse_entry_intent(sh, sid, local, local_idx, ts, &mut input)?;
         check_intent_grid(sh, sid, local, &input)?;
         input
     } else {

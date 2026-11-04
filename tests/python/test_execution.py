@@ -276,6 +276,11 @@ def digest(result):
         if o["status"] == "filled" and requested is not None:
             if float.fromhex(o["filled_qty"]) < float.fromhex(requested):
                 o["status"] = "canceled"
+        # A reduce-only leg whose sibling filled first is cut to what is left: in-process the
+        # book's order is resized and ends filled; a venue cuts its own copy, and the book's
+        # order, still showing the quantity it was sent with, reads partly filled.
+        if o["status"] == "partially_filled":
+            o["status"] = "filled"
         # A venue does not reject an order it has partly filled; it stops
         # working the rest.
         if o["status"] == "rejected" and o["filled_qty"] != enc_zero:
@@ -932,21 +937,31 @@ def test_a_typed_order_made_before_a_held_entry_fills_first_at_a_venue():
     """The one stream scenario that differs. ``enter()`` called from a quote is held for the
     symbol's next print, and a typed market order made at the same quote waits for it too.
     In-process the engine handles the step's intents before it sweeps market orders, so the
-    entry fills first and the typed order is then refused (``position_open``). A venue works
+    entry fills first and the typed order then adds to its position (netting). A venue works
     its orders in the order they were sent, and the typed order was sent first: it fills, and
-    the entry is the one refused. The in-process order is the specified one (a signal is
-    resolved in a phase of its own, ahead of the order sweep, wherever in the hook it was
-    called), so this stays a difference rather than something the simulated venue reorders
-    to match: see docs/architecture/execution-adapters.md, "Order of an entry intent"."""
+    the entry, finding the position held, is a no-op (``enter()`` never adds). Every order
+    fills in both, but the quantities and trades differ, since the order that opens is not the
+    same one. The in-process order is the specified one (a signal is resolved in a phase of its
+    own, ahead of the order sweep, wherever in the hook it was called): see
+    docs/architecture/execution-adapters.md, "Order of an entry intent"."""
     name = "st_refused_rows_timers"
     in_process = stream_digest(name, None)
     paper = stream_digest(name, PaperExecution())
-    assert (in_process["orders"][0]["status"], in_process["orders"][0]["reject_reason"]) == (
-        "rejected",
-        "position_open",
-    )
-    assert paper["orders"][0]["status"] == "filled"
+    assert [o["status"] for o in in_process["orders"]] == ["filled"] * 5
+    assert [o["status"] for o in paper["orders"]] == ["filled"] * 5
     assert in_process["trades"] != paper["trades"]
+
+
+def test_an_enter_racing_a_typed_order_on_a_held_instrument_never_adds_at_a_venue():
+    """``st_push_basic`` sends an ``enter()`` for an instrument whose typed limit buy fills on the
+    same print. ``enter()`` means "be in this position": with it held it is a no-op in-process,
+    and a simulated venue refuses to fill it as an add (``entry_held``), so sizes agree. Typed
+    orders are how a strategy adds."""
+    name = "st_push_basic"
+    in_process = stream_digest(name, None)
+    paper = stream_digest(name, PaperExecution())
+    assert in_process["trades"] == paper["trades"]
+    assert in_process == paper
 
 
 def test_hedging_equals_in_process_on_a_paper_node_because_a_close_names_its_position():

@@ -12,7 +12,7 @@ from raptorbt.strategy.clock import Clock
 from raptorbt.strategy.config import StrategyConfig
 from raptorbt.strategy.context import StrategyContext
 from raptorbt.strategy.orders import Market
-from raptorbt.strategy.orders.types import Twap, _OrderBase
+from raptorbt.strategy.orders.types import Twap, _OrderBase, check_term
 
 
 def _structures_first(hook):
@@ -331,6 +331,9 @@ class Strategy:
         Prefer :meth:`enter_long` / :meth:`enter_short`, which read better
         and cannot be mis-spelled.
         """
+        check_term("size_frac", size_frac, maximum=1.0)
+        check_term("stop_price", stop_price)
+        check_term("target_price", target_price)
         if side is None:
             self._queue.enter(size_frac, stop_price, target_price)
             return

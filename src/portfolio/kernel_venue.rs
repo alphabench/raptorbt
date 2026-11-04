@@ -12,7 +12,7 @@
 use std::sync::Mutex;
 
 use crate::accounts::Money;
-use crate::core::types::{Direction, ExitReason};
+use crate::core::types::{Direction, ExitReason, Price};
 use crate::core::FillTiming;
 use crate::execution::orders::{
     ExecutionReport, Order, OrderEventError, OrderKind, OrderSide, OrderStatus, QtySpec,
@@ -21,6 +21,15 @@ use crate::execution::orders::{
 use crate::portfolio::kernel::{EngineEvent, EngineKernel, KernelBar};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::risk::RejectReason;
+
+/// What the orders a venue holds would add to an instrument if they all
+/// filled; see [`EngineKernel::venue_pretrade`].
+#[derive(Debug, Default)]
+struct WorkingEntries {
+    buy_units: f64,
+    sell_units: f64,
+    notional: f64,
+}
 
 /// Why a venue request or report was not applied.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -274,6 +283,13 @@ impl EngineKernel {
         self.fill_timing == FillTiming::NextBarOpen
     }
 
+    /// Mark an order as an `enter()` intent: with a netting position held it fills nothing.
+    pub fn set_order_entry_intent(&mut self, order_id: u64) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.entry_intent = true;
+        }
+    }
+
     pub fn set_order_position(&mut self, order_id: u64, position_id: Option<u64>) {
         if let Some(order) = self.orders.get_mut(order_id) {
             order.position_id = position_id;
@@ -282,19 +298,29 @@ impl EngineKernel {
 
     /// The book's own limits, applied before an order is sent to a venue
     /// that does not apply them for us: the kill-switch and halts, the
-    /// drawdown and daily-loss latches, `max_positions` and the order-size
-    /// and position limits. A simulated venue applies them itself, at the
-    /// fill, exactly as the matcher does, so it skips this.
+    /// drawdown and daily-loss latches, `max_positions` and the order-size,
+    /// position and exposure limits. A simulated venue applies them itself,
+    /// at the fill, exactly as the matcher does, so it skips this.
     ///
     /// An order that can only shrink a position is always allowed, as the
-    /// matcher allows exits when entries are blocked. `price` is the price to
-    /// size the order's notional at, when the caller has one.
+    /// matcher allows exits when entries are blocked. `price` is the price
+    /// the order names (its limit or trigger); `mark` is the last price seen,
+    /// which prices an order that names none. `own` is the order being
+    /// checked, already in the book, which must not count against itself.
+    ///
+    /// Orders the venue is already working, or has not yet answered, count
+    /// as if filled: two entries that each fit under a cap must not both be
+    /// sent when together they do not. An order that needs a price (a
+    /// notional or exposure limit is set) and has neither `price` nor `mark`
+    /// is refused as `no_mark`, never passed unchecked.
     pub fn venue_pretrade(
         &self,
+        own: Option<u64>,
         side: OrderSide,
         units: f64,
         reduce_only: bool,
         price: Option<f64>,
+        mark: Option<f64>,
     ) -> Result<(), RejectReason> {
         let direction = match side {
             OrderSide::Buy => Direction::Long,
@@ -315,19 +341,76 @@ impl EngineKernel {
             // reduce and the venue decides.
             return if !hedging && held.is_some() { Err(RejectReason::ReduceOnly) } else { Ok(()) };
         }
-        if !hedging && held.is_some() {
-            return Err(RejectReason::PositionOpen);
-        }
         if self.session_state.entries_blocked {
             return Err(RejectReason::Squareoff);
         }
         if self.margin.is_halted() {
             return Err(RejectReason::MarginCall);
         }
-        self.risk.check_entry(self.gating_open_count())?;
-        match price {
-            Some(p) => self.check_whole_order(direction, units, p),
-            None => Ok(()),
+        // An order on the side of a netting position adds to it: the position-count limit
+        // does not bind it.
+        let counted = if !hedging && held.is_some() { 0 } else { self.gating_open_count() };
+        self.risk.check_entry(counted)?;
+        if !self.limits.is_active() {
+            return Ok(());
+        }
+        let Some(at) = price.or(mark) else {
+            return if self.limits.needs_price() { Err(RejectReason::NoMark) } else { Ok(()) };
+        };
+        let multiplier = self.multiplier();
+        let working = self.working_entries(own, at);
+        self.limits.check_order(units, units * at * multiplier)?;
+        let before = self.net_size();
+        let after = match direction {
+            Direction::Long => before + working.buy_units + units,
+            Direction::Short => before - working.sell_units - units,
+        };
+        self.limits.check_position(before, after)?;
+        if self.limits.tracks_exposure() {
+            let existing =
+                self.gross_notional(at) + self.external_exposure.unwrap_or(0.0) + working.notional;
+            self.limits.check_exposure(existing, units * at * multiplier)?;
+        }
+        Ok(())
+    }
+
+    /// What the orders the venue holds for this instrument would add if they
+    /// all filled: the units that buy, the units that sell and their notional,
+    /// the order `own` left out. Orders that only reduce are not counted, and
+    /// an order is priced at its limit or trigger, else at `mark`.
+    fn working_entries(&self, own: Option<u64>, mark: Price) -> WorkingEntries {
+        let multiplier = self.multiplier();
+        let mut out = WorkingEntries::default();
+        for o in self.orders.working() {
+            if Some(o.id) == own || o.reduce_only || !o.is_venue_driven() {
+                continue;
+            }
+            let QtySpec::Units(total) = o.qty else { continue };
+            let left = (total - o.filled_qty).max(0.0);
+            match o.side {
+                OrderSide::Buy => out.buy_units += left,
+                OrderSide::Sell => out.sell_units += left,
+            }
+            let at = o.kind.limit_price().or(o.kind.trigger_price()).unwrap_or(mark);
+            out.notional += left * at * multiplier;
+        }
+        out
+    }
+
+    /// The gross notional the orders the venue holds for this instrument
+    /// would add if they all filled, for the other instruments' exposure check.
+    pub(crate) fn working_notional(&self, mark: Option<Price>) -> f64 {
+        match mark {
+            Some(mark) => self.working_entries(None, mark).notional,
+            None => 0.0,
+        }
+    }
+
+    /// Add to the gross notional the portfolio's other instruments hold, for
+    /// `max_gross_exposure`, while the account is lent to this kernel.
+    pub(crate) fn add_external_exposure(&mut self, extra: f64) {
+        if let Some(e) = self.external_exposure.as_mut() {
+            *e += extra;
         }
     }
 
@@ -509,7 +592,7 @@ impl EngineKernel {
                 ) || (reduce_only && reason == "unfillable")
                     // An entry intent that finds the position already open is
                     // a no-op in-process.
-                    || (client_id.starts_with("enter-") && reason == "position_open");
+                    || (client_id.starts_with("enter-") && reason == "entry_held");
                 if !uncounted {
                     self.risk.record_rejection();
                 }
@@ -991,8 +1074,8 @@ impl EngineKernel {
     }
 
     /// Open or add `qty` in `direction` at the venue's price. Under netting a
-    /// fill on the side of the position another order opened adds to it and
-    /// reports the breach (the matcher refuses that entry, `position_open`).
+    /// fill on the side of the position another order opened adds to it, as the
+    /// matcher's does.
     #[allow(clippy::too_many_arguments)]
     fn open_fact(
         &mut self,
@@ -1027,9 +1110,6 @@ impl EngineKernel {
             .map(|m| m.id);
         let scale_in = if hedging { None } else { self.ledger.first().map(|m| m.id) };
         if let Some(position_id) = adds_to.or(scale_in) {
-            if adds_to.is_none() {
-                self.fact_breaches.push(RejectReason::PositionOpen.as_str());
-            }
             let (cost0, fees0, lock0) = self.position_books(position_id);
             let Some((fill_price, size)) =
                 self.add_at(idx, bar, position_id, price, qty, stop_attach, target_attach, true)

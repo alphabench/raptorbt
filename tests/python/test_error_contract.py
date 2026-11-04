@@ -744,6 +744,40 @@ def _():
     run(bindings={"fut": "A"})
 
 
+@case("invalid_binding", "bindings")
+def _():
+    from raptorbt.strategy import Underlying
+
+    run(with_roles(index=Underlying(asset="index"))(lambda s, ctx: None), bindings={"index": ["A", "B"]})
+
+
+@case("invalid_binding", "bindings", name="universe_given_a_symbol")
+def _():
+    from raptorbt.strategy import Universe
+
+    run(with_roles(basket=Universe(min=1, max=2))(lambda s, ctx: None), bindings={"basket": "A"})
+
+
+@case("universe_size", "bindings")
+def _():
+    from raptorbt.strategy import Universe
+
+    run(with_roles(basket=Universe(min=2, max=3))(lambda s, ctx: None), bindings={"basket": ["A"]})
+
+
+@case("universe_instrument", "symbol_or_role")
+def _():
+    from raptorbt.strategy import Universe
+
+    Roled = with_roles(basket=Universe(min=1, max=2))
+    run(Roled(lambda s, ctx: ctx.instrument("basket")), bindings={"basket": ["A"]})
+
+
+@case("invalid_trade_from", "trade_from")
+def _():
+    run(trade_from="09:30")
+
+
 @case("no_instrument_spec", "symbol_or_role")
 def _():
     during_run(lambda s, ctx: ctx.instrument("A"))

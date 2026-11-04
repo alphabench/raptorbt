@@ -166,9 +166,11 @@ def restore(
     records=None,
     reconcile: bool | str = True,
     accept=None,
+    cash_tolerance: float = 0.0,
     on_discrepancy: Callable[[Discrepancy], None] | None = None,
     **kwargs,
 ):
+    _check_cash_tolerance(cash_tolerance)
     ck = jr.decode_checkpoint(checkpoint_bytes) if checkpoint_bytes is not None else None
     if records is None:
         if ck is None or ck.get("log") is None:
@@ -270,7 +272,7 @@ def restore(
         node._resume_record({"skipped": True})
         node._state = "live"
     elif reconcile:
-        found = node.reconcile()
+        found = node.reconcile(cash_tolerance=cash_tolerance)
         if not found:
             node.resume()
         elif accept is not None:
@@ -526,8 +528,29 @@ def venue_cash(raw) -> tuple[float | None, dict]:
     return None, snap
 
 
+def _check_cash_tolerance(cash_tolerance) -> None:
+    # A tolerance of NaN compares false with everything: no cash difference would ever be reported.
+    if (
+        isinstance(cash_tolerance, bool)
+        or not isinstance(cash_tolerance, (int, float))
+        or not math.isfinite(cash_tolerance)
+        or cash_tolerance < 0
+    ):
+        raise InvalidParameter(
+            f"cash_tolerance must be a finite number >= 0, got {cash_tolerance!r}",
+            code="invalid_parameter", operation="LiveNode.reconcile",
+            parameter="cash_tolerance", value=cash_tolerance,
+            valid=["a finite number >= 0, in the account's currency"],
+        )
+
+
 def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
-    """Ask the adapter what the venue holds and compare it with the node."""
+    """Ask the adapter what the venue holds and compare it with the node.
+
+    An adapter with ``catch_up()`` is asked first for what happened at the venue that the node
+    has not heard (a fill while the node was down), and the node takes those reports before it
+    compares: such an order is booked, not reported as ``missing_order``."""
+    _check_cash_tolerance(cash_tolerance)
     adapter = node._execution
     has_orders = callable(getattr(adapter, "open_orders", None))
     has_positions = callable(getattr(adapter, "positions", None))
@@ -538,6 +561,10 @@ def reconcile(node, cash_tolerance: float = 0.0) -> list[Discrepancy]:
             code="no_reconcile", operation="LiveNode.reconcile",
         )
     rt = node._rt
+    catch_up = getattr(adapter, "catch_up", None)
+    if callable(catch_up):
+        for q in catch_up():
+            node.push_report(q.client_order_id, q.report, arrival_ns=q.arrival_ns)
     found: list[Discrepancy] = []
     sent = rt.venue_orders()
     unconfirmed = set(rt.unconfirmed())

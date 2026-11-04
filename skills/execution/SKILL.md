@@ -64,7 +64,7 @@ Reports are keyed by the venue-facing id.
 **Fills are facts.** A fill report is booked at the quantity and price the
 venue reported. No slippage is added, and no limit of the book can undo it: the
 venue executed it. A fill that breaches a limit (`order_size`, `max_position`,
-`max_exposure`, `insufficient_capital`, `position_open`, `reduce_only`) is
+`max_exposure`, `insufficient_capital`, `reduce_only`) is
 booked and announced as a risk event `fill_breach` with the limit named. A fill
 the book cannot book yet (a reduce-only fill that arrives before the fill that
 opens its position) is kept, announced as `fill_deferred`, journaled as

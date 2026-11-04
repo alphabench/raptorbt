@@ -328,6 +328,14 @@ pub struct Order {
     pub post_only: bool,
     /// Reject fills that would open a position (closing fills only).
     pub reduce_only: bool,
+    /// The order is an `enter()` intent sent to a venue: "be in this position". Under netting it
+    /// is a no-op when the position is held when it fills, as the signal is in-process; it never adds.
+    #[serde(default)]
+    pub entry_intent: bool,
+    /// The close leg of a netting flip has filled; the rest is still to open. If it cannot, the
+    /// order ends filled at what it closed (resized), not rejected after fills.
+    #[serde(default)]
+    pub flipped: bool,
     /// Sent by the strategy in answer to a fill it just heard (a roll's open, a structure's sold
     /// leg): it meets the bar of the step that fill came in, not the next one. Market orders only.
     #[serde(default)]
@@ -517,6 +525,8 @@ impl Order {
             target_price: None,
             post_only: false,
             reduce_only: false,
+            entry_intent: false,
+            flipped: false,
             follow_up: false,
             parent_id: None,
             algo_id: None,

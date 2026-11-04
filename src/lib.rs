@@ -27,6 +27,19 @@ pub mod runtime;
 pub mod signals;
 pub mod strategies;
 
+/// The source file and line of the most recent raptorbt engine panic in this process, from any
+/// thread (a panic in a worker thread is re-raised on the caller's). Never the panic message.
+/// Written only for a panic that is a crash: not by the money / fee-schedule faults, which are
+/// structured errors. Taken (cleared) on read.
+static LAST_PANIC_LOCATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `file:line` of the most recent engine panic, or None; clears it, so a later panic that is not
+/// raptorbt's cannot inherit it. Read by `raptorbt.crash_report`.
+#[pyfunction]
+fn _last_panic_location() -> Option<String> {
+    LAST_PANIC_LOCATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+}
+
 /// A money fault is a structured error in Python (`money_overflow`), as is a fee
 /// schedule gap (`fee_schedule_gap`), each raised through a panic only to unwind out of the kernel. Its panic notice would be
 /// a second, unstructured report of the same failure on stderr, so the hook
@@ -46,6 +59,13 @@ fn silence_money_fault_notices() {
                     || m.starts_with(execution::fees::FEE_GAP_PREFIX)
             }) {
                 return;
+            }
+            // Where, never what: the opt-in crash reporter reads this file:line, and the
+            // message (which can hold prices or symbols) is not kept. Only a panic that is a
+            // crash gets here. The lock is never held across code that can panic.
+            if let Some(location) = info.location() {
+                *LAST_PANIC_LOCATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some(format!("{}:{}", location.file(), location.line()));
             }
             previous(info);
         }));
@@ -203,6 +223,7 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_INDICATOR_FUNCTIONS", indicator_functions)?;
 
     m.add_function(wrap_pyfunction!(python::capabilities_bindings::capabilities_json, m)?)?;
+    m.add_function(wrap_pyfunction!(_last_panic_location, m)?)?;
 
     // Register option pricing, Greeks, implied volatility and the option chain
     python::pricing_bindings::register(m)?;

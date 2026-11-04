@@ -18,7 +18,8 @@ strategy's context.
 * ``ctx.role(name)`` returns the symbol a :class:`~raptorbt.strategy.requirements.Requirements`
   role means now: the bound symbol of an ``Underlying``, the fixed one of an
   ``Instrument``, the contract of a ``Future`` and, for a ``Chain``, a tuple of
-  contract symbols, resolved at the context's time with
+  contract symbols; for a ``Universe``, the tuple of symbols the role is bound to, in the
+  order they were bound. Resolved at the context's time with
   :func:`~raptorbt.strategy.requirements.resolve` from the instruments and last
   prices the strategy can see. A role that cannot be resolved raises
   ``unresolved_role`` naming why.
@@ -27,11 +28,17 @@ strategy's context.
 from __future__ import annotations
 
 from bisect import bisect_right
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from raptorbt import OptionChain
 from raptorbt.errors import InvalidParameter, UnknownSymbol
-from raptorbt.strategy.requirements import Chain, Requirements, resolve
+from raptorbt.strategy.requirements import (
+    Chain,
+    Requirements,
+    Universe,
+    resolve,
+    universe_binding_problem,
+)
 
 
 class ContextHost:
@@ -41,9 +48,12 @@ class ContextHost:
     calls :meth:`changed` and every strategy sees the new set at its next call.
     """
 
-    def __init__(self, specs: Mapping[str, object] | None, bindings: Mapping[str, str] | None):
+    def __init__(
+        self, specs: Mapping[str, object] | None, bindings: Mapping[str, str | Sequence[str]] | None
+    ):
         self.specs: dict[str, object] = dict(specs or {})
-        self.bindings: dict[str, str] = dict(bindings or {})
+        #: A role to its symbol; a ``Universe`` role to the tuple of its symbols.
+        self.bindings: dict[str, str | tuple[str, ...]] = dict(bindings or {})
         self._version = 0
         #: The execution adapter of a node with a venue of its own, if any; a strategy's exit
         #: rules are offered to it (``place_exit_rule``).
@@ -95,6 +105,16 @@ class ContextHost:
         if key is None:
             key = ctx.symbol
         symbol = self.bindings.get(key, key) if key not in self.specs else key
+        if not isinstance(symbol, str):
+            raise InvalidParameter(
+                f"ctx.instrument({key!r}): the role is a Universe of {len(symbol)} symbols; "
+                f"read them with ctx.role({key!r}) and pass one",
+                code="universe_instrument",
+                operation="ctx.instrument",
+                parameter="symbol_or_role",
+                value=key,
+                valid=list(symbol),
+            )
         spec = self.specs.get(symbol)
         if spec is None:
             raise UnknownSymbol(
@@ -184,7 +204,11 @@ class ContextHost:
                 parameter="name",
                 value=name,
             )
-        return tuple(role.symbols) if isinstance(requirements.roles[name], Chain) else role.symbols[0]
+        return (
+            tuple(role.symbols)
+            if isinstance(requirements.roles[name], (Chain, Universe))
+            else role.symbols[0]
+        )
 
     # -- internals -----------------------------------------------------------------
 
@@ -218,16 +242,19 @@ class ContextHost:
 def build(instruments, bindings, entries, universe, call: str) -> ContextHost:
     """The host of a run or node, with ``bindings`` checked.
 
-    Every key must be a role of at least one strategy, and every bound symbol a
-    symbol of the run (``universe``).
+    Every key must be a role of at least one strategy; a ``Universe`` role is bound to a list of
+    symbols (``universe_size`` if the count is outside the role's min..max) and any other role to
+    one symbol (``invalid_binding`` for the wrong shape); every bound symbol must be a symbol of
+    the run (``universe``).
     """
     bindings = dict(bindings or {})
-    declared: set[str] = set()
+    declared: dict[str, list] = {}
     for strategy, _ in entries:
         requirements = getattr(type(strategy), "requirements", None)
         if isinstance(requirements, Requirements):
-            declared.update(requirements.roles)
-    for role, symbol in bindings.items():
+            for name, role in requirements.roles.items():
+                declared.setdefault(name, []).append(role)
+    for role, bound in bindings.items():
         if role not in declared:
             raise InvalidParameter(
                 f"{call}: bindings names role {role!r}, which no strategy declares",
@@ -237,13 +264,38 @@ def build(instruments, bindings, entries, universe, call: str) -> ContextHost:
                 value=role,
                 valid=sorted(declared),
             )
-        if symbol not in universe:
-            raise UnknownSymbol(
-                f"{call}: role {role!r} is bound to {symbol!r}, which is not a symbol here",
-                code="unknown_symbol",
-                operation=call,
-                parameter="bindings",
-                value=symbol,
-                valid=list(universe),
-            )
+        symbols = [bound]
+        for kind in declared[role]:
+            if isinstance(kind, Universe):
+                problem = universe_binding_problem(kind, bound)
+                if problem is not None:
+                    shown = list(bound) if not isinstance(bound, str) and isinstance(bound, Sequence) else bound
+                    message = f"{call}: role {role!r}: {problem[1]}"
+                    if problem[0] == "universe_size":
+                        raise InvalidParameter(
+                            message, code="universe_size", operation=call, parameter="bindings", value=shown
+                        )
+                    raise InvalidParameter(
+                        message, code="invalid_binding", operation=call, parameter="bindings", value=shown
+                    )
+                symbols = list(bound)
+                bindings[role] = tuple(bound)
+            elif not isinstance(bound, str):
+                raise InvalidParameter(
+                    f"{call}: role {role!r} takes one symbol, got {bound!r}",
+                    code="invalid_binding",
+                    operation=call,
+                    parameter="bindings",
+                    value=bound if isinstance(bound, (str, int, float)) else repr(bound),
+                )
+        for symbol in symbols:
+            if symbol not in universe:
+                raise UnknownSymbol(
+                    f"{call}: role {role!r} is bound to {symbol!r}, which is not a symbol here",
+                    code="unknown_symbol",
+                    operation=call,
+                    parameter="bindings",
+                    value=symbol,
+                    valid=list(universe),
+                )
     return ContextHost(instruments, bindings)

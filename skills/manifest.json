@@ -95,7 +95,8 @@
         "Defining futures lot size, tick size, multiplier, expiry and settlement.",
         "Picking option strikes and expiries from a chain; pricing options, Greeks and implied volatility.",
         "Building iron condors, straddles and other multi-leg option structures.",
-        "Market hours, trading sessions and holidays."
+        "Market hours, trading sessions and holidays.",
+        "Trading option contracts while deciding on the index; building a synthetic chain and setting span_pct and exposure_pct for sold options."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -248,7 +249,8 @@
       "load_when": [
         "Submitting or managing orders: limit, stop, stop-limit, trailing, bracket, OCO, modify, cancel.",
         "Implementing a stop-loss, target or time in force (day, gtd, ioc, fok).",
-        "Explaining why an order was rejected, or placing a multi-leg option structure."
+        "Explaining why an order was rejected, or placing a multi-leg option structure.",
+        "Putting an ATR stop or target on an option leg: the premium or the index."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -504,7 +506,9 @@
       "api_version": "2.x",
       "status": "stable",
       "modules": [
-        "raptorbt.version_check"
+        "raptorbt.version_check",
+        "raptorbt.crash_report",
+        "raptorbt.enable_crash_reporting"
       ]
     },
     {

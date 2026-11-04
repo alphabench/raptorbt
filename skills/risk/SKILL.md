@@ -42,6 +42,17 @@ reaches `on_order_rejected` with a stable `reject_reason`.
 An equal value passes; one step above is refused. A reducing order is not
 blocked by a position cap it reduces.
 
+**On a `LiveNode` with a real venue** (an adapter that is not `PaperExecution`)
+the same limits are checked before the adapter sees the order, because the venue
+knows none of them. A market order names no price, so it is priced at the last
+price seen on the instrument. Orders the venue is working or has not answered
+count as if filled: with `max_position_qty=7`, a second 5-unit buy is refused
+while the first is still out, and `max_gross_exposure` counts the working orders
+of every instrument. Reducing orders are never held back. A market order that
+cannot be priced at all (no print yet on its instrument) under
+`max_order_notional` or `max_gross_exposure` is refused as `no_mark`, never
+sent unchecked.
+
 **Events.** `on_risk_event(ctx, event)` hears the first six limits as
 `"risk_rejected"` (`event.reject_reason` says which), and the two stop-trading
 moments as `"risk_halted"`: the daily loss limit being reached
@@ -104,7 +115,8 @@ non-positive or non-finite input.
 4. Handle `on_order_rejected` and `on_risk_event`: log the reason, do not retry
    the same order into the same limit.
 5. Test each limit at its boundary: equal passes, one step above is refused.
-6. Run the same limits live; they are the same settings on a `LiveNode`.
+6. Run the same limits live; they are the same settings on a `LiveNode`, and
+   on a real venue they are checked before each order is sent.
 
 ## 5. Examples
 
@@ -321,9 +333,10 @@ assert risk.total_vol_annualized > 0.0
 
 - The limits apply the same way in `run_strategy_backtest`, `run_strategies`,
   the portfolio and tick runners and `LiveNode`.
-- Under netting, an order in the direction of an open position is rejected as
-  `position_open` before a size cap is consulted (see orders). Use hedging, or
-  test the cap with a flat account.
+- Under netting, an order in the direction of an open position adds to it, and
+  the size caps (`max_position_qty`, `max_order_qty`, exposure) judge the
+  position after the add, so a cap is tested the same with a position open and
+  with a flat account (see orders).
 - `max_drawdown_pct` and the percent forms are percents (`15.0` is 15%);
   `fees`, `slippage` and sizing `fraction` / `risk_fraction` are fractions.
 - Daily loss counts unrealised loss, and the day boundary follows
@@ -333,9 +346,9 @@ assert risk.total_vol_annualized > 0.0
   the next day.
 - A flatten closes at the latest mark the engine has, not at a price a later bar prints.
 - The margin rule never reads a missing instrument rule as zero: it refuses.
-- Known defect: in `run_strategy_backtest`, `ctx.halt(flatten=True)` records the
-  flattened trade twice (`metrics.total_trades` counts it twice; equity and cash
-  are right). `run_strategies` records it once.
+- `ctx.halt(reason, flatten=True)` records the flattened trade once, in
+  `run_strategy_backtest` and `run_strategies` alike (`metrics.total_trades`
+  counts it once).
 - Sizing never rounds up and never returns zero. Handle `below_one_lot`: the
   honest answer may be "do not trade".
 
@@ -368,6 +381,7 @@ sizing.lots_for_capital(1_000_000, 100.0, 1, fraction=1.5)   # InvalidParameter:
   path to `ctx.halt`.
 - Using `percent_of_notional(0.2)` for 20 percent margin: it is 0.2 percent.
   Use `fraction_of_notional(0.2)`, which refuses `20`.
+- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: a size or stop distance you compute in a fill hook answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation
 

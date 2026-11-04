@@ -187,18 +187,41 @@ def test_auto_settlement_uses_the_underlying_when_it_is_in_the_run(order):
     assert trades(out["batch"]) == [("C", 150.0, 200.0, 75.0, "11-26 15:30")]
 
 
-def test_auto_settlement_falls_back_to_the_last_price_without_the_underlying():
-    """With no underlying in the run, ``auto`` settles at the option's own last price (150): the
-    rule only reaches for a price the run has."""
-    out = run(
-        {("C", 0): lambda s, c: s.submit_order(O.Market(side="buy", units=75.0))},
-        {"C": bars([(150,) * 4, (150,) * 4], EXPIRY_TS[:2])},
-        expiry_cfg,
-        paths=("batch",),
-        instruments={"C": call_option("auto")},
-    )
-    ((_, entry, exit_, size, _),) = trades(out["batch"])
-    assert (entry, exit_, size) == (150.0, 150.0, 75.0)
+def test_auto_settlement_refuses_an_index_option_when_the_run_has_no_underlying_price():
+    """An index option cash-settles at the official index close. With no
+    underlying in the run, ``auto`` does not settle it at the option's own last trade (150): the
+    settlement is refused like ``underlying`` is, the strategy hears why, and the run's own end
+    closes the position (``EndOfData``). ``settlement_price="last_price"`` still asks for the
+    option's own price."""
+    class Holder(Strategy):
+        def __init__(self):
+            super().__init__()
+            self.refused = []
+
+        def on_bar(self, ctx):
+            if ctx.idx == 0:
+                self.submit_order(O.Market(side="buy", units=75.0))
+
+        def on_contract_event(self, ctx, event):
+            if event.kind == "lifecycle_refused":
+                self.refused.append((event.reject_reason, event.outcome))
+
+    def go(price):
+        s = Holder()
+        out = rb.run_strategies(
+            [s], {"C": bars([(150,) * 4] * 4, EXPIRY_TS[:4])}, expiry_cfg(),
+            instruments={"C": call_option(price)}, bar_stamp="close",
+        )
+        return s, out[0].result.trades()
+
+    auto, trades_auto = go("auto")
+    assert auto.refused == [("underlying_price_missing", "settlement")]
+    assert [str(t.exit_reason) for t in trades_auto] == ["EndOfData"]
+
+    last, trades_last = go("last_price")
+    assert last.refused == []
+    assert [str(t.exit_reason) for t in trades_last] == ["Settlement"]
+    assert trades_last[0].exit_price == 150.0
 
 
 # ---------------------------------------------------------------------------

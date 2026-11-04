@@ -107,6 +107,7 @@ state is as it was before the call.
 | `misaligned_legs` | `InvalidData` | The legs of a basket or pair do not share their timestamps: trade only on bars every leg has. |
 | `depth_without_ticks` | `InvalidData` | `depth` names a symbol with no `ticks`. |
 | `invalid_data` | `InvalidData` | `adjust_history` or a resample was given a field it cannot use; the message and `parameter` name it. |
+| `invalid_trade_from` | `InvalidParameter` | `trade_from` must be an event time in integer nanoseconds since the epoch (or `None`). |
 | `invalid_adjust`, `no_continuous_bars` | `InvalidParameter` / `InvalidData` | `continuous_series` needs `adjust` of `raw`, `back` or `ratio`, and bars for each contract inside its own window. |
 
 *Orders.*
@@ -114,7 +115,7 @@ state is as it was before the call.
 | Code | Class | Cause and fix |
 | --- | --- | --- |
 | `invalid_order_side`, `invalid_time_in_force`, `invalid_order_kind`, `invalid_offset_kind` | `InvalidOrder` | An order term is not one of the values in `valid`. See [orders](../orders/SKILL.md). |
-| `invalid_order_value`, `missing_order_field`, `incompatible_order_options` | `InvalidOrder` | A price, size, offset or count is out of range; a field the kind needs is missing (`limit_price`, `trigger_price`, `offset`, `expire_ns` for `gtd`); or two options do not go together (`at_open` with a limit, `post_only` with a market). |
+| `invalid_order_value`, `missing_order_field`, `incompatible_order_options` | `InvalidOrder` | A price, size, offset, protective level (`stop_price`, `target_price`) or count is out of range, NaN or infinite; a field the kind needs is missing (`limit_price`, `trigger_price`, `offset`, `expire_ns` for `gtd`); or two options do not go together (`at_open` with a limit, `post_only` with a market). |
 | `invalid_order_link`, `invalid_order_intent`, `invalid_order_tags` | `InvalidOrder` | An OCO or parent link names too few or unknown orders; a bar queued two `enter()` or two `close_position()`; or `tags` is not at most 16 `str` pairs (no `client_id` key). |
 | `invalid_order_reference`, `unknown_order` | `InvalidOrder` | A position id or client id the run does not hold. A submitted order that has finished is a no-op, not this error. |
 | `off_lot_quantity`, `off_tick_price` | `InvalidOrder` | A quantity is not whole lots, or a price not whole ticks; `valid` lists the nearest. Round before submitting. |
@@ -124,7 +125,7 @@ state is as it was before the call.
 
 | Code | Class | Cause and fix |
 | --- | --- | --- |
-| `untradable_instrument` | `UnsupportedOperation` | An index or other untradable kind was given to trade. |
+| `untradable_instrument` | `UnsupportedOperation` | An index was given to a single-instrument session. In `run_strategies` and `LiveNode` an index is accepted as data and an order on it is refused `not_tradable`. |
 | `invalid_session_schedule`, `invalid_session_date`, `invalid_instrument_metadata`, `mcx_session_unknown`, `invalid_settlement` | `InvalidParameter` | A schedule window, weekday or date is wrong; a `venue` or `currency` is empty; an MCX contract of no known class has no `session=`; a settlement style or price is not in `valid`. See [instruments](../instruments/SKILL.md). |
 | `invalid_roll_sizing`, `roll_price_missing` | `InvalidParameter` / `StateError` | `roll_sizing` is `notional` or `lots`; a notional roll needs the new contract to have a bar before the roll (feed one, or size by lots). |
 | `invalid_margin_model` | `InvalidParameter` | A margin model name, rule or leg does not fit, or a `margin_model` was given to a cash account. See [risk](../risk/SKILL.md). |
@@ -132,6 +133,7 @@ state is as it was before the call.
 | `structure_limit_breached`, `structure_margin_exceeded` | `InvalidParameter` | The legs' prices make the net premium worse than `net_limit`; the margin model needs more than `available`. Nothing was queued. |
 | `below_one_lot`, `invalid_sizing_input` | `InvalidParameter` | A sizing rule yields under one lot (nothing is rounded up), or an input is not a positive finite number. |
 | `unknown_role_binding`, `unknown_role`, `no_requirements`, `unresolved_role`, `no_instrument_spec` | `InvalidParameter` / `UnknownSymbol` | A `bindings` key or `ctx.role` name no strategy declares, a strategy with no `requirements`, a role the data cannot resolve at this time, or a symbol with no `InstrumentSpec`. |
+| `invalid_binding`, `universe_size`, `universe_instrument` | `InvalidParameter` | A role bound to the wrong shape (a list for an `Underlying`; for a `Universe` anything but a list of distinct symbols); a `Universe` bound to fewer than its `min` or more than its `max` symbols; `ctx.instrument(role)` of a `Universe`, which names many symbols (`ctx.role(role)` lists them). |
 
 *Live node, journal and venue, not listed above.*
 
@@ -151,9 +153,12 @@ state is as it was before the call.
 | --- | --- |
 | `invalid_qty`, `zero_size` | No size on an opening order, or a capital fraction that rounds to nothing at the lot step. |
 | `insufficient_capital`, `insufficient_margin`, `margin_unpriced` | Not enough cash or margin, or the margin model has no price for the instrument. |
-| `reduce_only`, `position_open`, `post_only` | The order would not reduce, adds to a netting position, or would have crossed the book. |
+| `reduce_only`, `post_only` | The order would not reduce, or would have crossed the book. |
+| `not_tradable` | The order (or an `enter()`) was for an index, a data-only reference: trade the instrument it tracks. |
+| `warmup` | The order was decided before the run's `trade_from`: the bars before it only warm the strategy up. |
 | `expired`, `inactive`, `market_closed`, `squareoff` | Time in force, an inactive instrument, outside the session, or after the cutoff. |
 | `order_size`, `max_position`, `max_exposure`, `max_positions`, `daily_loss`, `killed`, `drawdown_halt`, `margin_call` | A risk limit ([risk](../risk/SKILL.md)). |
+| `no_mark` | A market order bound for a real venue under `max_order_notional` or `max_gross_exposure` had no price to be checked at: its instrument has had no print. Send it after the instrument's first bar or tick, or give the order a limit price. |
 | your own code | `order_check` refused it. |
 | the venue's text | `OrderRefused("...")` from the adapter, or `unsupported: ...` from `Unsupported`; a broker mapping gives the broker's code and message. |
 

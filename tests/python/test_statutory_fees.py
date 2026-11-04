@@ -341,7 +341,50 @@ def test_a_result_lists_the_unverified_fee_rows_it_used_and_confirmed_rows_are_n
         assert report["unverified_fee_rows"] == ["MCX:FUTURES"]
     # the agricultural row is its own row, and says so
     agri = _one_future("MCX", "KAPASX", "KAPAS")
-    assert list(agri["batch"].result.unverified_fee_rows) == ["MCX:FUTURES:KAPAS"]
+    assert list(agri["batch"].result.unverified_fee_rows) == ["MCX:FUTURES:class:AGRI"]
+
+
+AGRI_NAMES = ["COTTON", "COTWASOIL", "CARDAMOM", "RBDPMOLEIN", "KAPAS", "CPO", "MENTHAOIL"]
+
+
+@pytest.mark.parametrize("name", AGRI_NAMES)
+def test_every_mcx_agri_name_of_the_session_table_pays_the_agri_fee_row(name):
+    """Hand: 10 x Rs 1,000 = Rs 10,000 each side. SEBI Re 1 per crore = 0.001 a side, so 0.002 over
+    the round trip, and no commodities transaction tax (agricultural contracts are excluded).
+    Exchange 210 per crore = 0.21 a side, stamp duty 200 per crore on the buy = 0.20."""
+    for path, res in _one_future("MCX", name + "26DECFUT", name).items():
+        (trade,) = res.result.trades()
+        fb = trade.fee_breakdown
+        assert fb["stt"] == 0.0, (name, path)
+        assert fb["sebi_fee"] == pytest.approx(0.002), (name, path)
+        assert fb["exchange_txn"] == pytest.approx(0.42), (name, path)
+        assert fb["stamp_duty"] == pytest.approx(0.20), (name, path)
+        assert list(res.result.unverified_fee_rows) == ["MCX:FUTURES:class:AGRI"], (name, path)
+
+
+@pytest.mark.parametrize("name", ["GOLD", "CRUDEOIL", "COPPER", "NATURALGAS"])
+def test_every_mcx_non_agri_name_pays_ctt_and_sebi_ten(name):
+    """Hand: Rs 10,000 each side. CTT 1,000 per crore on the sell = 1.00; SEBI 10 per crore a side = 0.01."""
+    for path, res in _one_future("MCX", name + "26DECFUT", name).items():
+        (trade,) = res.result.trades()
+        assert trade.fee_breakdown["stt"] == pytest.approx(1.0), (name, path)
+        assert trade.fee_breakdown["sebi_fee"] == pytest.approx(0.02), (name, path)
+        assert list(res.result.unverified_fee_rows) == ["MCX:FUTURES"], (name, path)
+
+
+def test_an_mcx_name_in_no_class_is_refused_for_fees_even_with_a_session_given():
+    spec = InstrumentSpec.futures_contract(
+        "NOSUCH26DECFUT", ist(2027, 1, 1, 0, 0), 1.0, underlying="NOSUCH", venue="MCX",
+        session=rb.SessionSchedule.mcx(),
+    )
+    with pytest.raises(InvalidParameter) as e:
+        rb.run_strategies(
+            [rb.Strategy()], {"NOSUCH26DECFUT": bars([(1000.0,) * 4] * 3, ist(2026, 11, 2, 10, 0))},
+            BacktestConfig(fee_schedule=PRESETS), bar_stamp="close",
+            instruments={"NOSUCH26DECFUT": spec},
+        )
+    assert (e.value.code, e.value.parameter) == ("fee_schedule_gap", "fee_schedule")
+    assert "NOSUCH" in str(e.value) and "agricultural" in str(e.value)
 
 
 def test_an_unverified_row_carries_its_figure_and_never_a_defaulted_zero():

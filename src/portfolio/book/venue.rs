@@ -125,17 +125,34 @@ impl PortfolioBook {
     /// does not apply them; see [`EngineKernel::venue_pretrade`].
     ///
     /// [`EngineKernel::venue_pretrade`]: crate::portfolio::kernel::EngineKernel::venue_pretrade
+    #[allow(clippy::too_many_arguments)]
     pub fn venue_pretrade(
         &mut self,
         instrument: usize,
+        own: Option<u64>,
         side: crate::execution::orders::OrderSide,
         units: f64,
         reduce_only: bool,
         price: Option<f64>,
+        mark: Option<f64>,
     ) -> Result<(), crate::portfolio::risk::RejectReason> {
+        // Orders the venue holds for the other instruments add to the gross
+        // exposure once filled, as their positions do.
+        let others_working = if self.kernels[instrument].tracks_exposure() {
+            self.kernels
+                .iter()
+                .zip(&self.last_close)
+                .enumerate()
+                .filter(|(i, _)| *i != instrument)
+                .map(|(_, (k, close))| k.working_notional(*close))
+                .sum::<f64>()
+        } else {
+            0.0
+        };
         let (verdict, _) = self
             .with_lent_account(instrument, None, |k| {
-                Ok((k.venue_pretrade(side, units, reduce_only, price), Vec::new()))
+                k.add_external_exposure(others_working);
+                Ok((k.venue_pretrade(own, side, units, reduce_only, price, mark), Vec::new()))
             })
             .expect("a check cannot fail");
         verdict

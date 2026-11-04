@@ -122,9 +122,12 @@ def test_a_fill_past_a_limit_is_a_record():
         venue.fill_all()
         tape.step("fills", lambda: venue.deliver(node, MIN + 2), "report", "rejection")
 
-    wrote = _venue_run(venue, lambda: [Twice()], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), drive)
+    wrote = _venue_run(
+        venue, lambda: [Twice()], ["A"],
+        BacktestConfig(initial_capital=1e6, fees=0.0, max_position_qty=7.0), drive,
+    )
     (breach,) = of(wrote, "rejection", event="fill_breach")
-    assert breach.source == "engine" and breach.payload["reason"] == "position_open"
+    assert breach.source == "engine" and breach.payload["reason"] == "max_position"
 
 
 def test_a_settlement_on_a_node_with_a_venue_is_a_record():
@@ -152,7 +155,10 @@ def test_a_refusal_the_book_makes_before_sending_is_a_record_on_a_paper_node():
         def on_bar(self, ctx, bar):
             self.n += 1
             if self.n in (1, 3):
-                self.submit_order(orders.Market(side="buy", units=5.0), client_id=f"b{self.n}")
+                # the second cannot reduce a position on its own side
+                self.submit_order(
+                    orders.Market(side="buy", units=5.0, reduce_only=self.n == 3), client_id=f"b{self.n}"
+                )
 
     def drive(tape, node):
         for i in range(5):
@@ -161,7 +167,7 @@ def test_a_refusal_the_book_makes_before_sending_is_a_record_on_a_paper_node():
     wrote = _venue_run(PaperExecution(), lambda: [Twice()], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), drive)
     # The simulated venue's refusal is on the record, with its reason and the order it is about.
     (refused,) = of(wrote, "simulated_report", report="rejected")
-    assert refused.payload["reason"] == "position_open"
+    assert refused.payload["reason"] == "reduce_only"
     sent = [r for r in of(wrote, "adapter_request") if r.client_order_id == refused.client_order_id]
     assert sent and sent[0].seq < refused.seq
     assert len(of(wrote, "simulated_report", report="fill")) == 1

@@ -7,10 +7,11 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 
 | Module | Public names |
 | --- | --- |
-| [`raptorbt`](raptorbt.md) | 113 |
+| [`raptorbt`](raptorbt.md) | 114 |
 | [`raptorbt.adapters`](raptorbt.adapters.md) | 26 |
 | [`raptorbt.capabilities`](raptorbt.capabilities.md) | 1 |
 | [`raptorbt.costs`](raptorbt.costs.md) | 2 |
+| [`raptorbt.crash_report`](raptorbt.crash_report.md) | 2 |
 | [`raptorbt.errors`](raptorbt.errors.md) | 17 |
 | [`raptorbt.execution`](raptorbt.execution.md) | 9 |
 | [`raptorbt.journal`](raptorbt.journal.md) | 10 |
@@ -21,9 +22,9 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.sampling`](raptorbt.sampling.md) | 6 |
 | [`raptorbt.sizing`](raptorbt.sizing.md) | 8 |
 | [`raptorbt.skills`](raptorbt.skills.md) | 5 |
-| [`raptorbt.strategy`](raptorbt.strategy.md) | 51 |
+| [`raptorbt.strategy`](raptorbt.strategy.md) | 57 |
 | [`raptorbt.strategy.orders`](raptorbt.strategy.orders.md) | 12 |
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |
 | [`raptorbt.version_check`](raptorbt.version_check.md) | 3 |
 
-Public names and members still without a docstring: 707.
+Public names and members still without a docstring: 731.

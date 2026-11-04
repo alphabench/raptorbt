@@ -93,6 +93,36 @@ pub fn fee_row_for(
             return Err(format!("instrument {:?} is an index and is not traded", spec.symbol))
         }
     };
+    // MCX: the agricultural row (CTT excluded, SEBI Re 1 per crore) applies to the contracts the
+    // session table calls agricultural; a name in no class of that table is refused, never
+    // charged the non-agricultural row by default.
+    if venue == "MCX"
+        && schedule.rows.iter().any(|r| {
+            r.venue == venue
+                && r.segment == segment
+                && r.underlying.as_deref() == Some(crate::execution::costs::schedule::MCX_AGRI)
+        })
+    {
+        use crate::core::session_schedule::{mcx_class, McxClass};
+        let mut names: Vec<&str> = spec.underlying().into_iter().collect();
+        names.push(spec.symbol.as_str());
+        return match names.iter().find_map(|n| mcx_class(n)) {
+            Some(McxClass::SelectAgri | McxClass::OtherAgri) => Ok((
+                venue,
+                segment,
+                Some(crate::execution::costs::schedule::MCX_AGRI.to_string()),
+            )),
+            Some(McxClass::Standard) => Ok((venue, segment, None)),
+            None => Err(format!(
+                "instrument {:?}: no MCX fee class is known for {:?}, so its charges cannot be \
+                 chosen (agricultural contracts pay no commodities transaction tax and SEBI Re 1 \
+                 per crore; bullion, base metals and energy pay both at the general row). Name an \
+                 underlying the session table lists, or pass a fee_schedule with a row for it",
+                spec.symbol,
+                names.first().copied().unwrap_or_default(),
+            )),
+        };
+    }
     // Rows keyed by scrip group (BSE cash) need the instrument's group, never an assumed one.
     let groups: Vec<&str> = schedule
         .rows

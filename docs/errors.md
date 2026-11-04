@@ -71,6 +71,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `invalid_bar_stamp` | `InvalidParameter` | bar_stamp is not 'open' or 'close'. | `'open'`; `'close'` | `raptorbt-timeframes` |
 | `invalid_bar_step` | `InvalidSubscription` | A bar subscription step is below 1. | a whole number >= 1 | `raptorbt-timeframes` |
 | `invalid_batch_size` | `InvalidParameter` | batch_size is not a positive integer or None. | a positive integer; `None` | `raptorbt-backtesting` |
+| `invalid_binding` | `InvalidParameter` | A role is bound to the wrong shape: a Universe to anything but a list of distinct symbols, any other role to anything but one symbol. | one symbol (str) for an Underlying; a list of distinct symbols for a Universe | `raptorbt-live-trading` |
 | `invalid_calendar` | `InvalidParameter` | A calendar document given to SessionSchedule.from_calendars is not valid JSON in the documented format, names no entry for the venue, or has overlapping or out-of-range windows or dates. | a JSON document with utc_offset and an entry for the venue; windows and dates inside range; one zone for every document | `raptorbt-instruments` |
 | `invalid_checkpoint` | `InvalidData` | The checkpoint or journal records cannot be used to rebuild the node. | a checkpoint from LiveNode.checkpoint() of this version; records= for a checkpoint taken without its log | `raptorbt-live-trading` |
 | `invalid_combine_mode` | `InvalidParameter` | combine_mode is not recognised. | `'any'`; `'all'`; `'majority'`; `'independent'`; `'weighted'` | `raptorbt-backtesting` |
@@ -108,7 +109,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `invalid_order_refusal` | `InvalidParameter` | order_check returned something other than None, a code, or an object with a str code; or the code is empty, over 64 bytes, or the 1025th distinct one. | None to accept; a str code of 1 to 64 bytes; an object with a str code; at most 1024 distinct codes | `raptorbt-live-trading` |
 | `invalid_order_side` | `InvalidOrder` | Order side is not 'buy' or 'sell'. | `'buy'`; `'sell'` | `raptorbt-orders` |
 | `invalid_order_tags` | `InvalidOrder` | An order's tags are not a dict of at most 16 str pairs (keys 1-64 bytes, values up to 256), or use the reserved key 'client_id'. | tags: dict of at most 16 str -> str pairs, keys 1-64 bytes, values up to 256, no 'client_id' | `raptorbt-orders` |
-| `invalid_order_value` | `InvalidOrder` | A price, size, offset or count is out of range. | price, trigger, quantity, offset, slices and every > 0; size_frac in (0, 1]; limit_offset >= 0 | `raptorbt-orders` |
+| `invalid_order_value` | `InvalidOrder` | A price, size, offset, protective level or count is out of range, NaN or infinite. | price, trigger, quantity, offset, stop_price, target_price, slices and every > 0 and finite; size_frac in (0, 1]; limit_offset >= 0 | `raptorbt-orders` |
 | `invalid_parameter` | `InvalidParameter` | A parameter value is invalid (engine-side check). | the argument the message names | `raptorbt-core` |
 | `invalid_primary_bars` | `InvalidSubscription` | primary_bars is not a valid (step, unit) pair. | (step, unit) with step >= 1 and unit a bar unit, e.g. (5, 'm') | `raptorbt-timeframes` |
 | `invalid_roll_sizing` | `InvalidParameter` | roll_sizing is not 'notional' or 'lots'. | `'notional'`; `'lots'` | `raptorbt-instruments` |
@@ -125,6 +126,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `invalid_structure` | `InvalidParameter` | A structure, leg, selector, exit or submission argument is invalid. | the leg, selector, exit or submission argument the message names | `raptorbt-instruments` |
 | `invalid_time_in_force` | `InvalidOrder` | Time in force is not recognised. | `'auto'`; `'gtc'`; `'day'`; `'gtd'`; `'ioc'`; `'fok'`; `'at_open'`; `'at_close'` | `raptorbt-orders` |
 | `invalid_timeframe` | `InvalidSubscription` | A timeframe is not one of the supported strings or a valid bar spec. | `'1m'`; `'3m'`; `'5m'`; `'10m'`; `'15m'`; `'30m'`; `'1h'`; `'2h'`; `'4h'`; `'1d'`; `'1w'` | `raptorbt-timeframes` |
+| `invalid_trade_from` | `InvalidParameter` | trade_from is not an integer event time in nanoseconds. | integer nanoseconds since the epoch; `None` | `raptorbt-backtesting` |
 | `invalid_warmup` | `InvalidParameter` | warmup is not 'live', 'muted' or None. | `'live'`; `'muted'`; `None` | `raptorbt-live-trading` |
 | `journal_evicted` | `StateError` | A journal read asked for records a bounded memory has dropped; read them from the durable sink. | read the records from the durable sink; a larger memory= bound | `raptorbt-live-trading` |
 | `journal_failed` | `StateError` | The journal could not take a record, so the node stopped before acting on it. | fix the sink and LiveNode.restore from what is durable | `raptorbt-live-trading` |
@@ -169,6 +171,8 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `structure_limit_breached` | `InvalidParameter` | The legs' prices make the net premium worse than net_limit. | a net_limit the legs' prices can meet; order_type='market' without net_limit | `raptorbt-orders` |
 | `structure_margin_exceeded` | `InvalidParameter` | The margin model needs more for the group than is available. | fewer lots; more available margin; a structure that needs less margin | `raptorbt-risk` |
 | `structure_missing_mark` | `StateError` | A price or mark a structure needs was not supplied. | marks: a price for every leg's symbol | `raptorbt-instruments` |
+| `universe_instrument` | `InvalidParameter` | ctx.instrument was given a Universe role, which names many symbols; ask for one of them. | one symbol of the role: ctx.role(name) lists them | `raptorbt-instruments` |
+| `universe_size` | `InvalidParameter` | A Universe role is bound to fewer symbols than its min or more than its max. | a list with between the role's min and max symbols | `raptorbt-live-trading` |
 | `unknown_account` | `InvalidParameter` | A strategy or call names an account that is not in accounts. | a name from accounts={name: AccountSpec(...)} | `raptorbt-portfolio` |
 | `unknown_client_order_id` | `InvalidParameter` | A report names an order that was never sent. | the client_order_id of a request the node sent (s0-3), as the adapter received it | `raptorbt-live-trading` |
 | `unknown_order` | `InvalidOrder` | A cancel or modify named a client id this run never submitted. A submitted order that has finished is a documented no-op, not this error. | a client id this run submitted (the error lists them) | `raptorbt-orders` |

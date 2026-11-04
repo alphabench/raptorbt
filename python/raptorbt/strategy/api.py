@@ -460,6 +460,21 @@ def begin(strategy, ctx, symbols=None, default=None, host=None) -> None:
     strategy.on_init(ctx)
 
 
+def release(strategy) -> None:
+    """End a run's API state, on the thread that ran it.
+
+    The context and the strategy hold each other (``ctx.data`` -> run -> ctx; ``ctx`` ->
+    strategy -> run), and the runtime's context belongs to the thread that made it, so a cycle
+    left to the collector is freed on whichever thread collects next, which fails with "is being
+    dropped on another thread". Breaking it here frees the context by its last reference."""
+    _unbind(strategy)
+    run = strategy.__dict__.pop("_api", None)
+    ctx = getattr(run, "ctx", None)
+    if ctx is not None:
+        ctx.__dict__.clear()
+        run.ctx = None
+
+
 def finish(strategy) -> int:
     """Wire the strategy's hooks to the runtime's channels; return the mask.
 

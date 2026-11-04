@@ -733,6 +733,9 @@ pub struct IndicatorBank {
     floor: AtomicU64,
     /// `0` no group, `1` a group opened and awaiting its first event, `2` in progress.
     group: AtomicU8,
+    /// The hooks of a bar's open (`next_bar_open` fills) are being heard: every cell fed by the
+    /// group in flight shows the value before the group, whichever stream it is on.
+    opening: AtomicBool,
     updates: AtomicU64,
     keys: Box<[IndKey]>,
     cells: Box<[CellVals]>,
@@ -835,6 +838,7 @@ impl IndicatorBank {
         std::sync::Arc::new(Self {
             event: AtomicU64::new(0),
             floor: AtomicU64::new(1),
+            opening: AtomicBool::new(false),
             group: AtomicU8::new(0),
             updates: AtomicU64::new(0),
             cells: keys.iter().map(|_| CellVals::new()).collect(),
@@ -1062,6 +1066,12 @@ impl IndicatorBank {
         }
     }
 
+    /// Start or end the hearing of a bar's open: while on, a read shows the value before the
+    /// group for every cell the group fed, so an open hook sees no bar of the open's own instant.
+    pub fn set_opening(&self, on: bool) {
+        self.opening.store(on, Ordering::Relaxed);
+    }
+
     /// The value the slot's strategy sees now.
     #[inline]
     pub fn read(&self, slot: SlotId) -> Reading {
@@ -1069,6 +1079,13 @@ impl IndicatorBank {
         let cell = sc.cell as usize;
         let c = &self.cells[cell];
         let event = self.event.load(Ordering::Relaxed);
+        if self.opening.load(Ordering::Relaxed) {
+            return if c.touched.load(Ordering::Relaxed) >= self.floor.load(Ordering::Relaxed) {
+                c.prev.load()
+            } else {
+                c.cur.load()
+            };
+        }
         // Only the event that fed the cell, which is the selected event for a
         // reader of its own instrument's stream, has a reveal protocol. A cell
         // fed by another event of the group, earlier or later, shows the value

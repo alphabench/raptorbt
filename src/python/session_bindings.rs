@@ -31,11 +31,13 @@ fn book_levels(book: &DepthTick, side: BookSide) -> &[BookLevel] {
 }
 
 /// Validate the per-instrument arguments of `add_instrument`: direction,
-/// position policy from `oms_type`, and a tradable instrument spec.
+/// position policy from `oms_type`, and a tradable instrument spec. With `reference_ok` an
+/// index spec is accepted as data (a runtime refuses its orders, `not_tradable`).
 pub(crate) fn parse_instrument_args(
     direction: i32,
     instrument: Option<&PyInstrumentSpec>,
     oms_type: &str,
+    reference_ok: bool,
 ) -> PyResult<(Direction, PositionPolicy, Option<crate::instruments::InstrumentSpec>)> {
     let direction = Direction::from_int(direction).ok_or_else(|| {
         Fail::new("invalid_direction", "direction must be 1 or -1")
@@ -58,7 +60,7 @@ pub(crate) fn parse_instrument_args(
     let spec = match instrument {
         Some(py_spec) => {
             let spec = crate::instruments::InstrumentSpec::from(py_spec);
-            if !spec.kind.tradable() {
+            if !spec.kind.tradable() && !reference_ok {
                 return Err(Fail::new(
                     "untradable_instrument",
                     format!("instrument {:?} is not tradable", spec.symbol),
@@ -192,7 +194,8 @@ impl PyPortfolioSession {
         instrument: Option<&PyInstrumentSpec>,
         oms_type: &str,
     ) -> PyResult<usize> {
-        let (direction, policy, spec) = parse_instrument_args(direction, instrument, oms_type)?;
+        let (direction, policy, spec) =
+            parse_instrument_args(direction, instrument, oms_type, false)?;
         let inst: Option<InstrumentConfig> = instrument_config.map(InstrumentConfig::from);
         super::strategy_bindings::check_market(&self.config, symbol, spec.as_ref())?;
         Ok(self.session_mut()?.add_instrument(

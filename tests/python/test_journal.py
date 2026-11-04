@@ -149,7 +149,8 @@ class Trader(Strategy):
 
     def on_bar(self, ctx, bar):
         n = self.count[ctx.symbol] = self.count.get(ctx.symbol, 0) + 1
-        if n % 7 == 2:
+        if n % 7 == 2 and not ctx.positions():
+            # one 5-lot at most per symbol (a netting book would add to a held position)
             self.submit_order(orders.Market(side="buy", units=5.0))
         elif n % 7 == 5:
             self.submit_order(orders.Market(side="sell", units=5.0, reduce_only=True))

@@ -167,30 +167,21 @@ fn a_reduce_only_fill_before_its_entry_is_kept_and_booked_when_the_entry_arrives
 }
 
 #[test]
-fn a_second_entry_on_the_side_held_is_refused_before_sending_and_booked_if_the_venue_fills_it() {
+fn a_second_entry_on_the_side_held_is_sent_and_adds_to_the_net_position() {
     let mut k = kernel();
     open_long(&mut k, 10.0, 100.0);
+    assert_eq!(k.venue_pretrade(None, OrderSide::Buy, 5.0, false, Some(100.0), None), Ok(()));
     assert_eq!(
-        k.venue_pretrade(OrderSide::Buy, 5.0, false, Some(100.0)),
-        Err(RejectReason::PositionOpen)
-    );
-    assert_eq!(
-        k.venue_pretrade(OrderSide::Buy, 5.0, true, Some(100.0)),
+        k.venue_pretrade(None, OrderSide::Buy, 5.0, true, Some(100.0), None),
         Err(RejectReason::ReduceOnly)
     );
-    assert_eq!(k.venue_pretrade(OrderSide::Sell, 5.0, false, Some(100.0)), Ok(()));
+    assert_eq!(k.venue_pretrade(None, OrderSide::Sell, 5.0, false, Some(100.0), None), Ok(()));
 
-    // The venue filled it anyway: the position is what the venue says.
     let second = submit(&mut k, OrderSide::Buy, 5.0, false, "again");
     accept(&mut k, second);
     let events = fill(&mut k, second, "E2", 5.0, 101.0).unwrap();
     assert_eq!(k.position_snapshot().unwrap().size, 15.0);
-    assert!(
-        events.iter().any(
-            |e| matches!(e, EngineEvent::FillBreach { reason, .. } if *reason == "position_open")
-        ),
-        "{events:?}"
-    );
+    assert!(!events.iter().any(|e| matches!(e, EngineEvent::FillBreach { .. })), "{events:?}");
 }
 
 #[test]

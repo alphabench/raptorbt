@@ -62,12 +62,12 @@ and is the bar's open when the run says `bar_stamp="open"`.
 | `InstrumentSpec.perpetual(symbol, ...)` | A future with no expiry (kind `contract`). |
 | `InstrumentSpec.option(symbol, strike, right, expiration_ns, lot_size, underlying=, ...)` | A European option. `right` is `"call"` or `"put"` (`"CE"` and `"PE"` also work). `underlying` is required by `OptionChain`. |
 | `InstrumentSpec.currency_pair(symbol, ...)` | A currency pair. |
-| `InstrumentSpec.index(symbol, ...)` | A reference series. It is **not tradable**: ordering it raises. |
+| `InstrumentSpec.index(symbol, ...)` | A reference series, data only. It is **not tradable**: a single-instrument session refuses it (`untradable_instrument`); in `run_strategies` and `LiveNode` it is accepted as data (its bars feed the strategy, also under a fee schedule, which asks no fee row for it) and any order or `enter()` on it is refused `not_tradable`. |
 | `SessionSchedule(windows, tz_offset_ns=, holidays=, squareoff_minute=)` | Weekday windows in local minutes from midnight, half-open (`open <= t < close`), plus holiday dates as `yyyymmdd` ints. |
 | `SessionSchedule.nse_equity()`, `.bse_equity()`, `.nse_fo()`, `.bse_fo()`, `.mcx()`, `.mcx_select_agri()`, `.cds()`, `.cds_cross()`, `.bcd()` | Presets, in IST. Cash equities Monday to Friday 09:15 to 15:30 (minutes 555 to 930); equity derivatives the same until 2026-07-31 and 09:15 to 15:40 from 2026-08-03; MCX a day session 09:00 to 17:00 and an evening session closing 23:55, or 23:30 while the US is on daylight saving (the change takes effect on the first trading day after the US clocks move: the Monday after the second Sunday of March and after the first Sunday of November; the rule has no end, and dates before 2024-11-04 are closed and need a calendar document), `mcx_select_agri()` (Cotton, Kapas, Cotton Seed Wash Oil `COTWASOIL`) closing 21:00 all year, `mcx_other_agri()` (every other agricultural contract, CPO and RBD palmolein included) closing 17:00 all year; an instrument on `venue="MCX"` takes the one of its class by its underlying or symbol, however the spec is built (constructor, `venue` setter, `from_json`), and a name in no class of the table (not those agricultural contracts, nor bullion, base metals or energy) raises `mcx_session_unknown`: pass `session=`; NSE currency 09:00 to 17:00 on INR pairs (`cds()`) and to 19:30 on cross pairs (`cds_cross()`). Muhurat trading on 2026-11-08 has no preset: add its times with `with_session_override`. They carry **no holiday calendar and no square-off**; pass the exchange's dates in `holidays=` and a `squareoff_minute=` only if you want one. |
 | `schedule.with_session_override(date, windows)`, `.with_window_change(from_date, windows, to_date=)`, `.windows_on(date)` | A special session, a half day or a closure (empty windows) on one `yyyymmdd` date beats the weekday and the holidays (Muhurat trading is an override); a dated window change moves a venue's hours between two dates. |
 | `SessionSchedule.from_calendars(venue, [json_text, ...])` | A venue's schedule from dated calendar documents (`utc_offset`, `valid_from`, `valid_to`, `sessions`, and your own `holidays` and `overrides`); the later document answers for the dates it covers, and a date no document covers is closed. Format: `SessionSchedule.from_calendars` docstring in the Rust sources, `docs/architecture/lifecycle.md`. |
-| `spec.scrip_group = "A"` | The exchange's scrip group where charges depend on it. BSE cash fees are priced by group (A and B are priced); a BSE equity without one, or with another, is refused by a fee schedule (`fee_schedule_gap`). |
+| `scrip_group="A"` (a keyword of every `InstrumentSpec` factory; also `spec.scrip_group = "A"`) | The exchange's scrip group where charges depend on it. BSE cash fees are priced by group (A and B are priced); a BSE equity without one, or with another, is refused by a fee schedule (`fee_schedule_gap`). Derivatives delivered in BSE stock read the group of their spec too. |
 | `schedule.is_open(ts_ns)`, `.session_date(ts_ns)`, `.next_open_ns(ts_ns)`, `.session_close_ns(date)` | Ask the schedule. |
 | `OptionChain(specs)` | Build once from every contract and expiry you know. |
 | `chain.expiries / strikes / contract / contracts` | List what is visible at `now_ns`. |
@@ -95,8 +95,9 @@ by 365 for a day).
 5. In `on_bar`, query the chain with `now_ns=ctx.bar_close_ts`, price with
    `pricing`, and place orders on the contracts you got back.
 6. If an option position can run to expiry, call `ctx.set_underlying_price(...)`
-   each bar so settlement uses intrinsic value. Without it the contract settles
-   at its own last close.
+   each bar so settlement uses intrinsic value. Without it the settlement is
+   refused (an index option settles at the official index close, never at its
+   own last trade) and the run's end closes the position.
 
 ## 5. Examples
 
@@ -232,8 +233,11 @@ assert [(leg.side, leg.lots, leg.quantity) for leg in condor.legs] == [
 ```
 
 Option settlement needs the underlying price. The same long call settles at
-intrinsic value (108 - 100 = 8) when the strategy supplies it, and at its own
-close (5) when it does not:
+intrinsic value (108 - 100 = 8) when the strategy supplies it; when it does not,
+the settlement is refused (`lifecycle_refused`, `underlying_price_missing`) and
+the run's end closes the position at its last close (5), exit reason
+`EndOfData`. Set `settlement_price="last_price"` on the spec to settle an option
+at its own last trade on purpose:
 
 ```python
 import numpy as np
@@ -266,7 +270,134 @@ def settle(underlying):
     return t.exit_reason, t.exit_price
 
 assert settle(108.0) == ("Settlement", 8.0)
-assert settle(None) == ("Settlement", 5.0)
+assert settle(None) == ("EndOfData", 5.0)
+```
+
+**Trading options on an index.** The index is a series you read, not a
+contract you trade: put its bars in `data`, leave its spec out of
+`instruments` (a run refuses an index spec as not tradable), and give every
+contract its bars and its `InstrumentSpec.option(..., underlying="NIFTY")`.
+Decide on the index bar (`ctx.symbol == "NIFTY"`), pick the contract from the
+chain at `ctx.bar_close_ts`, and name the contract on every order and exit:
+`submit_order(order, symbol=contract.symbol)` and
+`close_position(symbol=contract.symbol)`. A bare `close_position()` or
+`enter()` acts on the bar's own symbol, which is the index. Keep the held
+contract's symbol on the strategy, since the chain will not tell you which
+one you hold. Read a contract's price with `ctx.series(contract.symbol)`.
+
+```python
+import numpy as np
+from raptorbt import BacktestConfig, InstrumentSpec, OptionChain, Strategy, pricing, run_strategies
+from raptorbt.strategy import orders
+
+MIN, DAY = 60 * 10**9, 86_400 * 10**9
+T0 = 1_767_225_600 * 10**9                    # a UTC instant; the bars below close at T0 + k minutes
+N, LOT, EXPIRY = 60, 50.0, 1_767_225_600 * 10**9 + 7 * DAY
+
+
+def bars(close):
+    close = np.asarray(close, dtype=float)
+    return dict(timestamps=T0 + MIN * np.arange(1, len(close) + 1, dtype=np.int64),
+                open=close, high=close + 0.5, low=close - 0.5, close=close,
+                volume=np.full(len(close), 1_000.0))
+
+
+index = 24_000.0 + np.cumsum(np.where(np.arange(N) < 30, 2.0, -3.0))     # up, then down
+data, instruments, specs = {"NIFTY": bars(index)}, {}, []                 # the index is data only
+tau = np.maximum(EXPIRY - (T0 + MIN * np.arange(1, N + 1)), 0) / (365 * DAY)
+for strike in (23_900.0, 24_000.0, 24_100.0):
+    for right in ("call", "put"):
+        symbol = f"NIFTY-{int(strike)}-{right[0].upper()}"
+        spec = InstrumentSpec.option(symbol, strike, right, EXPIRY, LOT, underlying="NIFTY")
+        data[symbol] = bars(np.maximum(pricing.price(right, index, strike, tau, 0.14, rate=0.065), 0.05))
+        instruments[symbol] = spec
+        specs.append(spec)
+chain = OptionChain(specs)
+
+
+class IndexCall(Strategy):
+    def __init__(self):
+        super().__init__()
+        self.held = None                                   # the contract's symbol while one is held
+
+    def on_bar(self, ctx, event=None):
+        if ctx.symbol != "NIFTY":                          # decide on the index bar only
+            return
+        now, spot = ctx.bar_close_ts, ctx.bar.close
+        if self.held is None and ctx.idx == 10:
+            expiry = chain.pick_expiry("NIFTY", now, "nearest")
+            contract = chain.contract("NIFTY", expiry, chain.atm_strike("NIFTY", expiry, now, spot),
+                                      "call", now)
+            self.submit_order(orders.Market(side="buy", quantity=contract.lot_size),
+                              symbol=contract.symbol)   # trade the contract, not the index
+            self.held = contract.symbol
+        elif self.held is not None and ctx.idx == 40:
+            self.close_position(symbol=self.held)          # close the contract by its symbol
+            self.held = None
+
+
+s = IndexCall()
+(run,) = run_strategies([s], data, BacktestConfig(initial_capital=1_000_000.0, fees=0.0),
+                        instruments=instruments, bar_stamp="close")
+trades = run.result.trades()
+assert [t.symbol for t in trades] == ["NIFTY-24000-C"]
+assert trades[0].exit_reason == "Signal"       # closed by symbol, at bar 40
+```
+
+**A synthetic chain, and what `span_pct` and `exposure_pct` mean.** A test
+chain needs one bar series and one `InstrumentSpec.option` per contract;
+`pricing.price` (above) gives premiums that move with the index. The two
+margin fields matter only when you sell options. Both are fractions of the
+underlying notional at the strike (`strike * lot units`): `span_pct` models
+the exchange's SPAN margin and `exposure_pct` its exposure margin, and a
+**sold** option locks `(span_pct + exposure_pct) * strike * lot units` per
+position. Left at `0.0` (the default) a sold option holds back only its
+premium, so a short strategy looks far better funded than it would be on the
+exchange; a bought option is unaffected. Use `account_type="margin"`. The
+examples use 0.10 and 0.02 as stand-ins; take the real rates from the
+exchange's margin file for a real study.
+
+```python
+import numpy as np
+from raptorbt import BacktestConfig, InstrumentSpec, Strategy, run_strategies
+from raptorbt.strategy import orders
+
+MIN, DAY = 60 * 10**9, 86_400 * 10**9
+T0 = 1_767_225_600 * 10**9
+N, LOT = 10, 50.0
+STAMPS = T0 + MIN * np.arange(1, N + 1, dtype=np.int64)
+
+
+def flat(level):
+    c = np.full(N, float(level))
+    return dict(timestamps=STAMPS, open=c, high=c + 0.1, low=c - 0.1, close=c, volume=np.full(N, 1_000.0))
+
+
+class Short(Strategy):
+    free = None
+
+    def on_bar(self, ctx, event=None):
+        if ctx.symbol != "IDX":
+            return
+        if ctx.idx == 1:
+            self.submit_order(orders.Market(side="sell", quantity=LOT), symbol="IDX-C")
+        elif ctx.idx == 4:
+            self.free = ctx.free_capital
+
+
+def free_after_selling(span_pct, exposure_pct):
+    spec = InstrumentSpec.option("IDX-C", 24_000.0, "call", T0 + 7 * DAY, LOT, underlying="IDX",
+                                 span_pct=span_pct, exposure_pct=exposure_pct)
+    s = Short()
+    run_strategies([s], {"IDX": flat(24_000.0), "IDX-C": flat(100.0)},
+                   BacktestConfig(initial_capital=1_000_000.0, fees=0.0),
+                   instruments={"IDX-C": spec}, account_type="margin", bar_stamp="close")
+    return s.free
+
+# selling one lot of a 24,000 call at 100: without the rates only the premium is held back;
+# with them the deposit is (span_pct + exposure_pct) * strike * lot units
+assert free_after_selling(0.0, 0.0) == 1_000_000.0 - 100.0 * LOT
+assert abs(free_after_selling(0.10, 0.02) - (1_000_000.0 - 0.12 * 24_000.0 * LOT)) < 1e-6
 ```
 
 ## 6. Composition

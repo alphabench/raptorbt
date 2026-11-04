@@ -56,12 +56,25 @@ operator must approve after a recovery; who may start, halt or flatten; what
 runs at a session's start and end.
 
 **The manifest.** `requirements` names roles (`Underlying`, `Instrument`,
-`Future`, `Chain`), timeframes, data kinds (`bar`, `trade`, `quote`, `book`),
-`Holding` (intraday with a flatten time, or overnight), `warmup`, the largest
-structure held at once (`max_structure`) and a parameter schema. It is what lets
-a host plan data, warm-up, capital and placement before it runs anything.
+`Universe`, `Future`, `Chain`), timeframes, data kinds (`bar`, `trade`, `quote`,
+`book`), `Holding` (intraday with a flatten time, or overnight), `warmup`, the
+legs of the structure held at once (`max_structure=Legs(OptionLeg(...), ...)`:
+side, right, strike offset or delta with a window, expiry), the largest position
+per role (`max_position={role: MaxPosition(lots=, notional=, fraction=)}`) and a
+parameter schema. It is what lets a host plan data, warm-up, capital and
+placement before it runs anything: a host estimates capital from `max_position`
+without asking the deployer, lists the contracts to subscribe with
+`resolve_legs(...)` and margins the structure with
+`legs.structure(vol=).resolve(...).margin(model, prices)`. A `Universe` is a
+basket the deployer fills (`min` to `max` symbols of one asset class); bind it
+with `bindings={"basket": ["A", "B"]}` to `run_strategies` or `LiveNode`, and
+the strategy reads the list with `ctx.role("basket")`. A binding with the wrong
+shape is `invalid_binding`; one with too few or too many symbols is
+`universe_size`.
 `check_requirements(cls)` verifies the class does not subscribe to more than it
-declared; `requirements_hash(cls)` is a SHA-256 of the canonical declaration and
+declared (it runs the strategy on a synthetic tape with every `Underlying`
+and `Universe` role bound, so `ctx.role(...)` works there);
+`requirements_hash(cls)` is a SHA-256 of the canonical declaration and
 the engine version: store it with a saved strategy, and a different declaration
 or a different engine gives a different hash, so a saved strategy is re-admitted
 rather than silently run on a new engine. Importing a strategy module runs its
@@ -71,7 +84,8 @@ and never imports the class.
 **Resolution never guesses.** `resolve` returns a `SymbolPlan` (`roles`,
 `symbols`, `issues`). Each gap is an `Issue` and the role resolves to nothing:
 `unbound_role`, `no_contract`, `no_options`, `no_expiry`, `needs_price`,
-`needs_vol`. A plan with issues is not deployable. Resolve again as time passes
+`needs_vol`, and for a universe `invalid_binding` and `universe_size`. A plan with
+issues is not deployable. Resolve again as time passes
 (a continuous future rolls, a weekly expiry passes); a role's symbols are a
 function of the time you ask.
 
@@ -96,23 +110,27 @@ record raises `replay_diverged`); finish a session before changing the engine.
 
 | Name | What it is |
 | --- | --- |
-| `raptorbt.strategy.Requirements`, `Underlying`, `Instrument`, `Future`, `Chain`, `StrikeWindow`, `ByDelta`, `Holding`, `Bars`, `Duration`, `Legs` | The declaration. `to_dict()` / `from_dict()` (schema 1) round trip, and `requirements_hash` is equal for the round trip. |
-| `raptorbt.strategy.check_requirements(cls, dry_run=True)` | `list[Issue(code, path, message)]`. Static: `no_requirements`, `no_roles`, `missing_holding`, `no_timeframes`, `unknown_role`, `invalid_base`, `undeclared_timeframe`, `timeframes_without_bars`. Dry run: `undeclared_instrument`, `undeclared_timeframe`, `undeclared_data`, `dry_run_failed` (the strategy raised), `dry_run_unresolved`. |
+| `raptorbt.strategy.Requirements`, `Underlying`, `Instrument`, `Universe`, `Future`, `Chain`, `StrikeWindow`, `ByDelta`, `Holding`, `Bars`, `Duration`, `Legs`, `OptionLeg`, `MaxPosition` | The declaration. `to_dict()` / `from_dict()` (schema 2) round trip, and `requirements_hash` is equal for the round trip. `Legs(4, lots=2)`, the count-only form, is refused (`legs_need_shape`). |
+| `raptorbt.strategy.check_requirements(cls, dry_run=True)` | `list[Issue(code, path, message)]`. Static: `no_roles`, `missing_holding`, `no_timeframes`, `unknown_role`, `invalid_base`, `undeclared_timeframe`, `timeframes_without_bars`, `role_data_not_declared`, and for the legs `leg_chain_ambiguous`, `leg_outside_chain`. Dry run: `undeclared_instrument`, `undeclared_timeframe`, `undeclared_data`, `dry_run_failed` (the strategy raised), `dry_run_unresolved`. |
 | `raptorbt.strategy.requirements_hash(cls_or_requirements)` | The hash above. |
-| `raptorbt.strategy.resolve(requirements, *, now_ns, bindings, specs, prices=None, vols=None, chain=None)` | A `SymbolPlan` of concrete symbols per role at `now_ns`. |
+| `raptorbt.strategy.resolve(requirements, *, now_ns, bindings, specs, prices=None, vols=None, chain=None)` | A `SymbolPlan` of concrete symbols per role at `now_ns`. `bindings` maps an `Underlying` to a symbol and a `Universe` to a list. |
+| `raptorbt.strategy.resolve_legs(requirements, *, now_ns, bindings, specs, prices, chain=None)` | A `LegPlan`: for each declared leg (`LegContracts`) the contracts it can mean (one for an `offset` leg, the window of candidates for a `delta` leg), the units and the sign margin models read. `plan.lines(prices)` is the argument of `MarginModel.required_legs`; `issues` lists what could not be resolved (`needs_price`, `no_expiry`, `leg_strike_unlisted`). |
 | `raptorbt.strategy.params_schema(ConfigClass)`, `ParamSchema.validate(values)`, `param(default, min=, max=, choices=, description=)` | The parameter schema and its issues: `unknown_param`, `missing_param`, `invalid_param`, `out_of_bounds`, `not_a_choice`. |
 | `raptorbt.capabilities()` | A JSON-serialisable dict of what this engine supports (order kinds, time in force, fill timings, hooks, indicators, adapters, error codes): read it to decide what to offer instead of hard-coding. |
 | `LiveNode(..., journal=, epoch=, instruments=, bindings=, order_check=, warmup=, protective=)`, `heartbeat()`, `health()`, `checkpoint()`, `LiveNode.restore(...)`, `halt(i, flatten=)`, `halt_account(name, flatten=)` | What you wire ([live-trading](../live-trading/SKILL.md)). |
 | `raptorbt.version_check` | The once-a-day release check (`check_for_update`, `is_outdated`, `parse_version`). |
+| `raptorbt.crash_report`, `raptorbt.enable_crash_reporting` | Opt-in, off-by-default engine-panic reports, sent to the maintainers' own server (named in the README) unless you name another collector (`RAPTORBT_CRASH_REPORTING=1`, `RAPTORBT_CRASH_ENDPOINT`, `RAPTORBT_CRASH_KEY`); fields listed in the README. |
 
 ## 4. Standard workflow
 
 1. **Admit.** Import (or read the JSON), `check_requirements`, validate the
    parameters against `params_schema`, compute `requirements_hash`, store it.
-2. **Plan.** Bind every `Underlying` role, `resolve`, refuse a plan with
+2. **Plan.** Bind every `Underlying` role and every `Universe` role (a list),
+   `resolve`, refuse a plan with
    issues, and check that the symbols and timeframes are ones you can feed.
-3. **Rehearse** on recorded data: the backtest ([backtesting](../backtesting/SKILL.md)),
-   then the same strategy through `PaperExecution()` with a journal and real
+3. **Rehearse** on recorded data: the backtest ([backtesting](../backtesting/SKILL.md);
+   `run_strategies(trade_from=)` runs the history that primes indicators without
+   trading it: orders decided before it are refused `warmup`), then the same strategy through `PaperExecution()` with a journal and real
    arrival times.
 4. **Build the node** with the plan's symbols, `instruments=`, `bindings=`, your
    adapter, `epoch=`, a journal whose header carries the run id, the strategy

@@ -64,13 +64,15 @@ class TestHedging:
         assert len(trades) == 2
         assert {t.exit_reason for t in trades} == {"Signal", "EndOfData"}
 
-    def test_netting_rejects_hedged_open(self):
+    def test_netting_adds_to_the_open_position(self):
         class S(Strategy):
             def __init__(self, config=None):
                 super().__init__(config)
                 self.rejects = []
+                self.held = []
 
             def on_bar(self, ctx):
+                self.held = [(p.direction, p.size, p.entry_price) for p in ctx.positions()]
                 if ctx.idx == 0:
                     self.submit_order(orders.Market(side="buy", units=10.0))
                 if ctx.idx == 1:
@@ -79,10 +81,12 @@ class TestHedging:
             def on_order_rejected(self, ctx, event):
                 self.rejects.append(event.reject_reason)
 
-        data = _bars([100.0, 101.0, 102.0])
+        data = _bars([100.0, 101.0, 102.0, 103.0])
         strategy = S()
         run_strategy_backtest(strategy, **data, config=_zero_fee_config(), bar_stamp="close")
-        assert strategy.rejects == ["position_open"]
+        assert strategy.rejects == []
+        # 10 filled at 100, 5 at 101: one position, at the size-weighted average
+        assert strategy.held == [(1, 15.0, pytest.approx((10 * 100.0 + 5 * 101.0) / 15))]
 
     def test_per_position_stops_fire_independently(self):
         class S(Strategy):

@@ -139,6 +139,12 @@ pub fn builder_for_with(
     params: BuilderParams,
 ) -> Result<Box<dyn BarBuilder + Send + Sync>, SpecError> {
     if let Some(unit_ns) = spec.unit.fixed_ns() {
+        // The epoch was a Thursday: shifting a week's grid by three days puts its boundaries on
+        // Mondays 00:00 (local), so a weekly bar is a trading week, not Thursday to Wednesday.
+        let align_offset_ns = match spec.unit {
+            AggregationUnit::Week => align_offset_ns + WEEK_PHASE_NS,
+            _ => align_offset_ns,
+        };
         return Ok(Box::new(TimeBarBuilder::new(unit_ns * spec.step as i64, align_offset_ns)));
     }
     match spec.unit {
@@ -170,6 +176,10 @@ pub fn builder_for_with(
         }
     }
 }
+
+/// Three days: the distance from the Unix epoch (a Thursday) back to the Monday that starts the
+/// week of every 7-day window grid.
+const WEEK_PHASE_NS: i64 = 3 * 86_400_000_000_000;
 
 /// India Standard Time offset (UTC+5:30) in nanoseconds, for aligning
 /// day/week/calendar windows to IST trading dates.

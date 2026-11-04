@@ -644,9 +644,10 @@ class TestRiskEvents:
         run_strategy_backtest(Plain(), **_bars([100.0] * 3), symbol="S", config=_config(max_order_qty=1.0), bar_stamp="close")
 
     def test_existing_reasons_do_not_raise_risk_events(self):
-        s = Script({1: [("buy", 1.0)], 2: [("buy", 1.0)]})  # netting: position_open
-        run_strategy_backtest(s, **_bars([100.0] * 4), symbol="S", config=_config(max_order_qty=10.0), bar_stamp="close")
-        assert s.rejected == [(2, "position_open")]
+        s = Script({1: [("buy", 10.0)]})  # more than the 500 of capital buys: insufficient_capital
+        config = BacktestConfig(fees=0.0, initial_capital=500.0, max_order_qty=10.0)
+        run_strategy_backtest(s, **_bars([100.0] * 4), symbol="S", config=config, bar_stamp="close")
+        assert s.rejected == [(1, "insufficient_capital")]
         assert s.risk == []
 
 

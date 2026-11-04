@@ -1058,6 +1058,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def futures_contract(
@@ -1075,6 +1076,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def perpetual(
@@ -1091,6 +1093,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def option(
@@ -1113,6 +1116,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def currency_pair(
@@ -1127,6 +1131,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def index(
@@ -1135,6 +1140,7 @@ class InstrumentSpec:
         venue: str | None = ...,
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
+        scrip_group: str | None = ...,
     ) -> InstrumentSpec: ...
 
 # --- Streaming indicators ----------------------------------------------------
@@ -1638,6 +1644,7 @@ class Runtime:
     def hold_boot(self) -> None: ...
     def release_boot(self) -> None: ...
     def set_order_check(self, check: Any, proposal: Any) -> None: ...
+    def set_trade_from(self, ns: int | None = ...) -> None: ...
     def push_report(
         self, client_order_id: str, report: ExecutionReport, arrival_ns: int
     ) -> str: ...
@@ -2353,3 +2360,5 @@ def canonical(value: Any) -> bytes: ...
 _INDICATOR_FUNCTIONS: list[str]
 
 def capabilities_json() -> str: ...
+
+def _last_panic_location() -> str | None: ...

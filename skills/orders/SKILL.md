@@ -95,11 +95,14 @@ bar that already closed when it was placed.
 
 Events carry `kind`, `idx`, `client_order_id`, `price`, `size` and
 `reject_reason`. Order-level `reject_reason` values: `invalid_qty`,
-`insufficient_capital`, `reduce_only`, `post_only`, `position_open`, `zero_size`,
+`insufficient_capital`, `reduce_only`, `post_only`, `zero_size`,
 `insufficient_margin`, `margin_unpriced`, `expired`, `inactive`,
-`market_closed`, `squareoff`, plus the risk reasons (`order_size`,
+`market_closed`, `squareoff`, `not_tradable` (an index takes no orders),
+`warmup` (decided before `trade_from`), plus the risk reasons (`order_size`,
 `max_position`, `max_exposure`, `max_positions`, `daily_loss`, `killed`,
-`drawdown_halt`, `margin_call`; see [risk](../risk/SKILL.md)).
+`drawdown_halt`, `margin_call`, and `no_mark` for a market order on a real venue
+that could not be priced against a notional or exposure limit; see
+[risk](../risk/SKILL.md)).
 
 ## 4. Standard workflow
 
@@ -373,6 +376,93 @@ sides = {t.symbol: t.direction for t in res[0].result.trades()}
 assert sides == {"IDX90PE": 1, "IDX95PE": -1, "IDX105CE": -1, "IDX110CE": 1}   # wings long, body short
 ```
 
+**A stop on an option leg: the premium or the index.** Decide first what the
+stop protects. A stop on the **premium** caps the money lost on the contract
+and is an engine level, so it fills at the level (or the open after a gap);
+it also trips on time decay and a volatility drop with the index unchanged.
+A stop on the **index** says the thesis is wrong, but the premium loss at that
+index level depends on delta and time left, so the loss is not fixed, and the
+strategy must close the contract itself because the engine only watches the
+contract's own price.
+
+- Premium stop: put `stop_price` (and `target_price`) on the opening order,
+  computed from the **contract's** bars, for example
+  `raptorbt.atr(b["high"], b["low"], b["close"], 14)[-1]` over
+  `ctx.series(contract_symbol)`. An ATR of the index is in index points and is
+  the wrong size for a premium.
+- Index stop: take the index ATR (`ctx.indicators.atr(instrument="NIFTY")`),
+  remember the index level, and on a later index bar call
+  `close_position(symbol=contract_symbol)`.
+- `StopConfig` / `set_atr_stop` on `BacktestConfig` is a run-level setting for
+  every position of the run, measured on the traded contract's own ATR at
+  entry. Use it when you own the config (a research script); a strategy that
+  must carry its stop to a host that builds the config places the stop on the
+  order instead, as below.
+
+```python
+import numpy as np
+import raptorbt
+from raptorbt import BacktestConfig, InstrumentSpec, Strategy, pricing, run_strategies
+from raptorbt.strategy import orders
+
+MIN, DAY = 60 * 10**9, 86_400 * 10**9
+T0 = 1_767_225_600 * 10**9
+N, EXPIRY = 60, 1_767_225_600 * 10**9 + 7 * DAY
+STAMPS = T0 + MIN * np.arange(1, N + 1, dtype=np.int64)
+
+
+def bars(close, wick):
+    close = np.asarray(close, dtype=float)
+    return dict(timestamps=STAMPS, open=close, high=close + wick, low=close - wick,
+                close=close, volume=np.full(N, 1_000.0))
+
+
+# the index drifts down from bar 20, so a long call loses; its premium follows the index
+index = 24_000.0 + np.cumsum(np.where(np.arange(N) < 20, 1.0, -4.0)) + np.tile([0.0, 3.0], N // 2)
+premium = np.maximum(pricing.price("call", index, 24_000.0, (EXPIRY - STAMPS) / (365 * DAY), 0.14, rate=0.065), 0.05)
+data = {"IDX": bars(index, 2.0), "IDX-C": bars(premium, 0.4)}
+call = InstrumentSpec.option("IDX-C", 24_000.0, "call", EXPIRY, 50.0, underlying="IDX")
+
+
+class LongCall(Strategy):
+    def __init__(self, stop_on):
+        super().__init__()
+        self.stop_on, self.entered, self.index_stop = stop_on, False, None
+
+    def on_start(self, ctx):
+        self.index_atr = ctx.indicators.atr(instrument="IDX", period=14)
+
+    def on_bar(self, ctx, event=None):
+        if ctx.symbol != "IDX":
+            return
+        if not self.entered and ctx.idx == 20:
+            self.entered = True
+            if self.stop_on == "premium":
+                # the contract's own ATR, from its own bars: the stop is a level on the premium
+                b = ctx.series("IDX-C")
+                atr = raptorbt.atr(b["high"], b["low"], b["close"], 14)[-1]
+                px = float(b["close"][-1])
+                self.submit_order(orders.Market(side="buy", quantity=50.0, stop_price=px - 2 * atr,
+                                                target_price=px + 4 * atr), symbol="IDX-C")
+            else:
+                # the thesis is about the index: remember its level, stop when the index breaks it
+                self.index_stop = ctx.bar.close - 2 * self.index_atr.value
+                self.submit_order(orders.Market(side="buy", quantity=50.0), symbol="IDX-C")
+        elif self.index_stop is not None and ctx.bar.close <= self.index_stop:
+            self.close_position(symbol="IDX-C")
+            self.index_stop = None
+
+
+def run(stop_on):
+    (r,) = run_strategies([LongCall(stop_on)], data, BacktestConfig(initial_capital=1_000_000.0, fees=0.0),
+                          instruments={"IDX-C": call}, bar_stamp="close")
+    return r.result.trades()[0]
+
+
+assert run("premium").exit_reason == "StopLoss"   # the engine held the premium level
+assert run("index").exit_reason == "Signal"       # the strategy closed the contract itself
+```
+
 ## 6. Composition
 
 - A strategy sends orders; the account they trade against, with netting,
@@ -388,20 +478,48 @@ assert sides == {"IDX90PE": 1, "IDX95PE": -1, "IDX105CE": -1, "IDX110CE": 1}   #
 
 ## 7. Constraints and correctness
 
-- **Netting vs hedging.** The default `oms_type="netting"` keeps one position
-  per instrument: a sell against a long reduces it and does not open a short,
-  and a sell larger than the position closes it and stops (the fill is capped at
-  the open size). A sell with nothing open opens a short. An order in the
-  direction of the open position is rejected as `position_open`; a netting
-  account does not add to a position through typed orders. With
-  `oms_type="hedging"` every typed order opens its own position in its own
+- **Netting vs hedging.** The default `oms_type="netting"` keeps one net
+  position per instrument and moves it as a broker's does:
+  - an order **on the side held adds**: the size adds and the entry price
+    becomes the size-weighted average. Each fill pays its own fees, and each
+    is a record of its own (the order log, the journal). A capital-fraction
+    order adds too. It is gated like an entry (halts, the kill switch, daily
+    loss, margin, size and position limits), but `max_positions` does not
+    count it, since the position already counts;
+  - an order **against the position reduces it**. The reduction is booked at
+    the average entry price and is one trade (`size`, `entry_price` = the
+    average, `pnl`, fees: the entry fees of the slice and the exit fees); the
+    rest stays open at the same average. Indian brokers' net positions use the
+    average price too;
+  - an order **larger than the position flips it**: it closes what is held (a
+    trade) and opens the rest on its own side, as one order and one fill
+    price. The close and the open are two fills and are charged separately.
+    A `reduce_only` order, an order that names a position, and an order sized
+    as a capital fraction or as the whole position never flip: they stop at
+    flat. With nothing open an order opens in its own side's direction.
+
+  The levels of a net position are one pair. A level derived from the entry
+  (a percent or ATR stop) follows the new average. A `stop_price` or
+  `target_price` the added order names becomes the position's level, so the
+  whole net position is protected at it. A bracket's legs close the full
+  position when they trigger, so a bracket made with an added slice protects
+  the net position, earlier slices included, and the earlier bracket's legs do
+  too: the first leg to trigger closes it and the others are refused
+  (`reduce_only`, nothing left). A leg with an explicit quantity closes at most
+  that quantity (and never more than is held).
+
+  `enter()` and `close_position()` are signals, "be in this position": with a
+  position held `enter()` is a no-op in every mode (a simulated venue refuses to
+  fill it as an add). Typed orders are how a strategy adds.
+
+  With `oms_type="hedging"` every typed order opens its own position in its own
   direction, so a buy and a sell coexist; close one with
-  `close_position(position_id)`.
+  `close_position(position_id)`. Batch runs, a `LiveNode` and a paper or
+  adapter venue all follow these rules.
 - `reduce_only` orders can only reduce an open position; they are rejected
   with `reduce_only` when there is nothing to reduce. Bracket legs use it so a
   leg still working after the position closed can never open the other side.
-- A `Twap` on a netting account rejects every slice after the first as
-  `position_open`; use hedging for a schedule that builds a position.
+- A `Twap` on a netting account builds one position: each slice adds to it.
   Cancelling a schedule stops unreleased slices but does not undo traded ones.
 - **Stops and gaps.** A stop that the market gaps through fills at the open,
   not at the trigger. Within a bar where a stop and a target are both touched,
@@ -454,6 +572,7 @@ orders.Limit(side="buy", price=0.0, quantity=1)         # InvalidOrder: invalid_
   no error and no event.
 - Assuming a limit buy at a price above the market fills at that price. It
   fills at the market, which is better for a buyer.
+- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: an order you queue from a fill hook (`on_fill`, `on_position_opened`, `on_position_closed`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation
 

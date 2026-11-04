@@ -48,12 +48,17 @@ pub enum RejectReason {
     DailyLoss,
     /// The strategy was halted by hand (`ctx.halt` / `LiveNode.halt`).
     Killed,
-    /// Netting holds a position and the order would open a second entry on
-    /// its side.
-    PositionOpen,
+    /// A market order bound for a venue could not be priced against the notional or exposure
+    /// limits: it names no price and no price has been seen on the instrument.
+    NoMark,
     /// A reduce-only order that cannot reduce the position (none held, or
     /// held on the order's own side).
     ReduceOnly,
+    /// The instrument is a reference (an index): it feeds data and takes no orders.
+    NotTradable,
+    /// The order was decided before the run's `trade_from`: the bar feeds data and
+    /// indicators, and nothing trades yet.
+    Warmup,
 }
 
 impl RejectReason {
@@ -73,11 +78,13 @@ impl RejectReason {
             RejectReason::Squareoff => "squareoff",
             RejectReason::OrderSize => "order_size",
             RejectReason::MaxPosition => "max_position",
-            RejectReason::PositionOpen => "position_open",
             RejectReason::ReduceOnly => "reduce_only",
+            RejectReason::NotTradable => "not_tradable",
+            RejectReason::Warmup => "warmup",
             RejectReason::MaxExposure => "max_exposure",
             RejectReason::DailyLoss => "daily_loss",
             RejectReason::Killed => "killed",
+            RejectReason::NoMark => "no_mark",
         }
     }
 
@@ -92,6 +99,7 @@ impl RejectReason {
                 | RejectReason::MaxExposure
                 | RejectReason::DailyLoss
                 | RejectReason::Killed
+                | RejectReason::NoMark
         )
     }
 
@@ -115,7 +123,10 @@ impl RejectReason {
 
     /// [`RejectReason::is_risk_limit`] for a stable identifier string.
     pub fn is_risk_limit_str(reason: &str) -> bool {
-        matches!(reason, "order_size" | "max_position" | "max_exposure" | "daily_loss" | "killed")
+        matches!(
+            reason,
+            "order_size" | "max_position" | "max_exposure" | "daily_loss" | "killed" | "no_mark"
+        )
     }
 }
 
@@ -174,6 +185,13 @@ impl SizeLimits {
     #[inline]
     pub fn tracks_exposure(&self) -> bool {
         self.max_gross_exposure.is_some()
+    }
+
+    /// Whether a limit needs the price of an order to be known: a notional
+    /// or an exposure limit.
+    #[inline]
+    pub fn needs_price(&self) -> bool {
+        self.max_order_notional.is_some() || self.max_gross_exposure.is_some()
     }
 
     /// An order of `qty` units worth `notional` is refused only when it is

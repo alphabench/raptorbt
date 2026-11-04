@@ -6,9 +6,12 @@ call ``executor.kick()``. The executor decides where the outbox is drained.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
+
+log = logging.getLogger("raptorbt.adapters")
 
 
 class Executor(Protocol):
@@ -16,7 +19,8 @@ class Executor(Protocol):
 
     ``bind(pump)`` hands over the adapter's drain function once; ``kick()`` says the outbox has work and
     must not block on I/O; ``close()`` stops whatever the executor started. ``InlineExecutor``,
-    ``ManualExecutor`` and ``ThreadExecutor`` are the three provided.
+    ``ManualExecutor`` and ``ThreadExecutor`` are the three provided. An executor that runs a
+    thread may also have ``health()``, a dict the adapter's ``health()`` carries.
     """
 
     def bind(self, pump: Callable[[], int]) -> None:
@@ -71,6 +75,8 @@ class ThreadExecutor:
         self._stop = False
         self._thread: threading.Thread | None = None
         self._pump: Callable[[], int] = lambda: 0
+        self._errors = 0
+        self.last_error: str | None = None
 
     def bind(self, pump: Callable[[], int]) -> None:
         self._pump = pump
@@ -83,7 +89,24 @@ class ThreadExecutor:
             self._wake.clear()
             if self._stop:
                 return
-            self._pump()
+            try:
+                self._pump()
+            except Exception as exc:  # noqa: BLE001 - the worker outlives a failed drain
+                # The adapter records a failed job itself; this is the net under the rest of the
+                # drain. The worker stays alive, says what happened and tries again shortly: the
+                # outbox is never left without a thread to drain it.
+                self._errors += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                log.error("executor %s: the drain raised %s", self._name, self.last_error, exc_info=exc)
+                if not self._stop:
+                    retry = threading.Timer(0.5, self._wake.set)
+                    retry.daemon = True
+                    retry.start()
+
+    def health(self) -> dict[str, Any]:
+        """Whether the worker is running and what, if anything, made a drain fail."""
+        alive = self._thread is not None and self._thread.is_alive()
+        return {"alive": alive, "errors": self._errors, "last_error": self.last_error}
 
     def kick(self) -> None:
         self._wake.set()

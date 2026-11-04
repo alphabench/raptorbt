@@ -25,8 +25,9 @@ are thin wrappers over this runtime and behave the same.
 from __future__ import annotations
 
 import os
+import traceback
 import warnings
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal, Sequence
 
 import numpy as np
 
@@ -380,36 +381,41 @@ def _add_strategy(rt, strategy, symbols, adopt=None, stacklevel=4, account=None,
     strategy.clock = Clock()
     strategy.cache = Cache()
     sid, ctx, view = rt.add_strategy(symbols, account)
-    api.begin(strategy, ctx, symbols, host=host)
-    if adopt is not None:
-        adopt(sid)
-    strategy.on_start(ctx)
-    mask = api.finish(strategy)
-    # One clock per symbol: a timer set in on_start belongs to every
-    # symbol, not to whichever one's event crosses the threshold first.
-    clocks = [strategy.clock.clone_schedule() for _ in symbols]
-    # The Python command path stays reachable while the native one settles.
-    commands = (
-        CommandPath(strategy, PortfolioTarget(view, ctx))
-        if os.environ.get("RAPTORBT_PY_COMMANDS") == "1"
-        else None
-    )
-    unrouted = rt.register_streams(
-        sid,
-        strategy,
-        ctx,
-        commands,
-        clocks,
-        mask,
-        [(s[0], s[1], s[2] if len(s) > 2 else 0.0) for s in strategy._bar_subscriptions],
-        list(strategy._indicators),
-    )
-    if unrouted:
-        warnings.warn(
-            "register_indicator() without symbol= in a portfolio run feeds the "
-            "indicator every symbol's bars interleaved; pass symbol= to route it",
-            stacklevel=stacklevel,
+    try:
+        api.begin(strategy, ctx, symbols, host=host)
+        if adopt is not None:
+            adopt(sid)
+        strategy.on_start(ctx)
+        mask = api.finish(strategy)
+        # One clock per symbol: a timer set in on_start belongs to every
+        # symbol, not to whichever one's event crosses the threshold first.
+        clocks = [strategy.clock.clone_schedule() for _ in symbols]
+        # The Python command path stays reachable while the native one settles.
+        commands = (
+            CommandPath(strategy, PortfolioTarget(view, ctx))
+            if os.environ.get("RAPTORBT_PY_COMMANDS") == "1"
+            else None
         )
+        unrouted = rt.register_streams(
+            sid,
+            strategy,
+            ctx,
+            commands,
+            clocks,
+            mask,
+            [(s[0], s[1], s[2] if len(s) > 2 else 0.0) for s in strategy._bar_subscriptions],
+            list(strategy._indicators),
+        )
+        if unrouted:
+            warnings.warn(
+                "register_indicator() without symbol= in a portfolio run feeds the "
+                "indicator every symbol's bars interleaved; pass symbol= to route it",
+                stacklevel=stacklevel,
+            )
+    except BaseException:
+        # the run never gets to release it: its context would wait for the collector, on any thread
+        api.release(strategy)
+        raise
     return sid, ctx, view
 
 
@@ -437,6 +443,7 @@ def _run_group(
     adjustment_policy=None,
     order_check=None,
     host=None,
+    trade_from=None,
 ):
     """One runtime over ``entries``; returns ``(results, report, account_results)``.
 
@@ -468,8 +475,11 @@ def _run_group(
         QuoteTick,
         BookSnapshot,
     )
+    setups: list[tuple[Any, int, Any]] = []
     try:
         order_check_mod.install(rt, order_check, "run_strategies")
+        if trade_from is not None:
+            rt.set_trade_from(trade_from)
         if primary_bars is not None:
             rt.set_primary_bars(*primary_bars)
         gids = {}
@@ -486,10 +496,9 @@ def _run_group(
                 max_gross_exposure=spec.max_gross_exposure,
                 max_positions=spec.max_positions,
             )
-        setups = []
         for k, (strategy, symbols) in enumerate(entries):
             gid = gids.get(names[k]) if names else None
-            sid, ctx, _ = _add_strategy(
+            sid, ctx, view = _add_strategy(
                 rt, strategy, symbols, stacklevel=stacklevel, account=gid, host=host
             )
             setups.append((strategy, sid, ctx))
@@ -504,8 +513,17 @@ def _run_group(
             results.append(rt.finish(sid))
         account_results = {name: rt.finish_account(gid, name) for name, gid in gids.items()}
         return results, report, account_results
+    except BaseException as exc:
+        # the frames the exception carries hold contexts: keep the lines, drop the locals
+        traceback.clear_frames(exc.__traceback__)
+        raise
     finally:
         rt.close()
+        for strategy, _, _ in setups:
+            api.release(strategy)
+        # this frame outlives the call in an exception's traceback
+        setups.clear()
+        rt = ctx = view = None
 
 
 def _lifecycle(actions, policy, universe, tick_symbols, call, live=False):
@@ -614,7 +632,8 @@ def run_strategies(
     corporate_actions: Iterable[CorporateAction] | None = None,
     adjustment_policy: Literal["raw", "adjusted"] | None = None,
     order_check=None,
-    bindings: dict[str, str] | None = None,
+    bindings: dict[str, str | Sequence[str]] | None = None,
+    trade_from: int | None = None,
     _via: str | None = None,
 ) -> (
     list[PortfolioResult]
@@ -727,9 +746,20 @@ def run_strategies(
     backtest and live; see :mod:`raptorbt.strategy.order_check`.
 
     ``bindings`` maps a requirements role name to the symbol it means
-    (``{"index": "NSE:NIFTY"}``); with ``instruments=`` it is what
-    ``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer from, as on a
-    :class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+    (``{"index": "NSE:NIFTY"}``), or, for a :class:`~raptorbt.strategy.requirements.Universe`
+    role, to the list of symbols chosen for it (``{"basket": ["A", "B", "C"]}``); with
+    ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer
+    from, as on a :class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+
+    ``trade_from`` (ns since the epoch, an event time) is the first moment the strategies may
+    trade. The bars before it are run in full, so the strategies' hooks and indicators warm up on
+    them, but every order decided at an event before it is refused with the reason ``warmup``:
+    a typed order is recorded as rejected (the strategy hears ``on_order_rejected`` with
+    ``reject_reason == "warmup"``), an ``enter()`` intent is a refused entry, and the refusal is
+    journaled and counted like any other. Orders decided at ``trade_from`` or later are not
+    affected. ``None`` (the default) trades from the first bar. A host that wants the history
+    without the trades uses this instead of an ``order_check`` that also refuses ``enter()``
+    and ``close_position()``.
 
     ``keep_curves=False`` drops the equity, drawdown and returns curves from
     the results (the final equity value stays as a one-element curve); trades,
@@ -752,6 +782,16 @@ def run_strategies(
     # warning and error, and its extra frame is skipped when attributing them.
     call = _via or "run_strategies"
     extra = 1 if _via else 0
+    if trade_from is not None and (isinstance(trade_from, bool) or not isinstance(trade_from, int)):
+        raise InvalidParameter(
+            f"trade_from must be an event time in integer nanoseconds since the epoch or None, "
+            f"got {trade_from!r}",
+            code="invalid_trade_from",
+            operation=call,
+            parameter="trade_from",
+            value=trade_from,
+            valid=["integer nanoseconds since the epoch", None],
+        )
     if batch_size is not None and (
         isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
     ):
@@ -851,6 +891,7 @@ def run_strategies(
         adjustment_policy=adjustment_policy,
         order_check=order_check,
         host=context_host.build(instruments, bindings, entries, universe, call),
+        trade_from=trade_from,
     )
     size = 1 if not share else (batch_size or _AUTO_BATCH)
     results: list = [None] * len(entries)

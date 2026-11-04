@@ -73,6 +73,7 @@ Load when:
 - Picking option strikes and expiries from a chain; pricing options, Greeks and implied volatility.
 - Building iron condors, straddles and other multi-leg option structures.
 - Market hours, trading sessions and holidays.
+- Trading option contracts while deciding on the index; building a synthetic chain and setting span_pct and exposure_pct for sold options.
 
 ## Market data
 
@@ -156,6 +157,7 @@ Load when:
 - Submitting or managing orders: limit, stop, stop-limit, trailing, bracket, OCO, modify, cancel.
 - Implementing a stop-loss, target or time in force (day, gtd, ioc, fok).
 - Explaining why an order was rejected, or placing a multi-leg option structure.
+- Putting an ATR stop or target on an option leg: the premium or the index.
 
 ## Execution
 
@@ -358,5 +360,6 @@ the skills it names, then copy the script.
 | An options strategy on a chain: strike and expiry picks, ATR stops, sizing, account limits | `examples/options/nifty_momentum.py` |
 | A hedge-first multi-leg structure (bear call spread) with a defined-risk margin model | `examples/options/bear_call_spread.py` |
 | Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
+| A basket strategy over instruments the deployer picks (a `Universe` role), with a warm-up session before `trade_from` | `examples/portfolio/top_n_basket.py` |
 | A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |
 | The same strategy on a paper `LiveNode`, matching the batch run, with a journal checkpoint and restore | `examples/live-trading/paper_node.py` |

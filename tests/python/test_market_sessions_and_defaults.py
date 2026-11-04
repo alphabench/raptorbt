@@ -302,12 +302,13 @@ class Overnight(Script):
 
 
 def test_a_positional_strategy_is_not_squared_off_by_the_session_preset():
-    """Bought at 15:17, held overnight, closed only when the data ends."""
+    """Bought at 15:17, added to at 15:22 and the next morning (netting adds to the one position),
+    held overnight, closed only when the data ends."""
     rows, rejected = _closed(Script, BacktestConfig(initial_capital=1e5, fees=0.0))
-    assert rows == [(10.0, "11-02 15:17", "11-03 09:18", "EndOfData")]
-    assert [r for _, r in rejected] == ["position_open", "position_open"]
+    assert rows == [(20.0, "11-02 15:17", "11-03 09:18", "EndOfData")]
+    assert rejected == []
     rows, _ = _closed(Overnight, BacktestConfig(initial_capital=1e5, fees=0.0))
-    assert rows == [(10.0, "11-02 15:17", "11-03 09:18", "EndOfData")]
+    assert rows == [(20.0, "11-02 15:17", "11-03 09:18", "EndOfData")]
 
 
 def test_a_strategy_whose_requirements_say_intraday_is_flat_by_its_flatten_time():
@@ -321,7 +322,7 @@ def test_a_strategy_whose_requirements_say_intraday_is_flat_by_its_flatten_time(
 
 def test_an_explicit_squareoff_time_beats_the_one_the_requirements_declare():
     rows, _ = _closed(Intraday, BacktestConfig(initial_capital=1e5, fees=0.0, squareoff_time="15:25"))
-    assert rows[0] == (10.0, "11-02 15:17", "11-02 15:25", "Squareoff")
+    assert rows[0] == (15.0, "11-02 15:17", "11-02 15:25", "Squareoff")  # the 15:22 buy adds before 15:25
 
 
 def test_strategies_with_different_holdings_cannot_share_one_squareoff():

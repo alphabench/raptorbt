@@ -160,3 +160,40 @@ so the sold leg's event can come before the event that fills its hedge; the
 leg is funded, with the group's credit, at its next event once the hedge is
 held. If the hedge never fills, the sold leg is refused when it is next
 stepped without a pending hedge, as before.
+
+## Netting: adds, reductions and flips
+
+Under `oms_type="netting"` an instrument has one position, and an order moves it as a
+broker's net position moves. The same rules apply in a batch run, a `LiveNode`, a paper
+node and an adapter node (a venue's fills are facts and follow the same book):
+
+| Order | What the book does |
+|---|---|
+| on the side held | **adds**. Size adds; the entry price becomes the size-weighted average of the position and the fill. The fill pays its entry fee on its own; the position's entry fees are the sum. Each fill is a record of its own (an `OrderFilled` and an `Entered`, the order log, the journal). |
+| against the position, smaller | **reduces**. One trade is booked for the reduced size at the **average** entry price (the way Indian brokers' net positions book realised P&L); the rest stays open at that average. |
+| against the position, equal | **closes** it. |
+| against the position, larger | **flips**. It closes what is held (a trade) and opens the rest on its own side at the same fill price, as one order. The close and the open are two fills with a fee each; a per-order brokerage cap is shared by both (`fee_model.begin_order`). |
+
+Only a unit-quantity order that is neither `reduce_only` nor tied to a position flips. A
+`reduce_only` order, an order that names a position (`position_id`), and an order sized as a
+fraction of capital or as the whole position stop at flat. If the rest of a flip cannot open
+(halted, no margin, a limit), the order ends `Filled` at what it closed: its quantity is cut to
+that (an `order_resized` event) and the refusal is counted, so no order ends rejected with fills.
+With volume-sliced fills (`partial_fills`) a flip closes on the print that has the volume and the
+rest opens on the following prints.
+
+An add is gated like an entry, once, on the order's first fill: a halt (`killed`, `drawdown_halt`,
+`daily_loss`, `margin_call`), the order and position size limits, funding. `max_positions` does not
+count it, since the position already counts; the position and exposure caps judge the position
+after the add.
+
+**Protective levels belong to the position.** A level derived from the entry (percent, ATR) follows
+the new average. A `stop_price` / `target_price` the added order names becomes the position's level
+(the other is kept): the whole net position is protected at it. Under a venue that holds the
+protection (`protective="venue"`) the protective orders keep the size they were placed with.
+**Brackets** are `reduce_only` legs of the full position, so a bracket made with an added slice
+protects the net position, earlier slices included; when one bracket's leg fires and the position
+is flat, the other brackets' legs are refused as any reduce-only order with nothing to reduce.
+Legs with an explicit quantity close at most that quantity, never more than is held.
+
+Hedging is unchanged: every order opens a position of its own and a close names its position.

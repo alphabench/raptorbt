@@ -171,12 +171,17 @@ from raptorbt.version_check import check_for_update as _check_for_update
 
 _check_for_update(__version__)
 
+# Opt-in, off by default; when enabled it reports to the maintainers' own server unless
+# you name another: see raptorbt.crash_report and the README.
+from raptorbt.crash_report import enable_crash_reporting
+
 __all__ = [
     # Research statistics and the full report
     "research",
     "report",
     "capabilities",
     "full_report",
+    "enable_crash_reporting",
     # Structured errors
     "errors",
     "RaptorBTError",

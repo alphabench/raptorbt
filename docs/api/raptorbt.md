@@ -16,6 +16,7 @@ production quantitative trading:
 | --- | --- | --- |
 | [`capabilities`](#capabilities) | function | The engine's capability manifest (see the module docs). |
 | [`full_report`](#full_report) | function | ``raptorbt._raptorbt.full_report`` plus ``unverified_fee_rows``: the fee rows the costs were priced on whose rates are not matched to an official publication (a result carries them as ``result.unverified_fee_rows``, which ``result.full_report`` passes). Left out, the key is absent. The costs of a run that lists any are not exchange-accurate. |
+| [`enable_crash_reporting`](#enable_crash_reporting) | function | Turn crash reporting on for this process; return whether it can send. |
 | [`RaptorBTError`](#raptorbterror) | exception | Base class of every structured RaptorBT error. |
 | [`InvalidParameter`](#invalidparameter) | exception | An argument has a value the call does not accept. |
 | [`InvalidData`](#invaliddata) | exception | Input data is malformed: lengths, order, NaN, missing fields. |
@@ -632,21 +633,21 @@ Python-exposed instrument market definition.
 | --- | --- |
 | `activation_ns` | *No docstring.* |
 | `currency` | Quote currency, or None. Metadata only: nothing is converted. |
-| `currency_pair(symbol, price_increment=0.0, size_increment=0.0, lot_size=1.0, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None)` | A spot currency pair. |
-| `equity(symbol, price_increment=0.0, lot_size=1.0, size_increment=0.0, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None)` | A cash equity / spot instrument. |
+| `currency_pair(symbol, price_increment=0.0, size_increment=0.0, lot_size=1.0, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A spot currency pair. |
+| `equity(symbol, price_increment=0.0, lot_size=1.0, size_increment=0.0, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A cash equity / spot instrument. |
 | `expiration_ns` | *No docstring.* |
 | `exposure_pct` | Exposure margin fraction for a sold option (0.0 = not modelled). |
 | `from_json(text)` | Rebuild a spec from the text `to_json` wrote. |
-| `futures_contract(symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None)` | A dated futures contract. |
-| `index(symbol, price_increment=0.0, venue=None, currency=None, session=None)` | A non-tradable reference index. |
+| `futures_contract(symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A dated futures contract. |
+| `index(symbol, price_increment=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A non-tradable reference index. |
 | `kind` | Instrument family: "cash", "currency_pair", "contract", "option", "index". |
 | `lot_size` | *No docstring.* |
 | `maker_fee` | *No docstring.* |
 | `margin_init` | *No docstring.* |
 | `margin_maint` | *No docstring.* |
 | `multiplier` | *No docstring.* |
-| `option(symbol, strike, right, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, binary=False, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None)` | A vanilla or binary option contract.    /// `span_pct` and `exposure_pct` model the deposit an exchange blocks against a SOLD option, each as a fraction of the underlying notional at the strike. Both default to `0.0`, which leaves a short option funded at its premium as in earlier releases. Bought options are unaffected: a buyer can lose only the premium. |
-| `perpetual(symbol, lot_size=1.0, multiplier=1.0, price_increment=0.0, size_increment=0.0, underlying=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None)` | A perpetual contract (dated future without expiry). |
+| `option(symbol, strike, right, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, binary=False, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A vanilla or binary option contract.    /// `span_pct` and `exposure_pct` model the deposit an exchange blocks against a SOLD option, each as a fraction of the underlying notional at the strike. Both default to `0.0`, which leaves a short option funded at its premium as in earlier releases. Bought options are unaffected: a buyer can lose only the premium. |
+| `perpetual(symbol, lot_size=1.0, multiplier=1.0, price_increment=0.0, size_increment=0.0, underlying=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A perpetual contract (dated future without expiry). |
 | `price_increment` | *No docstring.* |
 | `right` | "call"/"put" for options, None otherwise. |
 | `scrip_group` | The exchange's scrip group where charges depend on it (BSE cash: `"A"`, `"B"`), or None. A fee schedule that prices BSE equity by group refuses an instrument without one. |
@@ -790,7 +791,7 @@ one FFI call per bar with no array allocation.
 
 ```python
 class LiveNode
-LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, bindings: 'dict[str, str] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
+LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
 ```
 
 Many strategies over the symbols of one pushed feed.
@@ -903,8 +904,9 @@ action the node will see; without a policy there must be none.
 :func:`~raptorbt.run_strategies` takes: every typed order passes it before
 the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
 
-``bindings`` maps a requirements role name to the symbol it means; with
-``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
+``bindings`` maps a requirements role name to the symbol it means, or, for a
+:class:`~raptorbt.strategy.requirements.Universe` role, to the list of symbols chosen for it;
+with ``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and
 ``ctx.option_chain`` answer from, identically to
 :func:`~raptorbt.run_strategies` (see :mod:`raptorbt.strategy.context_host`).
 
@@ -950,7 +952,7 @@ there.
 | `annotate(self, ts: 'int', kind: 'str', detail=None) -> 'None'` | Write a note of your own into the journal at event time ``ts`` (an adoption, an unattributed fill, an operator command): record kind ``annotation``, payload ``{"kind", "detail"}``. Refused without a journal. |
 | `apply_plan(self, plan) -> 'None'` | Apply a :func:`~raptorbt.strategy.requirements.plan_instruments` plan: retire what it says to retire, then add what it says to add, each as its own journaled step. Stops at the first refusal; what was applied stays applied. |
 | `begin_group(self, timestamp: 'int | None' = None) -> 'None'` | Open a timestamp group: the pushes that follow are held and delivered together, as a batch run delivers the events that share a timestamp. |
-| `bindings` | The role bindings the node was built with. A copy. |
+| `bindings` | The role bindings the node was built with (a Universe role's symbols as a tuple). A copy. |
 | `checkpoint(self, include_log: 'bool' = True) -> 'bytes'` | A versioned snapshot to rebuild this node from: the journal head, a digest of the state to check the rebuild against, each strategy's ``state()``, the epoch and (``include_log``) every journal record since the journal's ``seq_base``. Taken between pushes. See :meth:`restore`. |
 | `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. |
 | `epoch` | *No docstring.* |
@@ -960,7 +962,7 @@ there.
 | `flush(self) -> 'None'` | Close the open timestamp group and deliver what it holds. With none open, nothing happens. |
 | `halt(self, strategy_index: 'int', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt one strategy from outside it, like ``ctx.halt``: its new entries are refused with ``killed``, its working orders are cancelled and, with ``flatten=True``, its positions are closed at the last prices seen. ``is_halted`` reads True at once; the cancels and closes happen when that strategy's next event is applied. |
 | `halt_account(self, account: 'str', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt every strategy on ``account`` from outside, as ``halt`` halts one: their new entries are refused with ``killed``, their working orders are cancelled and, with ``flatten=True``, their positions are closed at the last prices seen. Each strategy's cancels and closes happen when its next event is applied. The account's ``halted_at`` is the number of events applied to its strategies so far. Strategies not on the account are untouched. |
-| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, and the orders with no confirmed outcome. |
+| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
 | `heartbeat(self) -> 'dict'` | Check the execution epoch with the adapter now and return :meth:`health`. Raises ``fenced`` when a newer epoch owns the account. Call it on a timer; the node also checks before every request. |
 | `holders_of(self, symbol: 'str') -> 'tuple[int, ...]'` | The strategy indices that traded ``symbol`` when it was last added or revived. |
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
@@ -2081,6 +2083,20 @@ ema(data, period)
 
 Exponential Moving Average.
 
+### `enable_crash_reporting`
+
+*function*
+
+```python
+enable_crash_reporting(endpoint: 'Optional[str]' = None, key: 'Optional[str]' = None) -> 'bool'
+```
+
+Turn crash reporting on for this process; return whether it can send.
+
+``endpoint`` and ``key`` default to ``RAPTORBT_CRASH_ENDPOINT`` and
+``RAPTORBT_CRASH_KEY``. If either is empty, nothing is sent and the function returns
+False.
+
 ### `estimate_covariance`
 
 *function*
@@ -2421,7 +2437,7 @@ Run spread backtest (multi-leg options).
 *function*
 
 ```python
-run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, bindings: 'dict[str, str] | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
+run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, trade_from: 'int | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
 ```
 
 Run many strategies over shared market data.
@@ -2529,9 +2545,20 @@ holder at the ex-date; a short pays it. See ``docs/architecture/lifecycle.md``.
 backtest and live; see :mod:`raptorbt.strategy.order_check`.
 
 ``bindings`` maps a requirements role name to the symbol it means
-(``{"index": "NSE:NIFTY"}``); with ``instruments=`` it is what
-``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer from, as on a
-:class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+(``{"index": "NSE:NIFTY"}``), or, for a :class:`~raptorbt.strategy.requirements.Universe`
+role, to the list of symbols chosen for it (``{"basket": ["A", "B", "C"]}``); with
+``instruments=`` it is what ``ctx.role``, ``ctx.instrument`` and ``ctx.option_chain`` answer
+from, as on a :class:`~raptorbt.LiveNode` (see :mod:`raptorbt.strategy.context_host`).
+
+``trade_from`` (ns since the epoch, an event time) is the first moment the strategies may
+trade. The bars before it are run in full, so the strategies' hooks and indicators warm up on
+them, but every order decided at an event before it is refused with the reason ``warmup``:
+a typed order is recorded as rejected (the strategy hears ``on_order_rejected`` with
+``reject_reason == "warmup"``), an ``enter()`` intent is a refused entry, and the refusal is
+journaled and counted like any other. Orders decided at ``trade_from`` or later are not
+affected. ``None`` (the default) trades from the first bar. A host that wants the history
+without the trades uses this instead of an ``order_check`` that also refuses ``enter()``
+and ``close_position()``.
 
 ``keep_curves=False`` drops the equity, drawdown and returns curves from
 the results (the final equity value stays as a one-element curve); trades,

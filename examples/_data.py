@@ -100,7 +100,7 @@ def nifty_universe(days: int = 2, seed: int = 5, spot: float = 24_000.0, step: f
     index = bars(days=days, seed=seed, start=spot, step=step, wick=1.0, drift_period=180)
     ts, close = index["timestamps"], index["close"]
     data = {"NIFTY": index}
-    instruments = {}  # the index is a plain series: a run refuses an index spec as "not tradable"
+    instruments = {}  # the index is a plain series and needs no spec (an index spec is data only: orders on it are refused)
     specs = []
     centre = round(spot / 50.0) * 50.0
     for expiry in expiries:

@@ -59,9 +59,19 @@ others. A model needs an instrument definition (`InstrumentSpec`) so it can
 classify the line; without one the entry is refused as `margin_unpriced`.
 
 **Netting and hedging.** `oms_type="netting"` (default) keeps one position per
-instrument; `"hedging"` lets every order open its own independent position,
-each with its own stop and target, listed in `ctx.positions()`. See
-[orders](../orders/SKILL.md) for how orders behave under each.
+instrument and moves it like a broker's net position: an order on its side
+adds (average entry price), an order against it reduces, closes or flips it;
+`"hedging"` lets every order open its own independent position, each with its
+own stop and target, listed in `ctx.positions()`. See [orders](../orders/SKILL.md)
+for how orders behave under each.
+
+**A basket.** One strategy over N instruments chosen at deploy time declares
+`Universe(asset=, min=, max=)` in its `requirements` and reads the chosen list
+with `ctx.role("basket")`; the run binds it with
+`run_strategies(..., bindings={"basket": [...]})`. `trade_from=<ns>` runs the
+bars before it without trading them (orders decided earlier are refused
+`warmup`), so momentum and other indicators are primed when trading starts.
+`examples/portfolio/top_n_basket.py` runs both.
 
 **Account groups.** Strategies can share an account:
 `run_strategies(..., accounts={"desk": AccountSpec(...)})`, with the strategy
@@ -308,7 +318,7 @@ assert w[0] > w[3]                                  # the higher alpha gets the 
   [instruments](../instruments/SKILL.md).
 - Exchange charges that hit the booked cash: [backtesting](../backtesting/SKILL.md).
 - Reading P&L and the curves: [results](../results/SKILL.md).
-- Runnable examples: `examples/portfolio/shared_account.py`, `examples/multi-instrument/relative_value.py`.
+- Runnable examples: `examples/portfolio/shared_account.py`, `examples/portfolio/top_n_basket.py`, `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 

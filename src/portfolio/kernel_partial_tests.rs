@@ -76,7 +76,7 @@ fn an_opening_order_fills_across_prints_into_one_averaged_position() {
     assert_eq!(fills(&events), vec![40.0]);
     assert_eq!(kernel.order(id).unwrap().status, OrderStatus::PartiallyFilled);
     assert_eq!(kernel.order(id).unwrap().filled_qty, 40.0);
-    // A second print of the SAME order is not "position_open": it adds.
+    // A second print of the SAME order adds.
     let events = kernel.step_trade(2, &print(2, 110.0, 60.0), StepInput::default());
     assert_eq!(fills(&events), vec![60.0]);
     assert!(!events.iter().any(|e| matches!(e, EngineEvent::OrderRejected { .. })), "{events:?}");
@@ -87,10 +87,12 @@ fn an_opening_order_fills_across_prints_into_one_averaged_position() {
     assert!((snap.entry_price - 106.0).abs() < 1e-9, "{}", snap.entry_price);
     // Cash paid the two slices at their own prices.
     assert!((kernel.cash() - (100_000.0 - 4_000.0 - 6_600.0)).abs() < 1e-6);
-    // A different order is still a second entry under netting.
+    // A different order on the side held adds to the one netting position.
     let other = submit(&mut kernel, OrderSide::Buy, QtySpec::Units(10.0), TimeInForce::Gtc, "p");
     let events = kernel.step_trade(3, &print(3, 110.0, 10.0), StepInput::default());
-    assert!(events.iter().any(|e| matches!(e, EngineEvent::OrderRejected { order_id, reason: "position_open", .. } if *order_id == other)), "{events:?}");
+    assert_eq!(fills(&events), vec![10.0]);
+    assert_eq!(kernel.order(other).unwrap().status, OrderStatus::Filled);
+    assert!((kernel.position_snapshot().unwrap().size - 110.0).abs() < 1e-9);
 }
 
 #[test]
@@ -140,13 +142,13 @@ fn a_derived_stop_follows_the_average_and_an_explicit_one_stays() {
 }
 
 #[test]
-fn a_closing_order_reduces_across_prints_and_never_reverses() {
+fn a_closing_order_reduces_across_prints_then_reverses_with_the_surplus() {
     let mut kernel = partial_kernel();
     submit(&mut kernel, OrderSide::Buy, QtySpec::Units(100.0), TimeInForce::Gtc, "o");
     kernel.step_trade(1, &print(1, 100.0, 100.0), StepInput::default());
     assert!(kernel.is_in_position());
     // Sell 150 against a 100 position: 40 prints, then 60 closes it; the
-    // surplus 50 is canceled rather than opening a short.
+    // surplus 50 opens a short on the next print, as a broker's net position flips.
     let id = submit(&mut kernel, OrderSide::Sell, QtySpec::Units(150.0), TimeInForce::Gtc, "x");
     let events = kernel.step_trade(2, &print(2, 105.0, 40.0), StepInput::default());
     assert_eq!(fills(&events), vec![40.0]);
@@ -164,12 +166,16 @@ fn a_closing_order_reduces_across_prints_and_never_reverses() {
     let events = kernel.step_trade(3, &print(3, 106.0, 500.0), StepInput::default());
     assert_eq!(fills(&events), vec![60.0]);
     assert!(!kernel.is_in_position());
-    assert_eq!(kernel.order(id).unwrap().status, OrderStatus::Filled);
-    assert!((kernel.order(id).unwrap().filled_qty - 100.0).abs() < 1e-9);
-    let events = kernel.step_trade(4, &print(4, 106.0, 500.0), StepInput::default());
-    assert!(!kernel.is_in_position(), "the surplus must never reverse: {events:?}");
+    assert_eq!(kernel.order(id).unwrap().status, OrderStatus::PartiallyFilled);
     // Cash: 100_000 - 10_000 + 40*105 + 60*106 = 100_560.
     assert!((kernel.cash() - 100_560.0).abs() < 1e-6, "{}", kernel.cash());
+    let events = kernel.step_trade(4, &print(4, 106.0, 500.0), StepInput::default());
+    assert_eq!(fills(&events), vec![50.0]);
+    assert_eq!(kernel.order(id).unwrap().status, OrderStatus::Filled);
+    assert!((kernel.order(id).unwrap().filled_qty - 150.0).abs() < 1e-9);
+    let short = kernel.position_snapshot().unwrap();
+    assert_eq!(short.direction, Direction::Short);
+    assert!((short.size - 50.0).abs() < 1e-9 && (short.entry_price - 106.0).abs() < 1e-9);
 }
 
 #[test]
@@ -267,8 +273,8 @@ fn an_order_in_flight_cannot_fill_before_its_latency_elapses() {
     let events = kernel.step_trade(2, &print(300_000_000, 100.0, 1_000.0), StepInput::default());
     assert_eq!(
         fills(&events).len(),
-        1,
-        "netting: the first fill opens, the second is refused: {events:?}"
+        2,
+        "netting: the first fill opens, the second adds to it: {events:?}"
     );
     assert!(kernel.is_in_position());
 }

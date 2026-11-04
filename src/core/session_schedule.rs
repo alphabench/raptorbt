@@ -102,8 +102,10 @@ struct Era {
     windows: [Vec<(u32, u32)>; 7],
 }
 
-/// The classes MCX trades to different hours.
-enum McxClass {
+/// The classes MCX trades to different hours. The fee classes derive from the same table
+/// (agricultural or not), so a name has one class for its session and its charges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McxClass {
     /// Cotton, Kapas and Cotton Seed Wash Oil: Mon-Fri 09:00-21:00.
     SelectAgri,
     /// Every other agricultural contract: 09:00-17:00.
@@ -132,7 +134,7 @@ impl std::fmt::Display for UnknownMcxClass {
 
 /// Which class an MCX contract name (an underlying or a symbol such as `COTTON26DECFUT`)
 /// belongs to, or `None` for a name the table does not list.
-fn mcx_class(name: &str) -> Option<McxClass> {
+pub fn mcx_class(name: &str) -> Option<McxClass> {
     const SELECT: [&str; 3] = ["COTTON", "KAPAS", "COTWASOIL"];
     const OTHER: [&str; 19] = [
         "CPO",

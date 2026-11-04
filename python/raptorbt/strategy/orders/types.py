@@ -21,6 +21,7 @@ closed when it was placed.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from raptorbt.errors import InvalidOrder
@@ -39,6 +40,22 @@ def _bad(code: str, message: str, parameter: str, value=None, valid=None) -> Inv
         value=value,
         valid=valid,
     )
+
+
+def check_term(name: str, value, *, maximum: float | None = None, minimum_zero: bool = False) -> None:
+    """Refuse an order term that is NaN, infinite, not positive (not negative, when
+    ``minimum_zero``), or above ``maximum``. ``None`` is a term not given. A NaN compares false
+    against every bound, so a plain ``value <= 0`` check lets it through."""
+    if value is None:
+        return
+    ok = math.isfinite(value) and (value >= 0.0 if minimum_zero else value > 0.0)
+    if ok and maximum is not None:
+        ok = value <= maximum
+    if not ok:
+        bound = ">= 0" if minimum_zero else "> 0" if maximum is None else f"in (0, {maximum:g}]"
+        raise _bad(
+            "invalid_order_value", f"{name} must be a finite number {bound}, got {value!r}", name, value
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -74,6 +91,10 @@ class _OrderBase:
             object.__setattr__(self, "quantity", self.units)
         elif self.quantity is not None:
             object.__setattr__(self, "units", self.quantity)
+        check_term("quantity", self.quantity)
+        check_term("size_frac", self.size_frac, maximum=1.0)
+        check_term("stop_price", self.stop_price)
+        check_term("target_price", self.target_price)
         if self.side not in _VALID_SIDES:
             raise _bad(
                 "invalid_order_side",
@@ -134,8 +155,7 @@ class Limit(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.price <= 0.0:
-            raise _bad("invalid_order_value", "limit price must be > 0", "price", self.price)
+        check_term("price", self.price)
 
     @property
     def kind(self) -> str:
@@ -150,8 +170,7 @@ class StopMarket(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.trigger <= 0.0:
-            raise _bad("invalid_order_value", "stop trigger must be > 0", "trigger", self.trigger)
+        check_term("trigger", self.trigger)
 
     @property
     def kind(self) -> str:
@@ -167,13 +186,8 @@ class StopLimit(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.trigger <= 0.0 or self.price <= 0.0:
-            raise _bad(
-                "invalid_order_value",
-                "stop_limit needs trigger > 0 and price > 0",
-                "trigger, price",
-                [self.trigger, self.price],
-            )
+        check_term("trigger", self.trigger)
+        check_term("price", self.price)
 
     @property
     def kind(self) -> str:
@@ -189,8 +203,7 @@ class MarketIfTouched(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.trigger <= 0.0:
-            raise _bad("invalid_order_value", "trigger must be > 0", "trigger", self.trigger)
+        check_term("trigger", self.trigger)
 
     @property
     def kind(self) -> str:
@@ -206,13 +219,8 @@ class LimitIfTouched(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.trigger <= 0.0 or self.price <= 0.0:
-            raise _bad(
-                "invalid_order_value",
-                "limit_if_touched needs trigger > 0 and price > 0",
-                "trigger, price",
-                [self.trigger, self.price],
-            )
+        check_term("trigger", self.trigger)
+        check_term("price", self.price)
 
     @property
     def kind(self) -> str:
@@ -240,8 +248,7 @@ class TrailingStopMarket(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.offset <= 0.0:
-            raise _bad("invalid_order_value", "offset must be > 0", "offset", self.offset)
+        check_term("offset", self.offset)
         if self.offset_kind not in _VALID_OFFSET_KINDS:
             raise _bad(
                 "invalid_offset_kind",
@@ -267,8 +274,7 @@ class TrailingStopLimit(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.offset <= 0.0:
-            raise _bad("invalid_order_value", "offset must be > 0", "offset", self.offset)
+        check_term("offset", self.offset)
         if self.offset_kind not in _VALID_OFFSET_KINDS:
             raise _bad(
                 "invalid_offset_kind",
@@ -277,10 +283,7 @@ class TrailingStopLimit(_OrderBase):
                 self.offset_kind,
                 _VALID_OFFSET_KINDS,
             )
-        if self.limit_offset < 0.0:
-            raise _bad(
-                "invalid_order_value", "limit_offset must be >= 0", "limit_offset", self.limit_offset
-            )
+        check_term("limit_offset", self.limit_offset, minimum_zero=True)
 
     @property
     def kind(self) -> str:

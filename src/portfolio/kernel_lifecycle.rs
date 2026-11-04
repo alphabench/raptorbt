@@ -177,10 +177,14 @@ impl EngineKernel {
                     Some(u) => Ok((u, SettlementSource::Underlying)),
                     None => Err(refusal::UNDERLYING_PRICE_MISSING),
                 },
+                // An option cash-settles at the underlying's official close: without that price
+                // the settlement is refused, as under `Underlying`, never made at the option's
+                // own last trade (`LastPrice` asks for that).
                 SettlementPrice::Auto => match self.underlying_price {
                     Some(u) if is_option && under_for_option => {
                         Ok((intrinsic(u), SettlementSource::Underlying))
                     }
+                    None if is_option && under_for_option => Err(refusal::UNDERLYING_PRICE_MISSING),
                     _ => Ok((bar.close, SettlementSource::LastPrice)),
                 },
             }
