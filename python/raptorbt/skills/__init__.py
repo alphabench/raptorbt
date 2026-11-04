@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import Any
 
+from raptorbt.errors import UnknownSymbol
+
 __all__ = ["SkillInfo", "for_task", "index", "load", "manifest"]
 
 _PREFIX = "raptorbt-"
@@ -78,7 +80,11 @@ def load(name: str) -> str:
     by_name = {s.name: s for s in index()}
     full = name if name.startswith(_PREFIX) else _PREFIX + name
     if full not in by_name:
-        raise KeyError(f"no skill {name!r}; available: {', '.join(sorted(by_name))}")
+        raise UnknownSymbol(
+            f"no skill {name!r}; available: {', '.join(sorted(by_name))}",
+            code="unknown_skill", operation="skills.load", parameter="name", value=name,
+            valid=sorted(by_name),
+        )
     return _root().joinpath(by_name[full].path).read_text(encoding="utf-8")
 
 

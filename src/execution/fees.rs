@@ -107,11 +107,9 @@ pub fn fee_row_for(
         let mut names: Vec<&str> = spec.underlying().into_iter().collect();
         names.push(spec.symbol.as_str());
         return match names.iter().find_map(|n| mcx_class(n)) {
-            Some(McxClass::SelectAgri | McxClass::OtherAgri) => Ok((
-                venue,
-                segment,
-                Some(crate::execution::costs::schedule::MCX_AGRI.to_string()),
-            )),
+            Some(McxClass::SelectAgri | McxClass::OtherAgri) => {
+                Ok((venue, segment, Some(crate::execution::costs::schedule::MCX_AGRI.to_string())))
+            }
             Some(McxClass::Standard) => Ok((venue, segment, None)),
             None => Err(format!(
                 "instrument {:?}: no MCX fee class is known for {:?}, so its charges cannot be \
@@ -225,14 +223,18 @@ impl DatedFees {
     /// (GST on it). Read back, not recomputed, so a position built of several fills or sliced
     /// into several exits keeps what each order was charged.
     fn booked_entry_brokerage(&self, day: i64, is_buy: bool, value: f64, booked_total: f64) -> f64 {
-        let Ok(row) = self.schedule.row_for(
+        // The entry was booked on this same row (same venue, segment and day), so a lookup that
+        // fails now is a schedule changed under the run: stop, as every other fee lookup does,
+        // rather than read the entry's brokerage as nothing and understate the round trip.
+        let row = match self.schedule.row_for(
             &self.venue,
             self.segment,
             self.underlying.as_deref(),
             day,
             false,
-        ) else {
-            return 0.0;
+        ) {
+            Ok(row) => row,
+            Err(why) => fee_gap_fault(why),
         };
         let without = row.rates.charge_keeping_brokerage(is_buy, value, 0.0).total();
         let slope = row.rates.charge_keeping_brokerage(is_buy, value, 1.0).total() - without;

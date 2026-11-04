@@ -410,6 +410,10 @@ struct Shared {
     /// The latest bar the feed took for each instrument, as pushed: a bar taken is delivered
     /// whatever a hook then raised, and a retry of it is a duplicate.
     delivered: RefCell<std::collections::HashMap<usize, PushedBar>>,
+    /// The first error a hook raised while its event was being delivered. The event is still
+    /// applied (fills, protective levels, marks), what the hook queued is dropped, and the error
+    /// is returned once the delivery is over (see [`hook_failed`]).
+    hook_error: RefCell<Option<PyErr>>,
     /// Declared processing latency of a live node (ns).
     processing_latency_ns: Cell<i64>,
     /// A push stopped on a panic (a booked amount that could not be
@@ -2440,6 +2444,7 @@ impl PyRuntime {
             opening: Cell::new(false),
             open_intents: RefCell::new(Default::default()),
             delivered: RefCell::new(Default::default()),
+            hook_error: RefCell::new(None),
             processing_latency_ns: Cell::new(0),
             poisoned: Cell::new(false),
             warmup: Cell::new(false),
@@ -3246,6 +3251,21 @@ impl PyRuntime {
                 if let Some(why) = b.unmarginable() {
                     out.push((sid.index(), why.to_string()));
                 }
+                Ok(())
+            })?;
+        }
+        Ok(out)
+    }
+
+    /// The exits of hedge legs each strategy's book is still carrying out:
+    /// `(strategy index, hedge instrument, hedge position id, sold legs sent, hedge close sent)`.
+    fn pending_covers(&self) -> PyResult<Vec<(usize, usize, u64, usize, bool)>> {
+        let sh = &*self.shared;
+        let mut out = Vec::new();
+        let sids: Vec<StrategyId> = sh.strats.borrow().iter().map(|s| s.sid).collect();
+        for sid in sids {
+            sh.with_book(sid, |b, _| {
+                out.extend(b.pending_covers().into_iter().map(|(i, p, n, h)| (sid.index(), i, p, n, h)));
                 Ok(())
             })?;
         }
@@ -4607,7 +4627,8 @@ fn run_one(py: Python<'_>, sh: &Shared, ls: &mut LoopState, e: GroupEvent) -> Py
         *core.current().expect("advance sets the current event")
     };
     open_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
-    dispatch(py, sh, ls, &e.event, &cur, None)
+    let delivered = dispatch(py, sh, ls, &e.event, &cur, None);
+    hook_error(sh, delivered)
 }
 
 /// Deliver events that may span several timestamps and kinds: in time order,
@@ -4899,7 +4920,7 @@ fn run_round(
     decided.iter_mut().for_each(Vec::clear);
     ls.decided = decided;
     ls.remaining.fill(0);
-    phases
+    hook_error(sh, phases)
 }
 
 /// Run `f` on the live rings.
@@ -7214,6 +7235,27 @@ fn dispatch_deliver(
     Ok(())
 }
 
+/// A hook raised. It decided nothing: what it queued is dropped. The event is applied all the
+/// same, as the market it describes happened, so a fill, a protective level or a mark that
+/// belongs to it is not lost with the strategy's mistake. The first error is kept and returned
+/// by the caller once the delivery is over.
+fn hook_failed(py: Python<'_>, sh: &Shared, st: &Strat, called: PyResult<()>) {
+    let Err(error) = called else { return };
+    {
+        let mut q = st.queue.bind(py).borrow_mut();
+        drop(q.queue.take_commands());
+        drop(q.queue.take_intents());
+    }
+    sh.hook_error.borrow_mut().get_or_insert(error);
+}
+
+/// The error a hook raised during the delivery that just ended, if any; also forgets an old one.
+fn hook_error(sh: &Shared, delivery: PyResult<()>) -> PyResult<()> {
+    let raised = sh.hook_error.borrow_mut().take();
+    delivery?;
+    raised.map_or(Ok(()), Err)
+}
+
 /// A bar: composites, the primary bar's indicators and `on_bar`, the step.
 #[allow(clippy::too_many_arguments)]
 fn process_bar(
@@ -7240,7 +7282,7 @@ fn process_bar(
         ctx.prices.get()[local].last.set(Some(bar.close));
     }
     composites(py, sh, st, &t, bank, scratch)?;
-    primary_bar(py, st, &t, bank, local)?;
+    hook_failed(py, sh, st, primary_bar(py, st, &t, bank, local));
     finish_event(py, sh, st, ev, local, true, true, defer)
 }
 
@@ -7269,7 +7311,7 @@ fn process_trade(
             *c.bar.borrow_mut() = Some(bar_obj.clone().unbind());
             c.close_ts.set(Some(bar.timestamp));
         }
-        primary_bar(py, st, &t, bank, local)?;
+        hook_failed(py, sh, st, primary_bar(py, st, &t, bank, local));
         // In a timestamp group nothing is sent anywhere until every decision
         // of the group is taken.
         if !deferred {
@@ -7283,7 +7325,7 @@ fn process_trade(
         *ctx.borrow().tick.borrow_mut() = Some(tick.clone().unbind());
         let called = st.strategy.bind(py).call_method1(intern!(py, "on_trade_tick"), (ctx, tick));
         *ctx.borrow().tick.borrow_mut() = None;
-        called?;
+        hook_failed(py, sh, st, called.map(|_| ()));
     }
     finish_event(py, sh, st, ev, local, true, true, defer)
 }
@@ -7313,7 +7355,7 @@ fn process_quote(
         *ctx.borrow().quote.borrow_mut() = Some(obj.clone().unbind());
         let called = st.strategy.bind(py).call_method1(intern!(py, "on_quote"), (ctx, obj));
         *ctx.borrow().quote.borrow_mut() = None;
-        called?;
+        hook_failed(py, sh, st, called.map(|_| ()));
     }
     finish_event(py, sh, st, ev, local, false, timed || st.mask & HOOK_QUOTE != 0, defer)
 }
@@ -7343,7 +7385,8 @@ fn process_book(
     }
     if st.mask & HOOK_BOOK != 0 {
         let obj = obj.expect("built for a strategy that overrides on_order_book");
-        st.strategy.bind(py).call_method1(intern!(py, "on_order_book"), (ctx, obj))?;
+        let called = st.strategy.bind(py).call_method1(intern!(py, "on_order_book"), (ctx, obj));
+        hook_failed(py, sh, st, called.map(|_| ()));
     }
     finish_event(py, sh, st, ev, local, false, timed || st.mask & HOOK_BOOK != 0, defer)
 }

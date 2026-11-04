@@ -63,6 +63,8 @@ class RaptorBTError(Exception):
         valid: Accepted alternatives as a list: the values, or, where the set is
             open (a number range, a user's name), the rule that decides.
         skill: Documentation domain, one of :data:`SKILLS`.
+        symbol: The instrument the refusal concerns, when it concerns one (``value`` stays
+            what was supplied for ``parameter``).
         message: The short one-line message (``str(error)`` starts with it).
     """
 
@@ -76,6 +78,7 @@ class RaptorBTError(Exception):
         value: Any = _UNSET,
         valid: Any = None,
         skill: str | None = None,
+        symbol: str | None = None,
     ):
         super().__init__(message)
         entry = CODES.get(code)
@@ -93,6 +96,7 @@ class RaptorBTError(Exception):
         if skill is not None and skill not in SKILLS:
             raise ValueError(f"skill must be one of {SKILLS}, got {skill!r}")
         self.skill = skill
+        self.symbol = symbol
 
     def __str__(self) -> str:
         blocks = [self.message]
@@ -123,11 +127,16 @@ class RaptorBTError(Exception):
             "has_value": self.has_value,
             "valid": None if self.valid is None else [_plain(v) for v in self.valid],
             "skill": self.skill,
+            "symbol": self.symbol,
         }
 
 
 class InvalidParameter(RaptorBTError, ValueError):
     """An argument has a value the call does not accept."""
+
+
+class InvalidType(RaptorBTError, TypeError):
+    """An argument or class is of the wrong type for the call."""
 
 
 class InvalidData(RaptorBTError, ValueError):
@@ -193,6 +202,7 @@ def from_dict(data: dict, cls: type | None = None) -> RaptorBTError:
         value=data["value"] if data["has_value"] else _UNSET,
         valid=data["valid"],
         skill=data["skill"],
+        symbol=data.get("symbol"),
     )
 
 
@@ -285,6 +295,15 @@ CODES: dict[str, Code] = {
     "invalid_curve_samples": _c(
         InvalidParameter, "live-trading", "curve_samples is not a positive integer or None.",
         ["a positive integer", None],
+    ),
+    "invalid_argument_type": _c(
+        InvalidType, "strategy",
+        "An argument or a strategy class is of the wrong type: a non-typed order to submit_order, a custom indicator without update/ready/value, or a hook defined under both its name and its deprecated alias.",
+        ["a typed order (orders.Market, orders.Limit, ...)", "an indicator object with update(bar), ready and value", "one spelling of a hook, not both"],
+    ),
+    "unknown_skill": _c(
+        UnknownSymbol, "core", "raptorbt.skills.load was asked for a skill that does not exist.",
+        ["a name from raptorbt.skills.index()"],
     ),
     "invalid_input": _c(
         InvalidParameter, "core", "An argument or array was refused by the computation it was passed to.",
@@ -986,7 +1005,7 @@ def markdown() -> str:
         "| --- | --- |",
     ]
     for cls in (
-        InvalidParameter, InvalidData, InvalidOrder, InvalidSubscription,
+        InvalidParameter, InvalidType, InvalidData, InvalidOrder, InvalidSubscription,
         UnsupportedOperation, StateError, SessionFinished, UnknownSymbol,
     ):
         skip = (object, Exception, BaseException)

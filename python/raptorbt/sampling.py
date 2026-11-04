@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from raptorbt._raptorbt import ResampledBar as SampledBar
 from raptorbt._raptorbt import Resampler, resample_bars, resample_trades
+from raptorbt.errors import InvalidParameter
 
 __all__ = [
     "Resample",
@@ -45,10 +46,14 @@ def TimeBars(
 ) -> Resampler:
     """Trades of ``source`` into bars of ``period`` ns named ``stream``."""
     if source == stream:
-        raise ValueError("a derived stream needs its own id")
+        raise InvalidParameter("a derived stream needs its own id", code="invalid_parameter",
+                               operation="Resample", parameter="stream", value=stream,
+                               valid=["an id other than the source's"])
     session = isinstance(anchor, str)
     if session and anchor != "session":
-        raise ValueError("anchor must be a number of ns or 'session'")
+        raise InvalidParameter("anchor must be a number of ns or 'session'", code="invalid_parameter",
+                               operation="Resample", parameter="anchor", value=anchor,
+                               valid=["a number of ns", "session"])
     return Resampler(
         period,
         anchor_ns=0 if session or anchor is None else anchor,
@@ -75,7 +80,9 @@ def Resample(
 ) -> Resampler:
     """Bars of ``source_period`` ns (stamped at their close) into bars of ``period`` ns."""
     if source == stream:
-        raise ValueError("a derived stream needs its own id")
+        raise InvalidParameter("a derived stream needs its own id", code="invalid_parameter",
+                               operation="Resample", parameter="stream", value=stream,
+                               valid=["an id other than the source's"])
     return Resampler(
         period,
         source_ns=source_period,

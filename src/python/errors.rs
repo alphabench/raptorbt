@@ -61,6 +61,7 @@ pub struct Fail {
     value: Option<Val>,
     valid: Vec<String>,
     skill: Option<&'static str>,
+    symbol: Option<String>,
 }
 
 impl Fail {
@@ -73,6 +74,7 @@ impl Fail {
             value: None,
             valid: Vec::new(),
             skill: None,
+            symbol: None,
         }
     }
 
@@ -91,6 +93,12 @@ impl Fail {
     /// What was supplied.
     pub fn value(mut self, value: impl Into<Val>) -> Self {
         self.value = Some(value.into());
+        self
+    }
+
+    /// The instrument the refusal concerns, when it concerns one.
+    pub fn symbol(mut self, symbol: &str) -> Self {
+        self.symbol = Some(symbol.to_string());
         self
     }
 
@@ -131,6 +139,9 @@ impl Fail {
         }
         if let Some(skill) = self.skill {
             kw.set_item("skill", skill)?;
+        }
+        if let Some(symbol) = &self.symbol {
+            kw.set_item("symbol", symbol)?;
         }
         let exc = make.bind(py).call((self.code, &self.message), Some(&kw))?;
         Ok(PyErr::from_value(exc))

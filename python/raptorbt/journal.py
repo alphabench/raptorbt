@@ -104,7 +104,8 @@ def verify(records: Iterable[Record], header: dict, *, chain: str | None = None)
     for r in records:
         head = chain_step(head, r.canonical())
         if head != r.chain:
-            raise ValueError(f"record {r.seq} does not continue the chain")
+            raise InvalidData(f"record {r.seq} does not continue the chain", code="invalid_checkpoint",
+                              operation="verify", parameter="records", value=r.seq)
     return head
 
 

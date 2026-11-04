@@ -668,3 +668,30 @@ def test_bad_constructor_input():
         LiveNode([s, s], ["X"])
     with pytest.raises(KeyError):
         LiveNode([Reads()], ["X"]).push_tick("Z", 1, 1.0)
+
+
+# E-1: the node's context is cleared when the node finishes; asking for it then is a refusal
+def test_ctx_after_finish_is_a_refusal_not_a_cleared_context():
+    node = LiveNode([Strategy()], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close")
+    node.push_bar("A", 60 * 10**9, 100.0, 101.0, 99.0, 100.0, 10.0)
+    assert node.ctx(0) is not None
+    node.finish()
+    with pytest.raises(raptorbt.errors.StateError) as e:
+        node.ctx(0)
+    assert e.value.code == "node_finished"
+
+
+# E-1: a node whose start fails after its strategies were built releases them
+def test_a_node_whose_start_failed_releases_its_strategies():
+    class Boom(Strategy):
+        def on_bar(self, ctx):
+            raise RuntimeError("boom in warm-up")
+
+    s = Boom()
+    one = 60 * 10**9
+    warm = {"A": {"timestamps": np.array([one, 2 * one], dtype=np.int64), "open": np.array([1.0, 1.0]),
+                  "high": np.array([1.0, 1.0]), "low": np.array([1.0, 1.0]), "close": np.array([1.0, 1.0]),
+                  "volume": np.array([1.0, 1.0])}}
+    with pytest.raises(RuntimeError, match="boom in warm-up"):
+        LiveNode([s], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close", warmup_bars=warm)
+    assert "_api" not in s.__dict__

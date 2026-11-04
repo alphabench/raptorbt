@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from raptorbt.execution import OrderRequest, Unsupported
+from raptorbt.errors import InvalidParameter
 
 from ._limits import RateLimiter, TokenBucket
 from ._rest import ist_ns, need_num, num, price, rest
@@ -136,7 +137,9 @@ class KiteAdapter(BrokerAdapter):
         **kw: Any,
     ) -> None:
         if session.api_key() is None:
-            raise ValueError("Kite needs the api_key on the Session")
+            raise InvalidParameter("Kite needs the api_key on the Session", code="invalid_parameter",
+                                   operation="KiteAdapter", parameter="session",
+                                   valid=["a Session built with api_key="])
         self._http, self._base, self._segment = transport, base_url.rstrip("/"), margin_segment
         super().__init__(session, instruments, **kw)
 

@@ -588,6 +588,11 @@ impl VenueRoute {
             }
         }
         let mut tags = spec.tags.clone();
+        // The follow-up mark tells the simulated venue which bar an answer to a fill meets; a
+        // real broker decides its own timing and is not sent the engine's internal tag.
+        if !self.simulated {
+            tags.remove(super::FOLLOW_UP_TAG);
+        }
         tags.insert("client_id".to_string(), client_id.to_string());
 
         let request = OrderRequest {
@@ -1393,16 +1398,8 @@ impl VenueRoute {
                 ])
             })?;
             self.cancel_adding(sh, sid, local, idx)?;
-            let ids: Vec<u64> = sh.with_book(sid, |b, _| {
-                Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
-            })?;
-            for id in ids {
-                // A hedge leg's square-off closes the sold legs of its group first.
-                match self.hedge_to_cover(sh, sid, local, Some(id))? {
-                    Some(position) => self.cover_hedge(sh, sid, local, position, idx, ts, true)?,
-                    None => self.close(sh, sid, local, idx, ts, id, false)?,
-                }
-            }
+            // A hedge leg's square-off closes the sold legs of its group first.
+            self.flatten(sh, sid, &[(local, idx)], ts, true)?;
         }
         self.watch(sh, sid, local, idx, ts)
     }
@@ -1697,8 +1694,8 @@ impl VenueRoute {
         named: Option<u64>,
         idx: usize,
     ) -> PyResult<()> {
-        let orders: Vec<(u64, Option<u64>, crate::execution::orders::OrderKind, Option<f64>)> =
-            sh.with_book(sid, |b, _| {
+        let orders: Vec<(u64, Option<u64>, crate::execution::orders::OrderKind, Option<f64>)> = sh
+            .with_book(sid, |b, _| {
                 Ok(b.kernel(local)
                     .open_orders()
                     .iter()
@@ -1739,11 +1736,14 @@ impl VenueRoute {
                 crate::execution::orders::OrderKind::Limit { price } => watch.target = Some(price),
                 // The trailing stop of a hedge the engine carries trails as a backtest's does:
                 // the offset sent with the order is the entry price times the stop's fraction.
-                crate::execution::orders::OrderKind::TrailingStopMarket {
-                    offset: crate::execution::orders::TrailOffset::Price(offset),
-                } if entry.is_some_and(|e| e > 0.0) => {
+                crate::execution::orders::OrderKind::TrailingStopMarket { offset }
+                    if entry.is_some_and(|e| e > 0.0) =>
+                {
                     let entry = entry.unwrap_or_default();
-                    let fraction = offset / entry;
+                    let fraction = match offset {
+                        crate::execution::orders::TrailOffset::Price(price) => price / entry,
+                        crate::execution::orders::TrailOffset::Bps(bps) => bps / 10_000.0,
+                    };
                     let high = watermark.unwrap_or(entry).max(entry);
                     watch.stop = Some(high * (1.0 - fraction));
                     watch.trail = Some(Trail { fraction, entry, high });
@@ -1781,6 +1781,7 @@ impl VenueRoute {
         for r in &requests {
             self.protect(sh, sid, local, r, idx, ts)?;
         }
+        self.resize_protection(sh, sid, local, idx)?;
         // Under hedging a position's protection ends with that position, while others stay
         // open: cancel the protective orders (and drop the watched levels) of positions that
         // are gone, so none is left to be refused for a position it names.
@@ -1851,6 +1852,62 @@ impl VenueRoute {
         Ok(())
     }
 
+    /// The protective orders and watched levels cover what the position holds now. An add or a
+    /// partial close changes the size after they were placed for it; left at the placement size
+    /// an add is half protected, and the stop of a position part closed is oversized.
+    fn resize_protection(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+    ) -> PyResult<()> {
+        // (order id, position it names, its quantity) and (position id, size, whether hedging)
+        type Held = (Vec<(u64, Option<u64>, f64)>, Vec<(u64, f64)>, bool);
+        let (orders, positions, hedging): Held = sh.with_book(sid, |b, _| {
+            let k = b.kernel(local);
+            let orders = k
+                .open_orders()
+                .iter()
+                .filter(|o| {
+                    o.client_id.starts_with("prot-")
+                        && !matches!(
+                            o.status,
+                            OrderStatus::PendingCancel | OrderStatus::PendingReplace
+                        )
+                })
+                .filter_map(|o| match o.qty {
+                    crate::execution::orders::QtySpec::Units(q) => Some((o.id, o.position_id, q)),
+                    _ => None,
+                })
+                .collect();
+            let positions =
+                k.position_snapshots().iter().map(|p| (p.position_id, p.size)).collect();
+            Ok((orders, positions, k.is_hedging()))
+        })?;
+        let held = |named: Option<u64>| -> Option<f64> {
+            match named {
+                Some(id) if hedging => positions.iter().find(|p| p.0 == id).map(|p| p.1),
+                _ => Some(positions.iter().map(|p| p.1).sum()).filter(|n: &f64| *n > 0.0),
+            }
+        };
+        for (order_id, named, qty) in orders {
+            if let Some(size) = held(named) {
+                if (qty - size).abs() > 1e-9 {
+                    self.modify(sh, sid, local, idx, order_id, Some(size), None, None, None)?;
+                }
+            }
+        }
+        for w in self.ledger.borrow_mut().watchers.iter_mut() {
+            if w.sid == sid.index() && w.local == local {
+                if let Some(size) = held(w.position_id) {
+                    w.qty = size;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Place the stop and target a new position would have had in-process.
     fn protect(
         &self,
@@ -1909,7 +1966,15 @@ impl VenueRoute {
                 match r.trail {
                     Some(trail) => {
                         spec = Self::spec(exit, "trailing_stop_market", Some(r.size), true);
-                        spec.offset = Some(trail);
+                        // A backtest's trail stands a fraction of the highest price below it, so
+                        // the order trails basis points of its watermark, not the fixed price
+                        // distance the entry price would give.
+                        if r.entry_price > 0.0 {
+                            spec.offset = Some(trail / r.entry_price * 10_000.0);
+                            spec.offset_kind = "bps".to_string();
+                        } else {
+                            spec.offset = Some(trail);
+                        }
                     }
                     None => {
                         spec = Self::spec(exit, "stop_market", Some(r.size), true);
@@ -2004,7 +2069,13 @@ impl VenueRoute {
             idx_of.push(idx);
         }
         if flatten && !book_flattens {
-            self.flatten(sh, sid, &idx_of, ts)?;
+            self.flatten(
+                sh,
+                sid,
+                &idx_of.iter().copied().enumerate().collect::<Vec<_>>(),
+                ts,
+                false,
+            )?;
         }
         Ok(())
     }
@@ -2012,11 +2083,18 @@ impl VenueRoute {
     /// Close every position of the strategy with orders. A hedge leg whose close would leave a
     /// sold leg of its margin group without cover goes through [`VenueRoute::cover_hedge`]: the
     /// sold legs are closed first and the hedge once they are, so a flatten never sends a
-    /// broker the hedge's close ahead of the legs it covers. `idx_of` is each local
-    /// instrument's event ordinal.
-    fn flatten(&self, sh: &Shared, sid: StrategyId, idx_of: &[usize], ts: i64) -> PyResult<()> {
+    /// broker the hedge's close ahead of the legs it covers. `targets` are the (local
+    /// instrument, event ordinal) pairs to close; `follow_up` is passed to the covers' closes.
+    fn flatten(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        targets: &[(usize, usize)],
+        ts: i64,
+        follow_up: bool,
+    ) -> PyResult<()> {
         let mut held = Vec::new();
-        for (local, &idx) in idx_of.iter().enumerate() {
+        for &(local, idx) in targets {
             let ids: Vec<u64> = sh.with_book(sid, |b, _| {
                 Ok(b.kernel(local).position_snapshots().iter().map(|p| p.position_id).collect())
             })?;
@@ -2026,17 +2104,26 @@ impl VenueRoute {
         let mut covered = std::collections::HashSet::new();
         for &(local, idx, id) in &held {
             if let Some(position) = self.hedge_to_cover(sh, sid, local, Some(id))? {
-                self.cover_hedge(sh, sid, local, position, idx, ts, false)?;
+                self.cover_hedge(sh, sid, local, position, idx, ts, follow_up)?;
                 covered.insert((local, id));
             }
         }
         for (local, idx, id) in held {
-            // A hedge waits on its cover; a sold leg a cover has closed is not closed twice.
-            let closing = covered.contains(&(local, id))
-                || self.ledger.borrow().cover_sent.contains(&(sid.index(), local, id));
-            if !closing {
-                self.close(sh, sid, local, idx, ts, id, false)?;
+            // A hedge waits on its cover; a leg already sent a close (by a cover, or by the
+            // flatten of another instrument's square-off) is not closed twice. A close sent here
+            // is noted as the covers note theirs, so a later cover does not send it again.
+            let key = (sid.index(), local, id);
+            let waiting = covered.contains(&(local, id))
+                || self
+                    .ledger
+                    .borrow()
+                    .covers
+                    .iter()
+                    .any(|c| (c.sid, c.local, c.position_id) == key);
+            if waiting || !self.ledger.borrow_mut().cover_sent.insert(key) {
+                continue;
             }
+            self.close(sh, sid, local, idx, ts, id, false)?;
         }
         Ok(())
     }

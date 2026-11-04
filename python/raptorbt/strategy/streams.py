@@ -16,6 +16,7 @@ order follows the merged event schedule.
 from __future__ import annotations
 
 from raptorbt._raptorbt import BarAggregator
+from raptorbt.errors import InvalidParameter
 from raptorbt.strategy.context import CompositeBar
 
 
@@ -93,9 +94,11 @@ class StreamState:
                 and symbol not in self._primary
             ):
                 known = ", ".join(str(k) for k in keys)
-                raise ValueError(
+                raise InvalidParameter(
                     f"register_indicator(symbol={symbol!r}) names a symbol that is "
-                    f"not in this run; known symbols: {known}"
+                    f"not in this run; known symbols: {known}",
+                    code="unknown_symbol", operation="register_indicator", parameter="symbol",
+                    value=symbol, valid=[str(k) for k in keys],
                 )
             # A run without declared symbols has one stream, keyed None: the
             # symbol an indicator names (already checked by `ctx.indicators`

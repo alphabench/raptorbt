@@ -3137,6 +3137,17 @@ pub fn simulate_portfolio_mc(
         .into());
     }
 
+    // Zero paths leave nothing to take a percentile of, and zero days nothing to simulate.
+    for (name, n) in [("n_simulations", n_simulations), ("horizon_days", horizon_days)] {
+        if n == 0 {
+            return Err(Fail::new("invalid_input", format!("{name} must be at least 1"))
+                .op("simulate_portfolio_mc")
+                .param(name)
+                .value(n)
+                .into());
+        }
+    }
+
     let config = MonteCarloConfig { n_simulations, horizon_days, seed };
 
     // Run simulation (releases GIL for Rayon parallelism)

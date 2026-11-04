@@ -266,10 +266,11 @@ def check_class(cls: type) -> None:
                 continue
             if name == "on_bar" and not _takes_event(cls.on_bar, bound=False):
                 continue  # on_bar(ctx) is the primary-bar hook, not the alias's twin
-            raise TypeError(
+            raise errors.InvalidType(
                 f"{cls.__qualname__} defines both {name} and its deprecated alias "
                 f"{alias}; they receive the same events, so one of them would run "
-                f"twice. Keep {name}."
+                f"twice. Keep {name}.",
+                code="invalid_argument_type", operation="Strategy", parameter=name, valid=[f"{name}, not also {alias}"],
             )
     own = [alias for alias in DEPRECATED if alias in cls.__dict__]
     if own:
@@ -883,9 +884,12 @@ class IndicatorsView:
             if not hasattr(obj, n) or (n == "update" and not callable(obj.update))
         ]
         if missing:
-            raise TypeError(
+            raise errors.InvalidType(
                 "a custom indicator needs update(bar), ready and value; "
-                f"{type(obj).__name__} lacks {', '.join(missing)}"
+                f"{type(obj).__name__} lacks {', '.join(missing)}",
+                code="invalid_argument_type", operation="ctx.indicators.custom",
+                parameter="indicator", value=type(obj).__name__,
+                valid=["an object with update(bar), ready and value"],
             )
         symbol = run.instrument(instrument)
         tf = resolve_timeframe(timeframe)

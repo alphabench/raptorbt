@@ -610,9 +610,9 @@ def batch_single_backtest(
     config: BacktestConfig | None = ...,
 ) -> list[tuple[str, BacktestResult]]: ...
 def simulate_portfolio_mc(
-    returns: _F64,
+    returns: Sequence[_F64],
     weights: _F64,
-    correlation_matrix: _F64,
+    correlation_matrix: Sequence[_F64] | _F64,
     initial_value: float,
     n_simulations: int = ...,
     horizon_days: int = ...,

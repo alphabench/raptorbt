@@ -402,7 +402,7 @@ run_strategy_backtest(object(), np.arange(5, dtype=np.int64), x, x, x, x, x, bar
   timestamp before any `on_bar` runs, whatever the symbols are called. Your own
   symbol's primary-stream indicator is the one revealed late: it shows the value
   before the bar until `on_bar`.
-- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: a quantity or level you compute in a fill hook (`on_fill`, `on_position_opened`, `on_position_closed`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
+- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: a quantity or level you compute in a fill hook (`on_fill`, `on_position_event`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation
 

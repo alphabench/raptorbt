@@ -535,6 +535,7 @@
         "raptorbt.InvalidParameter",
         "raptorbt.InvalidData",
         "raptorbt.InvalidOrder",
+        "raptorbt.InvalidType",
         "raptorbt.UnsupportedOperation",
         "raptorbt.StateError",
         "raptorbt.SessionFinished",

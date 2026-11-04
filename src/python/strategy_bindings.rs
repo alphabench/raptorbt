@@ -410,7 +410,7 @@ pub(crate) fn check_market(
             "squareoff_needs_timezone" => Fail::new("squareoff_needs_timezone", e.message),
             _ => Fail::new("fee_schedule_gap", e.message),
         };
-        fail.param(e.param).value(e.symbol).valid(e.valid).into()
+        fail.param(e.param).value(e.symbol.clone()).symbol(&e.symbol).valid(e.valid).into()
     })
 }
 

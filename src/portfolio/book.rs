@@ -675,6 +675,15 @@ impl PortfolioBook {
         }
     }
 
+    /// The exits of hedge legs still in progress, `(hedge instrument, hedge position id, sold legs
+    /// sent, whether the hedge's own close is sent)`: state a checkpoint's digest must cover.
+    pub fn pending_covers(&self) -> Vec<(usize, u64, usize, bool)> {
+        self.covers
+            .iter()
+            .map(|c| (c.hedge.0, c.hedge.1, c.sold.len(), c.hedge_order.is_some()))
+            .collect()
+    }
+
     /// Capital available to open new positions across all instruments.
     pub fn free_capital(&self) -> f64 {
         self.account.free()
@@ -849,12 +858,10 @@ impl PortfolioBook {
     }
 
     /// Whether the open of the bar `entry` carries has something to meet ahead of the strategy
-    /// ([`PortfolioBook::open_bar`]): a bar under `next_bar_open`, on a book of its own account
-    /// with no halt waiting to take effect first, where an intent or a market order waits for
-    /// its open.
+    /// ([`PortfolioBook::open_bar`]): a bar under `next_bar_open`, on a book with no halt
+    /// waiting to take effect first, where an intent or a market order waits for its open.
     pub fn can_open(&self, entry: &ScheduleEntry) -> bool {
         matches!(entry.data, ScheduleData::Bar(_))
-            && self.grouped.is_none()
             && self.pending_halt.is_none()
             && self.kernels[entry.instrument].fills_at_next_open()
             && self.kernels[entry.instrument].has_open_work()

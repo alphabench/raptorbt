@@ -108,26 +108,32 @@ def test_a_stop_the_engine_watches_for_a_venue_is_a_decision_then_the_exit_order
 
 
 def test_a_fill_past_a_limit_is_a_record():
-    class Twice(Strategy):
+    # The book refuses before sending what it can see would breach a limit. A fill it could not
+    # see is the venue's fact: this order is worth 1000 at the last price (cap 1050) and fills at 120.
+    class Once(Strategy):
         def on_bar(self, ctx, bar):
             if not getattr(self, "done", False):
                 self.done = True
-                self.submit_order(orders.Market(side="buy", units=5.0), client_id="a")
-                self.submit_order(orders.Market(side="buy", units=5.0), client_id="b")
+                self.submit_order(orders.Market(side="buy", units=10.0), client_id="a")
 
     venue = MockVenue()
 
     def drive(tape, node):
         node.push_bar("A", MIN, 100.0, 101.0, 99.0, 100.0, 10.0, arrival_ns=MIN)
-        venue.fill_all()
-        tape.step("fills", lambda: venue.deliver(node, MIN + 2), "report", "rejection")
+        (cid,) = venue.sent
+
+        def fills():
+            node.push_report(cid, ExecutionReport.accepted("V-" + cid, MIN + 1), arrival_ns=MIN + 1)
+            node.push_report(cid, ExecutionReport.fill("X-" + cid, 10.0, 120.0, MIN + 2), arrival_ns=MIN + 2)
+
+        tape.step("fills", fills, "report", "rejection")
 
     wrote = _venue_run(
-        venue, lambda: [Twice()], ["A"],
-        BacktestConfig(initial_capital=1e6, fees=0.0, max_position_qty=7.0), drive,
+        venue, lambda: [Once()], ["A"],
+        BacktestConfig(initial_capital=1e6, fees=0.0, max_order_notional=1050.0), drive,
     )
     (breach,) = of(wrote, "rejection", event="fill_breach")
-    assert breach.source == "engine" and breach.payload["reason"] == "max_position"
+    assert breach.source == "engine" and breach.payload["reason"] == "order_size"
 
 
 def test_a_settlement_on_a_node_with_a_venue_is_a_record():

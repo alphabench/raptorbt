@@ -145,3 +145,18 @@ def test_a_fill_the_book_could_not_take_yet_is_reported_deferred_not_applied():
     assert seen == ["applied", "applied", "deferred"]
     ((_, qty, price, reason),) = node.health()["unbooked_fills"]
     assert (qty, price, reason) == (10.0, 100.0, "a reduce-only fill arrived with no position to reduce")
+
+
+# a hook that raises when a group is flushed has still taken the group's bars
+def test_a_group_whose_flush_raised_refuses_the_retry_of_its_bars():
+    class Boom(Strategy):
+        def on_bar(self, ctx):
+            raise RuntimeError("boom")
+
+    node = LiveNode([Boom()], ["A", "B"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close")
+    bars = {"A": (100.0, 101.0, 99.0, 100.5, 10.0), "B": (50.0, 51.0, 49.0, 50.5, 10.0)}
+    with pytest.raises(RuntimeError, match="boom"):
+        node.push_group(60 * 10**9, bars)
+    with pytest.raises(StateError) as e:
+        node.push_group(60 * 10**9, bars)
+    assert e.value.code == "duplicate_bar"

@@ -15,6 +15,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | Class | Also a |
 | --- | --- |
 | `InvalidParameter` | `ValueError` |
+| `InvalidType` | `TypeError` |
 | `InvalidData` | `ValueError` |
 | `InvalidOrder` | `ValueError` |
 | `InvalidSubscription` | `ValueError` |
@@ -65,6 +66,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `invalid_adjust` | `InvalidParameter` | continuous_series needs adjust to be 'raw', 'back' or 'ratio'. | `'raw'`; `'back'`; `'ratio'` | `raptorbt-market-data` |
 | `invalid_adjustment_policy` | `InvalidParameter` | Corporate actions were given without an adjustment_policy, or the policy is not raw or adjusted. | `'raw'`; `'adjusted'` | `raptorbt-execution` |
 | `invalid_allocation` | `InvalidParameter` | allocation is not recognised. | `'equal_weight'`; `'full'` | `raptorbt-portfolio` |
+| `invalid_argument_type` | `InvalidType` | An argument or a strategy class is of the wrong type: a non-typed order to submit_order, a custom indicator without update/ready/value, or a hook defined under both its name and its deprecated alias. | a typed order (orders.Market, orders.Limit, ...); an indicator object with update(bar), ready and value; one spelling of a hook, not both | `raptorbt-strategy` |
 | `invalid_array` | `InvalidData` | A field is not a numeric array of the required dimension. | a numeric 1-D numpy array (depth levels: 2-D) | `raptorbt-market-data` |
 | `invalid_bar_ns` | `InvalidParameter` | bar_ns is not a positive whole number of nanoseconds. | a positive whole number of nanoseconds, e.g. 60_000_000_000 for one minute | `raptorbt-timeframes` |
 | `invalid_bar_spec` | `InvalidSubscription` | A bar step or unit is not valid. | step >= 1; unit: ms, s, m, h, d, w, month, y, tick, volume, value, renko, tick_imbalance, tick_runs, volume_imbalance, volume_runs, value_imbalance, value_runs | `raptorbt-timeframes` |
@@ -178,6 +180,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `unknown_order` | `InvalidOrder` | A cancel or modify named a client id this run never submitted. A submitted order that has finished is a documented no-op, not this error. | a client id this run submitted (the error lists them) | `raptorbt-orders` |
 | `unknown_role` | `UnknownSymbol` | ctx.role was asked for a role the strategy's requirements do not declare. | a role the strategy's requirements declare | `raptorbt-instruments` |
 | `unknown_role_binding` | `InvalidParameter` | bindings names a role that no strategy declares. | a role some strategy declares in requirements | `raptorbt-live-trading` |
+| `unknown_skill` | `UnknownSymbol` | raptorbt.skills.load was asked for a skill that does not exist. | a name from raptorbt.skills.index() | `raptorbt-core` |
 | `unknown_symbol` | `UnknownSymbol` | A symbol was named that has no data in this run. | a symbol the run has data for | `raptorbt-market-data` |
 | `unresolved_role` | `UnknownSymbol` | ctx.role could not resolve a requirements role at this time. | supply the data or instrument specs the role needs; bindings={role: symbol} | `raptorbt-instruments` |
 | `unsupported_corporate_actions` | `UnsupportedOperation` | corporate_actions were given to a runner that cannot apply them; they are refused, never ignored. | `'run_single_backtest'`; `'run_strategy_backtest'`; `'run_strategies'` | `raptorbt-execution` |

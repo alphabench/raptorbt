@@ -22,6 +22,7 @@ production quantitative trading:
 | [`InvalidData`](#invaliddata) | exception | Input data is malformed: lengths, order, NaN, missing fields. |
 | [`InvalidOrder`](#invalidorder) | exception | An order is malformed or its options contradict each other. |
 | [`InvalidSubscription`](#invalidsubscription) | exception | A bar or tick subscription cannot be built. |
+| [`InvalidType`](#invalidtype) | exception | An argument or class is of the wrong type for the call. |
 | [`UnsupportedOperation`](#unsupportedoperation) | exception | The request is well formed but this engine mode cannot do it. |
 | [`StateError`](#stateerror) | exception | The object is in the wrong state for the call (e.g. already finished). |
 | [`SessionFinished`](#sessionfinished) | exception | A finished session was used again. |
@@ -653,7 +654,7 @@ Python-exposed instrument market definition.
 | `scrip_group` | The exchange's scrip group where charges depend on it (BSE cash: `"A"`, `"B"`), or None. A fee schedule that prices BSE equity by group refuses an instrument without one. |
 | `session` | Trading calendar, or None for an instrument that trades at any time. |
 | `settlement_fee` | Fee fraction charged on settlement at expiry. |
-| `settlement_price` | Where the settlement price comes from: `"auto"` (default), `"last_price"`, `"underlying"`, or a number declared for the contract. |
+| `settlement_price` | Where the settlement price comes from: `"auto"` (default; an option settles against the underlying's price and is refused without one, any other contract at its last price), `"last_price"`, `"underlying"`, or a number declared for the contract. |
 | `settlement_style` | How the contract settles at expiry: `"cash"` (default) or `"physical"` (the underlying is delivered). |
 | `size_increment` | *No docstring.* |
 | `span_pct` | SPAN-style deposit fraction for a sold option (0.0 = not modelled). |
@@ -690,7 +691,7 @@ Per-instrument attribution from a portfolio backtest.
 
 ```python
 class InvalidData(RaptorBTError, ValueError)
-InvalidData(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+InvalidData(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 Input data is malformed: lengths, order, NaN, missing fields.
@@ -705,7 +706,7 @@ Input data is malformed: lengths, order, NaN, missing fields.
 
 ```python
 class InvalidOrder(RaptorBTError, ValueError)
-InvalidOrder(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+InvalidOrder(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 An order is malformed or its options contradict each other.
@@ -720,7 +721,7 @@ An order is malformed or its options contradict each other.
 
 ```python
 class InvalidParameter(RaptorBTError, ValueError)
-InvalidParameter(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+InvalidParameter(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 An argument has a value the call does not accept.
@@ -735,10 +736,25 @@ An argument has a value the call does not accept.
 
 ```python
 class InvalidSubscription(RaptorBTError, ValueError)
-InvalidSubscription(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+InvalidSubscription(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 A bar or tick subscription cannot be built.
+
+| Member | What it is |
+| --- | --- |
+| `to_dict(self) -> 'dict'` | The error as plain JSON-ready data; see :func:`from_dict`. |
+
+### `InvalidType`
+
+*exception*
+
+```python
+class InvalidType(RaptorBTError, TypeError)
+InvalidType(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
+```
+
+An argument or class is of the wrong type for the call.
 
 | Member | What it is |
 | --- | --- |
@@ -954,7 +970,7 @@ there.
 | `begin_group(self, timestamp: 'int | None' = None) -> 'None'` | Open a timestamp group: the pushes that follow are held and delivered together, as a batch run delivers the events that share a timestamp. |
 | `bindings` | The role bindings the node was built with (a Universe role's symbols as a tuple). A copy. |
 | `checkpoint(self, include_log: 'bool' = True) -> 'bytes'` | A versioned snapshot to rebuild this node from: the journal head, a digest of the state to check the rebuild against, each strategy's ``state()``, the epoch and (``include_log``) every journal record since the journal's ``seq_base``. Taken between pushes. See :meth:`restore`. |
-| `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. |
+| `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. Refused once the node has finished: the finish clears the contexts. |
 | `epoch` | *No docstring.* |
 | `equity(self, strategy_index: 'int') -> 'float'` | *No docstring.* |
 | `fenced` | Whether a newer execution epoch owns the account. |
@@ -962,7 +978,7 @@ there.
 | `flush(self) -> 'None'` | Close the open timestamp group and deliver what it holds. With none open, nothing happens. |
 | `halt(self, strategy_index: 'int', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt one strategy from outside it, like ``ctx.halt``: its new entries are refused with ``killed``, its working orders are cancelled and, with ``flatten=True``, its positions are closed at the last prices seen. ``is_halted`` reads True at once; the cancels and closes happen when that strategy's next event is applied. |
 | `halt_account(self, account: 'str', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt every strategy on ``account`` from outside, as ``halt`` halts one: their new entries are refused with ``killed``, their working orders are cancelled and, with ``flatten=True``, their positions are closed at the last prices seen. Each strategy's cancels and closes happen when its next event is applied. The account's ``halted_at`` is the number of events applied to its strategies so far. Strategies not on the account are untouched. |
-| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
+| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome, ``halted`` (the indices of halted strategies) and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
 | `heartbeat(self) -> 'dict'` | Check the execution epoch with the adapter now and return :meth:`health`. Raises ``fenced`` when a newer epoch owns the account. Call it on a timer; the node also checks before every request. |
 | `holders_of(self, symbol: 'str') -> 'tuple[int, ...]'` | The strategy indices that traded ``symbol`` when it was last added or revived. |
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
@@ -1272,7 +1288,7 @@ Measured rank IC of a factor against forward returns.
 
 ```python
 class RaptorBTError(Exception)
-RaptorBTError(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+RaptorBTError(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 Base class of every structured RaptorBT error.
@@ -1285,6 +1301,8 @@ Attributes:
     valid: Accepted alternatives as a list: the values, or, where the set is
         open (a number range, a user's name), the rule that decides.
     skill: Documentation domain, one of :data:`SKILLS`.
+    symbol: The instrument the refusal concerns, when it concerns one (``value`` stays
+        what was supplied for ``parameter``).
     message: The short one-line message (``str(error)`` starts with it).
 
 | Member | What it is |
@@ -1487,7 +1505,7 @@ SESSION_NSE = 375.0
 
 ```python
 class SessionFinished(StateError, ValueError)
-SessionFinished(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+SessionFinished(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 A finished session was used again.
@@ -1546,7 +1564,7 @@ Python-exposed trading-session calendar.
 
 ```python
 class StateError(RaptorBTError, RuntimeError)
-StateError(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+StateError(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 The object is in the wrong state for the call (e.g. already finished).
@@ -1695,32 +1713,41 @@ StrategyContext(session, timestamps: 'np.ndarray', open_: 'np.ndarray', high: 'n
 
 Read/act surface a strategy sees inside its hooks.
 
-Data access contract: the full OHLCV arrays are exposed for indicator
-precomputation in ``on_start``, but decision logic inside ``on_bar`` must
-only read values at ``idx`` or earlier. Indexing past ``idx`` reads the
-future and invalidates the backtest.
+Data access contract: in ``on_start`` the OHLCV arrays hold the whole run, for indicator
+precomputation. In a bar hook (``on_bar`` and the others) ``open``, ``high``, ``low``,
+``close``, ``volume`` and ``timestamps`` end at the current bar, so ``ctx.close[-1]`` is this
+bar's close and ``ctx.close[ctx.idx + 1]`` raises ``IndexError``: the future cannot be read by
+mistake. (The guard is a view, not a copy; it stops accidents, not a deliberate read of
+``.base``.)
 
 | Member | What it is |
 | --- | --- |
 | `bar` | The bar currently being processed. |
 | `bar_close_ts` | Epoch ns at which the current bar closed: the time the engine acts on it. Fills, order expiry, square-off, the strategy clock and :attr:`datetime` all use it. Equals :attr:`timestamp` for ``bar_stamp="close"`` (and for the legacy unset case). |
 | `cash` | Uninvested cash. |
+| `close` | *No docstring.* |
+| `close_timestamps` | *No docstring.* |
 | `datetime` | Current bar's close time (:attr:`bar_close_ts`) as a naive UTC datetime. |
 | `equity` | Mark-to-market equity after the most recent completed bar. |
 | `free_capital` | Cash not locked as margin (margin accounts); all cash otherwise. |
 | `halt(self, reason: 'str' = 'manual', flatten: 'bool' = False) -> 'None'` | Stop this strategy trading. |
+| `high` | *No docstring.* |
 | `history(self, n: 'int') -> 'np.ndarray'` | Trailing window of up to ``n`` closes ending at the current bar. |
 | `is_flat` | *No docstring.* |
 | `is_net_long` | *No docstring.* |
 | `is_net_short` | *No docstring.* |
+| `low` | *No docstring.* |
 | `n_bars` | Total number of bars in the run. |
 | `net_position` | Signed unit total across open positions (hedging nets out). |
+| `open` | *No docstring.* |
 | `position` | Open position snapshot, or ``None`` when flat. |
 | `positions` | All open positions, in opening order (hedging holds several): call it, ``ctx.positions()``. Using the attribute as a list is deprecated. |
 | `set_stop_price(self, price: 'float | None') -> 'None'` | Overwrite the open position's stop; ``None`` removes it. |
 | `set_target_price(self, price: 'float | None') -> 'None'` | Overwrite the open position's target; ``None`` removes it. |
 | `set_underlying_price(self, price: 'float | None') -> 'None'` | Price an option settles against at expiry. |
 | `timestamp` | The current bar's timestamp as the caller stamped it. |
+| `timestamps` | *No docstring.* |
+| `volume` | *No docstring.* |
 
 ### `TargetConfig`
 
@@ -1845,7 +1872,7 @@ Python-exposed trade.
 
 ```python
 class UnknownSymbol(RaptorBTError, KeyError, ValueError)
-UnknownSymbol(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+UnknownSymbol(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 A symbol was named that the run does not know.
@@ -1860,7 +1887,7 @@ A symbol was named that the run does not know.
 
 ```python
 class UnsupportedOperation(RaptorBTError, ValueError)
-UnsupportedOperation(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None)
+UnsupportedOperation(message: 'str', *, code: 'str', operation: 'str | None' = None, parameter: 'str | None' = None, value: 'Any' = <object object>, valid: 'Any' = None, skill: 'str | None' = None, symbol: 'str | None' = None)
 ```
 
 The request is well formed but this engine mode cannot do it.

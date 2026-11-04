@@ -274,8 +274,8 @@ assert settle(None) == ("EndOfData", 5.0)
 ```
 
 **Trading options on an index.** The index is a series you read, not a
-contract you trade: put its bars in `data`, leave its spec out of
-`instruments` (a run refuses an index spec as not tradable), and give every
+contract you trade: put its bars in `data`, and give its spec, if you give one, as
+`InstrumentSpec.index(...)` (data only: an order on it is refused `not_tradable`), and give every
 contract its bars and its `InstrumentSpec.option(..., underlying="NIFTY")`.
 Decide on the index bar (`ctx.symbol == "NIFTY"`), pick the contract from the
 chain at `ctx.bar_close_ts`, and name the contract on every order and exit:

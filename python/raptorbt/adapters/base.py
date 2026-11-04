@@ -75,6 +75,7 @@ from raptorbt.execution import (
     OrderRequest,
     Unsupported,
 )
+from raptorbt.errors import InvalidParameter
 
 from ._executor import Executor, InlineExecutor
 from ._ids import IdCodec
@@ -430,17 +431,31 @@ class BrokerAdapter:
         lease: Callable[[int], bool] | Any | None = None,
     ) -> None:
         if not namespace:
-            raise ValueError("namespace is required: client ids restart at s0-0 every run, so pass new_namespace() (a fresh one per run)")
+            raise InvalidParameter(
+                "namespace is required: client ids restart at s0-0 every run, so pass new_namespace() (a fresh one per run)",
+                code="adapter_namespace_missing", operation="BrokerAdapter", parameter="namespace",
+            )
         if fill_source is not None:
             if fill_source not in ("order_updates", "trades"):
-                raise ValueError("fill_source is 'order_updates' or 'trades'")
+                raise InvalidParameter("fill_source is 'order_updates' or 'trades'",
+                                       code="invalid_parameter", operation="BrokerAdapter",
+                                       parameter="fill_source", value=fill_source,
+                                       valid=["order_updates", "trades"])
             self.fill_source = fill_source
         if reduce_only not in ("refuse", "best_effort"):
-            raise ValueError("reduce_only is 'refuse' or 'best_effort'")
+            raise InvalidParameter("reduce_only is 'refuse' or 'best_effort'",
+                                   code="invalid_parameter", operation="BrokerAdapter",
+                                   parameter="reduce_only", value=reduce_only,
+                                   valid=["refuse", "best_effort"])
         if gtc not in ("refuse", "day"):
-            raise ValueError("gtc is 'refuse' or 'day'")
+            raise InvalidParameter("gtc is 'refuse' or 'day'", code="invalid_parameter",
+                                   operation="BrokerAdapter", parameter="gtc", value=gtc,
+                                   valid=["refuse", "day"])
         if default_product not in self.products:
-            raise ValueError(f"default_product must be one of {sorted(self.products)}")
+            raise InvalidParameter(f"default_product must be one of {sorted(self.products)}",
+                                   code="invalid_parameter", operation="BrokerAdapter",
+                                   parameter="default_product", value=default_product,
+                                   valid=sorted(self.products))
         self.session = session
         self._instruments = instruments
         #: Instruments a running node added, by symbol (see ``add_instrument``).
@@ -870,7 +885,21 @@ class BrokerAdapter:
         return the reports of everything the node has not heard: a fill, a cancel or a rejection
         that happened while no node was listening. Blocking: call it from the node's thread
         before it compares itself with the venue (``LiveNode.reconcile`` does)."""
-        self._resync_now()
+        # Only the node's own orders: a row for an order it finished before the restart, or for
+        # one it never sent, is not an update this adapter ignores (``ignored_updates`` counts
+        # those the feed brings); reconcile names the venue's unknown orders itself.
+        for row in self._read_orders():
+            with self._lock:
+                ours = self._resolve(row) is not None
+            if ours:
+                self.handle_update(row)
+        if self.fill_source == "trades":
+            for t in self._read(self.fetch_trades):
+                if t.venue_order_id in self._by_venue:
+                    self.handle_trade(
+                        exec_id=t.exec_id, qty=t.qty, price=t.price, venue_order_id=t.venue_order_id,
+                        fee=t.fee, ts_ns=t.ts_ns, wire=True,
+                    )
         return self.drain_reports()
 
     def _bind(self, rec: _Rec, vid: str) -> None:
@@ -1463,7 +1492,10 @@ class BrokerAdapter:
             return holds
         if callable(lease):
             return lease
-        raise ValueError("lease is a callable(epoch) -> bool or an object with holds(epoch)")
+        raise InvalidParameter("lease is a callable(epoch) -> bool or an object with holds(epoch)",
+                               code="invalid_parameter", operation="BrokerAdapter",
+                               parameter="lease",
+                               valid=["a callable(epoch) -> bool", "an object with holds(epoch)"])
 
     def _holds_lease(self) -> bool:
         """The host's lease check for the current epoch; fails closed (an error is a no)."""

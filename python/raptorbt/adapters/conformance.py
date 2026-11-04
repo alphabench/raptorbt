@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from raptorbt import BacktestConfig, LiveNode, Strategy
+from raptorbt.errors import InvalidParameter
 from raptorbt.execution import ExecutionAdapter, ExecutionReport, OrderRequest
 from raptorbt.strategy import orders
 
@@ -201,7 +202,9 @@ class ScriptedVenue:
         for o in reversed(self.orders.values()):
             if o.ref == ref:
                 return o
-        raise KeyError(ref)
+        raise InvalidParameter(f"no order was placed under the reference {ref!r}", code="invalid_parameter",
+                               operation="conformance", parameter="ref", value=ref,
+                               valid=["a reference a scenario step placed"])
 
     # -- scenario steps ------------------------------------------------------------------------
     def _emit(self, o: _VOrder) -> None:

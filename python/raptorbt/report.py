@@ -26,6 +26,7 @@ from typing import Any
 
 from raptorbt._raptorbt import BacktestResult, PortfolioResult
 from raptorbt._raptorbt import full_report as _full_report
+from raptorbt.errors import InvalidData
 
 __all__ = ["full_report"]
 
@@ -57,7 +58,9 @@ def _result_full_report(
     equity = [float(x) for x in self.equity_curve()]
     ts = [int(t) for t in equity_ts]
     if len(ts) != len(equity):
-        raise ValueError(f"{len(ts)} timestamps for an equity curve of {len(equity)} samples")
+        raise InvalidData(f"{len(ts)} timestamps for an equity curve of {len(equity)} samples",
+                          code="length_mismatch", operation="full_report", parameter="equity_ts",
+                          value=len(ts))
     kwargs.setdefault("attribution", True)
     kwargs.setdefault("unverified_fee_rows", self.unverified_fee_rows)
     return full_report(ts, equity, self.trades(), self.orders(), **kwargs)

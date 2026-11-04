@@ -190,8 +190,11 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
             ns = getattr(ctx, "event_ns", None)
             return int(ctx.timestamp) if ns is None else int(ns)
 
-        def _check_same_event(self, ctx, decision, what):
+        def _check_same_event(self, ctx, decision, what, reason=""):
             decided_at = self._decided.pop((decision, self._key(ctx)), None)
+            # a protective stop or target fires inside the bar that decides nothing: not a decision
+            if any(w in reason.lower() for w in ("stop", "profit", "target")):
+                return
             if self.nbo and not self.ticks and decided_at == self._instant(ctx):
                 self.violations.append(
                     f"{what} of {self._key(ctx)} filled in the event that decided it "
@@ -204,7 +207,9 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
 
         def on_position_closed(self, ctx, e):
             self._rec(ctx, "close", self._key(ctx), e.price, e.size)
-            self._check_same_event(ctx, "exit", "exit")
+            self._check_same_event(
+                ctx, "exit", "exit", str(getattr(getattr(e, "trade", None), "exit_reason", ""))
+            )
 
         # -- actions shared by bar and tick strategies -----------------------------
         def _enter(self, ctx, size_hint):
@@ -333,10 +338,12 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
         at a bar's open, before the strategy has seen the bar."""
 
         def _open_read(self, ctx, what):
+            # every symbol's indicators, and what the hook sees of bars: all must be pre-open
             self._rec(
                 ctx, what, self._key(ctx),
                 tuple((s, self.fast[s].value, self.slow[s].value, self.comp[s].value)
                       for s in sorted(self.fast)),
+                tuple(ctx.bar), self._history(ctx),
             )
 
         def on_fill(self, ctx, e):
@@ -350,7 +357,12 @@ with pytest.warns(DeprecationWarning, match="deprecated hooks"):
 
         def on_position_closed(self, ctx, e):
             super().on_position_closed(ctx, e)
-            if self.mode == "intent" and ctx.idx % 3 == 0:
+            key = ("enter", self._key(ctx))
+            if self.mode == "intent" and ctx.idx % 3 == 0 and key not in self._decided:
+                # An answer to a fill at the open fills at that same open (the engine's rule), so
+                # it is no same-event violation; its ATR stop is what the poisoning checks.
+                self._decided[key] = None
+                self._rec(ctx, "decide", "enter", self._key(ctx), "hook")
                 self.enter(size_frac=0.1)
 
 
@@ -496,8 +508,11 @@ def test_the_harness_catches_a_strategy_that_peeks(portfolio_runner):
     assert all(p[1] is None for p in peeks), "series() exposed a future bar"
 
 
+_PLAIN_CFG = _cfg
+
+
 def _atr_cfg(timing):
-    cfg = _cfg(timing)
+    cfg = _PLAIN_CFG(timing)
     cfg.set_atr_stop(2.0, 5)
     return cfg
 

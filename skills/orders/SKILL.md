@@ -572,7 +572,7 @@ orders.Limit(side="buy", price=0.0, quantity=1)         # InvalidOrder: invalid_
   no error and no event.
 - Assuming a limit buy at a price above the market fills at that price. It
   fills at the market, which is better for a buyer.
-- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: an order you queue from a fill hook (`on_fill`, `on_position_opened`, `on_position_closed`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
+- Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: an order you queue from a fill hook (`on_fill`, `on_position_event`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation
 

@@ -78,6 +78,10 @@ def state_summary(node) -> dict:
     if node._added:
         # Only a node whose instrument set moved says so: older digests stay valid.
         out["instruments"] = [list(node._symbols), sorted(node._retired)]
+    covers = rt.pending_covers()
+    if covers:
+        # Only a node mid-way through the exit of a hedge leg says so: other digests stay valid.
+        out["covers"] = [list(c) for c in covers]
     out["venue_orders"] = [list(o) for o in rt.venue_orders()]
     out["unconfirmed"] = sorted(rt.unconfirmed())
     return out

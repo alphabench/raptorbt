@@ -359,6 +359,12 @@ impl PaperVenue {
                 EngineEvent::Settled { .. }
                 | EngineEvent::CorporateAction { .. }
                 | EngineEvent::LifecycleRefused { .. } => {}
+                // `Liquidation` reaches the shadow only from a flattening halt (`halt` above), which
+                // the strategy's own book receives in the same call and closes at the same marks;
+                // a margin-call liquidation is refused with a venue up front
+                // (`liquidate_on_margin_call`, `test_what_a_venue_cannot_follow_is_refused_up_front`),
+                // and `test_a_flattening_halt_books_the_same_trade_on_paper_and_simulated` pins
+                // that the two books agree. So the exit is dropped unchecked because it cannot differ.
                 // A contract's end is the exchange's act, not an order's: the
                 // position settles (or is delivered against, or has its odd
                 // fraction of a split paid out) on the instrument's declared

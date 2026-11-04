@@ -330,6 +330,25 @@ def test_daily_annualisation_does_not_flip_on_a_special_saturday_session():
     assert out[True] == pytest.approx(252.0, rel=0.01), out
 
 
+# a short daily series with one special Saturday session annualises on trading days too
+def test_a_short_daily_series_with_one_special_session_annualises_on_252():
+    days, d = [], dt.date(2025, 1, 27)
+    while len(days) < 11:
+        if d.weekday() < 5 or d == dt.date(2025, 2, 1):  # Budget-day Saturday
+            days.append(d)
+        d += dt.timedelta(days=1)
+    assert any(x.weekday() == 5 for x in days)
+    ts = [ist(x.year, x.month, x.day, 15, 30) for x in days]
+    px = np.round(100 * np.cumprod(1 + np.random.default_rng(7).normal(0.001, 0.01, len(ts))), 2)
+    data = {"X": bars([(p,) * 4 for p in px], ts)}
+    r = run_strategies([Script({0: lambda s, c: s.submit_order(O.Market(side="buy", units=50.0))})], data,
+                       BacktestConfig(initial_capital=1e4, fees=0.0), bar_stamp="close",
+                       instruments={"X": rb.InstrumentSpec.equity("X", venue="NSE")})[0]
+    ret = np.asarray(r.result.returns(), float)
+    ret = ret[np.isfinite(ret)]
+    assert (r.result.metrics.sharpe_ratio / (ret.mean() / ret.std(ddof=1))) ** 2 == pytest.approx(252.0, rel=0.01)
+
+
 # a custom (non-Indicator) object for another symbol is a bar stale or not by symbol name
 @pytest.mark.parametrize("other", ["FA", "ZFA"])
 def test_a_custom_indicator_of_another_symbol_is_current_at_the_decision(other):
@@ -541,3 +560,28 @@ def test_closing_a_calendar_or_diagonal_in_one_decision_closes_both_legs(mode, s
     r = run_strategies([C()], data, cfg, bar_stamp="close", **kw)[0] if mode == "batch" else _node_run(C(), data, cfg, True, **kw)
     rows = {o.client_id: o.status for o in r.result.orders()}
     assert rows == {"hedge": "filled", "sold": "filled", "close_sold": "filled", "close_hedge": "filled"}, rows
+
+
+# a supervisor reading health() sees which strategy a follow-up loop halted
+def test_health_names_the_strategy_a_follow_up_loop_halted():
+    class P(Strategy):
+        def __init__(self):
+            super().__init__()
+            self.bars, self.fills = 0, 0
+
+        def on_bar(self, ctx):
+            self.bars += 1
+            if self.bars == 2:
+                self.submit_order(O.Market(side="buy", units=1.0), client_id="seed")
+
+        def on_order_event(self, ctx, e):
+            if e.kind == "order_filled":
+                self.fills += 1
+                self.submit_order(O.Market(side="sell" if self.fills % 2 else "buy", units=1.0),
+                                  client_id=f"pp{self.fills}")
+
+    node = LiveNode([P()], ["A"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close")
+    assert node.health()["halted"] == []
+    for i in range(1, 7):
+        node.push_bar("A", i * MIN, 100 + i, 100 + i, 100 + i, 100 + i, 1000)
+    assert node.health()["halted"] == [0]

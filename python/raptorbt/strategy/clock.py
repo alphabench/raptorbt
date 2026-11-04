@@ -17,6 +17,7 @@ precedes the bar that revealed it had passed.
 from __future__ import annotations
 
 from typing import NamedTuple
+from raptorbt.errors import InvalidParameter
 
 
 class TimeEvent(NamedTuple):
@@ -57,7 +58,9 @@ class Clock:
         bar's single firing.
         """
         if interval_ns <= 0:
-            raise ValueError("interval_ns must be > 0")
+            raise InvalidParameter("interval_ns must be > 0", code="invalid_parameter",
+                                   operation="set_timer", parameter="interval_ns", value=interval_ns,
+                                   valid=["a positive integer number of ns"])
         first = start_ns if start_ns is not None else self._now + interval_ns
         self._timers[name] = [first, interval_ns, stop_ns]
 

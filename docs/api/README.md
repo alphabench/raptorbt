@@ -7,7 +7,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 
 | Module | Public names |
 | --- | --- |
-| [`raptorbt`](raptorbt.md) | 114 |
+| [`raptorbt`](raptorbt.md) | 115 |
 | [`raptorbt.adapters`](raptorbt.adapters.md) | 26 |
 | [`raptorbt.capabilities`](raptorbt.capabilities.md) | 1 |
 | [`raptorbt.costs`](raptorbt.costs.md) | 2 |
@@ -27,4 +27,4 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |
 | [`raptorbt.version_check`](raptorbt.version_check.md) | 3 |
 
-Public names and members still without a docstring: 731.
+Public names and members still without a docstring: 745.

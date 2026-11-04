@@ -6,7 +6,7 @@ A NaN compares false against every bound, so ``units <= 0`` let it through; a pr
 
 import pytest
 
-from raptorbt import BacktestConfig, Strategy, run_strategies
+from raptorbt import BacktestConfig, Strategy, run_strategies, run_strategy_backtest
 from raptorbt.errors import InvalidOrder
 from raptorbt.strategy import orders as O
 
@@ -97,7 +97,10 @@ class Sets(Strategy):
 
 @pytest.mark.parametrize("kw", [{"stop": 0.0}, {"stop": NAN}, {"target": -5.0}, {"target": INF}])
 def test_moving_a_level_refuses_a_bad_value_and_none_still_removes_it(kw):
-    data = {"X": bars([(100.0,) * 4] * 5, ist(2026, 11, 2, 9, 15))}
+    # ``set_stop_price`` / ``set_target_price`` live on the single-symbol context
+    b = bars([(100.0,) * 4] * 5, ist(2026, 11, 2, 9, 15))
     with pytest.raises(InvalidOrder) as e:
-        run_strategies([Sets(**kw)], data, BacktestConfig(initial_capital=1e6), bar_stamp="close")
+        run_strategy_backtest(
+            Sets(**kw), **b, symbol="X", bar_stamp="close", config=BacktestConfig(initial_capital=1e6)
+        )
     assert e.value.code == "invalid_order_value"

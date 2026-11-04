@@ -1304,10 +1304,11 @@ fn a_settlement_fee_is_charged_on_the_settled_notional() {
     }
 }
 
-#[test]
-fn an_option_settles_at_its_own_close_without_an_underlying() {
+fn expiring_call(
+    price: crate::instruments::lifecycle::SettlementPrice,
+) -> crate::instruments::InstrumentSpec {
     use crate::instruments::{InstrumentKind, InstrumentSpec, OptionRight};
-    let mut kernel = expiring_kernel(InstrumentSpec {
+    let mut spec = InstrumentSpec {
         expiration_ns: Some(5),
         ..InstrumentSpec::new(
             "CE",
@@ -1318,9 +1319,33 @@ fn an_option_settles_at_its_own_close_without_an_underlying() {
                 binary: false,
             },
         )
-    });
+    };
+    spec.settlement.price = price;
+    spec
+}
+
+#[test]
+fn an_option_on_auto_settlement_is_refused_without_an_underlying() {
+    use crate::instruments::lifecycle::SettlementPrice;
+    let mut kernel = expiring_kernel(expiring_call(SettlementPrice::Auto));
     enter(&mut kernel, 0, 7.0);
-    // No underlying supplied: the contract's own close is all we know.
+    // No underlying supplied: an index option settles at the official index close, never at its
+    // own last trade, so the settlement is refused and the position stays open.
+    let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
+    assert!(
+        matches!(
+            events.as_slice(),
+            [EngineEvent::LifecycleRefused { reason, .. }] if reason == "underlying_price_missing"
+        ),
+        "expected a refusal, got {events:?}"
+    );
+}
+
+#[test]
+fn an_option_on_last_price_settles_at_its_own_close_without_an_underlying() {
+    use crate::instruments::lifecycle::SettlementPrice;
+    let mut kernel = expiring_kernel(expiring_call(SettlementPrice::LastPrice));
+    enter(&mut kernel, 0, 7.0);
     let events = kernel.step(5, &bar(5, 9.0), StepInput::default());
     match events.as_slice() {
         [EngineEvent::Exited { trade, .. }, EngineEvent::Settled { .. }] => {

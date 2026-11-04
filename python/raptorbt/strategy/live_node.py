@@ -1112,7 +1112,9 @@ class LiveNode:
         return self._protective
 
     def ctx(self, strategy_index: int):
-        """The context handed to strategy ``strategy_index``'s hooks."""
+        """The context handed to strategy ``strategy_index``'s hooks. Refused once the node
+        has finished: the finish clears the contexts."""
+        self._check_open()
         return self._ctxs[strategy_index]
 
     def equity(self, strategy_index: int) -> float:
@@ -1360,9 +1362,13 @@ class LiveNode:
     def health(self) -> dict:
         """State for a supervisor: ``state``, ``epoch``, ``fenced``, the
         journal's ``count`` and ``chain``, the orders with no confirmed
-        outcome and, when the adapter has a ``health()``, its own state under
-        ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``,
-        ``recent_faults`` and its executor's ``alive``)."""
+        outcome, ``halted`` (the indices of halted strategies) and, when the
+        adapter has a ``health()``, its own state under ``adapter``
+        (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``,
+        ``recent_faults`` and its executor's ``alive``). ``margin_faults`` lists each strategy
+        stopped for holding a sold option with no hedge left; it is why the strategy stopped, and
+        a stop cannot be undone, so it stays listed after the positions are closed and the
+        strategy cannot buy the hedge back."""
         if not self._finished:
             self._no_open_group()
         out = {
@@ -1378,6 +1384,9 @@ class LiveNode:
             out["unbooked_fills"] = self._rt.unbooked_fills()
             # strategies stopped for a sold option with no hedge left: (strategy index, reason)
             out["margin_faults"] = self._rt.margin_faults()
+            # strategies halted for any cause (a follow-up loop, a margin call, the drawdown
+            # kill switch, a halt from outside): their entries are refused, the node runs on
+            out["halted"] = [i for i, v in enumerate(self._views) if v.is_halted()]
         if out["poisoned"]:
             # the error of the call that stopped, as ``(code, message)``
             out["poison_reason"] = self._poison

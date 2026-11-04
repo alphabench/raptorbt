@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from raptorbt._raptorbt import CommandQueue
-from raptorbt.errors import InvalidOrder, InvalidSubscription
+from raptorbt.errors import InvalidOrder, InvalidSubscription, InvalidType
 from raptorbt.strategy import api
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
@@ -429,9 +429,12 @@ class Strategy:
         deprecated spelling of the same thing (it does not warn).
         """
         if not isinstance(order, _OrderBase):
-            raise TypeError(
+            raise InvalidType(
                 "submit_order takes a typed order (orders.Market/Limit/StopMarket/"
-                f"StopLimit/...), got {type(order).__name__}"
+                f"StopLimit/...), got {type(order).__name__}",
+                code="invalid_argument_type", operation="submit_order", parameter="order",
+                value=type(order).__name__,
+                valid=["a typed order (orders.Market, orders.Limit, orders.StopMarket, ...)"],
             )
         if order.instrument is not None:
             if symbol is not None and symbol != order.instrument:

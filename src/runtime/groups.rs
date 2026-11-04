@@ -236,15 +236,8 @@ impl AccountGroup {
         }
     }
 
-    /// Step `member` with an event, then run the account-level checks.
-    pub fn step(
-        &mut self,
-        books: &mut [Option<PortfolioBook>],
-        member: usize,
-        entry: &ScheduleEntry,
-        depth: Option<crate::data::DepthTick>,
-        input: crate::portfolio::kernel::StepInput,
-    ) -> Vec<EngineEvent> {
+    /// What the other members hold, for the account's position and exposure limits.
+    fn others_hold(&self, books: &[Option<PortfolioBook>], member: usize) -> (usize, f64) {
         let (mut open, mut exposure) = (0usize, 0.0f64);
         for &m in &self.members {
             if m == member {
@@ -259,6 +252,48 @@ impl AccountGroup {
                 }
             }
         }
+        (open, exposure)
+    }
+
+    /// Meet the open of a bar for `member` before its strategy has seen the bar, as an isolated
+    /// book does ([`PortfolioBook::open_bar`]): what it decided earlier fills at this open, against
+    /// the account's pool and limits as the other members leave them, so members that share a
+    /// limit are served in the order their opens are met. The account-level work of the fills
+    /// (margin call, option margin across members) follows; the sample and the checks of the bar
+    /// stay with [`AccountGroup::step`].
+    pub fn open(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        member: usize,
+        entry: &ScheduleEntry,
+    ) -> Vec<EngineEvent> {
+        let (open, exposure) = self.others_hold(books, member);
+        let events = self
+            .with_member(books, member, |book| {
+                book.set_external(open, exposure);
+                book.open_bar(entry)
+            })
+            .expect("a stepped member's book is live");
+        if events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })) {
+            self.halt_all(books, true);
+        }
+        if !events.is_empty() {
+            self.regroup_option_margin(books);
+        }
+        self.sync(books);
+        events
+    }
+
+    /// Step `member` with an event, then run the account-level checks.
+    pub fn step(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        member: usize,
+        entry: &ScheduleEntry,
+        depth: Option<crate::data::DepthTick>,
+        input: crate::portfolio::kernel::StepInput,
+    ) -> Vec<EngineEvent> {
+        let (open, exposure) = self.others_hold(books, member);
         let mut events = self
             .with_member(books, member, |book| {
                 book.set_external(open, exposure);

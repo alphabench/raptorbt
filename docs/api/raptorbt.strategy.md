@@ -687,7 +687,7 @@ there.
 | `begin_group(self, timestamp: 'int | None' = None) -> 'None'` | Open a timestamp group: the pushes that follow are held and delivered together, as a batch run delivers the events that share a timestamp. |
 | `bindings` | The role bindings the node was built with (a Universe role's symbols as a tuple). A copy. |
 | `checkpoint(self, include_log: 'bool' = True) -> 'bytes'` | A versioned snapshot to rebuild this node from: the journal head, a digest of the state to check the rebuild against, each strategy's ``state()``, the epoch and (``include_log``) every journal record since the journal's ``seq_base``. Taken between pushes. See :meth:`restore`. |
-| `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. |
+| `ctx(self, strategy_index: 'int')` | The context handed to strategy ``strategy_index``'s hooks. Refused once the node has finished: the finish clears the contexts. |
 | `epoch` | *No docstring.* |
 | `equity(self, strategy_index: 'int') -> 'float'` | *No docstring.* |
 | `fenced` | Whether a newer execution epoch owns the account. |
@@ -695,7 +695,7 @@ there.
 | `flush(self) -> 'None'` | Close the open timestamp group and deliver what it holds. With none open, nothing happens. |
 | `halt(self, strategy_index: 'int', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt one strategy from outside it, like ``ctx.halt``: its new entries are refused with ``killed``, its working orders are cancelled and, with ``flatten=True``, its positions are closed at the last prices seen. ``is_halted`` reads True at once; the cancels and closes happen when that strategy's next event is applied. |
 | `halt_account(self, account: 'str', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt every strategy on ``account`` from outside, as ``halt`` halts one: their new entries are refused with ``killed``, their working orders are cancelled and, with ``flatten=True``, their positions are closed at the last prices seen. Each strategy's cancels and closes happen when its next event is applied. The account's ``halted_at`` is the number of events applied to its strategies so far. Strategies not on the account are untouched. |
-| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
+| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome, ``halted`` (the indices of halted strategies) and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
 | `heartbeat(self) -> 'dict'` | Check the execution epoch with the adapter now and return :meth:`health`. Raises ``fenced`` when a newer epoch owns the account. Call it on a timer; the node also checks before every request. |
 | `holders_of(self, symbol: 'str') -> 'tuple[int, ...]'` | The strategy indices that traded ``symbol`` when it was last added or revived. |
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
@@ -1123,32 +1123,41 @@ StrategyContext(session, timestamps: 'np.ndarray', open_: 'np.ndarray', high: 'n
 
 Read/act surface a strategy sees inside its hooks.
 
-Data access contract: the full OHLCV arrays are exposed for indicator
-precomputation in ``on_start``, but decision logic inside ``on_bar`` must
-only read values at ``idx`` or earlier. Indexing past ``idx`` reads the
-future and invalidates the backtest.
+Data access contract: in ``on_start`` the OHLCV arrays hold the whole run, for indicator
+precomputation. In a bar hook (``on_bar`` and the others) ``open``, ``high``, ``low``,
+``close``, ``volume`` and ``timestamps`` end at the current bar, so ``ctx.close[-1]`` is this
+bar's close and ``ctx.close[ctx.idx + 1]`` raises ``IndexError``: the future cannot be read by
+mistake. (The guard is a view, not a copy; it stops accidents, not a deliberate read of
+``.base``.)
 
 | Member | What it is |
 | --- | --- |
 | `bar` | The bar currently being processed. |
 | `bar_close_ts` | Epoch ns at which the current bar closed: the time the engine acts on it. Fills, order expiry, square-off, the strategy clock and :attr:`datetime` all use it. Equals :attr:`timestamp` for ``bar_stamp="close"`` (and for the legacy unset case). |
 | `cash` | Uninvested cash. |
+| `close` | *No docstring.* |
+| `close_timestamps` | *No docstring.* |
 | `datetime` | Current bar's close time (:attr:`bar_close_ts`) as a naive UTC datetime. |
 | `equity` | Mark-to-market equity after the most recent completed bar. |
 | `free_capital` | Cash not locked as margin (margin accounts); all cash otherwise. |
 | `halt(self, reason: 'str' = 'manual', flatten: 'bool' = False) -> 'None'` | Stop this strategy trading. |
+| `high` | *No docstring.* |
 | `history(self, n: 'int') -> 'np.ndarray'` | Trailing window of up to ``n`` closes ending at the current bar. |
 | `is_flat` | *No docstring.* |
 | `is_net_long` | *No docstring.* |
 | `is_net_short` | *No docstring.* |
+| `low` | *No docstring.* |
 | `n_bars` | Total number of bars in the run. |
 | `net_position` | Signed unit total across open positions (hedging nets out). |
+| `open` | *No docstring.* |
 | `position` | Open position snapshot, or ``None`` when flat. |
 | `positions` | All open positions, in opening order (hedging holds several): call it, ``ctx.positions()``. Using the attribute as a list is deprecated. |
 | `set_stop_price(self, price: 'float | None') -> 'None'` | Overwrite the open position's stop; ``None`` removes it. |
 | `set_target_price(self, price: 'float | None') -> 'None'` | Overwrite the open position's target; ``None`` removes it. |
 | `set_underlying_price(self, price: 'float | None') -> 'None'` | Price an option settles against at expiry. |
 | `timestamp` | The current bar's timestamp as the caller stamped it. |
+| `timestamps` | *No docstring.* |
+| `volume` | *No docstring.* |
 
 ### `StrikeWindow`
 

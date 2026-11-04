@@ -255,10 +255,11 @@ except ConnectionError as e:
     assert str(e) == "connection reset"
 ```
 
-Fills are facts. A limit says no more than 5 units; the venue filled 10. The
-position follows the venue and the breach is reported. A reduce-only fill that
-arrives before the entry it reduces is kept, journaled, and booked when the
-entry arrives:
+Fills are facts. The risk limits are checked before an order is sent (a market order over
+`max_position_qty` is refused, counting the orders already working), and a report that fills more
+than the order asked is refused as inconsistent; a fill the venue really made that breaches a limit
+anyway is booked and reported as `fill_breach`. A reduce-only fill that arrives before the entry it
+reduces is kept, journaled, and booked when the entry arrives:
 
 ```python
 from raptorbt import BacktestConfig, LiveNode, Strategy, journal as rj
@@ -307,13 +308,11 @@ def node_for(script, **config):
     return node, venue, journal, strategy
 
 
-# The venue filled 10 although the book allows 5.
+# An order over the book's limit is refused before the venue sees it.
 node, venue, _, strategy = node_for(
     lambda s: s.submit_order(orders.Market(side="buy", quantity=10), client_id="in"), max_position_qty=5.0)
-cid = venue.requests[0].client_order_id
-node.push_report(cid, ExecutionReport.fill("X1", 10.0, 101.0, MIN), arrival_ns=MIN)
-assert strategy.heard == [("order_filled", "in"), ("fill_breach", "max_position")]
-assert node.positions(0)["AAA"][0].size == 10.0                       # the venue's position, not the limit's
+assert venue.requests == []
+assert strategy.heard == [("order_rejected", "in"), ("risk_rejected", "max_position")]
 
 
 def entry_and_exit(s):

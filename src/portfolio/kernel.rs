@@ -1159,6 +1159,7 @@ impl EngineKernel {
     pub fn set_target_price(&mut self, price: Option<Price>) {
         if let Some(managed) = self.ledger.first_mut() {
             managed.position.target_price = price;
+            managed.target_fresh = price.is_some();
         }
     }
 
@@ -1178,6 +1179,7 @@ impl EngineKernel {
         match self.ledger.get_mut(position_id) {
             Some(managed) => {
                 managed.position.target_price = price;
+                managed.target_fresh = price.is_some();
                 true
             }
             None => false,
@@ -1916,8 +1918,11 @@ impl EngineKernel {
                 events.push(event);
             }
 
-            // Trail only if the position survived this bar.
-            if let StopConfig::Trailing { percent } = self.effective_stop {
+            // Trail only if the position survived this bar. A venue-managed kernel holds no stop
+            // of its own: the venue (or the engine's watcher of a hedge) trails it.
+            if let (StopConfig::Trailing { percent }, false) =
+                (self.effective_stop, self.venue_managed)
+            {
                 if let Some(managed) = self.ledger.get_mut(position_id) {
                     managed.update_trailing_stop(percent);
                 }
@@ -2414,26 +2419,20 @@ impl EngineKernel {
         exit_signal: bool,
         arrived: bool,
     ) -> Option<EngineEvent> {
+        // The first bar to examine a target is where it arrives: marketable if that bar opens
+        // through it. Every later bar finds it resting.
+        let target_fresh = std::mem::take(&mut self.ledger.get_mut(position_id)?.target_fresh);
         let managed = self.ledger.get(position_id)?;
         let mut exit_reason: Option<ExitReason> = None;
         let mut exit_price = bar.close;
 
         let direction = managed.position.direction;
         let ohlcv_bar = bar.to_ohlcv_bar();
-        // A target is a resting limit: it fills at its level, except across a
-        // session open that gaps past it (a print has no range to gap), and
-        // on the bar its position was entered at the open of: the target
-        // arrived with that bar and is marketable if the open is through it.
-        // A target already through the entry price (a long's below it, a short's above it) was
-        // marketable when it was attached: it trades where the bar opened, never at a level the
-        // market had already left.
-        let target_through_at_entry =
-            managed.position.target_price.is_some_and(|t| match direction {
-                Direction::Long => t <= managed.position.entry_price,
-                Direction::Short => t >= managed.position.entry_price,
-            });
-        let arrived =
-            arrived || managed.entry_timestamp == bar.timestamp || target_through_at_entry;
+        // A target is a resting limit and meets the market as one: on the first bar that
+        // examines it, and on the bar its position was entered at the open of, it is marketable
+        // if the open is through it, and trades there. After that it fills at its level, except
+        // across a session open that gaps past it (a print has no range to gap).
+        let arrived = arrived || managed.entry_timestamp == bar.timestamp || target_fresh;
         let session_gap = arrived
             || (!self.stepping_trade && self.orders.opens_session(bar.timestamp.saturating_sub(1)));
 
@@ -3473,7 +3472,27 @@ impl EngineKernel {
                 None => self.fee_model.calculate(contract_value, size, direction),
             },
         );
-        let funding = self.entry_funding(direction, price).ok()?;
+        let funding = match self.entry_funding(direction, price) {
+            Ok(funding) => funding,
+            // A sold leg the model cannot price alone may be carried by the hedge that is open:
+            // priced with its group below, as the order that opened the line was.
+            Err(RejectReason::InsufficientMargin) if self.group_context.is_some() => {
+                Some(EntryFunding::Deposit { per_contract: f64::INFINITY })
+            }
+            Err(_) => return None,
+        };
+        let funding = match funding {
+            Some(EntryFunding::Deposit { per_contract }) => {
+                match self.grouped_deposit(price, direction, size) {
+                    Some(grouped) => Some(EntryFunding::Deposit {
+                        per_contract: (per_contract * size).min(grouped) / size,
+                    }),
+                    None if per_contract.is_infinite() => return None,
+                    None => funding,
+                }
+            }
+            _ => funding,
+        };
         let funding_cost = match funding {
             None => contract_value * size,
             Some(EntryFunding::Rate { rate, .. }) => contract_value * size * rate,
@@ -3499,6 +3518,7 @@ impl EngineKernel {
                 }
                 if target_attach.is_some() {
                     managed.position.target_price = target_attach;
+                    managed.target_fresh = true;
                 }
             }
         }

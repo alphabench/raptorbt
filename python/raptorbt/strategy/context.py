@@ -255,7 +255,9 @@ class StrategyContext:
         """Overwrite the open position's target; ``None`` removes it.
 
         No-op when flat. Called from ``on_bar``, the new target is already
-        checked against the current bar's range.
+        checked against the current bar's range. Like any resting limit it meets the market once:
+        the first bar that examines it trades it at the open if that bar opens through it, and
+        every later bar trades it at its level.
         """
         check_term("target_price", price)
         self._session.set_target_price(price)

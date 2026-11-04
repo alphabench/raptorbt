@@ -111,6 +111,7 @@ def _refusal(**kw):
 def test_an_instrument_the_schedule_cannot_place_is_refused_not_charged_nothing():
     no_spec = _refusal()
     assert (no_spec.code, no_spec.parameter, no_spec.value) == ("fee_schedule_gap", "fee_schedule", "X")
+    assert no_spec.symbol == "X", "the instrument is its own attribute; value keeps the symbol for older readers"
     assert no_spec.skill == "execution"
     assert "NFO" in no_spec.valid and "MCX" in no_spec.valid  # the venues the schedule prices
 

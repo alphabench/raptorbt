@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from raptorbt.errors import InvalidParameter
 from collections.abc import Callable, Iterable, Mapping
 
 
@@ -12,7 +13,9 @@ class TokenBucket:
 
     def __init__(self, rate: float, burst: float | None = None, *, clock: Callable[[], float] = time.monotonic) -> None:
         if rate <= 0:
-            raise ValueError("rate must be positive")
+            raise InvalidParameter("rate must be positive", code="invalid_parameter",
+                                   operation="TokenBucket", parameter="rate", value=rate,
+                                   valid=["a positive number of tokens a second"])
         self.rate = float(rate)
         self.burst = float(burst if burst is not None else max(1.0, rate))
         self._clock = clock

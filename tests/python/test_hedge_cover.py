@@ -166,3 +166,5 @@ def test_a_broker_holds_no_stop_of_a_hedge_leg_once_a_sold_leg_depends_on_it_and
     assert stops <= set(broker.cancelled), (stops, broker.cancelled)
     assert [sym for sym, _ in order_of_close] == [S, H], order_of_close
     assert [side.lower() for _, side in order_of_close] == ["buy", "sell"], order_of_close
+    # the follow-up mark is the engine's own, so a broker is never sent it
+    assert [r.client_order_id for r in broker.requests if "after_fill" in r.tags] == []

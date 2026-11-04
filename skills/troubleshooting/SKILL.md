@@ -38,7 +38,7 @@ it.
 The first line of `str(error)` is the short message; the lines after list what
 was requested, what is supported and the related skill. Each class also
 subclasses the builtin it replaced (`InvalidParameter` and `InvalidData` are
-`ValueError`, `StateError` is `RuntimeError`, `UnknownSymbol` is `KeyError`), so
+`ValueError`, `StateError` is `RuntimeError`, `UnknownSymbol` is `KeyError`, `InvalidType` is `TypeError`), so
 older `except ValueError` code keeps working. `raptorbt.errors.CODES` maps every
 code to its class, owning skill and meaning; `raptorbt.errors.markdown()`
 renders the catalogue (`docs/errors.md` is generated from it).
@@ -92,6 +92,8 @@ state is as it was before the call.
 | `portfolio_total_unavailable` | `UnsupportedOperation` | A `ctx.portfolio` total needs the shared runtime: use `run_strategies`, not `run_strategy_backtest`. |
 | `invalid_input` | `InvalidParameter` | An array or number was refused by the computation (an indicator period, a covariance shape); the message names it. |
 | `invalid_parameter`, `invalid_config` | `InvalidParameter` | A value is out of range in the engine's own check; the message names it (a stop or target percent is a fraction in (0, 1], so 5% is `0.05`). |
+| `invalid_argument_type` | `InvalidType` (also a `TypeError`) | A non-typed order reached `submit_order` (build it with `orders.Market`, `orders.Limit`, ...), a custom indicator lacks `update(bar)`, `ready` or `value`, or a strategy defines a hook under both its name and its deprecated alias (keep the new name). |
+| `unknown_skill` | `UnknownSymbol` (also a `KeyError`) | `raptorbt.skills.load` was given a name that is not a skill; `valid` lists the names. |
 | `invalid_direction`, `invalid_combine_mode`, `invalid_allocation`, `invalid_option_type`, `invalid_strike_selection`, `invalid_size_type` | `InvalidParameter` | An enumerated argument is not one of the values in `valid`. See [backtesting](../backtesting/SKILL.md). |
 | `unsupported_short_ticks` | `UnsupportedOperation` | `run_tick_backtest` is long-only: `quantity` is zero or more. Use `run_strategies` with ticks for shorts. |
 | `unsupported_corporate_actions`, `invalid_corporate_action`, `invalid_adjustment_policy` | `UnsupportedOperation` / `InvalidParameter` | Corporate actions went to a runner that cannot apply them (the runners that can are in `valid`), an action has an unknown kind or a bad ratio, amount or pay date, or actions came without `adjustment_policy` (`raw` or `adjusted`). See [execution](../execution/SKILL.md). |

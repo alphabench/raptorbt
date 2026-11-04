@@ -50,6 +50,11 @@ pub struct ManagedPosition {
     /// Booked entry costs of the open quantity; `position.entry_fees` is its
     /// `f64` view.
     pub entry_fees_money: Money,
+    /// The target was attached or moved since a bar last looked at it. A resting order meets the
+    /// market once, on the first bar that examines it: if that bar opens through the level it
+    /// trades at the open, as the order matcher does for a limit on its first bar. The bar that
+    /// looks clears it; the level then rests and trades at its price.
+    pub target_fresh: bool,
 }
 
 impl ManagedPosition {
@@ -247,6 +252,7 @@ impl PositionLedger {
             entry_order_id: None,
             cost,
             entry_fees_money,
+            target_fresh: target_price.is_some(),
         });
         Some(id)
     }

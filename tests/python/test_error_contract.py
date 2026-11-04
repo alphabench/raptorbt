@@ -629,6 +629,18 @@ def _():
     rj.Journal({"run": 1}, memory=True, fsync="sometimes")
 
 
+@case("invalid_argument_type", "order")
+def _():
+    Noop().submit_order("buy")
+
+
+@case("unknown_skill", "name")
+def _():
+    from raptorbt import skills
+
+    skills.load("no-such-skill")
+
+
 @case("invalid_config", "percent")
 def _():
     BacktestConfig().set_fixed_stop(5.0)

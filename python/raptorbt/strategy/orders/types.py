@@ -42,7 +42,9 @@ def _bad(code: str, message: str, parameter: str, value=None, valid=None) -> Inv
     )
 
 
-def check_term(name: str, value, *, maximum: float | None = None, minimum_zero: bool = False) -> None:
+def check_term(
+    name: str, value, *, maximum: float | None = None, minimum_zero: bool = False, label: str | None = None
+) -> None:
     """Refuse an order term that is NaN, infinite, not positive (not negative, when
     ``minimum_zero``), or above ``maximum``. ``None`` is a term not given. A NaN compares false
     against every bound, so a plain ``value <= 0`` check lets it through."""
@@ -54,7 +56,7 @@ def check_term(name: str, value, *, maximum: float | None = None, minimum_zero: 
     if not ok:
         bound = ">= 0" if minimum_zero else "> 0" if maximum is None else f"in (0, {maximum:g}]"
         raise _bad(
-            "invalid_order_value", f"{name} must be a finite number {bound}, got {value!r}", name, value
+            "invalid_order_value", f"{label or name} must be a finite number {bound}, got {value!r}", name, value
         )
 
 
@@ -155,7 +157,7 @@ class Limit(_OrderBase):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        check_term("price", self.price)
+        check_term("price", self.price, label="limit price")
 
     @property
     def kind(self) -> str:

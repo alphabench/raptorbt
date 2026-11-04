@@ -47,6 +47,7 @@ from raptorbt._raptorbt import (
     walk_forward_windows,
     without_best,
 )
+from raptorbt.errors import InvalidParameter
 
 __all__ = [
     "OVERFITTING_NOTE",
@@ -250,11 +251,15 @@ def sweep(
     (threads of this process; see the module notes)."""
     wins = windows.windows() if isinstance(windows, WalkForward) else list(windows)
     if not wins:
-        raise ValueError("no windows")
+        raise InvalidParameter("no windows", code="invalid_parameter", operation="sweep",
+                               parameter="windows", value=[], valid=["at least one window"])
     if workers < 1:
-        raise ValueError("workers is at least 1")
+        raise InvalidParameter("workers is at least 1", code="invalid_parameter", operation="sweep",
+                               parameter="workers", value=workers, valid=["an integer of at least 1"])
     if executor not in ("process", "thread"):
-        raise ValueError("executor is 'process' or 'thread'")
+        raise InvalidParameter("executor is 'process' or 'thread'", code="invalid_parameter",
+                               operation="sweep", parameter="executor", value=executor,
+                               valid=["process", "thread"])
     path = None if manifest is None else Path(manifest)
     done = _load_manifest(path)
     jobs: list[tuple[RunFn, int, Params, Window]] = []

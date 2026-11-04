@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from raptorbt.errors import InvalidParameter
 import threading
 
 _ENGINE = re.compile(r"^s(\d+)-(\d+)$")
@@ -29,10 +30,15 @@ class IdCodec:
 
     def __init__(self, *, max_len: int, charset: str = "A-Za-z0-9", namespace: str = "") -> None:
         if max_len < 8:
-            raise ValueError("max_len must leave room for an id")
+            raise InvalidParameter("max_len must leave room for an id", code="invalid_parameter",
+                                   operation="IdCodec", parameter="max_len", value=max_len,
+                                   valid=["an integer of at least 8"])
         self._ok = re.compile(f"^[{charset}]*$")
         if not self._ok.match(namespace):
-            raise ValueError("namespace uses characters the broker does not allow")
+            raise InvalidParameter("namespace uses characters the broker does not allow",
+                                   code="invalid_parameter", operation="IdCodec",
+                                   parameter="namespace", value=namespace,
+                                   valid=[f"characters in [{charset}]"])
         self.max_len = max_len
         self.namespace = namespace
         self._hyphen = bool(self._ok.match("-"))

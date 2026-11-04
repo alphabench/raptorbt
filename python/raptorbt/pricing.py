@@ -35,6 +35,7 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+from raptorbt.errors import InvalidParameter
 
 from raptorbt._raptorbt import (
     Greeks,
@@ -98,13 +99,16 @@ def _is_call(right: Any) -> Any:
     call = (r == "call") | (r == "c")
     put = (r == "put") | (r == "p")
     if not bool(np.all(call | put)):
-        raise ValueError(f"right is 'call' or 'put' (or 'c'/'p'), got {right!r}")
+        raise InvalidParameter(f"right is 'call' or 'put' (or 'c'/'p'), got {right!r}",
+                               code="invalid_option_right", parameter="right", value=repr(right))
     return bool(call) if call.ndim == 0 else call
 
 
 def _check_model(model: str) -> str:
     if model not in MODELS:
-        raise ValueError(f"model is one of {', '.join(MODELS)}, got {model!r}")
+        raise InvalidParameter(f"model is one of {', '.join(MODELS)}, got {model!r}",
+                               code="invalid_parameter", parameter="model", value=model,
+                               valid=list(MODELS))
     return model
 
 

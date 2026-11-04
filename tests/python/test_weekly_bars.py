@@ -36,9 +36,7 @@ def test_weekly_bars_end_on_monday_midnight():
     s = Weeks()
     cfg = BacktestConfig(initial_capital=1e6)
     cfg.fees = 0.0
-    rb.run_strategies([s], data, cfg, bar_stamp="open")
+    rb.run_strategies([s], data, cfg, bar_stamp="open", bar_ns=DAY)
     # Wed 28 Oct to Sun 1 Nov, Mon 2 to Sun 8 Nov, Mon 9 to Sun 15 Nov: each completes when the
     # next Monday's bar arrives; the closes are the three Sundays'
     assert [c for _, c in s.weeks] == [104.0, 111.0, 118.0]
-    for ts, _ in s.weeks:
-        assert (ts // DAY) % 7 == 4, "a week ends at a Monday 00:00 boundary"

@@ -88,11 +88,13 @@ def reject_atr_stops(config, instrument_configs, symbols) -> None:
     for symbol in symbols:
         period = resolve_atr_period(config, (instrument_configs or {}).get(symbol))
         if period:
-            raise ValueError(
+            raise InvalidParameter(
                 f"ATR-based stop/target configured (ATR period {period}, "
                 f"symbol {symbol!r}), but tick runs have no bars to compute "
                 "ATR from, so the stop would never arm. Use a fixed stop or "
-                "target, or run on bars with run_portfolio_strategy."
+                "target, or run on bars with run_portfolio_strategy.",
+                code="invalid_config", parameter="atr_period", value=period,
+                valid=["a fixed stop or target", "a bar run (run_portfolio_strategy)"],
             )
 
 

@@ -91,9 +91,9 @@ def legs(requests):
     return sorted((r.symbol, str(r.side).lower()) for r in requests)
 
 
-def condor_on_a_broker():
+def condor_on_a_broker(**config_kw):
     broker = Broker()
-    config = BacktestConfig(initial_capital=1e6, fees=0.0, margin_model=MarginModel.defined_risk())
+    config = BacktestConfig(initial_capital=1e6, fees=0.0, margin_model=MarginModel.defined_risk(), **config_kw)
     node = LiveNode(
         [Condor()], list(DATA), config, execution=broker, instruments=INSTRUMENTS,
         account_type="margin", leverage=1.0, bar_stamp="close",
@@ -124,5 +124,22 @@ def test_a_flattening_halt_sends_the_sold_call_first_and_its_wing_once_it_is_clo
     answer(node, second, 7, ts)
     assert not any(rows for rows in node.positions(0).values())
     # every position was closed once, and none twice
+    closes = legs(broker.requests[before:])
+    assert closes == sorted([(WING_PUT, "sell"), (WING_CALL, "sell"), (BODY_PUT, "buy"), (BODY_CALL, "buy")]), closes
+
+
+def test_a_session_square_off_closes_each_leg_once_sold_call_first_and_flips_no_line():
+    node, broker = condor_on_a_broker(squareoff_time="00:08", session_tz_offset_ns=0)
+    before = len(broker.requests)
+    ts = push(node, 7)  # 00:08: the square-off
+    first = broker.requests[before:]
+    assert (BODY_CALL, "buy") in legs(first), legs(first)
+    assert (WING_CALL, "sell") not in legs(first), legs(first)
+    answer(node, first, 7, ts)
+    second = broker.requests[before + len(first) :]
+    assert (WING_CALL, "sell") in legs(second), legs(second)
+    answer(node, second, 7, ts)
+    assert not any(rows for rows in node.positions(0).values())
+    # a second close of a sold leg would turn it long: each line is closed exactly once
     closes = legs(broker.requests[before:])
     assert closes == sorted([(WING_PUT, "sell"), (WING_CALL, "sell"), (BODY_PUT, "buy"), (BODY_CALL, "buy")]), closes
