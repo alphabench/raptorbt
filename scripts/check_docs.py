@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Check that the front-door documents tell the truth about the installed package.
 
-    python scripts/check_docs.py                  # README.md, docs/migration-2.0.md, docs/release-criteria.md
+    python scripts/check_docs.py                  # README.md
     python scripts/check_docs.py docs/foo.md      # other files, held to the same rules
     python scripts/check_docs.py --api            # also fail when docs/api is stale
 
@@ -9,7 +9,7 @@ For each file: every ``python`` block is executed in a subprocess with the netwo
 blocked and ``DeprecationWarning`` as an error (the runner the skills use); a block
 marked ``<!-- skill: invalid -->`` on the line above must fail by running, not by a
 syntax error; a block marked ``<!-- doc: skip -->`` is illustration (for example a
-1.x snippet) and is not run. Backticked ``raptorbt.x.y`` names must resolve (files
+snippet of a removed API) and is not run. Backticked ``raptorbt.x.y`` names must resolve (files
 that talk about removed names pass ``--no-symbols`` through ``NO_SYMBOLS`` below),
 relative links must exist, and a backticked path under a repository directory must
 exist. It reuses the skill validator's runner, so docs and skills share one rule.
@@ -31,9 +31,9 @@ from pathlib import Path
 from raptorbt.skills import _check
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT = ("README.md", "docs/migration-2.0.md", "docs/release-criteria.md")
+DEFAULT = ("README.md",)
 #: Files that name removed APIs on purpose: their backticked names are not resolved.
-NO_SYMBOLS = ("docs/migration-2.0.md",)
+NO_SYMBOLS = ()
 SKIP = "<!-- doc: skip -->"
 _PATH = re.compile(r"`((?:tests|docs|benches|scripts|skills|python|src|\.github)/[A-Za-z0-9_./*\-]+)`")
 

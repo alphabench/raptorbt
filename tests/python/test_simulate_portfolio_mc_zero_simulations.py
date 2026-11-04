@@ -1,6 +1,6 @@
 """``simulate_portfolio_mc(n_simulations=0)`` must refuse with a validation error.
 
-Found by the ST6 stress workload (benches/stress/workloads/st6_monte_carlo.py). It panics at
+Found by a Monte Carlo stress workload. It panics at
 src/portfolio/monte_carlo.rs:272 (``final_values`` is empty and ``n - 1`` wraps), which reaches
 Python as ``PanicException``: a ``BaseException`` that ``except Exception`` in a strategy hook
 does not catch. Every other bad argument of this function raises ``ValueError``.

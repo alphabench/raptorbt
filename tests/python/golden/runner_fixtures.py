@@ -16,7 +16,7 @@ intend is a regression, not a fixture to refresh.
 Inputs are frozen next to the outputs (float hex), for the reason given in
 ``generate.py``: NumPy kernels are not correctly rounded, so rebuilding the
 data at test time would measure NumPy as much as the engine. The test replays
-the frozen arrays; only this generator touches ``benches/runtime/synthetic.py``.
+the frozen arrays; only this generator touches ``tests/python/synthetic.py``.
 
 What is deliberately NOT recorded: ``ctx.series()`` and the other full-array
 context attributes (``ctx.timestamps``, ``ctx.close``, ...) were the full
@@ -51,7 +51,7 @@ from raptorbt.strategy import orders
 
 HERE = Path(__file__).parent
 FIXTURE_PATH = HERE / "runner_fixtures.json"
-SYNTHETIC_DIR = HERE.parents[2] / "benches" / "runtime"
+SYNTHETIC_DIR = HERE.parent
 
 NS = 1_000_000_000
 MIN_NS = 60 * NS

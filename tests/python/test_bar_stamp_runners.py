@@ -9,9 +9,7 @@ differs, and it must stay the user's own stamp.
 """
 
 import functools
-import sys
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -21,7 +19,6 @@ from raptorbt import BacktestConfig, Indicator, Strategy
 from raptorbt.errors import InvalidParameter
 from raptorbt.strategy import TickStrategyStream, orders
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benches" / "runtime"))
 import synthetic  # noqa: E402
 
 MIN_NS = 60 * 10**9

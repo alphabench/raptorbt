@@ -13,7 +13,6 @@ import os
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,7 +21,6 @@ import raptorbt
 from raptorbt import BacktestConfig, BatchSingleItem, InstrumentSpec, Strategy
 from raptorbt.strategy import orders
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benches" / "runtime"))
 import synthetic  # noqa: E402
 from test_batch_single import assert_identical  # noqa: E402
 

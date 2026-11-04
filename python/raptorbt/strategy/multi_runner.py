@@ -722,7 +722,7 @@ def run_strategies(
     when all of them are live at once their state outgrows the CPU caches and
     the cost per strategy-event climbs. Each batch's ``on_start`` runs when
     the batch starts, not before the first event of the call. ``None`` picks
-    250 strategies per batch: in ``benches/runtime/density.py`` sweeps (K =
+    250 strategies per batch: in density sweeps (K =
     3000, 5 instruments per strategy) the cost per strategy-event was lowest
     and flat from 250 to 500 and rose steeply above 1000, where the live state
     (about 11 KB per strategy) no longer fits the CPU caches. It is a fixed

@@ -1,7 +1,6 @@
 # Published benchmark harness
 
-Every performance figure in `README.md`, the frontend `/raptorbt` page, and
-`frontend/public/raptorbt-doc.md` is produced by these scripts. They exist so a
+Every performance figure in `README.md` is produced by these scripts. They exist so a
 claim can be re-run rather than taken on trust.
 
 ```bash

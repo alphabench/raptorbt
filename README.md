@@ -25,8 +25,7 @@ pip install raptorbt
 ```
 
 Python 3.10 to 3.13, on Linux and macOS. Bar data is NumPy arrays, so install `numpy` too. To build from
-source see [Building from source](#building-from-source). Coming from an earlier version? Read
-[docs/migration-2.0.md](docs/migration-2.0.md) first.
+source see [Building from source](#building-from-source).
 
 ## A first strategy
 
@@ -334,8 +333,8 @@ print(result.metrics.total_return_pct, [t.pnl for t in trades])
   the result. Brokerage comes from a broker's `RateCard`.
 - **Structured errors.** Every error raised on purpose is a `raptorbt.errors.RaptorBTError` with a `code`,
   the accepted alternatives (`valid`) and the skill that covers it. See [docs/errors.md](docs/errors.md).
-- **Honest numbers.** No performance figure is published here without a harness that reproduces it: see
-  `benches/runtime/README.md` and [docs/release-criteria.md](docs/release-criteria.md).
+- **Honest numbers.** No performance figure is published here without a script that reproduces it: see
+  `benches/python/README.md`.
 
 ## Crash reporting (optional)
 
@@ -386,8 +385,6 @@ environments are skipped automatically).
 | [docs/architecture/event-semantics.md](docs/architecture/event-semantics.md) | Event ordering and visibility; the same folder holds the order lifecycle, execution adapters, journal and recovery, broker adapters and the embedding contract. |
 | [docs/quantitative-correctness/numerics.md](docs/quantitative-correctness/numerics.md) | Every rounding and conversion boundary. |
 | [docs/errors.md](docs/errors.md) | Every error code, its meaning and alternatives. |
-| [docs/migration-2.0.md](docs/migration-2.0.md) | Moving from 0.x and 1.x to 2.0. |
-| [docs/release-criteria.md](docs/release-criteria.md) | What must hold before a 2.0.0 release, as commands. |
 | [CHANGELOG.md](CHANGELOG.md) | Every change, with the results that moved. |
 
 ## Keeping the docs true

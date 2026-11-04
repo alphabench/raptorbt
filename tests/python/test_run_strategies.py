@@ -18,9 +18,7 @@ Every test here skips until ``raptorbt.run_strategies`` exists.
 """
 
 import hashlib
-import sys
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -29,7 +27,6 @@ import raptorbt
 from raptorbt import BacktestConfig, Indicator, InstrumentConfig, Strategy
 from raptorbt.strategy import orders
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benches" / "runtime"))
 import synthetic  # noqa: E402
 
 pytestmark = pytest.mark.skipif(

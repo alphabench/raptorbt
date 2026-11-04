@@ -13,7 +13,6 @@ A second, separate check covers a leak that poisoning cannot see: under
 """
 
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,7 +21,6 @@ import raptorbt
 from raptorbt import BacktestConfig, Indicator, Strategy
 from raptorbt.strategy import orders
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benches" / "runtime"))
 import synthetic  # noqa: E402
 
 MIN_NS = 60 * 1_000_000_000
