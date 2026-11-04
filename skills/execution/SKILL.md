@@ -6,7 +6,7 @@ description: >
     booked as facts, the host's order check and order tags, and what differs
     between paper and the in-process matcher.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-orders

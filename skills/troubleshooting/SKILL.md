@@ -6,7 +6,7 @@ description: >
     to read a journal, the mistakes that recur across skills, and the engine
     gaps known today.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
 status: stable

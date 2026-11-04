@@ -179,7 +179,7 @@ def test_missing_section(tree):
 
 
 def test_frontmatter_differs_from_manifest(tree):
-    edit(tree / "core" / "SKILL.md", "api_version: 2.x", "api_version: 3.x")
+    edit(tree / "core" / "SKILL.md", "api_version: 1.x", "api_version: 3.x")
     assert has(errs(tree), "frontmatter api_version")
 
 

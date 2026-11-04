@@ -14,7 +14,7 @@
         "Setting capital, fees, slippage, fill timing or session length."
       ],
       "depends_on": [],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.BacktestConfig",
@@ -41,7 +41,7 @@
       "depends_on": [
         "raptorbt-core"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.strategy",
@@ -102,7 +102,7 @@
         "raptorbt-core",
         "raptorbt-strategy"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.CorporateAction",
@@ -131,7 +131,7 @@
         "raptorbt-core",
         "raptorbt-instruments"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.bars_from_ticks",
@@ -166,7 +166,7 @@
         "raptorbt-strategy",
         "raptorbt-market-data"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.strategy.BarHistory",
@@ -191,7 +191,7 @@
         "raptorbt-strategy",
         "raptorbt-market-data"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.BarAggregator",
@@ -220,7 +220,7 @@
         "raptorbt-core",
         "raptorbt-strategy"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.Indicator",
@@ -257,7 +257,7 @@
         "raptorbt-strategy",
         "raptorbt-instruments"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.strategy.orders",
@@ -288,7 +288,7 @@
         "raptorbt-core",
         "raptorbt-orders"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.execution",
@@ -319,7 +319,7 @@
         "raptorbt-strategy",
         "raptorbt-instruments"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.AccountSpec",
@@ -359,7 +359,7 @@
         "raptorbt-core",
         "raptorbt-portfolio"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.margin",
@@ -386,7 +386,7 @@
         "raptorbt-core",
         "raptorbt-instruments"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.run_single_backtest",
@@ -420,7 +420,7 @@
         "raptorbt-backtesting",
         "raptorbt-results"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.BatchSingleItem",
@@ -451,7 +451,7 @@
         "raptorbt-risk",
         "raptorbt-execution"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.LiveNode",
@@ -473,7 +473,7 @@
       "depends_on": [
         "raptorbt-core"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.BacktestResult",
@@ -503,7 +503,7 @@
         "raptorbt-execution",
         "raptorbt-risk"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.version_check",
@@ -527,7 +527,7 @@
       "depends_on": [
         "raptorbt-core"
       ],
-      "api_version": "2.x",
+      "api_version": "1.x",
       "status": "stable",
       "modules": [
         "raptorbt.errors",

@@ -31,7 +31,7 @@ Engine concepts, the backtest lifecycle (data in, configuration, run, result) an
 Name: `raptorbt-core`  
 Path: [core/SKILL.md](core/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: none
 
 Load when:
@@ -47,7 +47,7 @@ Writing a class-based strategy: the Strategy class, its lifecycle hooks, Strateg
 Name: `raptorbt-strategy`  
 Path: [strategy/SKILL.md](strategy/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core
 
 Load when:
@@ -63,7 +63,7 @@ Instrument definitions, asset classes, options and multi-instrument runs.
 Name: `raptorbt-instruments`  
 Path: [instruments/SKILL.md](instruments/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy
 
 Load when:
@@ -82,7 +82,7 @@ Bars, trades, quotes and order-book inputs, and tick-level features.
 Name: `raptorbt-market-data`  
 Path: [market-data/SKILL.md](market-data/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-instruments
 
 Load when:
@@ -99,7 +99,7 @@ Declaring which streams and bar histories a strategy receives.
 Name: `raptorbt-subscriptions`  
 Path: [subscriptions/SKILL.md](subscriptions/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data
 
 Load when:
@@ -115,7 +115,7 @@ Multi-timeframe aggregation and composite bars.
 Name: `raptorbt-timeframes`  
 Path: [timeframes/SKILL.md](timeframes/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data
 
 Load when:
@@ -133,7 +133,7 @@ Built-in vectorised and streaming indicators.
 Name: `raptorbt-indicators`  
 Path: [indicators/SKILL.md](indicators/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy
 
 Load when:
@@ -149,7 +149,7 @@ Order construction and lifecycle: the typed order kinds, sizing forms, time in f
 Name: `raptorbt-orders`  
 Path: [orders/SKILL.md](orders/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-instruments
 
 Load when:
@@ -166,7 +166,7 @@ Where a strategy's orders go: the ExecutionAdapter protocol, requests and execut
 Name: `raptorbt-execution`  
 Path: [execution/SKILL.md](execution/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-orders
 
 Load when:
@@ -183,7 +183,7 @@ The account a strategy trades against: positions, cash, equity and free capital,
 Name: `raptorbt-portfolio`  
 Path: [portfolio/SKILL.md](portfolio/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-instruments
 
 Load when:
@@ -199,7 +199,7 @@ Risk limits, kill switches, margin models and position sizing helpers: what refu
 Name: `raptorbt-risk`  
 Path: [risk/SKILL.md](risk/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-portfolio
 
 Load when:
@@ -215,7 +215,7 @@ Historical simulation: choosing a runner, configuring fills, fees, slippage and 
 Name: `raptorbt-backtesting`  
 Path: [backtesting/SKILL.md](backtesting/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-instruments
 
 Load when:
@@ -231,7 +231,7 @@ Parameter sweeps, batch runs and Monte Carlo validation.
 Name: `raptorbt-optimization`  
 Path: [optimization/SKILL.md](optimization/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-backtesting, raptorbt-results
 
 Load when:
@@ -247,7 +247,7 @@ Running strategies on a pushed feed with LiveNode: arrival times, warm-up, adopt
 Name: `raptorbt-live-trading`  
 Path: [live-trading/SKILL.md](live-trading/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-market-data, raptorbt-risk, raptorbt-execution
 
 Load when:
@@ -265,7 +265,7 @@ Performance analysis, trades and diagnostics.
 Name: `raptorbt-results`  
 Path: [results/SKILL.md](results/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core
 
 Load when:
@@ -281,7 +281,7 @@ What a host must provide and decide to run a validated strategy for real: admitt
 Name: `raptorbt-deployment`  
 Path: [deployment/SKILL.md](deployment/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core, raptorbt-strategy, raptorbt-live-trading, raptorbt-execution, raptorbt-risk
 
 Load when:
@@ -299,7 +299,7 @@ Structured errors by symptom: how to read a RaptorBT error, the codes a run, an 
 Name: `raptorbt-troubleshooting`  
 Path: [troubleshooting/SKILL.md](troubleshooting/SKILL.md)  
 Status: stable  
-API version: 2.x  
+API version: 1.x  
 Depends on: raptorbt-core
 
 Load when:

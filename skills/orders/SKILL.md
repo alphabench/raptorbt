@@ -5,7 +5,7 @@ description: >
     time in force, brackets, OCO links, modify and cancel, option structures,
     and the reasons an order is refused.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-strategy

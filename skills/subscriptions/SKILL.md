@@ -3,7 +3,7 @@ name: raptorbt-subscriptions
 description: >
     Declaring which streams and bar histories a strategy receives.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-strategy

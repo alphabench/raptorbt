@@ -3,7 +3,7 @@ name: raptorbt-indicators
 description: >
     Built-in vectorised and streaming indicators.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-strategy

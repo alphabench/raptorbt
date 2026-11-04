@@ -473,7 +473,7 @@ def validate(root: Path, strict: bool = False, timeout: float = 60.0) -> Report:
         if s["status"] not in STATUSES:
             rep.err(label, f"status must be one of {STATUSES}")
         if not re.fullmatch(r"\d+\.x", s["api_version"]):
-            rep.err(label, "api_version must look like '2.x'")
+            rep.err(label, "api_version must look like '1.x'")
         for k in ("load_when", "depends_on", "modules"):
             if not isinstance(s[k], list) or not all(isinstance(x, str) for x in s[k]):
                 rep.err(label, f"{k} must be a list of strings")

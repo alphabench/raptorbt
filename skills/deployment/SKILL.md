@@ -7,7 +7,7 @@ description: >
     and an epoch, supervising it, recovering it, and what to verify before real
     money.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-strategy
@@ -98,7 +98,7 @@ already in flight and does not stop a process that never asks. Where the venue
 cannot enforce an epoch, your orchestrator must guarantee a single writer.
 
 **Versions.** The installed engine version is `importlib.metadata.version("raptorbt")`; a skill's
-`api_version` is its major (`2.x`). On `import raptorbt` a daemon thread may ask
+`api_version` is its major (`1.x`). On `import raptorbt` a daemon thread may ask
 pypi.org, at most once a day, whether a newer release exists and log one line.
 It never blocks and never changes behaviour; set `RAPTORBT_NO_VERSION_CHECK=1`
 to open no socket (CI is skipped automatically). Pin the engine version in the

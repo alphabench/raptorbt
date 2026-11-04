@@ -4,7 +4,7 @@ description: >
     Risk limits, kill switches, margin models and position sizing helpers:
     what refuses an order, what halts a strategy, and how many lots to trade.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-portfolio

@@ -5,7 +5,7 @@ description: >
     capital, netting and hedging, margin accounts, shared account groups,
     booked fixed-point money, and portfolio construction math.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
     - raptorbt-strategy

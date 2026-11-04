@@ -3,7 +3,7 @@ name: raptorbt-results
 description: >
     Performance analysis, trades and diagnostics.
 version: 1.0
-api_version: 2.x
+api_version: 1.x
 depends_on:
     - raptorbt-core
 status: stable
