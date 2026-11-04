@@ -314,6 +314,10 @@ impl ExecutionAdapter for JournalingAdapter {
         self.check_fence()
     }
 
+    fn resting_exits_hold_the_line(&self) -> bool {
+        self.inner.resting_exits_hold_the_line()
+    }
+
     fn as_simulation(&mut self) -> Option<&mut PaperVenue> {
         self.inner.as_simulation()
     }

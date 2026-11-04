@@ -881,6 +881,30 @@ impl PortfolioBook {
         })
     }
 
+    /// Whether the bar `entry` carries has resting work to meet ahead of the strategy's
+    /// decision ([`PortfolioBook::rest_bar`]): a bar, on a book with no halt waiting to take
+    /// effect first, whose instrument holds a position or has an order resting.
+    pub fn can_rest(&self, entry: &ScheduleEntry) -> bool {
+        matches!(entry.data, ScheduleData::Bar(_))
+            && self.pending_halt.is_none()
+            && self.kernels[entry.instrument].has_rest_work()
+    }
+
+    /// Meet what rests for the bar `entry` carries before the strategy has decided on it: the
+    /// position's stop and target, the square-off, the margin check and the orders committed on
+    /// earlier bars match the bar's range, as they do at a venue while the bar forms. The events
+    /// are returned for the strategy to hear before `on_bar`; the book's bookkeeping of the bar
+    /// (the mark, the equity sample, the account's limits) stays with [`PortfolioBook::apply`],
+    /// which carries on from here with the decisions of the bar. Only for an entry
+    /// [`PortfolioBook::can_rest`] allows; the lifecycle of the instant and the open have run
+    /// first.
+    pub fn rest_bar(&mut self, entry: &ScheduleEntry) -> Vec<EngineEvent> {
+        let ScheduleData::Bar(bar) = entry.data else { return Vec::new() };
+        self.lent_step(entry.instrument, entry.timestamp(), |kernel| {
+            kernel.step_rest(entry.local_idx, &bar)
+        })
+    }
+
     /// [`PortfolioBook::apply`] for the commonest book: one instrument on a
     /// cash account with no portfolio-wide limit, no option margin groups, no
     /// expiry, no corporate action and no group, fed a bar. Every step the

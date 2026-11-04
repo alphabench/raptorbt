@@ -85,8 +85,6 @@ struct Ledger {
     held_exits: std::collections::HashSet<(usize, usize)>,
     /// Exits of hedge legs the engine holds until the sold legs of their group are closed.
     covers: Vec<HeldCover>,
-    /// Sold legs a cover has sent a close for: `(strategy, local instrument, position id)`.
-    cover_sent: std::collections::HashSet<(usize, usize, u64)>,
 }
 
 /// The exit of a hedge leg waiting for the sold legs of its group to close.
@@ -130,6 +128,9 @@ pub(super) struct VenueRoute {
     adapter: RefCell<Box<dyn ExecutionAdapter>>,
     /// The adapter simulates an exchange that advances with the market.
     simulated: bool,
+    /// A protective order resting at the venue counts against the position: an order that closes
+    /// it is refused until the protection is taken off (the adapter says so).
+    exits_hold_line: bool,
     account_id: Option<String>,
     /// An exception a Python adapter raised that is not a refusal, kept to
     /// be re-raised as it was.
@@ -174,9 +175,11 @@ impl VenueRoute {
         protective_local: bool,
     ) -> Self {
         let simulated = adapter.as_simulation().is_some();
+        let exits_hold_line = !simulated && adapter.resting_exits_hold_the_line();
         Self {
             adapter: RefCell::new(adapter),
             simulated,
+            exits_hold_line,
             account_id,
             raised,
             ledger: RefCell::new(Ledger {
@@ -275,18 +278,47 @@ impl VenueRoute {
         }
     }
 
-    /// [`Self::note_ended`] when the order has reached a final state.
-    fn note_if_ended(&self, sh: &Shared, sid: StrategyId, local: usize, order_id: u64) {
+    /// [`Self::note_ended`] when the order has reached a final state. A close that ended without
+    /// closing, on a venue where the protection was taken off to send it, leaves the position
+    /// with only the levels the engine watches: that is journaled as `unprotected`.
+    fn note_if_ended(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        order_id: u64,
+    ) -> PyResult<()> {
         let ended = sh
             .with_book(sid, |b, _| {
-                Ok(b.kernel(local).order(order_id).is_some_and(|o| o.status.is_terminal()))
+                Ok(b.kernel(local)
+                    .order(order_id)
+                    .filter(|o| o.status.is_terminal())
+                    .map(|o| (o.status, o.reduce_only, o.client_id.clone())))
             })
-            .unwrap_or(false);
-        if ended {
-            if let Some(venue_id) = self.venue_id_of(sid, local, order_id) {
-                self.note_ended(&venue_id);
-            }
+            .unwrap_or(None);
+        let Some((status, reduce_only, client)) = ended else { return Ok(()) };
+        if let Some(venue_id) = self.venue_id_of(sid, local, order_id) {
+            self.note_ended(&venue_id);
         }
+        let unfilled = !matches!(status, OrderStatus::Filled);
+        if self.exits_hold_line && reduce_only && unfilled && client.starts_with("close-") {
+            let watched = self
+                .ledger
+                .borrow()
+                .watchers
+                .iter()
+                .any(|w| w.sid == sid.index() && w.local == local);
+            sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, None, || {
+                JV::map([
+                    ("strategy", JV::Int(sid.index() as i64)),
+                    ("reason", JV::str("unprotected")),
+                    ("close", JV::str(client.as_str())),
+                    ("levels_watched", JV::Bool(watched)),
+                    ("venue", JV::Bool(true)),
+                ])
+            })?;
+        }
+        Ok(())
     }
 
     // -- requests --------------------------------------------------------
@@ -587,6 +619,27 @@ impl VenueRoute {
                 return Ok(order_id);
             }
         }
+        // Where a resting protective order counts against the position, an order that reduces it
+        // would be refused: the protection is taken off first (its cancel is sent ahead of this
+        // order) and its levels are watched by the engine for what remains, and for the whole
+        // position should this order not close it.
+        if self.exits_hold_line
+            && spec.reduce_only
+            && matches!(parsed.kind, crate::execution::orders::OrderKind::Market)
+        {
+            let held = sh.with_book(sid, |b, _| {
+                let k = b.kernel(local);
+                Ok(k.position_snapshots()
+                    .into_iter()
+                    .find(|p| spec.position_id.is_none_or(|id| id == p.position_id))
+                    .map(|p| (p.position_id, p.size, k.is_hedging())))
+            })?;
+            if let Some((position_id, size, hedging)) = held {
+                let left = if units < size { size - units } else { size };
+                let named = if hedging { Some(position_id) } else { None };
+                self.take_levels(sh, sid, local, position_id, parsed.side, left, named, sub_idx)?;
+            }
+        }
         let mut tags = spec.tags.clone();
         // The follow-up mark tells the simulated venue which bar an answer to a fill meets; a
         // real broker decides its own timing and is not sent the engine's internal tag.
@@ -716,8 +769,7 @@ impl VenueRoute {
             book.kernel_mut(local).pending_events.extend(events);
             Ok(())
         })?;
-        self.note_if_ended(sh, sid, local, order_id);
-        Ok(())
+        self.note_if_ended(sh, sid, local, order_id)
     }
 
     /// Ask the venue to cancel an order it works.
@@ -808,7 +860,12 @@ impl VenueRoute {
         sh.with_book_mut(sid, |b, _| Ok(b.request_venue_replace(local, order_id)))?
             .map_err(venue_err)?;
         let ts = self.placed(&venue_id).map_or(0, |p| p.request.submitted_ns);
-        let change = OrderChange { quantity: units, limit_price, trigger_price };
+        let change = OrderChange {
+            quantity: units,
+            limit_price,
+            trigger_price,
+            decided_close: sh.decided_close(sid, local),
+        };
         let sent = self.adapter.borrow_mut().modify(&venue_id, &change);
         match sent {
             Ok(()) => Ok(()),
@@ -1056,6 +1113,41 @@ impl VenueRoute {
         Ok((!out.is_empty()).then_some(out))
     }
 
+    /// A simulated venue's turn while the bar forms, before the strategy has decided on it: its
+    /// stops, targets and resting orders trade the bar's range and the venue reports it.
+    /// [`VenueRoute::poll_step`] carries on with the decisions of the bar. `None` when there is
+    /// nothing to report.
+    pub(super) fn poll_rest(
+        &self,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        local: usize,
+    ) -> PyResult<Option<VenueReports>> {
+        if !self.simulated {
+            return Ok(None);
+        }
+        let entry = match &*sh.inner.borrow() {
+            Inner::Running(c) => {
+                let cur = c.current().ok_or_else(finished)?;
+                ScheduleEntry {
+                    instrument: local,
+                    local_idx: ev.event.local_idx as usize,
+                    data: cur.data,
+                }
+            }
+            _ => return Err(finished()),
+        };
+        let mut out = Vec::new();
+        let mut adapter = self.adapter.borrow_mut();
+        let venue = adapter.as_simulation().expect("checked when the route was built");
+        venue.on_rest(st.sid.index(), &entry, &mut out).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("internal error (paper venue): {e}"))
+        })?;
+        out.extend(venue.take_same_event());
+        Ok((!out.is_empty()).then_some(out))
+    }
+
     /// Book what the venue reported for the event now, keeping the events for the hooks:
     /// [`VenueRoute::hear_held`] tells the strategy once the whole round is matched.
     pub(super) fn poll_book(
@@ -1223,7 +1315,7 @@ impl VenueRoute {
             }
         }
         self.after_booking(sh, st.sid, placed.local, idx, ts)?;
-        self.note_if_ended(sh, st.sid, placed.local, placed.order_id);
+        self.note_if_ended(sh, st.sid, placed.local, placed.order_id)?;
         if !events.is_empty() && self.hold.get() {
             self.held.borrow_mut().push((placed.local, events));
         } else if !events.is_empty() {
@@ -1526,7 +1618,7 @@ impl VenueRoute {
         let sold = sh.with_book(sid, |b, _| Ok(b.sold_legs_left_bare(local, position_id)))?;
         let legs: Vec<(usize, u64)> = sold.iter().map(|&(j, id, _)| (j, id)).collect();
         for (j, id, size) in sold {
-            if !self.ledger.borrow_mut().cover_sent.insert((sid.index(), j, id)) {
+            if self.close_working(sh, sid, j, id)? {
                 continue;
             }
             let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(j).is_hedging()))?;
@@ -1587,24 +1679,6 @@ impl VenueRoute {
                 self.close(sh, sid, cover.local, idx, ts, cover.position_id, follow_up)?;
             }
         }
-        // A sold leg that has closed no longer waits on its close.
-        let live: Vec<(usize, usize, u64)> = {
-            let sent: Vec<_> = self.ledger.borrow().cover_sent.iter().copied().collect();
-            let mut live = Vec::new();
-            for (s, l, p) in sent {
-                if s != sid.index() {
-                    continue;
-                }
-                let held = sh.with_book(sid, |b, _| {
-                    Ok(b.kernel(l).position_snapshots().iter().any(|x| x.position_id == p))
-                })?;
-                if held {
-                    live.push((s, l, p));
-                }
-            }
-            live
-        };
-        self.ledger.borrow_mut().cover_sent.retain(|k| k.0 != sid.index() || live.contains(k));
         Ok(())
     }
 
@@ -1652,7 +1726,7 @@ impl VenueRoute {
                     && w.position_id == named
             });
             if needed && !watched {
-                self.take_levels(sh, sid, m, position_id, size, named, idx)?;
+                self.take_levels(sh, sid, m, position_id, OrderSide::Sell, size, named, idx)?;
             } else if !needed && watched {
                 let watch = {
                     let mut ledger = self.ledger.borrow_mut();
@@ -1673,6 +1747,7 @@ impl VenueRoute {
                         target: w.target,
                         trail: w.trail.map(|t| t.entry * t.fraction),
                         position_id,
+                        amend: false,
                     };
                     self.protect(sh, sid, m, &request, idx, ts)?;
                 }
@@ -1690,6 +1765,7 @@ impl VenueRoute {
         sid: StrategyId,
         local: usize,
         position_id: u64,
+        exit: OrderSide,
         size: f64,
         named: Option<u64>,
         idx: usize,
@@ -1717,7 +1793,7 @@ impl VenueRoute {
         let mut watch = Watch {
             sid: sid.index(),
             local,
-            exit: OrderSide::Sell,
+            exit,
             qty: size,
             stop: None,
             target: None,
@@ -1782,6 +1858,7 @@ impl VenueRoute {
             self.protect(sh, sid, local, r, idx, ts)?;
         }
         self.resize_protection(sh, sid, local, idx)?;
+        self.extend_protection(sh, sid, local, idx, ts, &requests)?;
         // Under hedging a position's protection ends with that position, while others stay
         // open: cancel the protective orders (and drop the watched levels) of positions that
         // are gone, so none is left to be refused for a position it names.
@@ -1852,6 +1929,139 @@ impl VenueRoute {
         Ok(())
     }
 
+    /// Where resting protection counts against the line, an add is protected by orders of its
+    /// own: what the position holds beyond what its resting stop and target cover gets a stop and
+    /// a target of the same levels. (The venue sizes a leg to the order it hangs on, so a leg is
+    /// never grown to take in an add.) Only a netting position: under hedging an add is a
+    /// position with its own protection.
+    fn extend_protection(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+        ts: i64,
+        requests: &[crate::portfolio::kernel::ProtectRequest],
+    ) -> PyResult<()> {
+        if !self.exits_hold_line || self.protective_local {
+            return Ok(());
+        }
+        // (direction, size) of the position, the levels and the quantity covered by each
+        type Cover = (crate::core::types::Direction, f64, Option<(f64, f64)>, Option<(f64, f64)>);
+        let cover: Option<Cover> = sh.with_book(sid, |b, _| {
+            let k = b.kernel(local);
+            if k.is_hedging() {
+                return Ok(None);
+            }
+            let Some(p) = k.position_snapshots().into_iter().next() else { return Ok(None) };
+            let mut stop: Option<(f64, f64)> = None;
+            let mut target: Option<(f64, f64)> = None;
+            for o in k.open_orders() {
+                if !o.client_id.starts_with("prot-")
+                    || !o.reduce_only
+                    || matches!(o.status, OrderStatus::PendingCancel)
+                {
+                    continue;
+                }
+                let crate::execution::orders::QtySpec::Units(q) = o.qty else { continue };
+                let left = (q - o.filled_qty).max(0.0);
+                match o.kind {
+                    crate::execution::orders::OrderKind::StopMarket { trigger } => {
+                        stop = Some((trigger, stop.map_or(0.0, |s| s.1) + left));
+                    }
+                    crate::execution::orders::OrderKind::Limit { price } => {
+                        target = Some((price, target.map_or(0.0, |s| s.1) + left));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Some((p.direction, p.size, stop, target)))
+        })?;
+        let Some((direction, size, stop, target)) = cover else { return Ok(()) };
+        let exit = if direction == crate::core::types::Direction::Long {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        // A level an add just moved is still on the old order until the venue acknowledges the
+        // change: the bare quantity is placed at the level the add named.
+        let named = |stop: bool| {
+            requests
+                .iter()
+                .rev()
+                .filter(|r| r.amend)
+                .find_map(|r| if stop { r.stop } else { r.target })
+        };
+        let mut ids = Vec::new();
+        for (level, covered, is_stop) in [(stop, true), (target, false)]
+            .into_iter()
+            .filter_map(|(l, k)| l.map(|(level, covered)| (named(k).unwrap_or(level), covered, k)))
+        {
+            let bare = size - covered;
+            if bare <= 1e-9 {
+                continue;
+            }
+            if let Some(id) =
+                self.place_leg(sh, sid, local, idx, ts, exit, is_stop, bare, level, None)?
+            {
+                ids.push(id);
+            }
+        }
+        if ids.len() == 2 {
+            self.link_oco(sid, local, &ids)?;
+        }
+        Ok(())
+    }
+
+    /// Send one reduce-only protective leg of `qty` at `level`; the id of the order when the venue
+    /// holds it. A venue that cannot hold it leaves the level to the engine, which watches it.
+    #[allow(clippy::too_many_arguments)]
+    fn place_leg(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+        ts: i64,
+        exit: OrderSide,
+        is_stop: bool,
+        qty: f64,
+        level: f64,
+        position_id: Option<u64>,
+    ) -> PyResult<Option<u64>> {
+        let mut spec =
+            Self::spec(exit, if is_stop { "stop_market" } else { "limit" }, Some(qty), true);
+        if is_stop {
+            spec.trigger_price = Some(level);
+        } else {
+            spec.limit_price = Some(level);
+        }
+        spec.position_id = position_id;
+        let n = self.next_prot(sid);
+        self.unsupported_sent.set(false);
+        let id = self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
+        if !self.unsupported_sent.replace(false) {
+            return Ok(Some(id));
+        }
+        let mut watch = Watch {
+            sid: sid.index(),
+            local,
+            exit,
+            qty,
+            stop: None,
+            target: None,
+            position_id,
+            trail: None,
+        };
+        if is_stop {
+            watch.stop = Some(level);
+        } else {
+            watch.target = Some(level);
+        }
+        self.ledger.borrow_mut().watchers.push(watch);
+        Ok(None)
+    }
+
     /// The protective orders and watched levels cover what the position holds now. An add or a
     /// partial close changes the size after they were placed for it; left at the placement size
     /// an add is half protected, and the stop of a position part closed is oversized.
@@ -1862,22 +2072,29 @@ impl VenueRoute {
         local: usize,
         idx: usize,
     ) -> PyResult<()> {
-        // (order id, position it names, its quantity) and (position id, size, whether hedging)
-        type Held = (Vec<(u64, Option<u64>, f64)>, Vec<(u64, f64)>, bool);
+        // (order id, position it names, its quantity, what it has filled) and (position id, size,
+        // whether hedging)
+        type Held = (Vec<(u64, Option<u64>, f64, f64)>, Vec<(u64, f64)>, bool);
         let (orders, positions, hedging): Held = sh.with_book(sid, |b, _| {
             let k = b.kernel(local);
             let orders = k
                 .open_orders()
                 .iter()
                 .filter(|o| {
+                    // An order the venue has not accepted cannot be changed yet; its
+                    // acceptance is booked through here again.
                     o.client_id.starts_with("prot-")
                         && !matches!(
                             o.status,
-                            OrderStatus::PendingCancel | OrderStatus::PendingReplace
+                            OrderStatus::Submitted
+                                | OrderStatus::PendingCancel
+                                | OrderStatus::PendingReplace
                         )
                 })
                 .filter_map(|o| match o.qty {
-                    crate::execution::orders::QtySpec::Units(q) => Some((o.id, o.position_id, q)),
+                    crate::execution::orders::QtySpec::Units(q) => {
+                        Some((o.id, o.position_id, q, o.filled_qty))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1891,21 +2108,302 @@ impl VenueRoute {
                 _ => Some(positions.iter().map(|p| p.1).sum()).filter(|n: &f64| *n > 0.0),
             }
         };
-        for (order_id, named, qty) in orders {
-            if let Some(size) = held(named) {
-                if (qty - size).abs() > 1e-9 {
-                    self.modify(sh, sid, local, idx, order_id, Some(size), None, None, None)?;
+        // Where resting protection counts against the line, the legs of a kind (stops, targets)
+        // that rest for one position must not add up to more than it holds: each leg judged
+        // alone against the whole position (the loop below) lets a part sale after an add leave
+        // legs of 10 and 10 on a position of 15, and a gap through them sells 20. The newest
+        // legs shrink first; one left with nothing is cancelled.
+        if self.exits_hold_line {
+            // (order id, position it names, stop or target, what it has left, whether the venue
+            // takes a change now)
+            let legs: Vec<(u64, Option<u64>, bool, f64, f64, bool)> =
+                sh.with_book(sid, |b, _| {
+                    Ok(b.kernel(local)
+                        .open_orders()
+                        .iter()
+                        .filter(|o| {
+                            o.client_id.starts_with("prot-")
+                                && o.status != OrderStatus::PendingCancel
+                        })
+                        .filter_map(|o| {
+                            let crate::execution::orders::QtySpec::Units(q) = o.qty else {
+                                return None;
+                            };
+                            let stop = match o.kind {
+                                crate::execution::orders::OrderKind::StopMarket { .. } => true,
+                                crate::execution::orders::OrderKind::Limit { .. } => false,
+                                _ => return None,
+                            };
+                            let changeable = !matches!(
+                                o.status,
+                                OrderStatus::Submitted | OrderStatus::PendingReplace
+                            );
+                            Some((
+                                o.id,
+                                o.position_id,
+                                stop,
+                                (q - o.filled_qty).max(0.0),
+                                o.filled_qty,
+                                changeable,
+                            ))
+                        })
+                        .collect())
+                })?;
+            let mut groups: Vec<(bool, Option<u64>)> = Vec::new();
+            for l in &legs {
+                let key = (l.2, if hedging { l.1 } else { None });
+                if !groups.contains(&key) {
+                    groups.push(key);
+                }
+            }
+            for (stop, named) in groups {
+                let Some(size) = held(named) else { continue };
+                let mut group: Vec<_> =
+                    legs.iter().filter(|l| l.2 == stop && (!hedging || l.1 == named)).collect();
+                let mut excess = group.iter().map(|l| l.3).sum::<f64>() - size;
+                group.sort_by_key(|l| std::cmp::Reverse(l.0));
+                for (order_id, _, _, left, filled, changeable) in group.into_iter().copied() {
+                    if excess <= 1e-9 {
+                        break;
+                    }
+                    if !changeable {
+                        continue;
+                    }
+                    let cut = left.min(excess);
+                    excess -= cut;
+                    if left - cut <= 1e-9 {
+                        self.cancel(sh, sid, local, idx, order_id)?;
+                    } else {
+                        self.modify(
+                            sh,
+                            sid,
+                            local,
+                            idx,
+                            order_id,
+                            Some(left - cut + filled),
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
                 }
             }
         }
+        for (order_id, named, qty, filled) in orders {
+            if let Some(size) = held(named) {
+                // An order's quantity is its total, what it has filled included: it has `qty -
+                // filled` left to sell, and to leave `size` the total is `size + filled`.
+                let left = qty - filled;
+                // Where resting protection counts against the line, an add is covered by orders
+                // of its own (`extend_protection`); a leg is never grown to the whole position.
+                // A leg bigger than the position is cut above, with the legs beside it.
+                if (left - size).abs() > 1e-9 && !self.exits_hold_line {
+                    self.modify(
+                        sh,
+                        sid,
+                        local,
+                        idx,
+                        order_id,
+                        Some(size + filled),
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+            }
+        }
+        // Where resting protection counts against the line, a venue leg holds part of the
+        // position and the engine's watcher the rest: its quantity is the bare part, or its
+        // close would be larger than the part it covers. (position it names, stop or target,
+        // what it has left to close), for every leg the venue still holds.
+        let legs: Vec<(Option<u64>, bool, f64)> = if self.exits_hold_line {
+            sh.with_book(sid, |b, _| {
+                Ok(b.kernel(local)
+                    .open_orders()
+                    .iter()
+                    .filter(|o| {
+                        o.client_id.starts_with("prot-") && o.status != OrderStatus::PendingCancel
+                    })
+                    .filter_map(|o| {
+                        let crate::execution::orders::QtySpec::Units(q) = o.qty else {
+                            return None;
+                        };
+                        match o.kind {
+                            crate::execution::orders::OrderKind::StopMarket { .. } => {
+                                Some((o.position_id, true, (q - o.filled_qty).max(0.0)))
+                            }
+                            crate::execution::orders::OrderKind::Limit { .. } => {
+                                Some((o.position_id, false, (q - o.filled_qty).max(0.0)))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect())
+            })?
+        } else {
+            Vec::new()
+        };
+        let covered = |named: Option<u64>, stop: bool| -> f64 {
+            legs.iter()
+                .filter(|l| l.1 == stop && (!hedging || l.0.is_none() || l.0 == named))
+                .map(|l| l.2)
+                .sum()
+        };
         for w in self.ledger.borrow_mut().watchers.iter_mut() {
             if w.sid == sid.index() && w.local == local {
                 if let Some(size) = held(w.position_id) {
-                    w.qty = size;
+                    w.qty = if self.exits_hold_line {
+                        // A watcher of both levels covers what is bare of either.
+                        let bare_of = |stop: bool| (size - covered(w.position_id, stop)).max(0.0);
+                        match (w.stop.is_some(), w.target.is_some()) {
+                            (true, true) => bare_of(true).max(bare_of(false)),
+                            (true, false) => bare_of(true),
+                            _ => bare_of(false),
+                        }
+                    } else {
+                        size
+                    };
                 }
             }
         }
+        if self.exits_hold_line {
+            // A watcher with nothing bare left is covered whole by the venue's legs.
+            self.ledger
+                .borrow_mut()
+                .watchers
+                .retain(|w| !(w.sid == sid.index() && w.local == local && w.qty <= 1e-9));
+        }
         Ok(())
+    }
+
+    /// Move the stop (or target) a position already has to `level`. `false` when it has none,
+    /// held or watched.
+    ///
+    /// Where resting protection counts against the line, a position's cover is several legs (an
+    /// add gets legs of its own, `extend_protection`) and the level moves on every one of them,
+    /// each keeping its size. Elsewhere the one leg is also resized to `size`, the whole position.
+    /// A leg the venue has not accepted cannot be changed: it is cancelled and sent again at the
+    /// new level for the same quantity.
+    #[allow(clippy::too_many_arguments)]
+    fn amend_level(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        position_id: Option<u64>,
+        stop: bool,
+        level: f64,
+        size: f64,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<bool> {
+        // (order id, what it has left to close, whether the venue has accepted it)
+        let mut legs: Vec<(u64, f64, bool)> = sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local)
+                .open_orders()
+                .iter()
+                .filter(|o| {
+                    o.client_id.starts_with("prot-")
+                        && !matches!(
+                            o.status,
+                            OrderStatus::PendingCancel | OrderStatus::PendingReplace
+                        )
+                        && position_id.is_none_or(|p| o.position_id.is_none_or(|q| q == p))
+                        && match o.kind {
+                            crate::execution::orders::OrderKind::StopMarket { .. } => stop,
+                            crate::execution::orders::OrderKind::Limit { .. } => !stop,
+                            _ => false,
+                        }
+                })
+                .map(|o| {
+                    let left = match o.qty {
+                        crate::execution::orders::QtySpec::Units(q) => (q - o.filled_qty).max(0.0),
+                        _ => 0.0,
+                    };
+                    (o.id, left, o.status != OrderStatus::Submitted)
+                })
+                .collect())
+        })?;
+        if !self.exits_hold_line {
+            legs.truncate(1);
+        }
+        let mut moved = !legs.is_empty();
+        let (limit, trigger) = if stop { (None, Some(level)) } else { (Some(level), None) };
+        let exit = if sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local).position_snapshots().first().map(|p| p.direction))
+        })? == Some(crate::core::types::Direction::Short)
+        {
+            OrderSide::Buy
+        } else {
+            OrderSide::Sell
+        };
+        let mut replaced: Vec<(u64, f64)> = Vec::new();
+        for (order_id, left, accepted) in legs {
+            let held = if self.exits_hold_line { left } else { size };
+            if accepted {
+                let units = if self.exits_hold_line { None } else { Some(size) };
+                self.modify(sh, sid, local, idx, order_id, units, None, limit, trigger)?;
+            } else {
+                self.cancel(sh, sid, local, idx, order_id)?;
+                if let Some(id) =
+                    self.place_leg(sh, sid, local, idx, ts, exit, stop, held, level, position_id)?
+                {
+                    replaced.push((id, held));
+                }
+            }
+        }
+        // The leg that was cancelled was one of a stop and target that cancel each other: the new
+        // one is linked to the other half when that is the one leg of its size on the other side.
+        for (id, qty) in replaced {
+            let partners: Vec<u64> = sh.with_book(sid, |b, _| {
+                Ok(b.kernel(local)
+                    .open_orders()
+                    .iter()
+                    .filter(|o| {
+                        o.client_id.starts_with("prot-")
+                            && o.id != id
+                            && o.status != OrderStatus::PendingCancel
+                            && position_id.is_none_or(|p| o.position_id.is_none_or(|q| q == p))
+                            && match o.kind {
+                                crate::execution::orders::OrderKind::StopMarket { .. } => !stop,
+                                crate::execution::orders::OrderKind::Limit { .. } => stop,
+                                _ => false,
+                            }
+                            && matches!(o.qty, crate::execution::orders::QtySpec::Units(q)
+                                if ((q - o.filled_qty) - qty).abs() < 1e-9)
+                    })
+                    .map(|o| o.id)
+                    .collect())
+            })?;
+            if let [partner] = partners[..] {
+                self.link_oco(sid, local, &[id, partner])?;
+            }
+        }
+        let mut ledger = self.ledger.borrow_mut();
+        for w in ledger.watchers.iter_mut().filter(|w| {
+            w.sid == sid.index()
+                && w.local == local
+                && w.position_id == position_id
+                && (if stop { w.stop.is_some() } else { w.target.is_some() })
+        }) {
+            if stop {
+                w.stop = Some(level);
+                w.trail = None;
+            } else {
+                w.target = Some(level);
+            }
+            if !self.exits_hold_line {
+                w.qty = size;
+            }
+            moved = true;
+        }
+        Ok(moved)
+    }
+
+    /// The trail a watched stop carries when the request asks for a trailing one.
+    fn trail_of(r: &crate::portfolio::kernel::ProtectRequest) -> Option<Trail> {
+        let trail = r.trail.filter(|_| r.entry_price > 0.0)?;
+        Some(Trail { fraction: trail / r.entry_price, entry: r.entry_price, high: r.entry_price })
     }
 
     /// Place the stop and target a new position would have had in-process.
@@ -1938,6 +2436,23 @@ impl VenueRoute {
         };
         for (level, kind) in [(r.stop, "stop"), (r.target, "target")] {
             let Some(level) = level else { continue };
+            // An add that names a level moves the one the position already has, held by the
+            // venue or watched by the engine; it places one only where there is none.
+            if r.amend
+                && self.amend_level(
+                    sh,
+                    sid,
+                    local,
+                    position_id,
+                    kind == "stop",
+                    level,
+                    r.size,
+                    idx,
+                    ts,
+                )?
+            {
+                continue;
+            }
             // The level of a hedge leg whose close would leave a sold leg bare is the engine's
             // whatever the venue could hold: it closes the sold legs left bare first, which a
             // resting order at the venue could not. Any other level is an ordinary resting order
@@ -1949,13 +2464,7 @@ impl VenueRoute {
             if self.protective_local || engine_holds {
                 if kind == "stop" {
                     watch.stop = Some(level);
-                    if let Some(trail) = r.trail.filter(|_| r.entry_price > 0.0) {
-                        watch.trail = Some(Trail {
-                            fraction: trail / r.entry_price,
-                            entry: r.entry_price,
-                            high: r.entry_price,
-                        });
-                    }
+                    watch.trail = Self::trail_of(r);
                 } else {
                     watch.target = Some(level)
                 }
@@ -1990,9 +2499,11 @@ impl VenueRoute {
             self.unsupported_sent.set(false);
             let id = self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
             if self.unsupported_sent.replace(false) {
-                // The venue cannot hold this leg: the engine watches it.
+                // The venue cannot hold this leg: the engine watches it, a trailing stop as a
+                // trailing one.
                 if kind == "stop" {
-                    watch.stop = Some(level)
+                    watch.stop = Some(level);
+                    watch.trail = Self::trail_of(r);
                 } else {
                     watch.target = Some(level)
                 }
@@ -2080,6 +2591,26 @@ impl VenueRoute {
         Ok(())
     }
 
+    /// Whether a reduce-only market order that closes the position (a `close-` or a `prot-`
+    /// answer) is working on it: sent and not ended.
+    fn close_working(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        position_id: u64,
+    ) -> PyResult<bool> {
+        sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local).open_orders().iter().any(|o| {
+                o.is_venue_driven()
+                    && o.reduce_only
+                    && matches!(o.kind, crate::execution::orders::OrderKind::Market)
+                    && (o.client_id.starts_with("close-") || o.client_id.starts_with("prot-"))
+                    && o.position_id.is_none_or(|p| p == position_id)
+            }))
+        })
+    }
+
     /// Close every position of the strategy with orders. A hedge leg whose close would leave a
     /// sold leg of its margin group without cover goes through [`VenueRoute::cover_hedge`]: the
     /// sold legs are closed first and the hedge once they are, so a flatten never sends a
@@ -2109,9 +2640,9 @@ impl VenueRoute {
             }
         }
         for (local, idx, id) in held {
-            // A hedge waits on its cover; a leg already sent a close (by a cover, or by the
-            // flatten of another instrument's square-off) is not closed twice. A close sent here
-            // is noted as the covers note theirs, so a later cover does not send it again.
+            // A hedge waits on its cover; a leg that already has a close working (sent by a cover,
+            // or by the flatten of another instrument's square-off) is not closed twice. A close
+            // the venue refused is no longer working: the next flatten sends it again.
             let key = (sid.index(), local, id);
             let waiting = covered.contains(&(local, id))
                 || self
@@ -2120,7 +2651,7 @@ impl VenueRoute {
                     .covers
                     .iter()
                     .any(|c| (c.sid, c.local, c.position_id) == key);
-            if waiting || !self.ledger.borrow_mut().cover_sent.insert(key) {
+            if waiting || self.close_working(sh, sid, local, id)? {
                 continue;
             }
             self.close(sh, sid, local, idx, ts, id, false)?;

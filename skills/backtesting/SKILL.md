@@ -48,6 +48,13 @@ bar `i`'s close) or `next_bar_open` (decide at `i`'s close, fill at `i+1`'s
 open; a decision on the last bar never trades). `same_bar_open_lookahead` is
 the pre-0.11 behaviour and not causal.
 
+**Resting orders trade before you decide.** On every bar, the stops, targets, trailing and resting
+orders you placed on earlier bars trade the bar's range first, and `on_bar` then decides on the
+position that is left, as it would live. A stop touched in the bar is no longer a position in
+`on_bar`. Orders placed in `on_bar` never trade inside the same bar. A stop the bar gaps through
+fills at the open and is answered at that open; any other intra-bar fill is answered at your fill
+timing (this close, or the next open).
+
 **The marketable-limit rule.** A limit order that is already marketable fills
 at the market, the next bar's open, never at its own limit price, under either
 fill timing. A resting limit touched inside a bar fills at its limit; a gap

@@ -442,6 +442,7 @@ def _run_group(
     corporate_actions=(),
     adjustment_policy=None,
     order_check=None,
+    order_check_scope="all",
     host=None,
     trade_from=None,
 ):
@@ -477,7 +478,7 @@ def _run_group(
     )
     setups: list[tuple[Any, int, Any]] = []
     try:
-        order_check_mod.install(rt, order_check, "run_strategies")
+        order_check_mod.install(rt, order_check, "run_strategies", order_check_scope)
         if trade_from is not None:
             rt.set_trade_from(trade_from)
         if primary_bars is not None:
@@ -632,6 +633,7 @@ def run_strategies(
     corporate_actions: Iterable[CorporateAction] | None = None,
     adjustment_policy: Literal["raw", "adjusted"] | None = None,
     order_check=None,
+    order_check_scope: Literal["all", "typed"] = "all",
     bindings: dict[str, str | Sequence[str]] | None = None,
     trade_from: int | None = None,
     _via: str | None = None,
@@ -743,7 +745,11 @@ def run_strategies(
 
     ``order_check`` is the host's pre-submit order check, shared with
     :class:`~raptorbt.LiveNode` so one rule refuses the same orders in a
-    backtest and live; see :mod:`raptorbt.strategy.order_check`.
+    backtest and live; see :mod:`raptorbt.strategy.order_check`. With a check installed,
+    ``enter()`` and ``close_position()`` are refused (``order_check_intent``), since they carry
+    no order to show it; ``order_check_scope="typed"`` declares that the check judges typed
+    orders only, and intents then pass unseen by it. Use it when the check judges forms an
+    intent cannot have (an order kind, a validity, ``post_only``).
 
     ``bindings`` maps a requirements role name to the symbol it means
     (``{"index": "NSE:NIFTY"}``), or, for a :class:`~raptorbt.strategy.requirements.Universe`
@@ -890,6 +896,7 @@ def run_strategies(
         corporate_actions=corporate_actions,
         adjustment_policy=adjustment_policy,
         order_check=order_check,
+        order_check_scope=order_check_scope,
         host=context_host.build(instruments, bindings, entries, universe, call),
         trade_from=trade_from,
     )

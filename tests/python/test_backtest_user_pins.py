@@ -496,7 +496,10 @@ def _hedged_run(mode, variant):
             if ctx.symbol != U:
                 return
             if ctx.idx == 3:
-                kw = dict(stop_price=0.01, target_price=0.6) if variant == "stop" else {}
+                # A level a rising-to-falling market reaches on bar 5, after the sold leg is held (sent
+                # on bar 4, filled at its close). A level the first bar examines (bar 4) trades while
+                # the bar forms, before the decision that sells the call, and finds no sold leg.
+                kw = dict(stop_price=5.7, target_price=9.0) if variant == "stop" else {}
                 self.submit_order(O.Market(side="buy", units=50.0, instrument=hedge, **kw), client_id="hedge")
             if ctx.idx == 4:
                 self.submit_order(O.Market(side="sell", units=50.0, instrument=sold), client_id="sold")
@@ -520,9 +523,9 @@ def _exits(r):
 @pytest.mark.parametrize("mode", ["batch", "node", "paper"])
 def test_a_forced_exit_of_a_hedge_closes_the_sold_leg_first(mode):
     exits = _exits(_hedged_run(mode, "stop"))
-    # the target on the hedge fires: the engine closes the sold call with an order, then the hedge
+    # the stop on the hedge fires: the engine closes the sold call with an order, then the hedge
     # with another (the same orders in every mode, not a local booking of the sold leg)
-    assert exits == [("100CE", "Order", 4), ("105CE", "Order", 4)], exits
+    assert exits == [("100CE", "Order", 5), ("105CE", "Order", 5)], exits
 
 
 @pytest.mark.parametrize("mode", ["batch", "node", "paper"])

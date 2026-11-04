@@ -476,6 +476,7 @@ impl RuntimeBuilder {
             current_depth: None,
             events: 0,
             group: Vec::new(),
+            carried: Vec::new(),
             selected: 0,
             spare: Vec::new(),
         })
@@ -637,6 +638,9 @@ pub struct RuntimeCore {
     /// The events of the timestamp group in flight, empty between groups. See
     /// [`RuntimeCore::begin_group`].
     group: Vec<GroupSlot>,
+    /// Lifecycle events of the current instant applied ahead of a bar's resting part
+    /// ([`RuntimeCore::rest_event`]) and not yet handed to the strategy's `begin_event`.
+    carried: Vec<(StrategyId, Vec<EngineEvent>)>,
     /// The slot of `group` that is current.
     selected: usize,
     /// Slots of finished groups, kept with their buffers for the next group.
@@ -1284,7 +1288,12 @@ impl RuntimeCore {
                 None => Vec::new(),
             });
         }
-        self.lifecycle_of_current(strategy)
+        let mut events = match self.carried.iter().position(|(sid, _)| *sid == strategy) {
+            Some(at) => self.carried.remove(at).1,
+            None => Vec::new(),
+        };
+        events.extend(self.lifecycle_of_current(strategy)?);
+        Ok(events)
     }
 
     /// Under `next_bar_open`, meet the open of the current bar for `strategy` before it has seen
@@ -1317,6 +1326,73 @@ impl RuntimeCore {
         let book = self.books[strategy.index()].as_mut().expect("checked above");
         events.extend(book.open_bar(&entry));
         Ok(events)
+    }
+
+    /// Meet what rests for the current bar for `strategy` before it has decided on the bar: its
+    /// stops, targets and resting orders trade the bar's range, as they do at a venue while the
+    /// bar forms, and the events are returned for its hooks to hear before `on_bar`. Empty when
+    /// nothing rests or the bar is not one the book can rest ahead of the strategy (a halt
+    /// waiting), in which case [`RuntimeCore::apply`] does it all. The lifecycle of the instant
+    /// has run first (`begin_event`), and [`RuntimeCore::apply`] carries on from here with the
+    /// decisions of the bar.
+    pub fn rest_event(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {
+        let Some(cur) = self.current else { return Ok(Vec::new()) };
+        if !matches!(cur.data, ScheduleData::Bar(_)) {
+            return Ok(Vec::new());
+        }
+        let Some(local) = local_of(&self.slots, &self.strat_insts, strategy, cur.event.instrument)
+        else {
+            return Ok(Vec::new());
+        };
+        let entry = ScheduleEntry {
+            instrument: local,
+            local_idx: cur.event.local_idx as usize,
+            data: cur.data,
+        };
+        if !self.books[strategy.index()].as_ref().is_some_and(|b| b.can_rest(&entry)) {
+            return Ok(Vec::new());
+        }
+        // The lifecycle of the instant (a corporate action, an expiry) must be applied before the
+        // bar's range is traded. Its events are not this step's to hear: they are kept for
+        // `begin_event`, which the strategy's event delivers first, as it always did. (In a
+        // timestamp group it ran in the apply phase and its events are kept already.)
+        if self.group.get(self.selected).is_none() {
+            let lifecycle = self.lifecycle_of_current(strategy)?;
+            if !lifecycle.is_empty() {
+                self.carried.push((strategy, lifecycle));
+            }
+        }
+        // A fill inside the bar is judged by the marks of the bars before the group: the closes of
+        // the instant's other bars are not known yet (an exposure limit reads them).
+        self.mark_group_before(strategy, true);
+        let events = if let Some(g) = self.group_of[strategy.index()] {
+            self.groups[g as usize].rest(&mut self.books, strategy.index(), &entry)
+        } else {
+            let book = self.books[strategy.index()].as_mut().expect("checked above");
+            book.rest_bar(&entry)
+        };
+        self.mark_group_before(strategy, false);
+        Ok(events)
+    }
+
+    /// In an open group, mark every instrument of the group that `strategy` holds at the mark it
+    /// had before the group (`before`), or at the group's price again.
+    fn mark_group_before(&mut self, strategy: StrategyId, before: bool) {
+        for slot in &self.group {
+            let instrument = slot.current.event.instrument;
+            let Some(k) = self.index.subscribers(instrument).iter().position(|s| *s == strategy)
+            else {
+                continue;
+            };
+            let View { local, before: mark, .. } = slot.views[k];
+            if local == NO_LOCAL {
+                continue;
+            }
+            let mark = if before { mark } else { slot.close.or(mark) };
+            if let Some(book) = self.books[strategy.index()].as_mut() {
+                book.set_mark(local, mark);
+            }
+        }
     }
 
     fn lifecycle_of_current(&mut self, strategy: StrategyId) -> Result<Vec<EngineEvent>> {

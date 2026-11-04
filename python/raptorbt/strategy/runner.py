@@ -241,11 +241,34 @@ def run_strategy_backtest(
         driver = KernelDriver(session, strategy, ctx, mask, atr_values)
 
     for i in range(n):
+        # What rests (stops, targets, orders of earlier bars) trades this bar's range before the
+        # strategy decides on the bar, and its hooks hear the fills (this runner has no open step
+        # and does not hide the bar from them; the fills are the bar's, at its index).
         ctx._advance(i)
+        if driver is not None:
+            driver.rest(
+                i, int(visible[i]), float(open_[i]), float(high[i]), float(low[i]),
+                float(close[i]), float(volume[i]),
+            )
+        else:
+            dispatch_events(
+                strategy,
+                ctx,
+                session.rest(
+                    i, int(visible[i]), float(open_[i]), float(high[i]), float(low[i]),
+                    float(close[i]), float(volume[i]),
+                ),
+            )
 
-        # Clock first: scheduled times precede the bar revealing them.
+        # Clock first: scheduled times precede the bar revealing them, so a timer's hook reads the
+        # bars before it, not the one still forming (the rest step above advanced the context to
+        # bar i, so step it back for the timer hooks).
+        ctx.idx = max(i - 1, 0)
+        ctx._end = i
         for time_event in strategy.clock._advance(int(visible[i])):
             strategy.on_time_event(ctx, time_event)
+
+        ctx._advance(i)
 
         streams.push(
             strategy,

@@ -403,6 +403,13 @@ struct Shared {
     /// The hooks that hear the fills at the open of a bar are running, before the strategy has
     /// seen the bar (`next_bar_open`, see [`open_phase`]): what they answer fills at that open.
     opening: Cell<bool>,
+    /// The hooks that hear the fills of what rested through a bar's range are running, before the
+    /// strategy has decided on the bar (see [`rest_phase`]): they know the bars before it only.
+    resting: Cell<bool>,
+    /// The open of the bar whose resting fills are being heard (`resting`): a fill at that price
+    /// happened at the open (a stop or limit the bar gapped through), and what a hook answers it
+    /// with fills at that open, as for any fill at an open.
+    rest_open: Cell<Option<f64>>,
     /// Intents a hook queued while hearing a fill at an open, before the strategy saw the bar:
     /// `(strategy, local instrument)` -> the close they were decided at (the previous bar's),
     /// which sizes them when the bar's step stashes them.
@@ -442,6 +449,9 @@ struct Shared {
     /// The host's pre-submit order check and the class of the order it is
     /// shown, once given.
     order_check: RefCell<Option<(Py<PyAny>, Py<PyAny>)>>,
+    /// The check judges typed orders only (`order_check_scope="typed"`): `enter()` and
+    /// `close_position()` intents are not refused for it and are not shown to it.
+    order_check_typed_only: Cell<bool>,
     /// What the strategies queued in `on_start`, set aside while muted
     /// warm-up history runs (it would discard them) and given back after.
     boot_queue: RefCell<Vec<BootQueued>>,
@@ -796,6 +806,24 @@ impl Shared {
         match &*self.inner.borrow() {
             Inner::Running(c) => c.tick_watermark(instrument),
             _ => 0,
+        }
+    }
+
+    /// The close of the bar being decided, for a change a decision makes to an order of the
+    /// event's own instrument: that bar is not stepped yet, so the kernel's last close is the
+    /// bar before. A hook that hears a rest-step fill decides before the bar closed and reads
+    /// the bar before, as the kernel does: `None`.
+    fn decided_close(&self, sid: StrategyId, local: usize) -> Option<f64> {
+        if self.resting.get() {
+            return None;
+        }
+        let global = self.global_of(sid, local).ok()?;
+        match &*self.inner.borrow() {
+            Inner::Running(c) => c.current().and_then(|cur| match cur.data {
+                ScheduleData::Bar(b) if cur.event.instrument == global => Some(b.close),
+                _ => None,
+            }),
+            _ => None,
         }
     }
 
@@ -2442,6 +2470,8 @@ impl PyRuntime {
             blind: RefCell::new(Vec::new()),
             matching: Cell::new(false),
             opening: Cell::new(false),
+            resting: Cell::new(false),
+            rest_open: Cell::new(None),
             open_intents: RefCell::new(Default::default()),
             delivered: RefCell::new(Default::default()),
             hook_error: RefCell::new(None),
@@ -2456,6 +2486,7 @@ impl PyRuntime {
             deciding: Cell::new(false),
             follow_ups: RefCell::new(Vec::new()),
             order_check: RefCell::new(None),
+            order_check_typed_only: Cell::new(false),
             boot_queue: RefCell::new(Vec::new()),
             manual_halts: RefCell::new(Default::default()),
             oms_type: oms_type.to_string(),
@@ -3259,13 +3290,15 @@ impl PyRuntime {
 
     /// The exits of hedge legs each strategy's book is still carrying out:
     /// `(strategy index, hedge instrument, hedge position id, sold legs sent, hedge close sent)`.
-    fn pending_covers(&self) -> PyResult<Vec<(usize, usize, u64, usize, bool)>> {
+    fn pending_covers(&self) -> PyResult<Vec<PendingCover>> {
         let sh = &*self.shared;
         let mut out = Vec::new();
         let sids: Vec<StrategyId> = sh.strats.borrow().iter().map(|s| s.sid).collect();
         for sid in sids {
             sh.with_book(sid, |b, _| {
-                out.extend(b.pending_covers().into_iter().map(|(i, p, n, h)| (sid.index(), i, p, n, h)));
+                out.extend(
+                    b.pending_covers().into_iter().map(|(i, p, n, h)| (sid.index(), i, p, n, h)),
+                );
                 Ok(())
             })?;
         }
@@ -3488,9 +3521,12 @@ impl PyRuntime {
 
     /// Install the host's pre-submit order check: `check(order, ctx)` is
     /// called with an `OrderProposal` (built by `proposal`) for every typed
-    /// order a strategy submits, before the engine or a venue sees it.
-    fn set_order_check(&self, check: Py<PyAny>, proposal: Py<PyAny>) {
+    /// order a strategy submits, before the engine or a venue sees it. `typed_only` says the
+    /// check judges typed orders only, so intents are left alone instead of refused.
+    #[pyo3(signature = (check, proposal, typed_only=false))]
+    fn set_order_check(&self, check: Py<PyAny>, proposal: Py<PyAny>, typed_only: bool) {
         *self.shared.order_check.borrow_mut() = Some((check, proposal));
+        self.shared.order_check_typed_only.set(typed_only);
     }
 
     /// Declare how long the engine takes to act on an event after it
@@ -4627,6 +4663,7 @@ fn run_one(py: Python<'_>, sh: &Shared, ls: &mut LoopState, e: GroupEvent) -> Py
         *core.current().expect("advance sets the current event")
     };
     open_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
+    rest_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     let delivered = dispatch(py, sh, ls, &e.event, &cur, None);
     hook_error(sh, delivered)
 }
@@ -4827,6 +4864,147 @@ fn open_phase(
     Ok(())
 }
 
+/// Meet what rests through each bar of a round before any strategy has decided on the bars.
+///
+/// A venue fills a stop, a target or a resting limit while the bar forms, so a strategy that
+/// decides on the bar's close must see the position the bar left. For each bar of the round every
+/// book matches the orders and levels committed on earlier bars against the bar's range
+/// (`RuntimeCore::rest_event`; on a simulated venue the shadow book does the same), and only then
+/// do the hooks hear the fills, in the order of the round's events (ascending symbol) and, within
+/// one, of the strategies. Every book of the round is matched before any hook hears, as in the
+/// match phase, so an answer for another instrument meets that instrument's bar whichever symbol
+/// sorts first.
+///
+/// The hooks hear a fill that happened inside the bar as the strategy would live: they know the
+/// bars before it (`blind`, and the indicators show their value before the group), and `on_bar`
+/// has not run. What they answer is an ordinary order, decided before the bar closed: it meets the
+/// run's fill timing (this bar's close under `same_bar_close`, the next open under
+/// `next_bar_open`). An order placed at the decision of this bar is not among the orders matched.
+fn rest_phase(
+    py: Python<'_>,
+    sh: &Shared,
+    ls: &mut LoopState,
+    events: &[GroupEvent],
+    grouped: bool,
+) -> PyResult<()> {
+    if sh.warmup_muted.get() {
+        return Ok(());
+    }
+    let mut met: Vec<(usize, StrategyId, usize, Matched)> = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        if e.event.kind != EventKind::Bar {
+            continue;
+        }
+        if grouped {
+            select_event(sh, i, e.times)?;
+        }
+        let n = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.subscribers(e.event.instrument).len(),
+            _ => return Err(finished()),
+        };
+        for pos in 0..n {
+            let (sid, local) = match &*sh.inner.borrow() {
+                Inner::Running(c) => {
+                    let sid = c.subscribers(e.event.instrument)[pos];
+                    (sid, c.local_of(sid, e.event.instrument).expect("subscribed"))
+                }
+                _ => return Err(finished()),
+            };
+            let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
+            let matched = if sh.venue_on.get() {
+                let venue = sh.venue.borrow().clone();
+                let Some(venue) = venue else { continue };
+                let ts_obj = e.event.ts.into_pyobject(py)?;
+                let symbols = sh.symbols.get();
+                let symbol = symbols[e.event.instrument.index()].bind(py);
+                let with_ticks = sh.has_ticks.get()[e.event.instrument.index()];
+                let ev = Ev {
+                    event: &e.event,
+                    ts_obj: &ts_obj,
+                    symbol,
+                    with_ticks,
+                    pos: Cell::new(pos),
+                };
+                // The venue's reports close the strategy's book ahead of its own step: the bar's
+                // range is taken into the excursions first.
+                let range = match &*sh.inner.borrow() {
+                    Inner::Running(c) => c.current().and_then(|cur| match cur.data {
+                        ScheduleData::Bar(b) => Some((b.high, b.low)),
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                if let Some((high, low)) = range {
+                    sh.with_book_mut(sid, |b, _| {
+                        b.kernel_mut(local).observe_range(high, low);
+                        Ok(())
+                    })?;
+                }
+                let Some(out) = venue.poll_rest(sh, st, &ev, local)? else { continue };
+                let (venue_heard, venue_held) = venue.poll_book(py, sh, st, &ev, out)?;
+                Matched { events: Vec::new(), venue_held, venue_heard }
+            } else {
+                let events = match &mut *sh.inner.borrow_mut() {
+                    Inner::Running(c) => c.rest_event(sid).map_err(runtime_err)?,
+                    _ => return Err(finished()),
+                };
+                if events.is_empty() {
+                    continue;
+                }
+                Matched { events, venue_held: Vec::new(), venue_heard: false }
+            };
+            met.push((i, sid, local, matched));
+        }
+    }
+    for (i, sid, local, matched) in met {
+        let e = &events[i];
+        if grouped {
+            select_event(sh, i, e.times)?;
+        }
+        let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
+        let ts_obj = e.event.ts.into_pyobject(py)?;
+        let symbols = sh.symbols.get();
+        let symbol = symbols[e.event.instrument.index()].bind(py);
+        let with_ticks = sh.has_ticks.get()[e.event.instrument.index()];
+        let pos = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.subscribers(e.event.instrument).iter().position(|s| *s == sid),
+            _ => return Err(finished()),
+        }
+        .expect("subscribed");
+        let ev = Ev { event: &e.event, ts_obj: &ts_obj, symbol, with_ticks, pos: Cell::new(pos) };
+        {
+            let ctx = st.ctx.bind(py).borrow();
+            ctx.local.set(local);
+            ctx.idx.set(e.event.local_idx as usize);
+        }
+        if let Inner::Running(c) = &mut *sh.inner.borrow_mut() {
+            c.decide_view(sid, pos, true);
+        }
+        let open = match &*sh.inner.borrow() {
+            Inner::Running(c) => c.current().and_then(|cur| match cur.data {
+                ScheduleData::Bar(b) => Some(b.open),
+                _ => None,
+            }),
+            _ => None,
+        };
+        sh.rest_open.set(open);
+        sh.resting.set(true);
+        ls.bank.set_opening(true);
+        let heard = step_deliver(py, sh, st, &ev, local, false, false, &mut None, matched);
+        ls.bank.set_opening(false);
+        sh.resting.set(false);
+        sh.rest_open.set(None);
+        heard?;
+        if st.has_held(py) {
+            let close = sh.with_book(sid, |b, _| Ok(b.kernel(local).last_close))?;
+            if let Some(close) = close {
+                sh.open_intents.borrow_mut().insert((sid.index(), local), close);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The match half of the open of one bar for one strategy: its book (or, on a simulated venue,
 /// the venue's shadow of it) fills what was decided earlier at the open. `None` when there is
 /// nothing to hear or the bar cannot be opened ahead of the strategy.
@@ -4874,6 +5052,9 @@ fn run_round(
         // 1b. Under `next_bar_open` the open of every bar is met before any strategy has seen
         // the bars: the fills at the open are heard by hooks that know only what was known then.
         open_phase(py, sh, ls, events, true)?;
+        // 1c. What rests (stops, targets, orders of earlier bars) trades every bar's range
+        // before any strategy decides on the bars, as at a venue while they form.
+        rest_phase(py, sh, ls, events, true)?;
         // The indicators strategies own are fed with every event of the group
         // too, so a decision reads each instrument's indicators as of the group.
         for (i, e) in events.iter().enumerate() {
@@ -5539,9 +5720,13 @@ fn settle(
 }
 
 /// With a host order check installed, `enter()` / `close_position()` intents
-/// are refused: they carry no order to show the check.
+/// are refused: they carry no order to show the check. Not when the check declared it
+/// judges typed orders only (`order_check_scope="typed"`).
 fn refuse_intents(sh: &Shared, input: &StepInput) -> PyResult<()> {
-    if (input.entry || input.exit) && sh.order_check.borrow().is_some() {
+    if (input.entry || input.exit)
+        && sh.order_check.borrow().is_some()
+        && !sh.order_check_typed_only.get()
+    {
         return Err(Fail::new(
             "order_check_intent",
             "enter() and close_position() carry no order for the host's order_check to see: \
@@ -5614,6 +5799,10 @@ fn refusal(error: CmdError) -> PyErr {
 /// The order tag that marks a market order as the strategy's answer to a fill it just heard: it
 /// meets the bar of the step that fill came in (`Order::follow_up`).
 pub(crate) const FOLLOW_UP_TAG: &str = "after_fill";
+
+/// A hedge exit in progress: `(strategy index, hedge instrument, hedge position id, sold legs sent,
+/// hedge close sent)`.
+type PendingCover = (usize, usize, u64, usize, bool);
 
 /// A strategy's book, as the target its commands are routed to.
 struct RuntimeTarget<'a> {
@@ -5837,8 +6026,15 @@ impl Target for RuntimeTarget<'_> {
             );
         }
         let qty = parse_qty_spec(units, size_frac)?;
+        let decided = self.sh.decided_close(self.sid, instrument);
         self.sh.with_book_mut(self.sid, |b, _| {
-            b.kernel_mut(instrument).modify_order(order_id, qty, limit_price, trigger_price);
+            b.kernel_mut(instrument).modify_order_at(
+                order_id,
+                qty,
+                limit_price,
+                trigger_price,
+                decided,
+            );
             Ok(())
         })
     }
@@ -6076,6 +6272,37 @@ impl PyKernelDriver {
             mask: hooks,
             atr: atr.map(|a| a.as_array().to_vec()).unwrap_or_default(),
         })
+    }
+
+    /// Bar `idx`, stamped `ts`, before the strategy has seen it: what rests (stops, targets,
+    /// orders of earlier bars) trades the bar's range and the hooks hear the fills.
+    #[allow(clippy::too_many_arguments)]
+    fn rest(
+        &self,
+        py: Python<'_>,
+        idx: usize,
+        ts: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> PyResult<()> {
+        let bar = KernelBar { timestamp: ts, open, high, low, close, volume };
+        let events = self.session.bind(py).borrow_mut().runner_mut()?.rest(idx, &bar);
+        if events.is_empty() {
+            return Ok(());
+        }
+        let ctx = self.ctx.bind(py);
+        let symbol = ctx.getattr_opt(intern!(py, "symbol"))?.and_then(|s| s.cast_into().ok());
+        dispatch_events(
+            py,
+            self.strategy.bind(py),
+            ctx,
+            live_mask(py, &self.queue, self.mask),
+            events,
+            symbol.as_ref(),
+        )
     }
 
     /// Bar `idx`, stamped `ts`: everything after the strategy's `on_bar`.
@@ -6594,7 +6821,14 @@ fn heard(
         }
         return heard(py, sh, st, chunk, call);
     }
-    let fill_at = match (events.iter().any(fills), &*sh.inner.borrow()) {
+    // A position's own stop that the bar opened through leaves as `Exited` alone (no order fill):
+    // at the open it is a fill at the open, as a resting order's is, and its hook is answered there.
+    let exited_at_open = sh.resting.get()
+        && sh.with_book(st.sid, |b, _| Ok(b.kernel(0).fills_at_next_open())).unwrap_or(false)
+        && events.iter().any(|e| {
+            matches!(e, EngineEvent::Exited { trade, .. } if Some(trade.exit_price) == sh.rest_open.get())
+        });
+    let fill_at = match (events.iter().any(fills) || exited_at_open, &*sh.inner.borrow()) {
         (true, Inner::Running(c)) => c.current().map(|cur| cur.event.ts),
         _ => None,
     };
@@ -6603,7 +6837,15 @@ fn heard(
     // seen the bar, can be answered at that open; a fill the bar brings is answered at the next.
     let at_open = fill_at.is_some()
         && sh.with_book(st.sid, |b, _| Ok(b.kernel(0).fills_at_next_open())).unwrap_or(false);
-    if fill_at.is_some() && (!at_open || sh.opening.get()) {
+    // A resting order the bar gapped through filled at the bar's open: heard before the bar,
+    // answered at that open. One that traded later in the bar is answered at the next open.
+    let gapped = at_open
+        && sh.resting.get()
+        && (exited_at_open
+            || events.iter().any(|e| {
+                matches!(e, EngineEvent::OrderFilled { price, .. } if Some(*price) == sh.rest_open.get())
+            }));
+    if fill_at.is_some() && (!at_open || sh.opening.get() || gapped) {
         st.queue.bind(py).borrow_mut().answering = fill_at;
     }
     if blind {
@@ -6624,7 +6866,7 @@ fn heard(
 /// group) are hidden from its market data until the hook is done.
 fn blind_to_the_instant(sh: &Shared, sid: StrategyId) {
     let at_open = sh.with_book(sid, |b, _| Ok(b.kernel(0).fills_at_next_open())).unwrap_or(false);
-    if !at_open {
+    if !at_open && !sh.resting.get() {
         return;
     }
     let mut blind = sh.blind.borrow_mut();
@@ -7281,7 +7523,7 @@ fn process_bar(
         }
         ctx.prices.get()[local].last.set(Some(bar.close));
     }
-    composites(py, sh, st, &t, bank, scratch)?;
+    hook_failed(py, sh, st, composites(py, sh, st, &t, bank, scratch));
     hook_failed(py, sh, st, primary_bar(py, st, &t, bank, local));
     finish_event(py, sh, st, ev, local, true, true, defer)
 }
@@ -7318,7 +7560,7 @@ fn process_trade(
             drain_commands(py, sh, st, local, ev)?;
         }
     }
-    composites(py, sh, st, &t, bank, scratch)?;
+    hook_failed(py, sh, st, composites(py, sh, st, &t, bank, scratch));
     ctx.borrow().prices.get()[local].last.set(Some(trade.price));
     if st.mask & HOOK_TRADE != 0 {
         let tick = tick.expect("built for a strategy that overrides on_trade_tick");

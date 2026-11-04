@@ -284,6 +284,34 @@ impl AccountGroup {
         events
     }
 
+    /// Meet what rests for a bar for `member` before its strategy has decided on it, as an
+    /// isolated book does ([`PortfolioBook::rest_bar`]): the stops, targets and resting orders of
+    /// earlier bars trade the bar's range against the account's pool and limits as the other
+    /// members leave them, members being served in the order their rests are met. The
+    /// account-level work of the fills follows, as after [`AccountGroup::open`].
+    pub fn rest(
+        &mut self,
+        books: &mut [Option<PortfolioBook>],
+        member: usize,
+        entry: &ScheduleEntry,
+    ) -> Vec<EngineEvent> {
+        let (open, exposure) = self.others_hold(books, member);
+        let events = self
+            .with_member(books, member, |book| {
+                book.set_external(open, exposure);
+                book.rest_bar(entry)
+            })
+            .expect("a stepped member's book is live");
+        if events.iter().any(|e| matches!(e, EngineEvent::MarginCall { .. })) {
+            self.halt_all(books, true);
+        }
+        if !events.is_empty() {
+            self.regroup_option_margin(books);
+        }
+        self.sync(books);
+        events
+    }
+
     /// Step `member` with an event, then run the account-level checks.
     pub fn step(
         &mut self,

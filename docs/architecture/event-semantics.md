@@ -84,13 +84,18 @@ are *applied* before any decision taken at `t` is *matched*:
    the book's marks, and the lifecycle (corporate actions, expiries). Nothing
    is decided and no order is matched yet. Afterwards every instrument's bar
    of `t` is visible to every strategy.
+   **Rest** (bars only; see "The rest of a bar" below). Before any decision, every book matches
+   what rests (the position's stop and target, trailing, the square-off, the margin check and every
+   order committed on an earlier bar) against its bar's range, and the hooks hear those fills. So
+   `on_bar(t)` sees the position the bar left.
 2. **Decide.** Each strategy's handlers run for each of its events at `t`. A
    decision sees the same market state whatever the order of the events;
    orders and commands queue and are not yet sent anywhere.
 3. **Match.** For each instrument with an event at `t`, the queued commands
-   are applied and its kernel steps: resting orders from earlier bars match
-   the bar, then the orders decided at `t` sweep (at `t`'s close under
-   `same_bar_close`, or stashed for the next open under `next_bar_open`). An
+   are applied and its kernel steps: the orders decided at `t` sweep (at `t`'s
+   close under `same_bar_close`, or stashed for the next open under
+   `next_bar_open`). Resting orders from earlier bars no longer match here: they
+   matched in the rest step. An
    order for an instrument with no event at `t` waits on that instrument's own
    clock and fills at its first event stamped after `t` (so the rule for a
    cross-instrument order is the one rule for any order: the target's first
@@ -276,7 +281,8 @@ Resting orders (limit, stop, stop-limit, trailing, if-touched) are different:
 they are matched against a bar only after the bar they were submitted on, so a
 resting order submitted on bar `i` can first fill on bar `i+1`
 (`OrderEngine`, `src/execution/orders/matching.rs`: orders with
-`submitted_idx >= idx` are skipped). A stop-limit whose trigger is touched
+`submitted_idx >= idx` are skipped). They trade bar `i+1`'s range before the strategy decides on
+bar `i+1` (see "The rest of a bar"), so `on_bar(i+1)` sees what they did. A stop-limit whose trigger is touched
 rests as a limit that becomes marketable from the next bar.
 
 A limit that is **marketable at the price its decision was made at** (a buy
@@ -461,7 +467,7 @@ the result no longer depends on which symbol sorts first.
 
 Under `next_bar_open` a venue reports what was decided on the previous bar at the open of this
 one, before the bar has traded. For each timestamp the runtime therefore runs the open first, in
-the order apply, **open**, decide, match:
+the order apply, **open**, rest, decide, match (the rest step is described below, "The rest of a bar"):
 
 1. every book of the group matches its opens (`EngineKernel::step_open`): the intents the previous
    bar stashed and the market orders decided on earlier bars fill at the bar's open. Nothing else of
@@ -477,11 +483,64 @@ the order apply, **open**, decide, match:
    decides, and the rest of the bar is matched: the step carries on from the open and does not sweep
    the market orders again.
 
-A fill the rest of the bar brings is heard after `on_bar(t)`: what its hook sends is an ordinary
-order and meets the next bar's open; it is never marked as an answer to a fill. Under
-`same_bar_close` a fill is at the close and the order of the phases is unchanged. A book that
-cannot be opened ahead (one in an account group, or with a halt waiting to take effect) is stepped
-whole, and its hooks hear after the decision as before.
+A resting order the bar gaps through (a stop or limit whose level lies behind the open) fills at
+the open, and is one of these fills: it is met in the rest step (below), heard before `on_bar(t)`
+by a hook that knows only the bars before `t`, and what the hook answers fills at that open
+(stop 95, the bar opens at 90: the stop sells at 90 and an answer buying back fills at 90, as a
+venue would). A fill the rest of the bar brings is also heard before `on_bar(t)`, but what its hook
+sends is an ordinary order and meets the next bar's open; it is never marked as an answer to a
+fill. Under `same_bar_close` a fill is at the close. A book with a halt waiting to take effect is
+stepped whole, and its hooks hear after the decision.
+
+## The rest of a bar
+
+A venue fills a stop, a target or a resting limit while the bar forms. A strategy that decides on
+the bar's close therefore decides with the position the bar left, and `on_bar(t)` must see it. The
+order of the phases of a bar is: apply, open (`next_bar_open`), **rest**, decide, match.
+
+- **What the rest step matches.** Everything that rests and does not depend on the decision:
+  the position's own stop and target and its trailing (`try_exit_position`), the session
+  square-off, the margin check, and every working order committed on an earlier bar (stops,
+  targets, limits, stop entries, trailing orders, if-touched orders, bracket and OCO legs,
+  reduce-only orders): `EngineKernel::step_rest`, `PortfolioBook::rest_bar`,
+  `RuntimeCore::rest_event`; on a simulated venue `PaperVenue::on_rest` steps the shadow book the
+  same way. All resting orders are matched, not only the protective ones: a venue does not tell
+  them apart, and a rule by kind would leave the same defect for an entry limit.
+- **What it does not match.** An order placed while deciding bar `t` is never matched against the
+  range of bar `t` (it carries bar `t`'s ordinal, and an order routed from another instrument's
+  event is held off every bar stamped at or before its decision). Market orders and signals
+  decided at `t` still fill after the decision: at `t`'s close under `same_bar_close`, at the next
+  open under `next_bar_open`. The orders `close_position` and a halt's flatten send act after
+  the rest step: a stop that bar touches trades first and the close finds the position gone.
+- **What the hooks know.** The hooks hear the fills of the rest step before `on_bar(t)`, as they
+  would hear them live, mid-bar: the market data they read stops at the bar before `t`, the
+  indicators show their value before the group, and the strategy's own objects are not yet fed.
+  Both fill timings. They are not blind to the position: `ctx.position` already shows the fill.
+- **No lookahead.** A decision at `t`'s close reads data up to `t` and nothing later, and no order
+  placed at the decision trades inside `t`: the fills a hook hears were decided on bars before
+  `t`. A fill hook decides without bar `t`, which is less than `on_bar(t)` knows.
+- **Answers.** What a rest-fill hook sends fills at the run's fill timing: bar `t`'s close under
+  `same_bar_close`, bar `t+1`'s open under `next_bar_open`; the exception is a fill at the open
+  (above). A flat `on_bar(t)` that re-enters sees the true position, so a plain `sell` after a
+  stop does not open a short.
+- **Several instruments and shared accounts.** Every book of the round rests before any hook
+  hears and before any decision, in ascending symbol (and, for one symbol, in strategy
+  order). Margin and positions freed by a stop are therefore the pool the decisions of the group
+  see. Where several members of an account group compete for the same cash or limit in the rest
+  step, they are served in that order. Orders decided at `t` still match after all decisions, as
+  before. Engine-held hedge levels and the sold-legs-first cover run in the rest step too: the
+  covers are sent there and meet the cover's own bars as before.
+- **Modify.** A limit moved through the market (past the last close seen) makes the next bar its
+  arrival: it trades at that bar's open. One moved to a level not yet reached keeps resting. A decision on bar `t` never reaches bar `t`'s range.
+- **The single-instrument runner** (`run_strategy_backtest`, `KernelSession`) meets the rest step
+  before `on_bar` as well (`KernelSession.rest`), without an open step.
+- **Not in the rest step.** A tick run (`run_tick_strategy`, prints) keeps its rule: a handler
+  reading the book during a print sees the book from before that print. A step with no
+  runtime around it (the array runners, `KernelSession`) runs the rest part at the top of the
+  step, in the same order. A bar that ends the contract is stepped whole (expiry settles it).
+- **Order inside one step.** The position's exit signal (`close_position()`/`enter` exit),
+  the targeted closes and a halt's flatten now come after the stop, target, square-off, margin
+  check and resting orders of the bar, not before the last three.
 
 ### When hooks hear a match, and what they know
 

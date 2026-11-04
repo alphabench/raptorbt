@@ -686,10 +686,14 @@ CODES: dict[str, Code] = {
         "order_check returned something other than None, a code, or an object with a str code; or the code is empty, over 64 bytes, or the 1025th distinct one.",
         ["None to accept", "a str code of 1 to 64 bytes", "an object with a str code", "at most 1024 distinct codes"],
     ),
+    "invalid_order_check_scope": _c(
+        InvalidParameter, "live-trading", "order_check_scope is not 'all' or 'typed'.",
+        ["all", "typed"],
+    ),
     "order_check_intent": _c(
         InvalidOrder, "live-trading",
         "enter() or close_position() was used with an order_check installed; they carry no order for it to see.",
-        ["submit_order(...) with a typed order, not enter() or close_position()"],
+        ["submit_order(...) with a typed order, not enter() or close_position()", "order_check_scope=\"typed\" when the check judges typed orders only"],
     ),
     "unknown_role_binding": _c(
         InvalidParameter, "live-trading", "bindings names a role that no strategy declares.",

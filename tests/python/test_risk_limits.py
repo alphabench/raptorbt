@@ -875,7 +875,11 @@ class _SizeChecks(_Chaos):
             gross = 0.0
             for s in self.symbols:
                 pos = ctx.positions(s)
-                gross += sum(p.size for p in pos) * self.last.get(s, 0.0)
+                # The filled instrument is marked at the fill; the others at the last close the
+                # strategy has seen. (A resting order can fill inside a bar, before `on_bar` has
+                # seen its close: the close of the bar before is not the engine's mark then.)
+                mark = event.price if s == sym else self.last.get(s, 0.0)
+                gross += sum(p.size for p in pos) * mark
             if gross > lim["max_gross_exposure"] * (1 + 1e-9):
                 self.violations.append(("exposure", gross))
 

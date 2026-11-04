@@ -1,5 +1,7 @@
 """Shared fixtures."""
 
+import gc
+
 import pytest
 
 import raptorbt
@@ -12,6 +14,15 @@ def pytest_configure(config):
         ("tick_stream", "scenario covers TickStrategyStream"),
     ):
         config.addinivalue_line("markers", f"{name}: {doc}")
+
+
+@pytest.fixture(autouse=True)
+def _collect_cycles_on_this_thread():
+    """Journals and records are unsendable (freed only by the thread that made them). A cycle left
+    by an earlier test is otherwise collected by whichever thread allocates next, and when that is
+    an executor thread the free raises and the test it lands in fails."""
+    gc.collect()
+    yield
 
 
 @pytest.fixture(params=["legacy", "shared"])

@@ -343,6 +343,14 @@ assert all(r.result.metrics.total_trades == 1 for r in results)
 - A hook that raises aborts the run: the engine does not catch strategy errors.
 - A run is deterministic. Do not read the wall clock, an unseeded `random`, or
   global mutable state: backtest and live must see the same decisions.
+- **`on_bar(t)` sees the position bar `t` left.** Stops, targets, trailing and every resting order
+  you placed on an earlier bar trade bar `t`'s range before `on_bar(t)` runs, as at a venue: a long
+  whose stop was touched is flat in `on_bar(t)`, a limit touched is already filled. Size entries
+  from `ctx.positions()` and branch on it freely. Orders you place in `on_bar(t)` never trade
+  inside bar `t`. The fill hooks (`on_fill`, `on_order_event`) for those intra-bar fills run before
+  `on_bar(t)` and see data up to bar `t - 1` only; what they send fills at your fill timing (bar
+  `t`'s close under `same_bar_close`, bar `t + 1`'s open under `next_bar_open`), except a fill at
+  the bar's open (a gap through your stop), which is answered at that open.
 - `bar_stamp` says whether your timestamps are bar opens (`"open"`, which also
   needs `bar_ns`) or closes (`"close"`). It is required: omitting it raises
   `missing_bar_stamp`.

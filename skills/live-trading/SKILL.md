@@ -132,7 +132,7 @@ section 3 and 7.
 
 | Name | What it is |
 | --- | --- |
-| `raptorbt.LiveNode(strategies, symbols, config=None, *, bar_stamp=, primary_bars=, warmup_bars=, warmup=, initial_positions=, corporate_actions=, adjustment_policy=, execution=, venue_account=, protective=, order_check=, instruments=, bindings=, processing_latency_ns=, journal=, epoch=, strategy_states=, accounts=, history=, curve_samples=, ...)` | The node. Strategies are instances, classes, `(strategy, symbols)` pairs, numbered by position. |
+| `raptorbt.LiveNode(strategies, symbols, config=None, *, bar_stamp=, primary_bars=, warmup_bars=, warmup=, initial_positions=, corporate_actions=, adjustment_policy=, execution=, venue_account=, protective=, order_check=, order_check_scope=, instruments=, bindings=, processing_latency_ns=, journal=, epoch=, strategy_states=, accounts=, history=, curve_samples=, ...)` | The node. Strategies are instances, classes, `(strategy, symbols)` pairs, numbered by position. |
 | `push_tick`, `push_bar`, `push_depth`, `advance_time`, `warm_up`, `push_report` | The only ways in. All but `warm_up` take `arrival_ns=` (`push_report` requires it). |
 | `push_group(ts, bars, arrival_ns=)`, `begin_group(ts=None)`, `flush()` | Deliver the events of one timestamp as a group (see the feed above). |
 | `positions(i, symbol=None)`, `equity(i)`, `ctx(i)`, `is_halted(i)`, `halt(i, flatten=, reason=)`, `halt_account(name, ...)`, `memory_report()`, `finish()` | State and control. `finish()` ends the node and returns one `PortfolioResult` per strategy (`.result.trades()`, `.result.equity_curve()`); a finished node raises `node_finished`. |
@@ -839,7 +839,10 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
   ATR stops, `liquidate_on_margin_call` and shared account groups with a venue
   are refused at construction.
 - **Percent exits** measure percent of the covered positions' entry value; a
-  rule fires once and its orders pass `order_check`. A venue that defines
+  rule fires once and its orders pass `order_check`. `order_check_scope="typed"` declares that
+  the check judges typed orders only: `enter()` and `close_position()` are then not refused
+  (`order_check_intent`) and are not shown to it; use it when the check judges forms an intent
+  cannot have (a kind, a validity, `post_only`). A venue that defines
   `place_exit_rule(request)` is offered the rule first, for positions that
   exist; `Unsupported` or `OrderRefused` leaves it with the engine. The orders
   the venue fires are registered, so their fills are booked. A held rule is

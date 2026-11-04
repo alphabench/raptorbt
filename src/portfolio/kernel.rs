@@ -23,7 +23,7 @@ use crate::execution::orders::{
 use crate::execution::queue::QueueTracker;
 use crate::execution::{FeeModel, FillModel, FillPrice, SlippageModel};
 use crate::instruments::{InstrumentKind, InstrumentSpec};
-use crate::portfolio::kernel_session::SessionState;
+use crate::portfolio::kernel_session::{SessionGate, SessionState};
 use crate::portfolio::ledger::{PositionLedger, PositionPolicy};
 use crate::portfolio::option_groups::OptionLeg;
 use crate::portfolio::position::ExitDetails;
@@ -359,6 +359,9 @@ pub struct ProtectRequest {
     pub trail: Option<f64>,
     /// The position the protection is for (what a hedging venue's protective order names).
     pub position_id: u64,
+    /// The request amends the protection of a position that already has some (an add named a
+    /// level): a venue moves the legs it holds before placing any.
+    pub amend: bool,
 }
 
 /// What the hedge rule says about one exit.
@@ -421,6 +424,9 @@ pub struct EngineKernel {
     pub(crate) last_close: Option<Price>,
     /// The last bar stepped and its ordinal, for an order that arrives with it.
     pub(crate) last_step: Option<(usize, KernelBar)>,
+    /// The bar whose resting part `step_rest` met while `last_step` still reads the bar before
+    /// it: what answers a fill heard there (`fill_follow_up`) meets this bar.
+    pub(crate) rest_step: Option<(usize, KernelBar)>,
     /// The timestamp of the bar stepped before `last_step`.
     pub(crate) prev_bar_ts: Option<i64>,
     /// Price the next capital-fraction open is sized at, set just before an
@@ -502,6 +508,10 @@ pub struct EngineKernel {
     opened_at: Option<i64>,
     open_swept: Vec<u64>,
     open_held_before: Vec<u64>,
+    /// The bar whose resting part [`EngineKernel::step_rest`] has run ahead of the strategy's
+    /// decision and [`EngineKernel::step`] has not yet finished, with the session gate it read.
+    rested_at: Option<i64>,
+    rest_gate: Option<SessionGate>,
     /// Exits of a hedge leg the engine holds back, for the book to carry out as orders, sold legs
     /// first (see [`EngineKernel::take_held_triggers`]).
     pub(crate) held_triggers: Vec<HeldTrigger>,
@@ -605,6 +615,7 @@ impl EngineKernel {
             last_atr: 0.0,
             last_close: None,
             last_step: None,
+            rest_step: None,
             prev_bar_ts: None,
             sizing_ref: None,
             size_ref_pending: false,
@@ -635,6 +646,8 @@ impl EngineKernel {
             opened_at: None,
             open_swept: Vec::new(),
             open_held_before: Vec::new(),
+            rested_at: None,
+            rest_gate: None,
             held_triggers: Vec::new(),
             entry_budget: None,
             spec: None,
@@ -1152,6 +1165,7 @@ impl EngineKernel {
     pub fn set_stop_price(&mut self, price: Option<Price>) {
         if let Some(managed) = self.ledger.first_mut() {
             managed.position.stop_price = price;
+            managed.stop_explicit = price.is_some();
         }
     }
 
@@ -1160,6 +1174,7 @@ impl EngineKernel {
         if let Some(managed) = self.ledger.first_mut() {
             managed.position.target_price = price;
             managed.target_fresh = price.is_some();
+            managed.target_explicit = price.is_some();
         }
     }
 
@@ -1168,6 +1183,7 @@ impl EngineKernel {
         match self.ledger.get_mut(position_id) {
             Some(managed) => {
                 managed.position.stop_price = price;
+                managed.stop_explicit = price.is_some();
                 true
             }
             None => false,
@@ -1180,6 +1196,7 @@ impl EngineKernel {
             Some(managed) => {
                 managed.position.target_price = price;
                 managed.target_fresh = price.is_some();
+                managed.target_explicit = price.is_some();
                 true
             }
             None => false,
@@ -1823,6 +1840,8 @@ impl EngineKernel {
         let events = self.step_events(idx, bar, input, mode);
         if mode == StepMode::Bar {
             self.opened_at = None;
+            self.rested_at = None;
+            self.rest_gate = None;
         }
         if self.limits.is_active() || self.risk.is_killed() || self.risk.daily_active() {
             return with_risk_events(events);
@@ -1841,6 +1860,8 @@ impl EngineKernel {
         // The open of this bar was already met (`step_open`): the fills at its open are done and
         // the step goes on from there.
         let opened = mode == StepMode::Bar && self.opened_at == Some(bar.timestamp);
+        // The resting part of this bar was already met (`step_rest`), ahead of the decision.
+        let rested = mode == StepMode::Bar && self.rested_at == Some(bar.timestamp);
         // A fill on this step is priced on the fee row in force on its date.
         self.fee_model.set_time(bar.timestamp);
         // Carried for order-path opens, which have no StepInput of their own.
@@ -1853,7 +1874,10 @@ impl EngineKernel {
         // Acknowledgments queued between steps (order accepted/canceled)
         // lead the event list, preserving submission-time ordering.
         let mut events = std::mem::take(&mut self.pending_events);
-        let gate = self.session_gate(bar.timestamp, mode);
+        let gate = match self.rest_gate.take().filter(|_| rested) {
+            Some(gate) => gate,
+            None => self.session_gate(bar.timestamp, mode),
+        };
 
         // Expiry settlement pre-empts everything: the contract no longer
         // trades at this bar, so neither exits-by-signal nor entries apply.
@@ -1882,12 +1906,16 @@ impl EngineKernel {
             self.fill_deferred(idx, bar, gate.data_open, &mut events);
         }
 
-        // Track running extremes for trailing stops.
-        self.ledger.update_price(bar.high, bar.low);
+        // The bar's resting part: the position's own protective exits, the square-off, the margin
+        // check and the resting orders of earlier bars. Nothing in it depends on this bar's
+        // decision, so a run that meets it ahead of the decision (`step_rest`) has done it.
+        if !rested {
+            self.rest_part(idx, bar, mode, &mut events);
+        }
 
-        // Under NextBarOpen this bar's signals only stash intents; they fill
-        // at the top of the next bar step. Protective stop/target exits are
-        // NOT deferred — their triggers are intra-bar prices, already causal.
+        // Under NextBarOpen this bar's signals only stash intents; they fill at the top of the
+        // next bar step. Protective stop/target exits are NOT deferred: their triggers are
+        // intra-bar prices, already causal.
         let defer_signals = self.fill_timing == FillTiming::NextBarOpen && mode == StepMode::Bar;
         if self.size_ref_pending && defer_signals {
             self.size_ref_pending = false;
@@ -1907,24 +1935,16 @@ impl EngineKernel {
         if defer_signals && input.exit {
             self.deferred.get_or_insert_with(DeferredIntent::default).exit = true;
         }
-        let same_bar_exit = !defer_signals && input.exit;
-
-        // Protective/signal exits, per position in opening order. Net policy
-        // holds one position, reproducing the original sequence exactly.
-        let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-        for position_id in open_ids {
-            if let Some(event) = self.try_exit_position(idx, bar, position_id, same_bar_exit, false)
-            {
-                events.push(event);
-            }
-
-            // Trail only if the position survived this bar. A venue-managed kernel holds no stop
-            // of its own: the venue (or the engine's watcher of a hedge) trails it.
-            if let (StopConfig::Trailing { percent }, false) =
-                (self.effective_stop, self.venue_managed)
-            {
-                if let Some(managed) = self.ledger.get_mut(position_id) {
-                    managed.update_trailing_stop(percent);
+        // An exit signal of this bar closes what the bar left, at the configured fill price.
+        if !defer_signals && input.exit {
+            let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+            for position_id in open_ids {
+                let Some(managed) = self.ledger.get(position_id) else { continue };
+                let price = self.fill_price_for(bar, managed.position.direction, false);
+                if let Some(event) =
+                    self.close_at(idx, bar, position_id, price, ExitReason::Signal, false)
+                {
+                    events.push(event);
                 }
             }
         }
@@ -1968,41 +1988,6 @@ impl EngineKernel {
                     events.extend(self.liquidate_all_as(idx, bar, reason));
                 }
             }
-        }
-
-        // Session square-off: the first event at or after the cutoff flattens
-        // the book, after the position's own protective exits and before
-        // resting orders can open anything new.
-        if self.session_state.squareoff_now {
-            events.extend(self.squareoff_all(idx, bar));
-        }
-
-        // Margin maintenance: mark against this bar's close; a breach halts
-        // new entries (latching) but does not force-liquidate.
-        if self.ledger.is_in_position() && !self.margin.is_halted() {
-            let required = self.maintenance_requirement(bar.close);
-            if required > 0.0 {
-                let equity = self.equity(bar.close);
-                if equity < required {
-                    self.margin.halt();
-                    events.push(EngineEvent::MarginCall { idx, equity, required });
-                    if self.config.liquidate_on_margin_call {
-                        events.extend(self.flatten_after(idx, bar, ExitReason::Liquidation));
-                    }
-                }
-            }
-        }
-
-        // Resting orders committed on earlier bars match against this bar,
-        // after the position's own protective exits (stop > target > signal
-        // keeps its priority) and before this bar's new signals.
-        let ohlcv = bar.to_ohlcv_bar();
-        let outcomes = match mode {
-            StepMode::Bar => self.orders.match_bar(idx, &ohlcv, &self.fill_model),
-            StepMode::Trade => self.orders.match_trade(idx, &ohlcv, &self.fill_model),
-        };
-        for outcome in outcomes {
-            self.apply_match_outcome(idx, bar, outcome, &mut events);
         }
 
         // An entry decided while the market is closed (or on the square-off
@@ -2151,48 +2136,187 @@ impl EngineKernel {
             self.sweep_market(idx, bar, gate.data_open, mode, defer_signals, &mut events)
         };
 
-        // Entry-bar protection (`next_bar_open`): an entry filled at this
-        // bar's open lives through the rest of the bar, so its protective
-        // levels trade against this bar too — as the working legs of a real
-        // venue would, whichever way they were attached (the position's own
-        // stop and target, a typed order's `stop_price`/`target_price`, or a
-        // bracket's child orders). Without this, a stop set on the entry bar
-        // was honoured or skipped depending on the API that set it.
         if defer_signals && mode == StepMode::Bar && !swept.is_empty() {
-            let opened: Vec<u64> = self
-                .ledger
-                .positions()
-                .iter()
-                .map(|p| p.id)
-                .filter(|id| !held_before.contains(id))
-                .collect();
-            // The entry was at this bar's open, so the whole bar is part of the
-            // position's life: its range counts toward the excursions, as it
-            // does for a signal entry filled at the top of the step.
-            if !opened.is_empty() {
-                self.ledger.update_price(bar.high, bar.low);
+            self.entry_bar_protection(idx, bar, &swept, &held_before, &mut events);
+        }
+
+        events
+    }
+
+    /// Entry-bar protection (`next_bar_open`): an entry filled at this
+    /// bar's open lives through the rest of the bar, so its protective
+    /// levels trade against this bar too, as the working legs of a real
+    /// venue would, whichever way they were attached (the position's own
+    /// stop and target, a typed order's `stop_price`/`target_price`, or a
+    /// bracket's child orders). Without this, a stop set on the entry bar
+    /// was honoured or skipped depending on the API that set it.
+    fn entry_bar_protection(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        swept: &[u64],
+        held_before: &[u64],
+        events: &mut Vec<EngineEvent>,
+    ) {
+        let ohlcv = bar.to_ohlcv_bar();
+        let opened: Vec<u64> = self
+            .ledger
+            .positions()
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| !held_before.contains(id))
+            .collect();
+        // The entry was at this bar's open, so the whole bar is part of the
+        // position's life: its range counts toward the excursions, as it
+        // does for a signal entry filled at the top of the step.
+        if !opened.is_empty() {
+            self.ledger.update_price(bar.high, bar.low);
+        }
+        for position_id in opened {
+            if let Some(event) = self.try_exit_position(idx, bar, position_id, false, true) {
+                events.push(event);
             }
-            for position_id in opened {
-                if let Some(event) = self.try_exit_position(idx, bar, position_id, false, true) {
-                    events.push(event);
-                }
+        }
+        let children: Vec<u64> = self
+            .orders
+            .working()
+            .filter(|o| o.parent_id.is_some_and(|p| swept.contains(&p)))
+            .filter(|o| o.status == OrderStatus::Accepted)
+            .map(|o| o.id)
+            .collect();
+        if !children.is_empty() {
+            let outcomes = self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &children);
+            for outcome in outcomes {
+                self.apply_match_outcome(idx, bar, outcome, events);
             }
-            let children: Vec<u64> = self
-                .orders
-                .working()
-                .filter(|o| o.parent_id.is_some_and(|p| swept.contains(&p)))
-                .filter(|o| o.status == OrderStatus::Accepted)
-                .map(|o| o.id)
-                .collect();
-            if !children.is_empty() {
-                let outcomes =
-                    self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &children);
-                for outcome in outcomes {
-                    self.apply_match_outcome(idx, bar, outcome, &mut events);
+        }
+    }
+
+    /// The part of a bar's step that no decision of the bar can change: the extremes, the
+    /// position's own stop and target (and its trailing), the session square-off, the margin
+    /// check, and the resting orders committed on earlier bars matching the bar's range. An order
+    /// decided on this bar is not among them (it was submitted on this bar's ordinal) and never
+    /// meets the bar's range. A venue fills all of these while the bar forms, so a strategy that
+    /// decides on the bar's close must see what they left: the runtime meets this part ahead of
+    /// the decision ([`EngineKernel::step_rest`]); a caller that does not gets it at the top of
+    /// [`EngineKernel::step`], in the same order.
+    fn rest_part(
+        &mut self,
+        idx: usize,
+        bar: &KernelBar,
+        mode: StepMode,
+        events: &mut Vec<EngineEvent>,
+    ) {
+        // Track running extremes for trailing stops.
+        self.ledger.update_price(bar.high, bar.low);
+
+        // Protective exits, per position in opening order: stop > target. Net policy holds one
+        // position, reproducing the original sequence exactly.
+        let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
+        for position_id in open_ids {
+            if let Some(event) = self.try_exit_position(idx, bar, position_id, false, false) {
+                events.push(event);
+            }
+
+            // Trail only if the position survived this bar. A venue-managed kernel holds no stop
+            // of its own: the venue (or the engine's watcher of a hedge) trails it.
+            if let (StopConfig::Trailing { percent }, false) =
+                (self.effective_stop, self.venue_managed)
+            {
+                if let Some(managed) = self.ledger.get_mut(position_id) {
+                    managed.update_trailing_stop(percent);
                 }
             }
         }
 
+        // Session square-off: the first event at or after the cutoff flattens
+        // the book, after the position's own protective exits and before
+        // resting orders can open anything new.
+        if self.session_state.squareoff_now {
+            events.extend(self.squareoff_all(idx, bar));
+        }
+
+        // Margin maintenance: mark against this bar's close; a breach halts
+        // new entries (latching) but does not force-liquidate.
+        if self.ledger.is_in_position() && !self.margin.is_halted() {
+            let required = self.maintenance_requirement(bar.close);
+            if required > 0.0 {
+                let equity = self.equity(bar.close);
+                if equity < required {
+                    self.margin.halt();
+                    events.push(EngineEvent::MarginCall { idx, equity, required });
+                    if self.config.liquidate_on_margin_call {
+                        events.extend(self.flatten_after(idx, bar, ExitReason::Liquidation));
+                    }
+                }
+            }
+        }
+
+        // Resting orders committed on earlier bars match against this bar, after the position's
+        // own protective exits (stop > target keeps its priority).
+        let ohlcv = bar.to_ohlcv_bar();
+        let outcomes = match mode {
+            StepMode::Bar => self.orders.match_bar(idx, &ohlcv, &self.fill_model),
+            StepMode::Trade => self.orders.match_trade(idx, &ohlcv, &self.fill_model),
+        };
+        for outcome in outcomes {
+            self.apply_match_outcome(idx, bar, outcome, events);
+        }
+    }
+
+    /// Take the range of a bar into the running extremes of the open positions. A venue-managed
+    /// book is closed by the venue's report ahead of its own step, which would otherwise find the
+    /// exit bar's range missing from the excursions.
+    pub(crate) fn observe_range(&mut self, high: Price, low: Price) {
+        self.ledger.update_price(high, low);
+    }
+
+    /// Whether there is anything for [`EngineKernel::step_rest`] to meet: a position that holds
+    /// a level or can be squared off or margin-called, or an order resting for the bar's range.
+    pub(crate) fn has_rest_work(&self) -> bool {
+        self.ledger.is_in_position() || self.orders.working().any(|o| !is_plain_market_order(&o))
+    }
+
+    /// Meet the resting part of a bar (`rest_part`) before the strategy has decided on it, as a
+    /// venue does while the bar forms. The events are returned for the strategy to hear before
+    /// `on_bar`, and [`EngineKernel::step`] carries on from here with this bar's decisions.
+    /// Under `next_bar_open` the open was met first ([`EngineKernel::step_open`]) and the entries
+    /// it filled are protected for the rest of the bar here. Returns nothing, and the bar is left
+    /// whole for `step`, when there is nothing resting or the bar ends the contract.
+    pub(crate) fn step_rest(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
+        if self.spec.as_ref().is_some_and(|s| s.is_expired_at(bar.timestamp))
+            || !self.has_rest_work()
+        {
+            return Vec::new();
+        }
+        self.entry_budget = None;
+        let opened = self.opened_at == Some(bar.timestamp);
+        if !opened {
+            if self.risk.daily_active() {
+                if let Some(day) = self.risk_day(bar.timestamp) {
+                    self.risk.roll_day(day);
+                }
+            }
+            self.stepping_trade = false;
+            self.fee_model.set_time(bar.timestamp);
+            // `last_step` is not moved: this bar is stepped by `step`, and what asks whether a bar
+            // was stepped (an order routed from another instrument's event, a follow-up, the
+            // sizing reference of a capital-fraction order) must not find it so before the
+            // decision.
+        }
+        // `last_close` stays the previous bar's: what the hooks that hear this part queue was
+        // decided before the bar closed.
+        self.rested_at = Some(bar.timestamp);
+        self.rest_step = Some((idx, *bar));
+        let mut events = std::mem::take(&mut self.pending_events);
+        let gate = self.session_gate(bar.timestamp, StepMode::Bar);
+        self.rest_gate = Some(gate);
+        self.rest_part(idx, bar, StepMode::Bar, &mut events);
+        if opened && !self.open_swept.is_empty() {
+            let swept = std::mem::take(&mut self.open_swept);
+            let held_before = std::mem::take(&mut self.open_held_before);
+            self.entry_bar_protection(idx, bar, &swept, &held_before, &mut events);
+        }
         events
     }
 
@@ -3279,6 +3403,7 @@ impl EngineKernel {
                 target: target_price,
                 trail,
                 position_id: 0, // set once the position exists, below
+                amend: false,
             });
             (None, None)
         } else {
@@ -3300,6 +3425,10 @@ impl EngineKernel {
             if let Some(request) = self.protect_outbox.last_mut() {
                 request.position_id = position_id;
             }
+        }
+        if let Some(managed) = self.ledger.get_mut(position_id) {
+            managed.stop_explicit = stop_override.is_some();
+            managed.target_explicit = target_override.is_some();
         }
         let fees_money = self.ledger.book(entry_fees);
         match funding {
@@ -3507,20 +3636,35 @@ impl EngineKernel {
             }
             self.fact_breaches.push(RejectReason::InsufficientCapital.as_str());
         }
-        // Both levels derived from the entry: shift with the average.
-        // Either level explicit: leave both, as the caller fixed them.
-        let shift = stop_attach.is_none() && target_attach.is_none();
-        self.ledger.add_to_position(position_id, price, size, entry_fees, shift)?;
+        // A level derived from the entry (a percent or ATR setting) shifts with the average; one
+        // the caller named rests where it was, as a broker's would. A level this add names
+        // replaces the position's.
+        self.ledger.add_to_position(position_id, price, size, entry_fees, true)?;
         if !self.venue_managed {
             if let Some(managed) = self.ledger.get_mut(position_id) {
                 if stop_attach.is_some() {
                     managed.position.stop_price = stop_attach;
+                    managed.stop_explicit = true;
                 }
                 if target_attach.is_some() {
                     managed.position.target_price = target_attach;
                     managed.target_fresh = true;
+                    managed.target_explicit = true;
                 }
             }
+        } else if stop_attach.is_some() || target_attach.is_some() {
+            // The venue holds the legs: tell it the levels the add names, for the whole position.
+            let total = self.ledger.get(position_id).map_or(size, |m| m.position.size);
+            self.protect_outbox.push(ProtectRequest {
+                direction,
+                size: total,
+                entry_price: price,
+                stop: stop_attach,
+                target: target_attach,
+                trail: None,
+                position_id,
+                amend: true,
+            });
         }
         let fees_money = self.ledger.book(entry_fees);
         match funding {

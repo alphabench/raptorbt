@@ -633,7 +633,10 @@ class TestSquareoff:
         # that (every later bar is refused); Friday trades again from 09:20.
         assert trades[0].exit_reason == "Squareoff"
         assert [t.entry_idx for t in trades if t.entry_idx > sq_idx][0] >= per_day
-        assert s.reasons().count("squareoff") == per_day - 1 - sq_idx
+        # The square-off happens before the decision, so `on_bar` of the square-off bar already
+        # sees a flat book and tries to re-enter: refused on that bar too (per_day - sq_idx bars,
+        # sq_idx included). Nothing reopens; the money rule is unchanged.
+        assert s.reasons().count("squareoff") == per_day - sq_idx
         assert all(t.exit_reason != "EndOfData" or t.entry_idx >= per_day for t in trades)
 
     def test_square_off_cancels_working_entry_orders_but_not_reduce_only_ones(self):

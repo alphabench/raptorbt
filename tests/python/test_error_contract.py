@@ -839,6 +839,11 @@ def _():
     run(OnBar(lambda s, ctx: s.submit_order(orders.Market(side="buy", units=1))), order_check=lambda order, ctx: 7)
 
 
+@case("invalid_order_check_scope", "order_check_scope")
+def _():
+    run(order_check=lambda order, ctx: None, order_check_scope="intents")
+
+
 @case("order_check_intent", "order_check")
 def _():
     run(OnBar(lambda s, ctx: s.enter(size_frac=0.5)), order_check=lambda order, ctx: None)
@@ -1514,6 +1519,7 @@ ACCEPTS = {
     "invalid_strike_selection": lambda v: option_run(strike_selection=v),
     "invalid_size_type": lambda v: option_run(size_type=v),
     "invalid_allocation": lambda v: raptorbt.run_portfolio_backtest(legs(), allocation=v),
+    "invalid_order_check_scope": lambda v: run(order_check=lambda order, ctx: None, order_check_scope=v),
     "invalid_warmup": lambda v: LiveNode([Noop()], ["A"], NO_FEES, bar_stamp="close", warmup=v),
     "invalid_timeframe": lambda v: at_start(lambda s, ctx: s.subscribe("A", timeframe=v)),
     "invalid_data_type": lambda v: at_start(lambda s, ctx: s.subscribe("A", data_type=v)),

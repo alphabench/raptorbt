@@ -524,7 +524,7 @@ position with ``Requirements(max_position=...)``.
 
 ```python
 class LiveNode
-LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
+LiveNode(strategies: 'Iterable', symbols: 'list[str]', config: 'BacktestConfig | None' = None, *, primary_bars: 'tuple[int, str] | None' = None, warmup_bars: 'dict[str, dict] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, initial_positions: 'dict | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, history: 'int | None' = None, curve_samples: 'int | None' = None, execution: 'ExecutionAdapter | PaperExecution | SimulatedExecution | None' = None, venue_account: 'str | None' = None, protective: "Literal['venue', 'local']" = 'venue', corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, processing_latency_ns: 'int' = 0, journal=None, epoch: 'int | None' = None, strategy_states: 'list | None' = None, order_check=None, order_check_scope: "Literal['all', 'typed']" = 'all', bindings: 'dict[str, str | Sequence[str]] | None' = None, warmup: "Literal['live', 'muted'] | None" = None, _via: 'str | None' = None, _replay=None)
 ```
 
 Many strategies over the symbols of one pushed feed.
@@ -636,6 +636,9 @@ action the node will see; without a policy there must be none.
 ``order_check`` is the host's pre-submit order check, the same callable
 :func:`~raptorbt.run_strategies` takes: every typed order passes it before
 the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
+``order_check_scope="typed"`` declares that the check judges typed orders only, so
+``enter()`` and ``close_position()`` are not refused for it (the default ``"all"`` refuses
+them with ``order_check_intent``).
 
 ``bindings`` maps a requirements role name to the symbol it means, or, for a
 :class:`~raptorbt.strategy.requirements.Universe` role, to the list of symbols chosen for it;
@@ -695,7 +698,7 @@ there.
 | `flush(self) -> 'None'` | Close the open timestamp group and deliver what it holds. With none open, nothing happens. |
 | `halt(self, strategy_index: 'int', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt one strategy from outside it, like ``ctx.halt``: its new entries are refused with ``killed``, its working orders are cancelled and, with ``flatten=True``, its positions are closed at the last prices seen. ``is_halted`` reads True at once; the cancels and closes happen when that strategy's next event is applied. |
 | `halt_account(self, account: 'str', flatten: 'bool' = False, reason: 'str' = 'manual') -> 'None'` | Halt every strategy on ``account`` from outside, as ``halt`` halts one: their new entries are refused with ``killed``, their working orders are cancelled and, with ``flatten=True``, their positions are closed at the last prices seen. Each strategy's cancels and closes happen when its next event is applied. The account's ``halted_at`` is the number of events applied to its strategies so far. Strategies not on the account are untouched. |
-| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome, ``halted`` (the indices of halted strategies) and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). |
+| `health(self) -> 'dict'` | State for a supervisor: ``state``, ``epoch``, ``fenced``, the journal's ``count`` and ``chain``, the orders with no confirmed outcome, ``halted`` (the indices of halted strategies) and, when the adapter has a ``health()``, its own state under ``adapter`` (``BrokerAdapter``: ``paused``, ``outbox``, ``faults``, ``recent_faults`` and its executor's ``alive``). ``margin_faults`` lists each strategy stopped for holding a sold option with no hedge left; it is why the strategy stopped, and a stop cannot be undone, so it stays listed after the positions are closed and the strategy cannot buy the hedge back. |
 | `heartbeat(self) -> 'dict'` | Check the execution epoch with the adapter now and return :meth:`health`. Raises ``fenced`` when a newer epoch owns the account. Call it on a timer; the node also checks before every request. |
 | `holders_of(self, symbol: 'str') -> 'tuple[int, ...]'` | The strategy indices that traded ``symbol`` when it was last added or revived. |
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
@@ -1546,7 +1549,7 @@ own future.
 *function*
 
 ```python
-run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, bindings: 'dict[str, str | Sequence[str]] | None' = None, trade_from: 'int | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
+run_strategies(strategies: 'Iterable', data: 'dict[str, dict] | None' = None, config: 'BacktestConfig | None' = None, *, ticks: 'dict[str, dict] | None' = None, depth: 'dict[str, dict] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, order_check_scope: "Literal['all', 'typed']" = 'all', bindings: 'dict[str, str | Sequence[str]] | None' = None, trade_from: 'int | None' = None, _via: 'str | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
 ```
 
 Run many strategies over shared market data.
@@ -1651,7 +1654,11 @@ holder at the ex-date; a short pays it. See ``docs/architecture/lifecycle.md``.
 
 ``order_check`` is the host's pre-submit order check, shared with
 :class:`~raptorbt.LiveNode` so one rule refuses the same orders in a
-backtest and live; see :mod:`raptorbt.strategy.order_check`.
+backtest and live; see :mod:`raptorbt.strategy.order_check`. With a check installed,
+``enter()`` and ``close_position()`` are refused (``order_check_intent``), since they carry
+no order to show it; ``order_check_scope="typed"`` declares that the check judges typed
+orders only, and intents then pass unseen by it. Use it when the check judges forms an
+intent cannot have (an order kind, a validity, ``post_only``).
 
 ``bindings`` maps a requirements role name to the symbol it means
 (``{"index": "NSE:NIFTY"}``), or, for a :class:`~raptorbt.strategy.requirements.Universe`

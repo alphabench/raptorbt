@@ -883,7 +883,8 @@ def strip_internal(d):
     a venue has its size resolved to units, the venue holds its
     one-cancels-other link, and the engine's own orders (intents, closes,
     protection) have ids of their own; a trade closed by an order has the exit
-    reason `Order`."""
+    reason `Order`; an order whose stop was hit and whose limit has not filled is
+    `triggered` in-process and `accepted` on a venue."""
     z = rf.enc(0.0)
     orders_ = []
     for o in d["orders"]:
@@ -891,6 +892,11 @@ def strip_internal(d):
             continue
         requested = o["requested_qty"]
         o = {k: v for k, v in o.items() if k not in ("requested_qty", "oco_group", "id")}
+        if o["status"] == "triggered":
+            # a venue never reports a trigger (OrderStatus.Triggered is the in-process matcher's
+            # own): a stop-limit whose stop has been hit and whose limit has not filled is still
+            # a working order to it
+            o["status"] = "accepted"
         if o["status"] == "rejected" and o["filled_qty"] != z:
             o["status"], o["reject_reason"] = "canceled", None
         if o["status"] == "filled" and requested is not None:

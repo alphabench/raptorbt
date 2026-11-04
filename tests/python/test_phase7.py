@@ -142,7 +142,9 @@ class TestClock:
         data = _bars([100.0] * 6)
         run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
         time_events = [e for e in events if e[0] == "time"]
-        assert time_events == [("time", 3, "flatten", 3 * MIN_NS)]
+        # Due at 3 min, the moment bar 3 is revealed: it fires ahead of bar 3, so its hook reads
+        # the bars before it and ctx.idx is the last of them, 2.
+        assert time_events == [("time", 2, "flatten", 3 * MIN_NS)]
         # Fired before that bar's on_bar.
         assert events.index(time_events[0]) < events.index(("bar", 3))
 
@@ -161,8 +163,9 @@ class TestClock:
 
         data = _bars([100.0] * 10)
         run_strategy_backtest(S, **data, config=_zero_fee_config(), bar_stamp="close")
-        # Set at ts=0 -> first due at 2min (idx 2), then 4 (idx 4); canceled at 5.
-        assert fires == [2, 4]
+        # Set at ts=0 -> due at 2min and 4min, each ahead of the bar that reveals it (bars 2 and
+        # 4), so the hook's ctx.idx is the bar before: 1 and 3. Canceled at 5.
+        assert fires == [1, 3]
 
     def test_timed_flatten_capability(self):
         """The capability test: an end-of-run alert flattens the position."""

@@ -506,3 +506,43 @@ fn a_correction_refused_at_the_unbooked_cap_leaves_the_order_position_and_cash_a
     );
     assert_eq!(k.unbooked_fills().len(), MAX_UNBOOKED_FILLS);
 }
+
+#[test]
+fn an_unpriced_market_order_is_still_held_to_the_position_and_size_limits() {
+    let config = BacktestConfig {
+        fees: 0.0,
+        max_position_qty: Some(10.0),
+        max_order_qty: Some(500.0),
+        ..BacktestConfig::default()
+    };
+    let k = kernel_with(config, None);
+    assert_eq!(
+        k.venue_pretrade(None, OrderSide::Buy, 1000.0, false, None, None),
+        Err(RejectReason::OrderSize)
+    );
+    assert_eq!(
+        k.venue_pretrade(None, OrderSide::Buy, 400.0, false, None, None),
+        Err(RejectReason::MaxPosition)
+    );
+    assert_eq!(k.venue_pretrade(None, OrderSide::Buy, 10.0, false, None, None), Ok(()));
+}
+
+#[test]
+fn a_working_limit_order_counts_at_its_own_price_with_no_mark() {
+    let mut k = kernel();
+    k.submit_venue_order(
+        OrderSide::Buy,
+        5.0,
+        OrderKind::Limit { price: 100.0 },
+        TimeInForce::Gtc,
+        0,
+        0,
+        "rest".to_string(),
+        false,
+        false,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(k.working_notional(None), 500.0);
+}

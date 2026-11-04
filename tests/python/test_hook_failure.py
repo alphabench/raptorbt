@@ -74,3 +74,37 @@ def test_a_strategy_that_raised_does_not_stop_the_others_of_its_group_being_matc
     (fill,) = [o for o in results[1].result.orders() if o.client_id == "b"]
     assert (fill.status, fill.filled_qty) == ("filled", 1.0)
     assert len(results[0].result.equity_curve()) == 4
+
+
+# the three-bar composite completes on bar 3, which is also the bar that crosses the stop
+ROWS3 = [(100, 101, 99, 100)] * 3 + [(100, 101, 90, 92), (92, 93, 91, 92.5), (92, 93, 91, 92)]
+
+
+@pytest.mark.filterwarnings("ignore:.*deprecated hooks:DeprecationWarning")
+def test_a_composite_handler_that_raised_still_trades_its_stop_and_marks_equity():
+    # defined here: the class statement itself warns about the deprecated hook name
+    class _BoomComposite(Strategy):
+        """Long 10 with a stop at 95; the handler of a three-bar composite raises on the bar that crosses it."""
+
+        def on_start(self, ctx):
+            self.subscribe_bars(3, "m")
+
+        def on_bar(self, ctx):
+            if ctx.idx == 0:
+                self.submit_order(O.Market(side="buy", units=10.0, stop_price=95.0))
+
+        def on_composite_bar(self, ctx, bar):
+            raise RuntimeError("boom")
+
+    node = LiveNode([_BoomComposite()], ["A"], _cfg(), bar_stamp="close")
+    for i, row in enumerate(ROWS3):
+        stamp = T0 + (i + 1) * MIN
+        if i == 3:
+            with pytest.raises(RuntimeError, match="boom"):
+                node.push_bar("A", stamp, *row, 1000.0)
+        else:
+            node.push_bar("A", stamp, *row, 1000.0)
+    result = node.finish()[0].result
+    (trade,) = result.trades()
+    assert (trade.size, trade.exit_price, trade.exit_time) == (10.0, 95.0, T0 + 4 * MIN)
+    assert len(result.equity_curve()) == len(ROWS3)

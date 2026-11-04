@@ -107,6 +107,9 @@ pub struct OrderChange {
     pub quantity: Option<f64>,
     pub limit_price: Option<f64>,
     pub trigger_price: Option<f64>,
+    /// The close the change was decided on, when that is a bar the adapter has not yet stepped
+    /// (a decision on bar `t` moving a limit through `t`'s close). `None`: the adapter's own last.
+    pub decided_close: Option<f64>,
 }
 
 /// Why a request was not handed to the venue.
@@ -161,6 +164,14 @@ pub trait ExecutionAdapter {
     /// Optional: an adapter with no ownership notion keeps the default.
     fn fence(&mut self, _epoch: u64) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    /// Whether a protective order resting at the venue counts against the position, so that an
+    /// order closing the position is refused while it rests. The engine then takes its
+    /// protective levels from the venue before it sends such an order, and watches them itself
+    /// until the order is done. A simulation and a venue that nets nothing keep the default.
+    fn resting_exits_hold_the_line(&self) -> bool {
+        false
     }
 
     /// The venue this adapter simulates, if it is a simulation that advances

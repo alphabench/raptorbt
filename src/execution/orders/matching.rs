@@ -535,21 +535,24 @@ impl OrderEngine {
                     }
                 },
                 OrderKind::TrailingStopMarket { offset } => {
-                    // Ratchet the watermark from this bar's favorable
-                    // extreme, then test the trigger against the adverse one
-                    // — both same-bar, mirroring position trailing stops.
+                    // The level stands where the highest price before this bar left it, as a
+                    // position's trailing stop does: the bar is tested against it, and only a bar
+                    // that did not trigger it ratchets it. An order not yet seen by a bar starts
+                    // from this bar's open.
                     let favorable = match order.side {
                         OrderSide::Sell => bar.high,
                         OrderSide::Buy => bar.low,
                     };
-                    let wm = match (order.trail_watermark, order.side) {
-                        (None, _) => favorable,
-                        (Some(w), OrderSide::Sell) => w.max(favorable),
-                        (Some(w), OrderSide::Buy) => w.min(favorable),
-                    };
-                    order.trail_watermark = Some(wm);
-                    let trigger = order.trail_trigger(wm, offset);
-                    fill_model.get_stop_fill_price(trigger, bar, direction, is_entry).map(fill)
+                    let before = order.trail_watermark.unwrap_or(bar.open);
+                    let trigger = order.trail_trigger(before, offset);
+                    let hit = fill_model.get_stop_fill_price(trigger, bar, direction, is_entry);
+                    if hit.is_none() {
+                        order.trail_watermark = Some(match order.side {
+                            OrderSide::Sell => before.max(favorable),
+                            OrderSide::Buy => before.min(favorable),
+                        });
+                    }
+                    hit.map(fill)
                 }
                 OrderKind::TrailingStopLimit { offset, limit_offset } => match order.status {
                     OrderStatus::Triggered | OrderStatus::PartiallyFilled => {
@@ -563,13 +566,14 @@ impl OrderEngine {
                             OrderSide::Sell => bar.high,
                             OrderSide::Buy => bar.low,
                         };
-                        let wm = match (order.trail_watermark, order.side) {
-                            (None, _) => favorable,
-                            (Some(w), OrderSide::Sell) => w.max(favorable),
-                            (Some(w), OrderSide::Buy) => w.min(favorable),
-                        };
-                        order.trail_watermark = Some(wm);
-                        let trigger = order.trail_trigger(wm, offset);
+                        let before = order.trail_watermark.unwrap_or(bar.open);
+                        let trigger = order.trail_trigger(before, offset);
+                        if !fill_model.would_trigger_stop(trigger, bar, direction, is_entry) {
+                            order.trail_watermark = Some(match order.side {
+                                OrderSide::Sell => before.max(favorable),
+                                OrderSide::Buy => before.min(favorable),
+                            });
+                        }
                         if fill_model.would_trigger_stop(trigger, bar, direction, is_entry) {
                             // Fix the limit through the trigger: bounded
                             // slippage, more marketable than the trigger.

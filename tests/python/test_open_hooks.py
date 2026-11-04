@@ -4,8 +4,10 @@ that open, and what it answers fills at that open.
 A venue reports what was decided on the previous bar at the open of the next one, before that bar
 has traded. So for each timestamp the books match the open first, the hooks hear those fills while
 the strategy and its indicators know only the bars up to the previous one, and only then is the
-bar applied to the strategy and decided on. A fill the rest of the bar brings is heard after that
-decision, and what it is answered with goes to the next bar's open.
+bar applied to the strategy and decided on. A resting order the bar gapped through fills at the
+open and is one of those fills: heard before the bar, answered at that open. A fill the rest of the
+bar brings is heard before the strategy decides on the bar, knowing only the bars before it,
+and what it is answered with goes to the next bar's open.
 
 Bars are 1-minute, stamped at close, from 09:16 IST on 2026-11-02. The same answer in a batch
 run, on a node and on the paper venue.
@@ -133,8 +135,9 @@ T1 = fmt(T0 + 2 * MIN)
 
 class Gap(Strategy):
     """A buy limit at 99 rests from bar 0; bar 1 opens at 98, through it, and fills it there. That
-    fill is part of bar 1 as the strategy sees it: its hook runs after `on_bar(1)`, which saw the
-    close at 98.5, and what it answers cannot fill at bar 1's open."""
+    fill is at bar 1's open: a venue reports it before the bar has traded, so its hook runs before
+    `on_bar(1)` (which sees the close at 98.5 only afterwards) and what it answers fills at that
+    same open, 98 (it used to be heard after `on_bar(1)` and answered at bar 2's open, 90)."""
 
     def __init__(self):
         super().__init__()
@@ -153,10 +156,40 @@ class Gap(Strategy):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_the_answer_to_a_fill_inside_a_bar_fills_at_the_next_open(mode):
+def test_the_answer_to_a_resting_order_the_bar_gapped_through_fills_at_that_open(mode):
     s = Gap()
     _run(s, {"X": bars(GAP, T0)}, mode)
-    assert s.fills == [("rest", T1, 98.0), ("ans", T2, 90.0)], s.fills
+    assert s.fills == [("rest", T1, 98.0), ("ans", T1, 98.0)], s.fills
+
+
+class Inside(Strategy):
+    """The same limit, but bar 1 opens at 100 and trades down through 99: the fill is inside the
+    bar, at 99, and what it answers goes to bar 2's open."""
+
+    def __init__(self):
+        super().__init__()
+        self.fills = []
+
+    def on_bar(self, ctx):
+        if ctx.idx == 0:
+            self.submit_order(O.Limit(side="buy", units=1.0, price=99.0), client_id="rest")
+
+    def on_order_event(self, ctx, e):
+        if e.kind != "order_filled":
+            return
+        self.fills.append((e.client_order_id, fmt(ctx.event_ns), e.price))
+        if e.client_order_id == "rest":
+            self.submit_order(O.Market(side="sell", units=1.0, reduce_only=True), client_id="ans")
+
+
+INSIDE = [(100,) * 4, (100, 101, 98, 98.5), (90, 91, 89, 90), (90, 91, 89, 90)]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_the_answer_to_a_fill_inside_a_bar_fills_at_the_next_open(mode):
+    s = Inside()
+    _run(s, {"X": bars(INSIDE, T0)}, mode)
+    assert s.fills == [("rest", T1, 99.0), ("ans", T2, 90.0)], s.fills
 
 
 class Close(Strategy):

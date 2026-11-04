@@ -236,6 +236,20 @@ impl SingleRunner {
         self.book.apply(&entry, None, input)
     }
 
+    /// Meet what rests for bar `idx` before the strategy decides on it (see
+    /// [`PortfolioBook::rest_bar`]): the stops, targets and resting orders of earlier bars trade
+    /// the bar's range and the events are returned for the strategy to hear. [`KernelRunner::step`]
+    /// carries on from here with the bar's decisions. Nothing when nothing rests, or when the
+    /// book has a lifecycle (corporate actions, expiries) to apply first, which `step` then
+    /// does whole.
+    pub fn rest(&mut self, idx: usize, bar: &KernelBar) -> Vec<EngineEvent> {
+        let entry = ScheduleEntry { instrument: 0, local_idx: idx, data: ScheduleData::Bar(*bar) };
+        if self.book.lifecycle_active() || !self.book.can_rest(&entry) {
+            return Vec::new();
+        }
+        self.book.rest_bar(&entry)
+    }
+
     /// Halt this strategy: new entries are refused as `killed` from now on.
     /// Working orders are cancelled, and open positions closed when
     /// `flatten`, at the start of the next step (at the last bar's close).

@@ -213,6 +213,36 @@ impl PaperVenue {
         self.report(strategy, entry.instrument, &events, entry.timestamp(), out)
     }
 
+    /// Step strategy `strategy`'s shadow book through what rests for the bar it is about to
+    /// decide on: its stops, targets and resting orders trade the bar's range while the bar
+    /// forms, and the venue reports it before the strategy decides. [`PaperVenue::on_market_event`]
+    /// carries on from here with the decisions of the bar. Reports nothing when nothing rests or
+    /// the bar cannot be met ahead (a halt waiting), which `on_market_event` then does whole.
+    pub fn on_rest(
+        &mut self,
+        strategy: usize,
+        entry: &ScheduleEntry,
+        out: &mut Vec<Report>,
+    ) -> Result<(), PaperError> {
+        let Some(shadow) = self.shadows.get_mut(strategy).and_then(Option::as_mut) else {
+            return Ok(());
+        };
+        if !shadow.book.can_rest(entry) {
+            return Ok(());
+        }
+        self.now_ns = entry.timestamp();
+        out.append(&mut self.queued);
+        let mut events = shadow.book.begin_event(entry.timestamp(), entry.instrument);
+        events.extend(shadow.book.rest_bar(entry));
+        // As in `on_market_event`: the strategy's own book places protection, schedule slices and
+        // the square-off; the shadow only needs to not act on them itself.
+        let managed = shadow.book.kernel_mut(entry.instrument);
+        managed.take_protect_requests();
+        managed.take_slices();
+        managed.take_squareoff();
+        self.report(strategy, entry.instrument, &events, entry.timestamp(), out)
+    }
+
     /// Turn what the shadow book did into the venue's reports.
     fn report(
         &mut self,
@@ -531,7 +561,13 @@ impl ExecutionAdapter for PaperVenue {
         let applied = kernel
             .order(p.order_id)
             .is_some_and(|o| !o.status.is_terminal() && o.status != OrderStatus::Submitted)
-            && kernel.modify_order(p.order_id, qty, change.limit_price, change.trigger_price);
+            && kernel.modify_order_at(
+                p.order_id,
+                qty,
+                change.limit_price,
+                change.trigger_price,
+                change.decided_close,
+            );
         let report = if applied {
             ExecutionReport::ReplaceAck {
                 new_qty: change.quantity,

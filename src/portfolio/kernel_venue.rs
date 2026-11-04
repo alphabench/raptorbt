@@ -354,12 +354,16 @@ impl EngineKernel {
         if !self.limits.is_active() {
             return Ok(());
         }
-        let Some(at) = price.or(mark) else {
-            return if self.limits.needs_price() { Err(RejectReason::NoMark) } else { Ok(()) };
-        };
+        let at = price.or(mark);
+        if at.is_none() && self.limits.needs_price() {
+            return Err(RejectReason::NoMark);
+        }
+        // With no price the notional is unknown, and no limit that needs it is set: the size
+        // and position limits still apply.
+        let priced = at.unwrap_or(0.0);
         let multiplier = self.multiplier();
         let working = self.working_entries(own, at);
-        self.limits.check_order(units, units * at * multiplier)?;
+        self.limits.check_order(units, units * priced * multiplier)?;
         let before = self.net_size();
         let after = match direction {
             Direction::Long => before + working.buy_units + units,
@@ -367,9 +371,10 @@ impl EngineKernel {
         };
         self.limits.check_position(before, after)?;
         if self.limits.tracks_exposure() {
-            let existing =
-                self.gross_notional(at) + self.external_exposure.unwrap_or(0.0) + working.notional;
-            self.limits.check_exposure(existing, units * at * multiplier)?;
+            let existing = self.gross_notional(priced)
+                + self.external_exposure.unwrap_or(0.0)
+                + working.notional;
+            self.limits.check_exposure(existing, units * priced * multiplier)?;
         }
         Ok(())
     }
@@ -377,22 +382,29 @@ impl EngineKernel {
     /// What the orders the venue holds for this instrument would add if they
     /// all filled: the units that buy, the units that sell and their notional,
     /// the order `own` left out. Orders that only reduce are not counted, and
-    /// an order is priced at its limit or trigger, else at `mark`.
-    fn working_entries(&self, own: Option<u64>, mark: Price) -> WorkingEntries {
+    /// an order is priced at its limit or trigger, else at `mark` (and counts nothing in
+    /// notional with neither).
+    fn working_entries(&self, own: Option<u64>, mark: Option<Price>) -> WorkingEntries {
         let multiplier = self.multiplier();
         let mut out = WorkingEntries::default();
         for o in self.orders.working() {
             if Some(o.id) == own || o.reduce_only || !o.is_venue_driven() {
                 continue;
             }
-            let QtySpec::Units(total) = o.qty else { continue };
+            // `submit_venue_order` is the only way a venue-driven order is made, and it sizes in units.
+            let QtySpec::Units(total) = o.qty else {
+                debug_assert!(false, "a venue-driven order is sized in units");
+                continue;
+            };
             let left = (total - o.filled_qty).max(0.0);
             match o.side {
                 OrderSide::Buy => out.buy_units += left,
                 OrderSide::Sell => out.sell_units += left,
             }
-            let at = o.kind.limit_price().or(o.kind.trigger_price()).unwrap_or(mark);
-            out.notional += left * at * multiplier;
+            // An order names its own price; one that names none is priced at the mark, if any.
+            if let Some(at) = o.kind.limit_price().or(o.kind.trigger_price()).or(mark) {
+                out.notional += left * at * multiplier;
+            }
         }
         out
     }
@@ -400,10 +412,7 @@ impl EngineKernel {
     /// The gross notional the orders the venue holds for this instrument
     /// would add if they all filled, for the other instruments' exposure check.
     pub(crate) fn working_notional(&self, mark: Option<Price>) -> f64 {
-        match mark {
-            Some(mark) => self.working_entries(None, mark).notional,
-            None => 0.0,
-        }
+        self.working_entries(None, mark).notional
     }
 
     /// Add to the gross notional the portfolio's other instruments hold, for

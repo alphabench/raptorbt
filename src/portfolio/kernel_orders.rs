@@ -325,7 +325,41 @@ impl EngineKernel {
         limit_price: Option<Price>,
         trigger_price: Option<Price>,
     ) -> bool {
-        self.orders.modify(id, qty, limit_price, trigger_price)
+        self.modify_order_at(id, qty, limit_price, trigger_price, None)
+    }
+
+    /// [`EngineKernel::modify_order`] for a change decided on a bar this kernel has not stepped
+    /// yet: `decided_close` is that bar's close, which a limit moved through is compared with
+    /// (the kernel's own last close is the bar before). `None` reads the kernel's own.
+    pub fn modify_order_at(
+        &mut self,
+        id: u64,
+        qty: Option<QtySpec>,
+        limit_price: Option<Price>,
+        trigger_price: Option<Price>,
+        decided_close: Option<Price>,
+    ) -> bool {
+        let done = self.orders.modify(id, qty, limit_price, trigger_price);
+        // A limit moved through the market (past the close the kernel last saw) crosses at the
+        // venue: the next bar it meets is its arrival, so it trades there at the open, the
+        // market, not at the limit it now sits behind. A limit moved to a level the market has
+        // not reached keeps resting.
+        if done && limit_price.is_some() {
+            if let (Some(close), Some(order)) =
+                (decided_close.or(self.last_close), self.orders.get_mut(id))
+            {
+                if let OrderKind::Limit { price } = order.kind {
+                    let through = match order.side {
+                        OrderSide::Buy => price > close,
+                        OrderSide::Sell => price < close,
+                    };
+                    if through {
+                        order.arrival_idx = None;
+                    }
+                }
+            }
+        }
+        done
     }
 
     /// Shared view of an order by engine id.
@@ -389,7 +423,11 @@ impl EngineKernel {
     /// meets it (`Order::follow_up`). Returns the events the fill produced.
     pub fn fill_follow_up(&mut self, order_id: u64, ts: i64) -> Vec<EngineEvent> {
         let mut events = std::mem::take(&mut self.pending_events);
-        let Some((idx, bar)) = self.last_step.filter(|(_, b)| b.timestamp == ts) else {
+        let Some((idx, bar)) = self
+            .last_step
+            .filter(|(_, b)| b.timestamp == ts)
+            .or(self.rest_step.filter(|(_, b)| b.timestamp == ts))
+        else {
             self.pending_events = events;
             return Vec::new();
         };

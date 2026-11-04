@@ -202,6 +202,9 @@ class LiveNode:
     ``order_check`` is the host's pre-submit order check, the same callable
     :func:`~raptorbt.run_strategies` takes: every typed order passes it before
     the engine or the venue sees it (see :mod:`raptorbt.strategy.order_check`).
+    ``order_check_scope="typed"`` declares that the check judges typed orders only, so
+    ``enter()`` and ``close_position()`` are not refused for it (the default ``"all"`` refuses
+    them with ``order_check_intent``).
 
     ``bindings`` maps a requirements role name to the symbol it means, or, for a
     :class:`~raptorbt.strategy.requirements.Universe` role, to the list of symbols chosen for it;
@@ -274,6 +277,7 @@ class LiveNode:
         epoch: int | None = None,
         strategy_states: list | None = None,
         order_check=None,
+        order_check_scope: Literal["all", "typed"] = "all",
         bindings: dict[str, str | Sequence[str]] | None = None,
         warmup: Literal["live", "muted"] | None = None,
         _via: str | None = None,
@@ -447,7 +451,7 @@ class LiveNode:
             rt.set_replay(True)
         self._strategies: list[Strategy] = []
         try:
-            order_check_mod.install(rt, order_check, name)
+            order_check_mod.install(rt, order_check, name, order_check_scope)
             if execution_kind is not None:
                 rt.set_execution(
                     execution_kind,

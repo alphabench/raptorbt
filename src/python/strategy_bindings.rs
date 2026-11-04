@@ -563,6 +563,27 @@ impl PyKernelSession {
         Ok(runner.step(idx, &bar, input).into_iter().map(PyEngineEvent::from).collect())
     }
 
+    /// Meet what rests for bar `idx` before the strategy decides on it: the stops, targets and
+    /// resting orders of earlier bars trade the bar's range. Call it ahead of `on_bar` and send the
+    /// events to the hooks; `step` then carries on with the bar's decisions.
+    #[allow(clippy::too_many_arguments)]
+    fn rest(
+        &mut self,
+        idx: usize,
+        timestamp: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> PyResult<Vec<PyEngineEvent>> {
+        let runner = self.runner.as_mut().ok_or_else(|| {
+            PyErr::from(Fail::new("session_finished", "session is finished; create a new one"))
+        })?;
+        let bar = KernelBar { timestamp, open, high, low, close, volume };
+        Ok(runner.rest(idx, &bar).into_iter().map(PyEngineEvent::from).collect())
+    }
+
     /// Submit an order.
     ///
     /// `side` is `"buy"`/`"sell"`; `kind` is `"market"`, `"limit"`,

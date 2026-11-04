@@ -825,10 +825,16 @@ class BrokerAdapter:
         """The node sent an order again that this adapter already knows (its reconcile found the
         order missing). Read the day's book by tag: an order that is there is adopted, whatever
         state it is in, and nothing is placed; an order that is not there is placed once more
-        under the same tag. A book that cannot be read, or shows several fits, places nothing."""
+        under the same tag, after the book has shown it absent twice. A book that cannot be read, or
+        shows several fits, places nothing."""
         if rec.terminal:
             return True
         row, state = self._try_lookup(rec)
+        if state == "absent":
+            # The book can lag a request that was only just sent: absent must be seen twice,
+            # ``resend_delay`` apart, before the order is placed again.
+            self._sleep(self.resend_delay)
+            row, state = self._try_lookup(rec)
         if state == "found" and row is not None:
             self.handle_update(row)
         elif state == "absent":
@@ -893,6 +899,10 @@ class BrokerAdapter:
                 ours = self._resolve(row) is not None
             if ours:
                 self.handle_update(row)
+            elif row.filled_qty > 0 and not (row.tag and self.ids.decode(row.tag)):
+                # A fill on an order that is no node's of this account: it moves the venue's
+                # position and no report can book it. Counted, and an event names it.
+                self._ignored("catch_up", row.venue_order_id, row.status, "a filled order of no node here", row.tag)
         if self.fill_source == "trades":
             for t in self._read(self.fetch_trades):
                 if t.venue_order_id in self._by_venue:

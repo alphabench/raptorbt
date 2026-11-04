@@ -82,7 +82,7 @@ moves no cash.
 | `raptorbt.execution.ExecutionReport` | What a venue says, built with the static constructors above (`fill(exec_id, qty, price, ts_ns, fee=)`). Fields: `kind`, `ts_ns`, `exec_id`, `qty`, `price`, `fee`, `reason`, `venue_order_id`. |
 | `raptorbt.execution.OrderRefused`, `Unsupported`, `Fenced`, `AdapterError` | The errors an adapter raises on purpose; the first three are subclasses of `AdapterError`. `Fenced` is for epochs ([live-trading](../live-trading/SKILL.md)). |
 | `raptorbt.execution.SimulatedExecution`, `PaperExecution` | The in-process matcher and the simulated exchange. Neither takes arguments; they follow the node's configuration. |
-| `LiveNode(..., execution=, venue_account=, protective="venue" or "local", order_check=, warmup=)` | Where orders go; the account name written on every request; who holds stops and targets; the host's check; what warm-up bars do. |
+| `LiveNode(..., execution=, venue_account=, protective="venue" or "local", order_check=, order_check_scope=, warmup=)` | Where orders go; the account name written on every request; who holds stops and targets; the host's check, and whether it judges typed orders only (`"typed"`: intents are not refused for it); what warm-up bars do. |
 | `LiveNode.push_report(client_order_id, report, *, arrival_ns)` | Apply a report now, as an event in the node's stream. Returns `"applied"`, `"duplicate"`, `"late"`, `"deferred"` (a fill the book could not book yet: kept, books itself when it can) or `"unbooked"` (a fill on an order the node no longer holds: refused, never booked, reconcile). |
 | `raptorbt.strategy.order_check.OrderProposal`, `OrderRefusal` | What the check sees (`symbol`, `strategy_index`, `client_id`, `side`, `kind`, `units`, `size_frac`, `limit_price`, `trigger_price`, `tif`, `reduce_only`, `post_only`, `tags`, `ts_ns`) and a refusal with a code. |
 | `raptorbt.FeeSchedule`, `raptorbt.RateCard`, `raptorbt.costs.FeeSchedule`, `raptorbt.costs.RateCard`, `raptorbt.indian_cost_schedule` | The fee model the book charges for a venue fill, as for a backtest (see [backtesting](../backtesting/SKILL.md)). |
@@ -522,6 +522,11 @@ their orders. `protective="venue"` (default) has the venue hold them (except the
 adapter answers `Unsupported` for is watched by the engine instead); `"local"`
 has the engine watch the levels and send a reduce-only market order, which fills
 at the event's price, not at the stop level.
+
+**A venue's fills come before your decision on the bar, and so do a backtest's.** A stop or
+resting order that trades inside bar `t` is reported while the bar forms, so `on_bar(t)` sees the
+position it left. The in-process matcher and the paper venue do the same: they match what rests
+against bar `t` before `on_bar(t)` runs and tell your fill hooks then (data up to bar `t - 1`).
 
 **Paper is not identical to the in-process matcher.** Where it differs, a test in
 `tests/python/test_execution.py` pins exactly what:

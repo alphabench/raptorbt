@@ -239,7 +239,7 @@ s = Script()
 result = run_strategy_backtest(s, **tape, config=BacktestConfig(fees=0.0), bar_stamp="close")
 assert ("order_canceled", 1) in s.kinds                   # ioc: one bar and gone
 assert ("order_expired", 3) in s.kinds                    # gtd: first bar stamped at 1.5 days
-assert ("order_filled", 1) in s.kinds                     # the modified limit, now marketable
+assert ("order_filled", 2) in s.kinds                     # the modified limit, now marketable: bar 2 is the first to meet it
 assert len(result.trades()) == 1
 ```
 
@@ -279,6 +279,11 @@ assert s.reasons == {"O-0": "reduce_only", "O-1": "insufficient_capital",
                      "O-2": "post_only", "O-3": "invalid_qty"}
 assert result.trades() == []
 ```
+
+A resting order (stop, target, limit, trailing, bracket leg) trades the range of every bar after the one
+that placed it, and it does so before your `on_bar` for that bar runs: the strategy decides on a bar
+knowing which of its resting orders that bar filled. An order never trades inside the bar on which
+you placed it.
 
 The marketable-limit rule: a limit that is already marketable fills at the
 market, never at its own limit price. Under `same_bar_close` that market is the
@@ -511,6 +516,13 @@ assert run("index").exit_reason == "Signal"       # the strategy closed the cont
   `enter()` and `close_position()` are signals, "be in this position": with a
   position held `enter()` is a no-op in every mode (a simulated venue refuses to
   fill it as an add). Typed orders are how a strategy adds.
+
+  A host's `order_check` sees typed orders only. With one installed, `enter()` and
+  `close_position()` are refused (`order_check_intent`): they carry no order to show it.
+  `order_check_scope="typed"` (on `run_strategies` and `LiveNode`) declares that the check
+  judges typed orders only, and intents then pass without being shown to it. Use it when the
+  check judges forms an intent cannot have (a kind, a validity, `post_only`); it does not make
+  the check see intents.
 
   With `oms_type="hedging"` every typed order opens its own position in its own
   direction, so a buy and a sell coexist; close one with

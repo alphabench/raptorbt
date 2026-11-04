@@ -128,7 +128,11 @@ fn skips_weekends(timestamps: &[i64]) -> bool {
     let quiet = (0..7).map(|d| per_day[d] + per_day[(d + 1) % 7]).min().unwrap_or(0);
     // A short series is allowed one special session: five percent of under twenty bars is less
     // than one, and a seven-day series of seven bars or more always puts two bars on a weekend.
-    let allowed = (WEEKEND_SHARE * timestamps.len() as f64).max(if timestamps.len() >= 7 { 1.0 } else { 0.0 });
+    let allowed = (WEEKEND_SHARE * timestamps.len() as f64).max(if timestamps.len() >= 7 {
+        1.0
+    } else {
+        0.0
+    });
     (quiet as f64) <= allowed
 }
 

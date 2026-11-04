@@ -55,6 +55,11 @@ pub struct ManagedPosition {
     /// trades at the open, as the order matcher does for a limit on its first bar. The bar that
     /// looks clears it; the level then rests and trades at its price.
     pub target_fresh: bool,
+    /// The stop / target was named by the caller (an order's level, `set_stop_price`) and not
+    /// derived from the entry price by a percent or ATR setting. A named level rests where a
+    /// broker's would when an add moves the average entry; only a derived one keeps its distance.
+    pub stop_explicit: bool,
+    pub target_explicit: bool,
 }
 
 impl ManagedPosition {
@@ -253,16 +258,17 @@ impl PositionLedger {
             cost,
             entry_fees_money,
             target_fresh: target_price.is_some(),
+            stop_explicit: false,
+            target_explicit: false,
         });
         Some(id)
     }
 
     /// Add a fill to an open position: size grows, the entry price becomes
     /// the size-weighted average, entry fees accumulate. When
-    /// `shift_protective` is set, stop and target move by the change in
-    /// average entry so a level derived from the entry price (a percent or
-    /// ATR stop) keeps its distance; explicit levels are left alone by the
-    /// caller passing `false`. Returns the new average entry price.
+    /// `shift_protective` is set, a stop or target derived from the entry price (a percent or
+    /// ATR level) moves by the change in average entry and keeps its distance; a level the
+    /// caller named stays where it is. Returns the new average entry price.
     pub fn add_to_position(
         &mut self,
         id: u64,
@@ -286,8 +292,12 @@ impl PositionLedger {
         pos.entry_fees = scale.to_f64(managed.entry_fees_money);
         if shift_protective {
             let shift = new_avg - old_avg;
-            pos.stop_price = pos.stop_price.map(|s| s + shift);
-            pos.target_price = pos.target_price.map(|t| t + shift);
+            if !managed.stop_explicit {
+                pos.stop_price = pos.stop_price.map(|s| s + shift);
+            }
+            if !managed.target_explicit {
+                pos.target_price = pos.target_price.map(|t| t + shift);
+            }
         }
         // The itemized entry breakdown describes the first slice only;
         // later slices carry their cost in `entry_fees` and the trade's
@@ -326,8 +336,12 @@ impl PositionLedger {
         pos.entry_fees = scale.to_f64(managed.entry_fees_money);
         if shift_protective {
             let shift = new_avg - old_avg;
-            pos.stop_price = pos.stop_price.map(|s| s + shift);
-            pos.target_price = pos.target_price.map(|t| t + shift);
+            if !managed.stop_explicit {
+                pos.stop_price = pos.stop_price.map(|s| s + shift);
+            }
+            if !managed.target_explicit {
+                pos.target_price = pos.target_price.map(|t| t + shift);
+            }
         }
         managed.entry_breakdown = None;
         Some(())

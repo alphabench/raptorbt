@@ -128,6 +128,35 @@ def test_a_resend_is_not_placed_when_the_book_cannot_be_read():
     assert [e.kind for e in adapter.drain_events()] == ["unconfirmed"]
 
 
+def test_a_resend_is_not_placed_on_one_read_that_lags_the_venue():
+    venue = ScriptedVenue()
+    adapter = adapter_on(venue)
+    node = started(adapter, rj.Journal(HEADER, memory=True))
+    ref = adapter.ids.encode("s0-0")
+    real = adapter.find_by_tag
+    reads = []
+
+    def lagging(tag):
+        reads.append(tag)
+        return [] if len(reads) == 1 else real(tag)  # the first read misses an order that is there
+
+    adapter.find_by_tag = lagging
+    node.resend("s0-0")
+    assert len(reads) == 2 and venue.place_calls[ref] == 1 and not venue.duplicates
+
+
+def test_a_fill_on_an_order_of_no_node_here_is_counted_and_named_at_reconcile():
+    venue = ScriptedVenue()
+    adapter = adapter_on(venue)
+    node = started(adapter, rj.Journal(HEADER, memory=True))
+    hear(venue, adapter, node, adapter.ids.encode("s0-0"))
+    venue.preload("someone-elses", "A", "buy", 3.0, 100.0, 3.0)
+    adapter.drain_events()
+    node.reconcile()
+    assert adapter.ignored_updates == 1
+    assert [e.kind for e in adapter.drain_events()] == ["ignored_update"]
+
+
 # -- a fill while the node was down, and the cash tolerance ----------------------------------
 
 

@@ -189,8 +189,8 @@ can. See [execution](../execution/SKILL.md).
 | `unknown_client_order_id` | `InvalidParameter` | A report names an order never sent. Key reports by the request's `client_order_id` (`s0-3`), not the strategy's id. It also refuses the fills of an exit the venue fired itself. |
 | `invalid_execution_report` | `InvalidData` | A report contradicts the order: an over-fill, a repeated `exec_id` with other terms, a reject after a fill. The order is unchanged. |
 | `duplicate_client_order_id` | `InvalidOrder` | An id was reused for a different order. Same id and terms is the same order and is not sent twice. |
-| `order_check_intent` | `InvalidOrder` | `enter()` or `close_position()` with an `order_check` installed. Use `submit_order`. |
-| `invalid_order_refusal`, `invalid_order_check` | `InvalidParameter` | The check returned something other than `None`, a code (1 to 64 bytes) or an object with a `str` `code`; or more than 1024 distinct codes; or it is not callable. An exception the check raises propagates and stops the run. |
+| `order_check_intent` | `InvalidOrder` | `enter()` or `close_position()` with an `order_check` installed. Use `submit_order`, or `order_check_scope="typed"` when the check judges typed orders only. |
+| `invalid_order_refusal`, `invalid_order_check`, `invalid_order_check_scope` | `InvalidParameter` | The check returned something other than `None`, a code (1 to 64 bytes) or an object with a `str` `code`; or more than 1024 distinct codes; or it is not callable; or the scope is not `"all"` or `"typed"`. An exception the check raises propagates and stops the run. |
 | `unsupported_in_venue_run`, `venue_requires_units` | `UnsupportedOperation` / `InvalidOrder` | The request has no equivalent on a venue (for example an order made on warm-up history against a real venue), or its size could not be resolved to units. |
 | `invalid_initial_positions`, `invalid_warmup`, `invalid_execution`, `invalid_adjustment_policy`, `invalid_corporate_action`, `unknown_role_binding`, `roll_target_not_subscribed` | `InvalidParameter` / `InvalidSubscription` | A node argument does not fit: see [live-trading](../live-trading/SKILL.md). |
 

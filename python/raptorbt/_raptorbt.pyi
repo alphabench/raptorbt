@@ -1423,6 +1423,16 @@ class KernelDriver:
         hooks: int,
         atr: Any | None = ...,
     ) -> None: ...
+    def rest(
+        self,
+        idx: int,
+        ts: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None: ...
     def step(
         self,
         idx: int,
@@ -1643,7 +1653,7 @@ class Runtime:
     def set_warmup(self, warmup: bool, muted: bool = ...) -> None: ...
     def hold_boot(self) -> None: ...
     def release_boot(self) -> None: ...
-    def set_order_check(self, check: Any, proposal: Any) -> None: ...
+    def set_order_check(self, check: Any, proposal: Any, typed_only: bool = False) -> None: ...
     def set_trade_from(self, ns: int | None = ...) -> None: ...
     def push_report(
         self, client_order_id: str, report: ExecutionReport, arrival_ns: int
@@ -1933,6 +1943,16 @@ class KernelSession:
         size_mult: float | None = ...,
         stop_price: float | None = ...,
         target_price: float | None = ...,
+    ) -> list[EngineEvent]: ...
+    def rest(
+        self,
+        idx: int,
+        timestamp: int,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
     ) -> list[EngineEvent]: ...
     def submit_order(
         self,

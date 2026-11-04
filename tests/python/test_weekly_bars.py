@@ -8,7 +8,8 @@ import raptorbt as rb
 from raptorbt import BacktestConfig, Strategy
 
 DAY = 86_400 * 10**9
-#: 2026-10-28, a Wednesday, 00:00 UTC (20,389 days after the epoch)
+IST = 19_800 * 10**9
+#: 2026-10-28, a Wednesday, 00:00 UTC (20,754 days after the epoch)
 WED = 20_754 * DAY
 
 
@@ -40,3 +41,7 @@ def test_weekly_bars_end_on_monday_midnight():
     # Wed 28 Oct to Sun 1 Nov, Mon 2 to Sun 8 Nov, Mon 9 to Sun 15 Nov: each completes when the
     # next Monday's bar arrives; the closes are the three Sundays'
     assert [c for _, c in s.weeks] == [104.0, 111.0, 118.0]
+    # each bar is stamped at the Monday that completes it, 00:00 UTC (05:30 IST); the epoch was a
+    # Thursday, so a Monday is day 4 of the seven-day cycle counted from it
+    assert [t for t, _ in s.weeks] == [WED + 5 * DAY, WED + 12 * DAY, WED + 19 * DAY]
+    assert all(((t + IST) // DAY) % 7 == 4 for t, _ in s.weeks)

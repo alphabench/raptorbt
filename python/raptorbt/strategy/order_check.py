@@ -28,6 +28,12 @@ stable set, not carry ids.
 Only typed orders (``submit_order``) are checked. The legacy ``enter()`` and
 ``close_position()`` intents carry no order to show the check, so with an
 ``order_check`` installed they are refused (``order_check_intent``).
+
+``order_check_scope="typed"`` declares that the check judges typed orders only: intents are then
+neither refused nor shown to it, and they pass as they would without a check. Use it when the
+check judges forms an intent cannot have (an order kind, a validity, ``post_only``); the intents
+are then outside what the check can say. Leave the default ``"all"`` when the check must see
+every order the strategy sends: an intent is refused rather than let past it.
 """
 
 from __future__ import annotations
@@ -72,8 +78,21 @@ class OrderRefusal:
 OrderCheck = Callable[[OrderProposal, object], "None | str | OrderRefusal"]
 
 
-def install(rt, order_check, operation: str) -> None:
-    """Install ``order_check`` on a runtime, or do nothing for ``None``."""
+SCOPES = ("all", "typed")
+
+
+def install(rt, order_check, operation: str, scope: str = "all") -> None:
+    """Install ``order_check`` on a runtime, or do nothing for ``None``. ``scope`` is
+    ``"all"`` (intents are refused) or ``"typed"`` (the check judges typed orders only)."""
+    if scope not in SCOPES:
+        raise InvalidParameter(
+            f"order_check_scope must be 'all' or 'typed', got {scope!r}",
+            code="invalid_order_check_scope",
+            operation=operation,
+            parameter="order_check_scope",
+            value=scope,
+            valid=list(SCOPES),
+        )
     if order_check is None:
         return
     if not callable(order_check):
@@ -85,4 +104,4 @@ def install(rt, order_check, operation: str) -> None:
             parameter="order_check",
             value=type(order_check).__name__,
         )
-    rt.set_order_check(order_check, OrderProposal)
+    rt.set_order_check(order_check, OrderProposal, scope == "typed")

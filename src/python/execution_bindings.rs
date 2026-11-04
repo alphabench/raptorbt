@@ -400,6 +400,17 @@ impl ExecutionAdapter for PyAdapter {
         self.call(|_, obj| obj.call_method1("fence", (epoch,)))
     }
 
+    fn resting_exits_hold_the_line(&self) -> bool {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .getattr_opt("resting_exits_hold_the_line")
+                .ok()
+                .flatten()
+                .is_some_and(|v| v.is_truthy().unwrap_or(false))
+        })
+    }
+
     fn link_oco(&mut self, client_order_ids: &[String]) -> Result<(), AdapterError> {
         let has = Python::attach(|py| self.obj.bind(py).hasattr("link_oco").unwrap_or(false));
         if !has {
