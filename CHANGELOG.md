@@ -5,6 +5,112 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-11-04
+
+The first stable release. It covers everything since 0.13.4, including the
+changes first prepared as 0.14.0, which was never published. **Several results
+change, and a few calls are refused that used to run.** Re-run your backtests
+on 1.0.0 before trusting old numbers; nothing is kept behind a compatibility
+flag, because the old numbers were wrong.
+
+### Added
+
+- **A strategy declares what it needs.** `requirements` is data (roles,
+  timeframes, holding, warm-up, parameters) that a host can check, fingerprint
+  and bind before a run starts.
+- **Live trading.** `LiveNode` runs the same `Strategy` class on a pushed feed.
+  It keeps a hash-chained journal, rebuilds from it after a crash, reconciles
+  with the venue, fences a restored node with an epoch, and adds and retires
+  instruments while running.
+- **Venues and brokers.** Orders can be worked by a venue and booked from its
+  execution reports, against a paper venue or an adapter of your own. A common
+  adapter layer (outbox, idempotent ids, fill normalisation) comes with thin
+  Kite, Upstox and Dhan mappings that pass the adapter conformance kit.
+- **Orders and positions.** Atomic order groups and option structures (hedge
+  legs first, all legs fill together or none), percent and absolute exits on a
+  position or a named group, continuous futures with a declared roll rule, and
+  netting that accumulates like a broker.
+- **Money and fees.** Money is booked in fixed-point minor units. Fees are data
+  (`FeeSchedule`, `RateCard`) with dated statutory rows per instrument, and
+  margin is a typed `MarginModel`. Contract expiry, settlement, delivery and
+  corporate actions are modelled.
+- **Pricing and research.** Option pricing, Greeks, implied volatility and an
+  option chain with no lookahead; research statistics and the full report;
+  standalone resampling.
+- **`bar_stamp` and `bar_ns`** declare whether bar timestamps mark a bar's open
+  or its close. Open-stamped and close-stamped copies of the same data give
+  identical results.
+- **Structured errors.** Every error raised on purpose is a `RaptorBTError`
+  with a `code`, the accepted alternatives and the skill that covers it
+  (`docs/errors.md`).
+- **Skills for AI agents**, shipped in the wheel and checked by
+  `python -m raptorbt.skills check`, and runnable `examples/`.
+- **Opt-in crash reporting**, off by default.
+
+### Results change
+
+- **Cash-account shorts are valued as shorts.** A 1,000-unit short from 100 to
+  90 ended at 90,000 instead of 110,000. Affects equity, drawdown, ratios and
+  later position sizes for shorts with `account_type="cash"`; longs and margin
+  accounts are unchanged.
+- **Pairs.** The short leg was credited as if it were long and entry fees were
+  left out of trade pnl. Final equity now equals starting capital plus the sum
+  of trade pnl.
+- **Limit and target fills no longer slip.** Limits, triggered stop-limits and
+  take-profits fill at their price; market and stop fills keep slippage.
+- **No lookahead in targeted closes** under `fill_timing="next_bar_open"`:
+  `close_position(position_id=...)` and `(symbol=...)` fill at the next open.
+- **A marketable limit fills at the market**, not at its own limit, and a limit
+  moved by a decision is judged against the close of the bar it decided on.
+- **A stop the bar gapped through fills at the open.** `on_bar` sees that fill.
+- **Resting orders trade a bar's range before the strategy decides on it**, and
+  the stops resting for a position never add up to more than it holds.
+- **One-bar entries are kept** in portfolio backtests under `next_bar_open`.
+- **Gapped stops in tick backtests fill at the worse of the stop and the bid.**
+- **Equity is sampled once per timestamp** in portfolio and tick strategy runs.
+- **Fill prices snap to the price increment**, against the trader for market
+  fills and in the trader's favour for limits.
+- **Position sizing uses the active fee model.**
+- **`simulate_portfolio_mc` gives the same result for a seed on any machine.**
+- **`sma`, and the streaming SMA, standard deviation and Bollinger bands,
+  recover after a NaN.**
+- **Weekly bars run Monday to Sunday.** Short daily series annualise on trading
+  days. A run that never traded has no Sharpe ratio, and undefined ratios are
+  `None`.
+- **Events that share a timestamp** are applied, decided and matched as a
+  group, and every indicator is current before any strategy decides.
+
+### Breaking
+
+- `bar_stamp` is required on the runners that take it; leaving it out raises
+  `missing_bar_stamp`.
+- Decreasing timestamps are refused by every runner; equal timestamps are
+  allowed.
+- NaN, infinite and non-positive prices, order terms and protective levels are
+  refused, naming the column and index.
+- `enter()` never adds to a position on a simulated venue; same-side orders
+  net at the average price.
+- `reduce_only` on the same side as the position, or with no position, is
+  rejected.
+- `Twap` in the portfolio and tick runners raises instead of becoming one
+  market order.
+- Bare `ValueError`, `TypeError` and `KeyError` raises on public calls became
+  `RaptorBTError` subclasses.
+- Rust library: the `raptorbt::stops` module, `core::TimeSeries` and
+  `execution::slippage::MarketImpact` are removed, and `EventSession`'s
+  `set_*` and `push_*` calls return `Result`.
+
+### Migration
+
+- Pass `bar_stamp="close"` if your bar timestamps mark the bar's end, or
+  `bar_stamp="open", bar_ns=<width in ns>` if they mark its start (as Kite
+  historical candles do).
+- Catch `RaptorBTError` (or the specific subclass) where you caught
+  `ValueError` from raptorbt calls.
+- Expect different numbers for cash-account shorts, pairs, runs that combine
+  limits or targets with `slippage`, targeted closes under `next_bar_open`,
+  multi-instrument metrics, seeded Monte Carlo and itemised-fee sizing.
+
 ## [0.13.4] - 2026-09-10
 
 **In plain words: a scheduled hook on a live tick stream now fires at the time

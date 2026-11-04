@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "raptorbt"
-version = "2.0.0-dev.0"
+version = "1.0.0"
 dependencies = [
  "approx",
  "clarabel",
