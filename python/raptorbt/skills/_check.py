@@ -11,6 +11,7 @@ forbids drafts.
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import functools
 import importlib
 import json
@@ -312,6 +313,21 @@ def run_block(code: str, timeout: float) -> tuple[int | None, str]:
     return p.returncode, p.stderr.strip().splitlines()[-1] if p.stderr.strip() else ""
 
 
+def prerun_examples(root: Path, skills: list[dict[str, Any]], timeout: float) -> None:
+    """Run every example of the non-draft skills at once, so the checks below find them cached.
+
+    Each example is a fresh interpreter and shares nothing with another, so the order they run in
+    cannot change a result; check_skill_text still reports the findings in source order.
+    """
+    codes: set[str] = set()
+    for s in skills:
+        f = root / s["path"]
+        if s["status"] != "draft" and f.is_file():
+            codes |= {b.code for b in code_blocks(f.read_text(encoding="utf-8")) if b.lang in ("python", "py")}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        list(pool.map(lambda code: run_block(code, timeout), codes))
+
+
 def check_skill_text(rep: Report, where: str, text: str, body_from: int, draft: bool, timeout: float) -> None:
     """Checks on a skill body: sections, then (non-draft) examples, symbols, deprecations."""
     headings = [(n, ln) for n, ln in prose(text) if ln.startswith("## ")]
@@ -482,6 +498,8 @@ def validate(root: Path, strict: bool = False, timeout: float = 60.0) -> Report:
         m = re.match(r"(\d+)", getattr(raptorbt, "__version__", "") or "")
         if m and re.fullmatch(r"\d+\.x", s["api_version"]) and s["api_version"].split(".")[0] != m.group(1):
             rep.err(label, f"api_version {s['api_version']} does not match installed raptorbt {raptorbt.__version__}")
+
+    prerun_examples(root, list(names.values()), timeout)
 
     # -- files <-> manifest
     on_disk = {p.parent.name for p in root.glob("*/SKILL.md") if not p.parent.name.startswith("_")}
