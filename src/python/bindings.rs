@@ -2862,6 +2862,11 @@ pub fn tick_velocity<'py>(
 // ============================================================================
 // Indicator Functions
 // ============================================================================
+//
+// Inputs are borrowed from NumPy when contiguous (copied when strided) and the
+// computation runs with the GIL released. As with NumPy's own ufuncs, a caller
+// mutating an input array from another thread during the call gets undefined
+// numbers (the borrow is a plain read of the live buffer).
 
 /// Simple Moving Average.
 #[pyfunction]
@@ -2870,8 +2875,8 @@ pub fn sma<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::trend::sma(&vec, period).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result = py.detach(|| indicators::trend::sma(&vec, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2882,8 +2887,8 @@ pub fn ema<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::trend::ema(&vec, period).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result = py.detach(|| indicators::trend::ema(&vec, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2894,8 +2899,8 @@ pub fn rsi<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::momentum::rsi(&vec, period).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result = py.detach(|| indicators::momentum::rsi(&vec, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2909,8 +2914,9 @@ pub fn macd<'py>(
     slow_period: usize,
     signal_period: usize,
 ) -> PyResult<(F64Array<'py>, F64Array<'py>, F64Array<'py>)> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::momentum::macd(&vec, fast_period, slow_period, signal_period)
+    let vec = numpy_cow_f64(&data);
+    let result = py
+        .detach(|| indicators::momentum::macd(&vec, fast_period, slow_period, signal_period))
         .map_err(invalid_input)?;
     Ok((
         vec_to_numpy_f64(py, result.macd_line),
@@ -2930,11 +2936,12 @@ pub fn stochastic<'py>(
     k_period: usize,
     d_period: usize,
 ) -> PyResult<(F64Array<'py>, F64Array<'py>)> {
-    let h = numpy_to_vec_f64(high);
-    let l = numpy_to_vec_f64(low);
-    let c = numpy_to_vec_f64(close);
-    let result =
-        indicators::momentum::stochastic(&h, &l, &c, k_period, d_period).map_err(invalid_input)?;
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let result = py
+        .detach(|| indicators::momentum::stochastic(&h, &l, &c, k_period, d_period))
+        .map_err(invalid_input)?;
     Ok((vec_to_numpy_f64(py, result.k), vec_to_numpy_f64(py, result.d)))
 }
 
@@ -2947,10 +2954,11 @@ pub fn atr<'py>(
     close: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let h = numpy_to_vec_f64(high);
-    let l = numpy_to_vec_f64(low);
-    let c = numpy_to_vec_f64(close);
-    let result = indicators::volatility::atr(&h, &l, &c, period).map_err(invalid_input)?;
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let result =
+        py.detach(|| indicators::volatility::atr(&h, &l, &c, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2963,9 +2971,10 @@ pub fn bollinger_bands<'py>(
     period: usize,
     std_dev: f64,
 ) -> PyResult<Py<PyAny>> {
-    let vec = numpy_to_vec_f64(data);
-    let result =
-        indicators::volatility::bollinger_bands(&vec, period, std_dev).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result = py
+        .detach(|| indicators::volatility::bollinger_bands(&vec, period, std_dev))
+        .map_err(invalid_input)?;
     super::indicator_bindings::bollinger_bands_obj(
         py,
         vec_to_numpy_f64(py, result.upper),
@@ -2983,10 +2992,11 @@ pub fn adx<'py>(
     close: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let h = numpy_to_vec_f64(high);
-    let l = numpy_to_vec_f64(low);
-    let c = numpy_to_vec_f64(close);
-    let result = indicators::strength::adx(&h, &l, &c, period).map_err(invalid_input)?;
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let result =
+        py.detach(|| indicators::strength::adx(&h, &l, &c, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -2999,11 +3009,11 @@ pub fn vwap<'py>(
     close: PyReadonlyArray1<f64>,
     volume: PyReadonlyArray1<f64>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let h = numpy_to_vec_f64(high);
-    let l = numpy_to_vec_f64(low);
-    let c = numpy_to_vec_f64(close);
-    let v = numpy_to_vec_f64(volume);
-    let result = indicators::volume::vwap(&h, &l, &c, &v).map_err(invalid_input)?;
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let v = numpy_cow_f64(&volume);
+    let result = py.detach(|| indicators::volume::vwap(&h, &l, &c, &v)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -3018,11 +3028,12 @@ pub fn supertrend<'py>(
     period: usize,
     multiplier: f64,
 ) -> PyResult<(F64Array<'py>, Bound<'py, PyArray1<i8>>)> {
-    let h = numpy_to_vec_f64(high);
-    let l = numpy_to_vec_f64(low);
-    let c = numpy_to_vec_f64(close);
-    let result =
-        indicators::trend::supertrend(&h, &l, &c, period, multiplier).map_err(invalid_input)?;
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let result = py
+        .detach(|| indicators::trend::supertrend(&h, &l, &c, period, multiplier))
+        .map_err(invalid_input)?;
 
     let direction_array = PyArray1::from_vec(py, result.direction);
     Ok((vec_to_numpy_f64(py, result.supertrend), direction_array))
@@ -3035,8 +3046,9 @@ pub fn rolling_min<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::rolling::rolling_min(&vec, period).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result =
+        py.detach(|| indicators::rolling::rolling_min(&vec, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 
@@ -3047,8 +3059,9 @@ pub fn rolling_max<'py>(
     data: PyReadonlyArray1<f64>,
     period: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let vec = numpy_to_vec_f64(data);
-    let result = indicators::rolling::rolling_max(&vec, period).map_err(invalid_input)?;
+    let vec = numpy_cow_f64(&data);
+    let result =
+        py.detach(|| indicators::rolling::rolling_max(&vec, period)).map_err(invalid_input)?;
     Ok(vec_to_numpy_f64(py, result))
 }
 

@@ -48,6 +48,10 @@ proptest = "1.12"
 name = "backtest_benchmark"
 harness = false
 
+[[bench]]
+name = "expr_kernels"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1
