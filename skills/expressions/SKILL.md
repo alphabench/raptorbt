@@ -272,6 +272,77 @@ for i, (ready, got) in enumerate(s.seen):
     assert got is None if np.isnan(want[i]) else got is bool(want[i])
 ```
 
+A cross-section in a strategy. Declare a `Universe` role and read the basket with
+`ctx.role("basket")`; `ctx.indicators.expr_all(text)` registers a cross-sectional expression once
+for every instrument of the run and returns `{symbol: handle}`. The members share one panel, so
+every handle shows the same date's ranking (the value after the whole group once a bar of the
+group is revealed). Decide once a step, on the first member, so each step looks at the whole
+cross-section. The strategy is bound with `bindings={"basket": SYMS}` here; a backtest of the
+platform binds the instruments it is given in order, `Underlying` roles first and the rest to
+the basket.
+
+```python
+import numpy as np
+from raptorbt import BacktestConfig, Strategy, run_strategies
+from raptorbt.strategy import Holding, Requirements, Universe, orders
+
+MIN = 60 * 10**9
+T0 = 1_767_225_600 * 10**9
+SYMS = [f"S{i}" for i in range(6)]
+
+
+def bars(n, seed):
+    rng = np.random.default_rng(seed)
+    close = 100.0 + np.cumsum(rng.normal(0, 1, n))
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    return dict(timestamps=T0 + np.arange(1, n + 1, dtype=np.int64) * MIN,
+                open=open_, high=np.maximum(open_, close) + 0.3,
+                low=np.minimum(open_, close) - 0.3, close=close,
+                volume=np.round(rng.uniform(500, 1500, n)))
+
+
+data = {s: bars(120, 10 + k) for k, s in enumerate(SYMS)}
+
+
+class TopRank(Strategy):
+    """Long a name while its cross-sectional rank of 5-bar momentum is in the top fifth."""
+
+    requirements = Requirements(
+        roles={"basket": Universe(asset="equity", min=6, max=6, data=("bar",))},
+        timeframes=["1m"], holding=Holding.overnight(), data=["bar"],
+    )
+
+    def on_start(self, ctx):
+        # one panel for the basket: {symbol: handle}; every handle reads the same ranking
+        self.rank = ctx.indicators.expr_all("rank(roc(close, 5))")
+        self.bought = []
+
+    def on_bar(self, ctx):
+        members = ctx.role("basket")
+        if ctx.symbol != members[0]:
+            return  # decide once a step, after every member's bar of it is in
+        for s in members:
+            h = self.rank[s]
+            if not h.ready or h.value is None:
+                continue
+            held = bool(ctx.positions(s))
+            if h.value >= 0.8 and not held:
+                self.submit_order(orders.Market(side="buy", size_frac=0.1), symbol=s)
+                self.bought.append(s)
+            elif h.value < 0.5 and held:
+                self.close_position(symbol=s)
+
+
+strategy = TopRank()
+(result,) = run_strategies(
+    [(strategy, SYMS)], data,
+    BacktestConfig(initial_capital=1_000_000.0, fees=0.0),
+    bar_stamp="close", bindings={"basket": SYMS},
+)
+assert strategy.bought and set(strategy.bought) <= set(SYMS)
+assert result.result.metrics.total_trades > 0
+```
+
 A coarser clock with `at`. `at("1d", expression)` computes `expression` on daily bars cut from
 the bars you give and holds the result on the base clock, so `close > at("1d", sma(close, 200))`
 compares every bar with the daily average. The daily value first shows on the first bar of the
