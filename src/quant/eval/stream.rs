@@ -83,6 +83,7 @@ impl Stream {
         std::mem::size_of::<f64>() * (self.regs.capacity() + self.out.capacity())
             + self.nodes.capacity() * std::mem::size_of::<Box<dyn Node>>()
             + self.nodes.iter().map(|n| n.state_bytes()).sum::<usize>()
+            + self.ats.capacity() * std::mem::size_of::<AtState>()
             + self.ats.iter().map(|a| a.state_bytes()).sum::<usize>()
     }
 

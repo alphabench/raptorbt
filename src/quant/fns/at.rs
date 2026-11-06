@@ -51,10 +51,18 @@ pub const REV: u32 = 1;
 pub const EXAMPLES: [&str; 11] =
     ["1m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"];
 
-/// Heap the boxed builder is counted at: the plain time builder's size. The builder is a trait
-/// object, so this is an estimate; a bound session adds its tables, which the hub holds per
-/// aggregator as well and which are not counted here.
-const BUILDER_BYTES: usize = std::mem::size_of::<crate::data::aggregate::TimeBarBuilder>();
+/// Heap of the boxed builder when it is known exactly: the plain time builder or the calendar
+/// (month, year) builder, with no session bound. With a session the builder is a private type
+/// that clones the schedule, and the `BarBuilder` trait cannot report its heap, so that case is
+/// counted as the plain builder's size and is NOT exact: the schedule's tables are missing.
+fn builder_bytes(spec: BarSpec) -> usize {
+    match spec.unit {
+        AggregationUnit::Month | AggregationUnit::Year => {
+            std::mem::size_of::<crate::data::aggregate::CalendarBarBuilder>()
+        }
+        _ => std::mem::size_of::<crate::data::aggregate::TimeBarBuilder>(),
+    }
+}
 
 /// `"15m"`, `"1h"`, `"1d"`, `"1w"`, `"1month"`, `"1y"`: a step and a time-window unit.
 pub fn parse_timeframe(s: &str) -> Result<BarSpec, String> {
@@ -105,6 +113,7 @@ pub fn valid_for(base_ns: i64) -> Vec<String> {
 pub struct AtState {
     builder: Box<dyn BarBuilder + Send + Sync>,
     key: AggKey,
+    spec: BarSpec,
     sub: Stream,
     held: f64,
 }
@@ -127,7 +136,7 @@ impl AtState {
             .map_err(|e| EvalError::Node(e.to_string()))?;
         let (key, session) = key.with_session(clock.session.as_deref());
         let builder = key.builder(session).map_err(|e| EvalError::Node(e.to_string()))?;
-        Ok(Self { builder, key, sub: Stream::new(inner)?, held: f64::NAN })
+        Ok(Self { builder, key, spec, sub: Stream::new(inner)?, held: f64::NAN })
     }
 
     /// Feed one base bar stamped `ts`; the held value after it. The value changes only on the
@@ -164,9 +173,9 @@ impl AtState {
         self.sub.ready()
     }
 
-    /// Heap this state owns.
+    /// Heap this state owns, not counting its own struct (the stream's `ats` vector holds it).
     pub fn state_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + BUILDER_BYTES + self.sub.state_bytes()
+        builder_bytes(self.spec) + self.sub.state_bytes()
     }
 }
 

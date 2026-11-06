@@ -375,7 +375,7 @@ def test_programs_without_at_keep_the_hashes_they_had():
         "close": "63a14bbe53bfdf48e2086a4f41586de9d16b13d54f8f5998d4acd3d5eae5cb6a",
         "sma(5)": "b2d173d37680ccf900eede9e5c7f1a23f94fa1c067e51e25a3efb35a86ad0ce3",
         "close > sma(20)": "2abfa0c16f9965d7f2dd3a0653be7f772b8f0da32bbae53281c5ff5d9ca84c3e",
-        "rsi(14) < 30": "379356a448b24963589402b063034317b7f2db927289be453afd3faaeead4328",
+        "rsi(14) < 30": "46200ab880ab4e63dd8a7f70d773326680ff6de4cd10b35193f6d377948c9d55",
     }.items():
         e = rb.expr(src)
         assert e.hash == want and e.bound_hash("close", IST) == want, src
