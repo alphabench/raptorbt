@@ -3,5 +3,6 @@
 
 pub mod fns;
 pub mod kernel;
+pub mod lang;
 pub mod registry;
 pub mod window;
