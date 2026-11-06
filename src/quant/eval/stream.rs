@@ -47,6 +47,15 @@ impl Stream {
         Ok(())
     }
 
+    /// Heap this stream owns, counted at capacity: the register file, the output row, the node
+    /// list and each node's allocation, ring and kernel state. The plan is shared and not
+    /// counted; a stream's own struct is not either (it sits wherever the caller put it).
+    pub fn state_bytes(&self) -> usize {
+        std::mem::size_of::<f64>() * (self.regs.capacity() + self.out.capacity())
+            + self.nodes.capacity() * std::mem::size_of::<Box<dyn Node>>()
+            + self.nodes.iter().map(|n| n.state_bytes()).sum::<usize>()
+    }
+
     /// Bars consumed so far.
     pub fn bars(&self) -> usize {
         self.bars

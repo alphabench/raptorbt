@@ -71,6 +71,7 @@ Warm-up lengths, as the first index with a value:
 | `raptorbt.Indicator.donchian(period)`, `.bollinger(period, k=2.0)`, `.macd(fast, slow, signal)` | Streaming, multi output. |
 | `indicator.update_bar(o, h, l, c)`, `.value`, `.initialized`, `.update_count`, `.reset()` | State. `.linked` is true once a runtime owns the indicator. |
 | `ctx.indicators.sma/ema/wma/rsi/roc/stddev/atr/donchian/bollinger/macd(instrument=, period=, timeframe=None, field="close")` | Registered, shared; returns a handle with `.ready`, `.value`, `.values`. |
+| `ctx.indicators.expr(expression, instrument=, params=None, output=None, timeframe=None)` | An [expression](../expressions/SKILL.md) over one instrument's bars (`"zscore(close, 20) < -2 and adx(14) < 25"`), registered and shared like the built-ins. The handle has `.ready`, `.value` (a `float`, a `bool` for a boolean expression, `None` while unknown), `.warmup` and `.settle(eps)`. Needs `run_strategies`, `run_portfolio_strategy` or a `LiveNode`. |
 | `ctx.indicators.custom(obj, instrument=, timeframe=None)` | Your own indicator, fed closed bars. |
 | `Strategy.register_indicator(indicator, stream_id=None, symbol=None)`, `.register_indicators(factory, symbols)` | The lower-level registration. Pass `symbol=` in a multi-symbol run. |
 | `Strategy.indicators_initialized()` | True when every registered indicator is warm. |
@@ -92,9 +93,11 @@ range of the first `period` bars then Wilder smoothing.
    `timeframe=` for a higher timeframe.
 3. In `on_bar`, check `handle.ready` (or `value is not None`) before using it.
 4. For multi-output indicators use `handle.values` and its field names.
-5. For something the library lacks, write a small class with `update(bar)`,
+5. For a condition or series the library lacks as one indicator, write it as an
+   [expression](../expressions/SKILL.md) and register it with `ctx.indicators.expr`.
+6. For something an expression cannot say, write a small class with `update(bar)`,
    `ready` and `value`, and register it with `ctx.indicators.custom`.
-6. Confirm the streaming value equals the vectorised value at the same bar.
+7. Confirm the streaming value equals the vectorised value at the same bar.
 
 ## 5. Examples
 

@@ -39,6 +39,10 @@ pub(crate) fn float_param(params: &[ParamVal], i: usize) -> Result<f64, String> 
 pub struct MapN<const N: usize>(pub fn([f64; N]) -> f64);
 
 impl<const N: usize> Kernel<N, 1> for MapN<N> {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -154,6 +158,10 @@ struct Sum {
 }
 
 impl Kernel<1, 1> for Sum {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -168,6 +176,10 @@ struct Ext {
 }
 
 impl Kernel<1, 1> for Ext {
+    fn heap_bytes(&self) -> usize {
+        self.e.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -183,6 +195,10 @@ struct MinMax {
 }
 
 impl Kernel<1, 2> for MinMax {
+    fn heap_bytes(&self) -> usize {
+        self.lo.heap_bytes() + self.hi.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -261,6 +277,10 @@ struct ArgOne {
 }
 
 impl Kernel<1, 1> for ArgOne {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -277,6 +297,10 @@ struct ArgBoth {
 }
 
 impl Kernel<1, 2> for ArgBoth {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -303,6 +327,10 @@ struct PopVar {
 }
 
 impl Kernel<1, 1> for PopVar {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -389,6 +417,10 @@ fn fit_line<H: Hist<1>>(p: usize, x: f64, h: &H) -> Option<(f64, f64)> {
 }
 
 impl Kernel<1, 1> for LinReg {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -494,6 +526,10 @@ struct Correl {
 }
 
 impl Kernel<2, 1> for Correl {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -516,6 +552,10 @@ struct Beta {
 }
 
 impl Kernel<2, 1> for Beta {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p + 1
     }

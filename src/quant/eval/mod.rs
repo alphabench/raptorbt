@@ -482,6 +482,12 @@ impl Plan {
         self.d.warm
     }
 
+    /// Heap one stream over this plan owns (see [`Stream::state_bytes`]), measured on a fresh
+    /// stream.
+    pub fn state_bytes(&self) -> Result<usize, EvalError> {
+        Ok(Stream::new(self)?.state_bytes())
+    }
+
     /// Number of output columns.
     pub fn n_outputs(&self) -> usize {
         self.d.out_regs.len()

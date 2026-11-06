@@ -33,6 +33,10 @@ impl Sma {
 }
 
 impl Kernel<1, 1> for Sma {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -74,6 +78,10 @@ impl Ema {
 }
 
 impl Kernel<1, 1> for Ema {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -88,6 +96,13 @@ struct Ring {
     buf: Box<[f64]>,
     head: usize,
     n: u64,
+}
+
+impl Ring {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.buf)
+    }
 }
 
 impl Ring {
@@ -134,6 +149,13 @@ struct RingSma {
     ring: Ring,
     sum: f64,
     bad: usize,
+}
+
+impl RingSma {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.ring.heap_bytes()
+    }
 }
 
 impl RingSma {
@@ -238,6 +260,13 @@ struct KamaSt {
     last: f64,
     sum: f64,
     prev: f64,
+}
+
+impl KamaSt {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.xs.heap_bytes() + self.ds.heap_bytes()
+    }
 }
 
 impl KamaSt {
@@ -414,6 +443,21 @@ enum Inner {
     Mama(Box<MamaSt>),
 }
 
+impl Inner {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Inner::Identity | Inner::Ema(_) | Inner::Dema(_) | Inner::Tema(_) => 0,
+            Inner::Sma(r) => r.heap_bytes(),
+            Inner::Wma(r, _) => r.heap_bytes(),
+            Inner::Trima(a, b) => a.heap_bytes() + b.heap_bytes(),
+            Inner::Kama(k) => k.heap_bytes(),
+            Inner::T3(_) => std::mem::size_of::<T3St>(),
+            Inner::Mama(_) => std::mem::size_of::<MamaSt>(),
+        }
+    }
+}
+
 /// A moving average of any TA-Lib `matype` as a one-step state machine over a single series, for
 /// use inside another kernel (BBANDS, MA, MAVP here; STOCH, MACDEXT, APO and PPO in the momentum
 /// family). It owns its history, so it needs no `Hist`. Windowed kinds (SMA, WMA, TRIMA) output
@@ -422,6 +466,13 @@ enum Inner {
 pub(crate) struct MaCore {
     inner: Inner,
     warmed: bool,
+}
+
+impl MaCore {
+    /// Heap owned, at capacity.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.inner.heap_bytes()
+    }
 }
 
 impl MaCore {
@@ -523,6 +574,10 @@ pub struct MaFn {
 }
 
 impl Kernel<1, 1> for MaFn {
+    fn heap_bytes(&self) -> usize {
+        self.core.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -538,6 +593,10 @@ pub struct Wilder {
 }
 
 impl Kernel<1, 1> for Wilder {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -557,6 +616,10 @@ pub struct BBands {
 }
 
 impl Kernel<1, 3> for BBands {
+    fn heap_bytes(&self) -> usize {
+        self.window.heap_bytes() + self.ma.as_ref().map_or(0, MaCore::heap_bytes)
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -591,6 +654,12 @@ pub struct Mavp {
 }
 
 impl Kernel<2, 1> for Mavp {
+    fn heap_bytes(&self) -> usize {
+        self.cores.capacity() * std::mem::size_of::<MaCore>()
+            + self.cores.iter().map(MaCore::heap_bytes).sum::<usize>()
+            + self.starts.capacity() * std::mem::size_of::<usize>()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -628,6 +697,13 @@ struct RollMid {
 }
 
 impl RollMid {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.hi.heap_bytes() + self.lo.heap_bytes()
+    }
+}
+
+impl RollMid {
     fn new(p: usize) -> Self {
         Self { hi: RollExt::new(p, true), lo: RollExt::new(p, false) }
     }
@@ -641,6 +717,10 @@ impl RollMid {
 pub struct Midpoint(RollMid);
 
 impl Kernel<1, 1> for Midpoint {
+    fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -654,6 +734,10 @@ impl Kernel<1, 1> for Midpoint {
 pub struct Midprice(RollMid);
 
 impl Kernel<2, 1> for Midprice {
+    fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -792,6 +876,10 @@ impl Sar {
 }
 
 impl Kernel<2, 1> for Sar {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }

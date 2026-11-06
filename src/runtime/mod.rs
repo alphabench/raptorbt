@@ -10,6 +10,7 @@
 //! * [`atr_cache`]: one ATR series per instrument and period.
 //! * [`commands`]: a strategy's queued commands and intents, as typed data.
 //! * [`indicators`]: one shared streaming core per distinct indicator key.
+//! * [`exprs`]: checked expressions as bank indicators, interned by canonical text.
 //! * [`memory`]: exact heap accounting.
 //! * [`router`]: CSR subscription indexes.
 //! * [`groups`]: several strategies on one account.
@@ -19,6 +20,7 @@ pub mod aggregators;
 pub mod atr_cache;
 pub mod commands;
 pub mod cursor;
+pub mod exprs;
 pub mod groups;
 pub mod ids;
 pub mod indicators;
@@ -36,11 +38,14 @@ mod cursor_tests;
 #[cfg(test)]
 mod indicators_bank_tests;
 #[cfg(test)]
+mod indicators_expr_tests;
+#[cfg(test)]
 mod indicators_tests;
 
 pub use aggregators::{AggKey, AggregatorHub, AggregatorHubBuilder, Deliveries};
 pub use atr_cache::{AtrCache, AtrStats};
 pub use cursor::{EventKind, EventRef, MergeCursor};
+pub use exprs::{ExprCore, ProgramId, ProgramInfo};
 pub use ids::{AggId, IndId, InstrumentId, InstrumentTable, StrategyId};
 pub use indicators::{
     CellCore, IndInput, IndKey, IndKind, IndSpec, IndicatorBank, IndicatorRegistry, InputField,

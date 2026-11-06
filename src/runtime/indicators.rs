@@ -87,6 +87,7 @@ use crate::indicators::streaming::{
     StreamingAtr, StreamingBollinger, StreamingDonchian, StreamingEma, StreamingIndicator,
     StreamingMacd, StreamingRoc, StreamingRsi, StreamingSma, StreamingStdDev, StreamingWma,
 };
+use crate::runtime::exprs::{self, ExprCore, ProgramId};
 use crate::runtime::ids::{AggId, IndId, InstrumentId, StrategyId};
 use crate::runtime::memory::HeapSize;
 
@@ -155,12 +156,14 @@ pub enum IndKind {
     Donchian,
     Bollinger,
     Macd,
+    /// A checked expression over the bar (`params = [program, output, 0]`).
+    Expr,
 }
 
 impl IndKind {
     /// Whether the core consumes a whole bar rather than one scalar.
     pub const fn is_bar(self) -> bool {
-        matches!(self, IndKind::Atr | IndKind::Donchian)
+        matches!(self, IndKind::Atr | IndKind::Donchian | IndKind::Expr)
     }
 
     /// How many numbers the value has: 1, 2 (Donchian) or 3.
@@ -212,8 +215,21 @@ pub enum IndSpec {
     Rsi(usize),
     Atr(usize),
     Donchian(usize),
-    Bollinger { period: usize, k: f64 },
-    Macd { fast: usize, slow: usize, signal: usize },
+    Bollinger {
+        period: usize,
+        k: f64,
+    },
+    Macd {
+        fast: usize,
+        slow: usize,
+        signal: usize,
+    },
+    /// Output `output` of an interned expression ([`exprs::intern`]). Build it with
+    /// [`IndSpec::expr`], which checks the output index.
+    Expr {
+        program: ProgramId,
+        output: u8,
+    },
 }
 
 fn canon_f64(x: f64) -> u64 {
@@ -231,6 +247,22 @@ fn canon_period(p: usize) -> u64 {
 }
 
 impl IndSpec {
+    /// Output `output` of `program`; refuses an output the program does not have.
+    pub fn expr(program: ProgramId, output: usize) -> Result<Self> {
+        let outputs = exprs::info(program).outputs;
+        match u8::try_from(output) {
+            Ok(output) if usize::from(output) < outputs => Ok(IndSpec::Expr { program, output }),
+            _ => Err(RaptorError::invalid_parameter(format!(
+                "output {output} of an expression with {outputs}"
+            ))),
+        }
+    }
+
+    /// Whether the indicator reads the bar's volume, so a bar without one must be refused.
+    pub fn reads_volume(self) -> bool {
+        matches!(self, IndSpec::Expr { program, .. } if exprs::info(program).reads_volume)
+    }
+
     /// The kind this spec names.
     pub fn kind(self) -> IndKind {
         self.parts().0
@@ -252,6 +284,9 @@ impl IndSpec {
             IndSpec::Roc(p) => p + 1,
             IndSpec::Bollinger { period, .. } => period,
             IndSpec::Macd { slow, signal, .. } => slow + signal,
+            // The bars to the first known value; a recursive function keeps its own state, so
+            // how long it takes to settle (`Expr::settle`) is not a history the rings hold.
+            IndSpec::Expr { program, .. } => exprs::info(program).warmup + 1,
         }
     }
 
@@ -272,6 +307,9 @@ impl IndSpec {
             }
             IndSpec::Macd { fast, slow, signal } => {
                 (IndKind::Macd, [canon_period(fast), canon_period(slow), canon_period(signal)])
+            }
+            IndSpec::Expr { program, output } => {
+                (IndKind::Expr, [program.index() as u64, u64::from(output), 0])
             }
         }
     }
@@ -407,6 +445,11 @@ impl IndicatorRegistry {
                     "only composite indicators take a local stream",
                 ));
             }
+            (IndInput::AllPrimary(_), _) if key.kind == IndKind::Expr => {
+                return Err(RaptorError::invalid_parameter(
+                    "an expression reads one instrument's bars; name the instrument",
+                ));
+            }
             (IndInput::AllPrimary(order), _) if order.index() >= self.orders.len() => {
                 return Err(RaptorError::invalid_parameter("unknown primary order"));
             }
@@ -487,6 +530,37 @@ pub struct Ohlc {
     pub high: f64,
     pub low: f64,
     pub close: f64,
+    /// Read by expression cells only. NaN where the feeder has none (a hand-fed `update_bar`
+    /// that gave none), which the feeder must refuse for an expression that reads it.
+    pub volume: f64,
+    /// The bar's timestamp, ignored by every core today; `0` where the feeder has none.
+    pub ts: i64,
+}
+
+impl From<&crate::core::types::OhlcvBar> for Ohlc {
+    fn from(b: &crate::core::types::OhlcvBar) -> Self {
+        Self {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            ts: b.timestamp,
+        }
+    }
+}
+
+impl From<&crate::portfolio::kernel::KernelBar> for Ohlc {
+    fn from(b: &crate::portfolio::kernel::KernelBar) -> Self {
+        Self {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            ts: b.timestamp,
+        }
+    }
 }
 
 /// An indicator value as a reader sees it: the cores' `Option` flattened.
@@ -558,6 +632,7 @@ enum Core {
     Donchian(StreamingDonchian),
     Bollinger(StreamingBollinger),
     Macd(StreamingMacd),
+    Expr(Box<ExprCore>),
 }
 
 /// A core with the field it reads.
@@ -590,6 +665,10 @@ impl CellCore {
                 Core::Bollinger(StreamingBollinger::new(p(0), f64::from_bits(key.params[1])))
             }
             IndKind::Macd => Core::Macd(StreamingMacd::new(p(0), p(1), p(2))),
+            IndKind::Expr => Core::Expr(Box::new(ExprCore::new(
+                ProgramId::from_param(key.params[0]),
+                p(1) as u8,
+            ))),
         };
         Self { core, field: key.field }
     }
@@ -615,6 +694,7 @@ impl CellCore {
             Core::Donchian(c) => Reading::pair(c.update_bar(bar.high, bar.low)),
             Core::Bollinger(c) => Reading::triple(c.update(x)),
             Core::Macd(c) => Reading::triple(c.update(x)),
+            Core::Expr(c) => c.update(bar),
         }
     }
 }
@@ -635,6 +715,7 @@ fn core_heap_bytes(key: &IndKey) -> usize {
         IndKind::Donchian => 2 * (p + 1) * f,
         IndKind::Bollinger => (p + 1) * f,
         IndKind::Macd => key.params.iter().map(|&q| (q as usize + 1) * f).sum(),
+        IndKind::Expr => exprs::cell_heap_bytes(ProgramId::from_param(key.params[0])),
     }
 }
 

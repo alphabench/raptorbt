@@ -22,8 +22,8 @@ a stored history and bar by bar on a live feed, or when two spellings of a formu
 recognised as one (they share a canonical text and a hash).
 
 Do not use it for order logic, sizing or state that depends on fills: an expression is a pure
-function of the bars it has seen. The existing indicator functions and `raptorbt.Indicator` are
-unchanged and remain the way to register an indicator on a strategy today.
+function of the bars it has seen. In a strategy, register one on one instrument with
+`ctx.indicators.expr`; the existing indicator functions and `raptorbt.Indicator` are unchanged.
 
 ## 2. Domain overview
 
@@ -54,6 +54,7 @@ the engine appears with no other change.
 | `raptorbt.expressions.ExprStream` | The bar-by-bar evaluator from `Expr.stream()`. |
 | `raptorbt.expressions.functions(query=None)` | The functions, optionally filtered by a word in the name, family or description. |
 | `raptorbt.expressions.describe(name)` | One function in full: inputs, parameters, outputs, warm-up, NaN handling, legacy pin. |
+| `ctx.indicators.expr(expression, instrument=, params=None, output=None, timeframe=None)` | Register an expression (text or `Expr`) on one instrument's bars, or on a `timeframe`'s composite bars, in `on_init` or `on_start`. Returns a handle: `.ready`, `.value`, `.warmup`, `.settle(eps)`, `.canonical`. |
 
 `Expr` members:
 
@@ -163,6 +164,51 @@ if 1 < c < 3:
     pass
 ```
 
+In a strategy. `ctx.indicators.expr` registers the expression on the shared indicator bank, so
+two strategies with one canonical expression on one stream share one cell. The handle shows what
+`Expr.eval` gives on the same bars, at the same bar, in a backtest and on a `LiveNode`. A boolean
+expression reads as `True`, `False` or `None` (unknown), a numeric one as a float or `None`.
+Like the built-in indicators, the value in `on_bar` includes the bar being handled, and a hook
+that runs before the strategy has seen a bar (a fill at the next bar's open) sees the value
+before it.
+
+```python
+import numpy as np
+import raptorbt as rb
+from raptorbt import Strategy, run_strategies
+
+MIN = 60 * 10**9
+T0 = 1_767_225_600 * 10**9
+n = 80
+rng = np.random.default_rng(5)
+close = 100.0 + np.cumsum(rng.normal(0, 1, n))
+open_ = np.concatenate([[close[0]], close[:-1]])
+bars = dict(timestamps=T0 + np.arange(1, n + 1, dtype=np.int64) * MIN,
+            open=open_, high=np.maximum(open_, close) + 0.3,
+            low=np.minimum(open_, close) - 0.3, close=close,
+            volume=np.round(rng.uniform(500, 1500, n)))
+
+TEXT = "zscore(close, 10) < -1 and sma(volume, 5) > 800"
+
+class Dip(Strategy):
+    def on_start(self, ctx):
+        self.sig = ctx.indicators.expr(TEXT, instrument="ASSET")
+        self.seen = []
+
+    def on_bar(self, ctx):
+        self.seen.append((self.sig.ready, self.sig.value))
+
+s = Dip()
+run_strategies([s], {"ASSET": bars}, bar_stamp="close")
+
+program = rb.expr(TEXT)
+want = program.eval(bars)
+assert s.sig.warmup == program.warmup
+for i, (ready, got) in enumerate(s.seen):
+    assert ready == (i >= program.warmup)
+    assert got is None if np.isnan(want[i]) else got is bool(want[i])
+```
+
 ## 6. Composition
 
 - [Indicators](../indicators/SKILL.md): `sma` and `ema` here are pinned bitwise, on finite input,
@@ -170,6 +216,9 @@ if 1 < c < 3:
   strategy that reads the indicator and an expression that reads the formula see the same
   numbers. They differ when an input is NaN (below).
 - Evaluate an expression over bars you hold, or stream it from your own loop.
+- Register one on a strategy with `ctx.indicators.expr` (see Indicators). It reads one
+  instrument's bars; the volume it reads is the bar's own, on the primary stream and on a
+  `timeframe=` stream alike.
 - [Core](../core/SKILL.md): errors are `raptorbt.errors.RaptorBTError`; an expression refusal
   is an `ExpressionError`, also a `ValueError`.
 
@@ -207,7 +256,18 @@ the program hash, so changing it changes the identity of the expression. A funct
 raptorbt indicator, and to what tolerance, is its `legacy` row in the registry.
 
 **Refusals.** A construct the language names but the engine does not run yet is refused with
-`expr_unsupported_here`; the message says which.
+`expr_unsupported_here`; the message says which. So is `ctx.indicators.expr` in
+`run_strategy_backtest`, which has no shared runtime: use `run_strategies` or
+`run_portfolio_strategy`.
+
+**In a strategy.** An expression with several outputs needs one picked, with `output="signal"` or
+in the text (`macd(close).signal`); otherwise `expr_type` lists the names. `.values` does not
+exist on an expression handle. A recursive function (`ema`) keeps settling after `.warmup`:
+`.ready` is true from the first bar the value can be known, and the value approaches the one a
+longer history would give as `settle(eps)` bars pass. A manifest's `warmup=Bars(n)` is the
+author's to set; use `n > handle.warmup` (or `rb.expr(text).warmup` at class definition) so the
+node is primed past it. A node restored from its journal replays the same bars and gives the
+same expression values as one that never stopped.
 
 ## 8. Common mistakes
 
@@ -222,6 +282,10 @@ raptorbt indicator, and to what tolerance, is its `legacy` row in the registry.
 - Treating warm-up NaN as false: unknown is not false. Test with `np.isnan` or compare from the
   `warmup` index.
 - Hashing an `Expr`: it defines `==` as an expression, so it is not hashable. Use `.hash`.
+- `ctx.indicators.expr("macd(close)", ...)` with no `output=`: pick one output.
+- Registering an expression in `run_strategy_backtest`: `expr_unsupported_here`.
+- A hand-fed `Indicator.expr(...)` whose expression reads `volume`, given a bar with four
+  prices: `missing_field`. Feed `update_bar(open, high, low, close, volume)`.
 
 ## 9. Validation
 

@@ -5234,12 +5234,8 @@ fn feed_owned(
     }
     let LoopState { by_sid, subs, scratch, .. } = ls;
     let primary = match cur.data {
-        ScheduleData::Bar(b) => {
-            Some(Ohlc { open: b.open, high: b.high, low: b.low, close: b.close })
-        }
-        ScheduleData::Trade(_) => {
-            cur.primary.map(|b| Ohlc { open: b.open, high: b.high, low: b.low, close: b.close })
-        }
+        ScheduleData::Bar(b) => Some(Ohlc::from(&b)),
+        ScheduleData::Trade(_) => cur.primary.map(|b| Ohlc::from(&b)),
         _ => None,
     };
     subs.clear();
@@ -5258,7 +5254,7 @@ fn feed_owned(
             _ => return Err(finished()),
         };
         for &(stream, ref b) in &scratch.deliveries {
-            let bar = Ohlc { open: b.open, high: b.high, low: b.low, close: b.close };
+            let bar = Ohlc::from(b);
             for ind in &t.streams[stream as usize].native {
                 ind.bind(py).borrow_mut().feed(bar);
             }

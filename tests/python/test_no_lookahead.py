@@ -530,3 +530,79 @@ def test_a_fill_hook_at_the_open_sees_no_indicator_or_atr_of_the_bar_opening(
         "portfolio", _OpenHookProbe, BAR_DATA[dataset](), "next_bar_open", mode, frac,
         _poison_bars, stamp, portfolio_runner,
     )
+
+
+# ---------------------------------------------------------------------------
+# expressions on the shared bank (ctx.indicators.expr)
+# ---------------------------------------------------------------------------
+def _add_expressions(probe, ctx):
+    """A numeric, a boolean and a composite-bar expression on every symbol; all read volume or
+    prices the poisoning replaces after the cut."""
+    syms = list(ctx.symbols)
+    probe.num = {
+        s: ctx.indicators.expr("ema(close, 4) - sma(close, 9) + sma(volume, 3) * 0.001", instrument=s)
+        for s in syms
+    }
+    probe.flag = {
+        s: ctx.indicators.expr("close > sma(close, 6) and volume > sma(volume, 6)", instrument=s)
+        for s in syms
+    }
+    probe.slow = {s: ctx.indicators.expr("sma(close, 2)", instrument=s, timeframe="15m") for s in syms}
+
+
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _ExprProbe(_BarProbe):
+        """_BarProbe that also logs what its expressions show on every bar."""
+
+        def on_start(self, ctx):
+            super().on_start(ctx)
+            _add_expressions(self, ctx)
+
+        def on_bar(self, ctx):
+            sym = self._key(ctx)
+            self._rec(
+                ctx, "expr", sym, self.num[sym].value, self.flag[sym].value, self.slow[sym].value,
+                tuple((s, self.num[s].value, self.flag[s].value) for s in sorted(self.num)),
+            )
+            super().on_bar(ctx)
+
+
+with pytest.warns(DeprecationWarning, match="deprecated hooks"):
+    class _ExprOpenProbe(_OpenHookProbe):
+        """_OpenHookProbe whose fill hooks also read every symbol's expressions."""
+
+        def on_start(self, ctx):
+            super().on_start(ctx)
+            _add_expressions(self, ctx)
+
+        def _open_read(self, ctx, what):
+            super()._open_read(ctx, what)
+            self._rec(
+                ctx, what + "-expr", self._key(ctx),
+                tuple((s, self.num[s].value, self.flag[s].value, self.slow[s].value)
+                      for s in sorted(self.num)),
+            )
+
+
+@pytest.mark.parametrize("frac", CUTS)
+@pytest.mark.parametrize("timing", TIMINGS)
+@pytest.mark.parametrize("dataset", sorted(BAR_DATA))
+@pytest.mark.parametrize("stamp", ["open", "close"])
+def test_expressions_on_the_bank_ignore_the_future(stamp, dataset, timing, frac, portfolio_runner):
+    _check(
+        "portfolio", _ExprProbe, BAR_DATA[dataset](), timing, "intent", frac, _poison_bars, stamp,
+        portfolio_runner,
+    )
+
+
+@pytest.mark.parametrize("frac", CUTS)
+@pytest.mark.parametrize("dataset", sorted(BAR_DATA))
+@pytest.mark.parametrize("stamp", ["open", "close"])
+def test_a_fill_hook_at_the_open_sees_no_expression_of_the_bar_opening(
+    stamp, dataset, frac, portfolio_runner, monkeypatch
+):
+    monkeypatch.setattr(sys.modules[__name__], "_cfg", _atr_cfg)
+    _check(
+        "portfolio", _ExprOpenProbe, BAR_DATA[dataset](), "next_bar_open", "intent", frac,
+        _poison_bars, stamp, portfolio_runner,
+    )

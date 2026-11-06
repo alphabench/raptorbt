@@ -83,8 +83,11 @@ class StreamState:
         }
 
         # Indicator routing, indexed once rather than scanned per bar.
+        # Expression indicators also take the bar's volume; the rest take the four prices.
         self._primary: dict[str | None, list] = {key: [] for key in keys}
         self._composite: dict[tuple[str | None, int], list] = {}
+        self._primary_vol: dict[str | None, list] = {key: [] for key in keys}
+        self._composite_vol: dict[tuple[str | None, int], list] = {}
         for indicator, stream_id, symbol in strategy._indicators:
             # An unrouted registration listens on every symbol; see
             # `Strategy.register_indicator` for why that is rarely wanted.
@@ -104,11 +107,14 @@ class StreamState:
             # symbol an indicator names (already checked by `ctx.indicators`
             # against the run's instrument) is that stream.
             targets = [symbol] if symbol is not None and symbols is not None else keys
+            vol = getattr(indicator, "kind", None) == "expr"
+            primary = self._primary_vol if vol else self._primary
+            composite = self._composite_vol if vol else self._composite
             for key in targets:
                 if stream_id is None:
-                    self._primary[key].append(indicator)
+                    primary[key].append(indicator)
                 else:
-                    self._composite.setdefault((key, stream_id), []).append(indicator)
+                    composite.setdefault((key, stream_id), []).append(indicator)
 
     def _dispatch(
         self, strategy, ctx, aggregator, completed, stream_id, step, unit, symbol
@@ -122,6 +128,8 @@ class StreamState:
             bar = CompositeBar(stream_id, step, unit, *completed, symbol=symbol)
             for indicator in self._composite.get((symbol, stream_id), ()):
                 indicator.update_bar(bar.open, bar.high, bar.low, bar.close)
+            for indicator in self._composite_vol.get((symbol, stream_id), ()):
+                indicator.update_bar(bar.open, bar.high, bar.low, bar.close, bar.volume)
             strategy.on_composite_bar(ctx, bar)
             completed = aggregator.next_pending()
 
@@ -140,3 +148,5 @@ class StreamState:
         # Primary-registered indicators update before on_bar sees the bar.
         for indicator in self._primary[symbol]:
             indicator.update_bar(o, h, l, c)
+        for indicator in self._primary_vol[symbol]:
+            indicator.update_bar(o, h, l, c, v)

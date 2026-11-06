@@ -50,6 +50,10 @@ impl Default for Ad {
 }
 
 impl Kernel<4, 1> for Ad {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -91,6 +95,10 @@ impl Adosc {
 }
 
 impl Kernel<4, 1> for Adosc {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -136,6 +144,10 @@ impl Default for Obv {
 }
 
 impl Kernel<2, 1> for Obv {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -180,6 +192,10 @@ impl Default for Vwap {
 }
 
 impl Kernel<4, 1> for Vwap {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -211,6 +227,10 @@ impl VolumeRoc {
 }
 
 impl Kernel<1, 1> for VolumeRoc {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }

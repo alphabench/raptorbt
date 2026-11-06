@@ -55,6 +55,13 @@ pub struct PyExprProgram {
     source: String,
 }
 
+impl PyExprProgram {
+    /// This program's id in the bank's interner: equal canonical text, equal id.
+    pub(crate) fn intern(&self) -> crate::core::Result<crate::runtime::exprs::ProgramId> {
+        crate::runtime::exprs::intern(&self.program, &self.plan)
+    }
+}
+
 #[pymethods]
 impl PyExprProgram {
     /// Compile `source`. `params` binds the `$name` constants the source uses.

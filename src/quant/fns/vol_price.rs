@@ -145,6 +145,10 @@ impl Atr {
 }
 
 impl Kernel<3, 1> for Atr {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -169,6 +173,10 @@ impl Natr {
 }
 
 impl Kernel<3, 1> for Natr {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -189,6 +197,10 @@ impl Kernel<3, 1> for Natr {
 pub struct Trange;
 
 impl Kernel<3, 1> for Trange {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         1
     }
@@ -217,6 +229,10 @@ impl Keltner {
 }
 
 impl Kernel<3, 3> for Keltner {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -247,6 +263,10 @@ impl Donchian {
 }
 
 impl Kernel<2, 3> for Donchian {
+    fn heap_bytes(&self) -> usize {
+        self.hi.heap_bytes() + self.lo.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -274,6 +294,10 @@ impl Supertrend {
 }
 
 impl Kernel<3, 2> for Supertrend {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }

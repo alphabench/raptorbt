@@ -405,6 +405,10 @@ pub struct HtKernel<const O: usize> {
 }
 
 impl<const O: usize> Kernel<1, O> for HtKernel<O> {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }

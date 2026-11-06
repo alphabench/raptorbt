@@ -1232,6 +1232,11 @@ impl CandleKernel {
 }
 
 impl Kernel<4, 1> for CandleKernel {
+    fn heap_bytes(&self) -> usize {
+        self.bars.capacity() * std::mem::size_of::<[f64; 4]>()
+            + self.tot.capacity() * std::mem::size_of::<f64>()
+    }
+
     fn lookback(&self) -> usize {
         self.lb + 1
     }

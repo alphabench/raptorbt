@@ -582,6 +582,7 @@ Streaming indicator with batch-identical values.
 | `bollinger(period, k=2.0)` | Bollinger bands; value is `BollingerBands(upper, middle, lower)`. |
 | `donchian(period)` | Highest-high / lowest-low channel; value is `(upper, lower)`. |
 | `ema(period)` | *No docstring.* |
+| `expr(program, output=0)` | An expression over one instrument's bars, as output `output` of `program` (an `ExprProgram`). `ctx.indicators.expr` is the way to make one; this is its engine. |
 | `initialized` | Whether the warmup period has completed. |
 | `kind` | *No docstring.* |
 | `linked` | Whether a shared runtime owns and updates this indicator. |
@@ -591,7 +592,7 @@ Streaming indicator with batch-identical values.
 | `rsi(period)` | *No docstring.* |
 | `sma(period)` | *No docstring.* |
 | `stddev(period)` | Rolling population standard deviation. |
-| `update_bar(self, /, open, high, low, close)` | Feed one bar. Price-series cores consume the close; bar cores (atr, donchian) consume high/low/close. Returns the new value, if warm. |
+| `update_bar(self, /, open, high, low, close, volume=None)` | Feed one bar. Price-series cores consume the close; bar cores (atr, donchian) consume high/low/close; an expression consumes what it reads, and one that reads `volume` is refused a bar without it. Returns the new value, if warm. |
 | `update_count` | How many bars it has been fed: `update_bar` calls, or for a linked indicator the bars of its shared cell its strategy has been shown. |
 | `value` | Latest value (`None` during warmup). |
 | `wilder_ma(period)` | Wilder-smoothed moving average (alpha = 1/period). |

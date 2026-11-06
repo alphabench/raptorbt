@@ -12,6 +12,8 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use super::errors::Fail;
+use super::expr_bindings::PyExprProgram;
+use crate::runtime::exprs;
 use crate::runtime::{CellCore, IndKind, IndSpec, IndicatorBank, Ohlc, Reading, SlotId};
 
 /// Where an indicator's value comes from.
@@ -230,11 +232,23 @@ fn linked_error(what: &str) -> PyErr {
 }
 
 /// The value a reading shows, shaped like the private core's `value`.
-fn reading_value(py: Python<'_>, kind: IndKind, r: Reading) -> PyResult<Option<Py<PyAny>>> {
+fn reading_value(py: Python<'_>, spec: IndSpec, r: Reading) -> PyResult<Option<Py<PyAny>>> {
     if !r.initialized {
         return Ok(None);
     }
+    let kind = spec.kind();
     let [a, b, c] = r.values;
+    if let IndSpec::Expr { program, .. } = spec {
+        // Unknown (a NaN the program let through) is None; a boolean is a bool, never 1.0.
+        if a.is_nan() {
+            return Ok(None);
+        }
+        return if exprs::info(program).boolean {
+            (a != 0.0).into_py_any(py).map(Some)
+        } else {
+            a.into_py_any(py).map(Some)
+        };
+    }
     if kind == IndKind::Bollinger {
         // The bank holds (middle, upper, lower); readers see the named order.
         return bollinger_bands_obj(py, b, a, c).map(Some);
@@ -346,8 +360,27 @@ impl PyIndicator {
         Ok(Self::private(IndSpec::Macd { fast, slow, signal }, "macd"))
     }
 
+    /// An expression over one instrument's bars, as output `output` of `program` (an
+    /// `ExprProgram`). `ctx.indicators.expr` is the way to make one; this is its engine.
+    #[staticmethod]
+    #[pyo3(signature = (program, output=0))]
+    fn expr(program: &PyExprProgram, output: usize) -> PyResult<Self> {
+        let id = program.intern().map_err(PyErr::from)?;
+        let spec = IndSpec::expr(id, output).map_err(|e| {
+            PyErr::from(
+                Fail::new("invalid_parameter", e.to_string())
+                    .op("Indicator.expr")
+                    .param("output")
+                    .value(output),
+            )
+        })?;
+        Ok(Self::private(spec, "expr"))
+    }
+
     /// Feed one bar. Price-series cores consume the close; bar cores (atr,
-    /// donchian) consume high/low/close. Returns the new value, if warm.
+    /// donchian) consume high/low/close; an expression consumes what it reads, and one that
+    /// reads `volume` is refused a bar without it. Returns the new value, if warm.
+    #[pyo3(signature = (open, high, low, close, volume=None))]
     fn update_bar(
         &mut self,
         py: Python<'_>,
@@ -355,13 +388,25 @@ impl PyIndicator {
         high: f64,
         low: f64,
         close: f64,
+        volume: Option<f64>,
     ) -> PyResult<Option<Py<PyAny>>> {
         let State::Private(p) = &mut self.state else {
             return Err(linked_error("update_bar"));
         };
+        if volume.is_none() && self.spec.reads_volume() {
+            return Err(Fail::new(
+                "missing_field",
+                "this expression reads volume, and this bar has none: feed the volume \
+                 (update_bar(open, high, low, close, volume))",
+            )
+            .op("Indicator.update_bar")
+            .param("volume")
+            .into());
+        }
         self.updates += 1;
-        p.feed(NOT_FED, 0, Ohlc { open, high, low, close });
-        reading_value(py, self.spec.kind(), p.cur)
+        let volume = volume.unwrap_or(f64::NAN);
+        p.feed(NOT_FED, 0, Ohlc { open, high, low, close, volume, ts: 0 });
+        reading_value(py, self.spec, p.cur)
     }
 
     /// Latest value (`None` during warmup).
@@ -371,7 +416,7 @@ impl PyIndicator {
             State::Private(p) => p.shown(),
             State::Linked { bank, slot } => bank.read(*slot),
         };
-        reading_value(py, self.spec.kind(), reading)
+        reading_value(py, self.spec, reading)
     }
 
     /// Whether the warmup period has completed.

@@ -347,7 +347,14 @@ fn bench_runtime_indicator_bank(c: &mut Criterion) {
             bank.begin_event();
             bank.emit_primary(
                 e.instrument,
-                Ohlc { open: k.open, high: k.high, low: k.low, close: k.close },
+                Ohlc {
+                    open: k.open,
+                    high: k.high,
+                    low: k.low,
+                    close: k.close,
+                    volume: k.volume,
+                    ts: k.timestamp,
+                },
             )
             .unwrap();
             for (handle, slots) in &readers[e.instrument.index()] {

@@ -71,6 +71,9 @@ impl Private {
             IndSpec::Macd { fast, slow, signal } => {
                 Private::Macd(StreamingMacd::new(fast, slow, signal))
             }
+            // The model is the legacy cores' reference; expressions have their own tests
+            // (`indicators_expr_tests`).
+            IndSpec::Expr { .. } => unreachable!("the generator makes no expression specs"),
         }
     }
 
@@ -206,7 +209,7 @@ fn bar_around(g: &mut Genes, level: f64) -> Ohlc {
     let low = open.min(close) * (1.0 - g.unit() * 0.01);
     // Rarely a bad print, to exercise the NaN handling of the cores.
     let close = if g.next(60) == 0 { f64::NAN } else { close };
-    Ohlc { open, high, low, close }
+    Ohlc { open, high, low, close, volume: 1_000.0, ts: 0 }
 }
 
 fn decode(genes: Vec<u32>) -> Scenario {
@@ -523,7 +526,7 @@ fn revealing_the_primary_before_the_composites_is_caught() {
 // ---------------------------------------------------------------------------
 
 fn flat(x: f64) -> Ohlc {
-    Ohlc { open: x, high: x, low: x, close: x }
+    Ohlc { open: x, high: x, low: x, close: x, volume: 1_000.0, ts: 0 }
 }
 
 fn value(bank: &IndicatorBank, slot: SlotId) -> Option<f64> {

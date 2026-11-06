@@ -498,7 +498,7 @@ fn adopt<R>(
 }
 
 fn ohlc(bar: &OhlcvBar) -> Ohlc {
-    Ohlc { open: bar.open, high: bar.high, low: bar.low, close: bar.close }
+    Ohlc::from(bar)
 }
 
 fn empty_bar(timestamp: i64) -> KernelBar {
@@ -770,10 +770,7 @@ impl RuntimeCore {
                 for (agg, composite) in self.hub.on_bar(event.instrument, &bar) {
                     self.bank.emit_composite(*agg, ohlc(composite))?;
                 }
-                self.bank.emit_primary(
-                    event.instrument,
-                    Ohlc { open: bar.open, high: bar.high, low: bar.low, close: bar.close },
-                )?;
+                self.bank.emit_primary(event.instrument, Ohlc::from(&bar))?;
                 (bar, ScheduleData::Bar(bar))
             }
             Pushed::Trade(t) => {

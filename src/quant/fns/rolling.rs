@@ -27,6 +27,10 @@ struct ZScore {
 }
 
 impl Kernel<1, 1> for ZScore {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -72,6 +76,10 @@ struct Moment {
 }
 
 impl Kernel<1, 1> for Moment {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -99,6 +107,13 @@ struct SortedWin {
     v: Vec<f64>,
     bad: usize,
     n: u64,
+}
+
+impl SortedWin {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.v.capacity() * std::mem::size_of::<f64>()
+    }
 }
 
 impl SortedWin {
@@ -135,6 +150,10 @@ struct Quantile {
 }
 
 impl Kernel<1, 1> for Quantile {
+    fn heap_bytes(&self) -> usize {
+        self.w.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         self.w.p
     }
@@ -162,6 +181,10 @@ struct RankTs {
 }
 
 impl Kernel<1, 1> for RankTs {
+    fn heap_bytes(&self) -> usize {
+        self.w.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         self.w.p
     }
@@ -211,6 +234,10 @@ impl BarsSince {
 }
 
 impl Kernel<1, 1> for BarsSince {
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.idx) + std::mem::size_of_val(&*self.val)
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -263,6 +290,10 @@ struct Lagged {
 }
 
 impl Kernel<1, 1> for Lagged {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.k
     }
@@ -286,6 +317,10 @@ struct Clip {
 }
 
 impl Kernel<1, 1> for Clip {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -303,6 +338,10 @@ struct Cov {
 }
 
 impl Kernel<2, 1> for Cov {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -320,6 +359,10 @@ struct EwmMean {
 }
 
 impl Kernel<1, 1> for EwmMean {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -346,6 +389,10 @@ struct EwmVar {
 }
 
 impl Kernel<1, 1> for EwmVar {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }

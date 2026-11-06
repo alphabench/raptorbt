@@ -120,6 +120,13 @@ struct TaSma {
 }
 
 impl TaSma {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.ring)
+    }
+}
+
+impl TaSma {
     fn new(p: usize) -> Self {
         Self { p, ring: vec![f64::NAN; p].into_boxed_slice(), n: 0, total: 0.0, bad: 0 }
     }
@@ -154,6 +161,17 @@ enum Avg {
     Core(Box<MaCore>),
 }
 
+impl Avg {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Avg::Ema(_) => 0,
+            Avg::Sma(a) => a.heap_bytes(),
+            Avg::Core(c) => std::mem::size_of::<MaCore>() + c.heap_bytes(),
+        }
+    }
+}
+
 /// An average over a series that starts at bar `offset` of the finite values it sees. TA-Lib
 /// starts each average of a composite so that its first output lands on the composite's first
 /// bar: a fast EMA inside MACD is seeded by the mean of the `fast` values ending at the slow
@@ -163,6 +181,13 @@ struct Fed {
     avg: Avg,
     offset: usize,
     seen: usize,
+}
+
+impl Fed {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.avg.heap_bytes()
+    }
 }
 
 impl Fed {
@@ -220,6 +245,10 @@ pub struct Change {
 }
 
 impl Kernel<1, 1> for Change {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -268,6 +297,10 @@ impl Kernel<1, 1> for Change {
 pub struct Bop;
 
 impl Kernel<4, 1> for Bop {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -374,6 +407,10 @@ pub struct Rsi {
 }
 
 impl Kernel<1, 1> for Rsi {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -398,6 +435,10 @@ pub struct Cmo {
 }
 
 impl Kernel<1, 1> for Cmo {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -480,6 +521,10 @@ impl Macd {
 }
 
 impl Kernel<1, 3> for Macd {
+    fn heap_bytes(&self) -> usize {
+        self.fast.heap_bytes() + self.slow.heap_bytes() + self.signal.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -513,6 +558,10 @@ impl Po {
 }
 
 impl Kernel<1, 1> for Po {
+    fn heap_bytes(&self) -> usize {
+        self.fast.heap_bytes() + self.slow.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -541,6 +590,10 @@ pub struct Trix {
 }
 
 impl Kernel<1, 1> for Trix {
+    fn heap_bytes(&self) -> usize {
+        self.e.iter().map(Fed::heap_bytes).sum()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -571,6 +624,13 @@ struct StochK {
 }
 
 impl StochK {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.hh.heap_bytes() + self.ll.heap_bytes()
+    }
+}
+
+impl StochK {
     fn new(p: usize) -> Self {
         Self { hh: RollExt::new(p, true), ll: RollExt::new(p, false) }
     }
@@ -595,6 +655,10 @@ pub struct StochF {
 }
 
 impl Kernel<3, 2> for StochF {
+    fn heap_bytes(&self) -> usize {
+        self.k.heap_bytes() + self.d.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -619,6 +683,10 @@ pub struct Stoch {
 }
 
 impl Kernel<3, 2> for Stoch {
+    fn heap_bytes(&self) -> usize {
+        self.k.heap_bytes() + self.sk.heap_bytes() + self.sd.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -644,6 +712,10 @@ pub struct StochRsi {
 }
 
 impl Kernel<1, 2> for StochRsi {
+    fn heap_bytes(&self) -> usize {
+        self.k.heap_bytes() + self.d.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -675,6 +747,10 @@ pub struct Stochastic {
 }
 
 impl Kernel<3, 2> for Stochastic {
+    fn heap_bytes(&self) -> usize {
+        self.hh.heap_bytes() + self.ll.heap_bytes() + std::mem::size_of_val(&*self.ring)
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -717,6 +793,10 @@ pub struct Willr {
 }
 
 impl Kernel<3, 1> for Willr {
+    fn heap_bytes(&self) -> usize {
+        self.hh.heap_bytes() + self.ll.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -745,6 +825,13 @@ struct ExtIdx {
     len: usize,
     n: u64,
     last_bad: Option<u64>,
+}
+
+impl ExtIdx {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.idx) + std::mem::size_of_val(&*self.val)
+    }
 }
 
 impl ExtIdx {
@@ -806,6 +893,13 @@ struct AroonCore {
 }
 
 impl AroonCore {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        self.hi.heap_bytes() + self.lo.heap_bytes()
+    }
+}
+
+impl AroonCore {
     fn new(p: usize) -> Self {
         Self { p, hi: ExtIdx::new(p + 1, true), lo: ExtIdx::new(p + 1, false) }
     }
@@ -826,6 +920,10 @@ impl AroonCore {
 pub struct Aroon(AroonCore);
 
 impl Kernel<2, 2> for Aroon {
+    fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -845,6 +943,10 @@ impl Kernel<2, 2> for Aroon {
 pub struct AroonOsc(AroonCore);
 
 impl Kernel<2, 1> for AroonOsc {
+    fn heap_bytes(&self) -> usize {
+        self.0.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -911,6 +1013,10 @@ pub struct Dm {
 }
 
 impl Kernel<2, 1> for Dm {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -1011,6 +1117,10 @@ impl Dir {
 }
 
 impl Kernel<3, 1> for Dir {
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.ring)
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -1080,6 +1190,10 @@ pub struct Cci {
 }
 
 impl Kernel<3, 1> for Cci {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p - 1
     }
@@ -1119,6 +1233,10 @@ pub struct Mfi {
 }
 
 impl Kernel<4, 1> for Mfi {
+    fn heap_bytes(&self) -> usize {
+        0
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -1178,6 +1296,10 @@ impl MfiRoll {
 }
 
 impl Kernel<4, 1> for MfiRoll {
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.pos) + std::mem::size_of_val(&*self.neg)
+    }
+
     fn lookback(&self) -> usize {
         0
     }
@@ -1288,6 +1410,13 @@ struct Sums3 {
 }
 
 impl Sums3 {
+    /// Heap owned, at capacity.
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.ring)
+    }
+}
+
+impl Sums3 {
     fn new(ps: [usize; 3]) -> Self {
         let cap = ps[0].max(ps[1]).max(ps[2]);
         Self { ps, ring: vec![f64::NAN; cap].into_boxed_slice(), n: 0, w: [WinAcc::default(); 3] }
@@ -1334,6 +1463,10 @@ pub struct Ultosc {
 }
 
 impl Kernel<3, 1> for Ultosc {
+    fn heap_bytes(&self) -> usize {
+        self.bp.heap_bytes() + self.tr.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         1
     }

@@ -804,12 +804,46 @@ class IndicatorHandle:
         return f"IndicatorHandle({self._indicator.kind}, ready={self.ready})"
 
 
+class ExprHandle(IndicatorHandle):
+    """The handle ``ctx.indicators.expr`` returns.
+
+    ``.ready`` is true once the expression's warm-up has passed. ``.value`` is a ``float`` for
+    a numeric expression and ``True`` or ``False`` for a boolean one; either is ``None`` while
+    the value is unknown (warm-up, or a NaN an input let through). ``.values`` does not exist:
+    an expression handle has one output.
+    """
+
+    def __init__(self, indicator, program):
+        super().__init__(indicator)
+        self._program = program
+
+    @property
+    def canonical(self) -> str:
+        """The canonical text two registrations share a cell by."""
+        return self._program.canonical
+
+    @property
+    def warmup(self) -> int:
+        """Leading bars on which the value is unknown (a manifest's ``Bars(n)`` wants ``n >
+        warmup``). A recursive function such as ``ema`` keeps converging after this; see
+        :meth:`settle`."""
+        return self._program.warmup
+
+    def settle(self, eps: float) -> int:
+        """Bars until recursive functions have forgotten their seed to within ``eps``."""
+        return self._program.settle(eps)
+
+    def __repr__(self) -> str:
+        return f"ExprHandle({self._program.canonical!r}, ready={self.ready})"
+
+
 class IndicatorsView:
     """``ctx.indicators``: streaming indicators the runtime updates and shares.
 
     Every factory takes ``instrument=`` (required), ``timeframe=`` (``None``:
     the primary bars) and ``field=`` (only ``"close"``; ATR and Donchian read
-    the whole bar). Create them in ``on_init`` or ``on_start``.
+    the whole bar; ``expr`` takes no ``field``). Create them in ``on_init`` or
+    ``on_start``.
     """
 
     def __init__(self, run: _Run):
@@ -866,6 +900,68 @@ class IndicatorsView:
             Indicator.macd(fast, slow, signal), instrument, timeframe, field,
             ("macd", "signal", "histogram"),
         )
+
+    def expr(self, expression, *, instrument, params=None, output=None, timeframe=None):
+        """An expression over ``instrument``'s bars, e.g. ``"zscore(close, 20) < -2 and adx(14) < 25"``.
+
+        ``expression`` is text or a ``raptorbt.expressions.Expr``; ``params`` binds its ``$name``
+        constants. It reads open, high, low, close and volume of the primary bars, or of
+        ``timeframe``'s composite bars. An expression with several outputs (``macd(close)``)
+        needs ``output=`` to pick one (or select in the text: ``macd(close).signal``).
+
+        The returned handle is shared by every strategy that registers the same canonical
+        expression on the same stream. Backtest and live give the numbers
+        ``raptorbt.expr(...).eval`` gives on the same bars. Needs the shared runtime
+        (``run_strategies``, ``run_portfolio_strategy``, ``LiveNode``).
+        """
+        from raptorbt.expressions import Expr  # imported after raptorbt.strategy
+
+        run = self._run
+        run.open("ctx.indicators.expr")
+        if getattr(run.ctx, "_portfolio_totals", None) is None:
+            raise errors.make(
+                "expr_unsupported_here",
+                "ctx.indicators.expr needs the shared runtime; run_strategy_backtest does not "
+                "run it. Use run_strategies or run_portfolio_strategy",
+                operation="ctx.indicators.expr",
+                parameter="expression",
+                valid=["run_strategies", "run_portfolio_strategy", "LiveNode"],
+            )
+        symbol = run.instrument(instrument)
+        if isinstance(expression, Expr):
+            if params:
+                raise errors.make(
+                    "expr_type",
+                    "params binds the $names of an expression given as text; an Expr carries its own",
+                    operation="ctx.indicators.expr",
+                    parameter="params",
+                    valid=["params only with an expression given as text"],
+                )
+            compiled = expression
+        else:
+            compiled = Expr(expression, params)
+        names = tuple(compiled.outputs)
+        if output is None and len(names) > 1:
+            raise errors.make(
+                "expr_type",
+                f"this expression has {len(names)} outputs; pick one with output= or select it in "
+                "the text (macd(close).signal)",
+                operation="ctx.indicators.expr",
+                parameter="output",
+                valid=list(names),
+            )
+        if output is not None and output not in names:
+            raise errors.make(
+                "expr_type",
+                f"this expression has no output {output!r}",
+                operation="ctx.indicators.expr",
+                parameter="output",
+                value=output,
+                valid=list(names),
+            )
+        index = 0 if output is None else names.index(output)
+        handle = self._make(Indicator.expr(compiled._prog, index), symbol, timeframe, "close")
+        return ExprHandle(handle._indicator, compiled)
 
     def custom(self, obj, *, instrument, timeframe=None):
         """Feed your own indicator the closed bars of ``instrument``.

@@ -73,6 +73,14 @@ impl<const I: usize> Win<I> {
 }
 
 impl<const I: usize> Kernel<I, 1> for Win<I> {
+    fn heap_bytes(&self) -> usize {
+        self.bufs.iter().map(|b| b.capacity() * std::mem::size_of::<f64>()).sum::<usize>()
+            + self.cfg.w.capacity() * std::mem::size_of::<f64>()
+            + self.scratch.a.capacity() * std::mem::size_of::<f64>()
+            + self.scratch.b.capacity() * std::mem::size_of::<f64>()
+            + self.scratch.idx.capacity() * std::mem::size_of::<usize>()
+    }
+
     fn lookback(&self) -> usize {
         self.lens.iter().copied().max().unwrap_or(1) - 1
     }
@@ -524,6 +532,10 @@ struct RangePos {
 }
 
 impl Kernel<3, 1> for RangePos {
+    fn heap_bytes(&self) -> usize {
+        self.hi.heap_bytes() + self.lo.heap_bytes()
+    }
+
     fn lookback(&self) -> usize {
         0
     }

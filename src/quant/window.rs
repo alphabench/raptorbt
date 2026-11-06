@@ -255,6 +255,11 @@ impl RollExt {
         (self.head + j) % self.p
     }
 
+    /// Heap owned: the two rings.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.idx) + std::mem::size_of_val(&*self.val)
+    }
+
     pub fn push(&mut self, x: f64) -> f64 {
         let cur = self.n;
         self.n += 1;
