@@ -548,6 +548,23 @@ def _add_expressions(probe, ctx):
         for s in syms
     }
     probe.slow = {s: ctx.indicators.expr("sma(close, 2)", instrument=s, timeframe="15m") for s in syms}
+    # The signal the probes trade on: long while the close is above its 4-bar average.
+    probe.go = {s: ctx.indicators.expr("close > sma(close, 4)", instrument=s) for s in syms}
+
+
+def _trade_on_expression(probe, ctx):
+    """Decide from the expression alone: enter when it turns true, exit when it turns false. An
+    order made from this value that fills before the cut is what the poisoning must leave alone."""
+    sym = probe._key(ctx)
+    go = probe.go[sym].value
+    pos = ctx.position
+    probe._rec(ctx, "bar", sym, tuple(ctx.bar), go, None if pos is None else (pos.size, pos.entry_price))
+    if go is None:
+        return
+    if pos is None and go:
+        probe._enter(ctx, 0.2)
+    elif pos is not None and not go:
+        probe._exit(ctx, pos)
 
 
 # These define no deprecated hook of their own, so they are outside the warns blocks.
@@ -564,15 +581,19 @@ class _ExprProbe(_BarProbe):
             ctx, "expr", sym, self.num[sym].value, self.flag[sym].value, self.slow[sym].value,
             tuple((s, self.num[s].value, self.flag[s].value) for s in sorted(self.num)),
         )
-        super().on_bar(ctx)
+        _trade_on_expression(self, ctx)
 
 
 class _ExprOpenProbe(_OpenHookProbe):
-    """_OpenHookProbe whose fill hooks also read every symbol's expressions."""
+    """_OpenHookProbe that trades on an expression, and whose fill hooks also read every
+    symbol's expressions."""
 
     def on_start(self, ctx):
         super().on_start(ctx)
         _add_expressions(self, ctx)
+
+    def on_bar(self, ctx):
+        _trade_on_expression(self, ctx)
 
     def _open_read(self, ctx, what):
         super()._open_read(ctx, what)

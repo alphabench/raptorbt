@@ -417,6 +417,9 @@ impl Avg {
         match self {
             Avg::Ema(_) => 0,
             Avg::Sma(a) => a.heap_bytes(),
+            Avg::Wma(a) => std::mem::size_of_val(&*a.ring),
+            Avg::Trima(a) => std::mem::size_of_val(&*a.ring),
+            Avg::Chain(a) => std::mem::size_of_val(&*a.e),
             Avg::Core(c) => std::mem::size_of::<MaCore>() + c.heap_bytes(),
         }
     }

@@ -212,11 +212,16 @@ def test_a_hook_at_the_open_sees_the_value_before_the_bar_as_a_built_in_does(mod
 
 def test_a_strategy_with_no_expression_is_unmoved_by_one_beside_it():
     class Cross(Strategy):
+        def __init__(self):
+            super().__init__()
+            self.seen = []
+
         def on_start(self, ctx):
             self.fast = ctx.indicators.sma(instrument="ASSET", period=3)
             self.slow = ctx.indicators.sma(instrument="ASSET", period=8)
 
         def on_bar(self, ctx):
+            self.seen.append((self.fast.value, self.slow.value, ctx.equity))
             if not (self.fast.ready and self.slow.ready):
                 return
             if ctx.position is None and self.fast.value > self.slow.value:
@@ -225,12 +230,20 @@ def test_a_strategy_with_no_expression_is_unmoved_by_one_beside_it():
                 self.close_position()
 
     def trades(result):
-        return [(t.entry_time, t.entry_price, t.exit_time, t.exit_price, t.size) for t in result.result.trades()]
+        return [
+            (t.symbol, t.direction, t.entry_time, t.entry_price, t.exit_time, t.exit_price,
+             t.size, t.pnl, t.exit_reason)
+            for t in result.result.trades()
+        ]
 
     data = {"ASSET": bars(200)}
-    alone = run_strategies([Cross()], data, config(), bar_stamp="close")[0]
-    beside = run_strategies([Cross(), Watch()], data, config(), bar_stamp="close")[0]
-    assert trades(alone) and trades(alone) == trades(beside)
+    a, b = Cross(), Cross()
+    alone = run_strategies([a], data, config(), bar_stamp="close")[0]
+    beside = run_strategies([b, Watch()], data, config(), bar_stamp="close")[0]
+    assert len(trades(alone)) >= 2
+    # Every trade field, and every value and equity the strategy saw on every bar, bit for bit.
+    assert trades(alone) == trades(beside)
+    assert a.seen == b.seen
 
 
 # -- sharing and memory -------------------------------------------------------------
