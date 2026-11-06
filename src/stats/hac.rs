@@ -41,6 +41,17 @@ pub(crate) fn peak_to_peak(x: &[f64]) -> f64 {
     hi - lo
 }
 
+/// Whether a finite series varies by no more than rounding noise: `max - min` at most
+/// [`CONSTANT_REL`] of its largest magnitude (a series of ulps around a level is constant, and
+/// a fit to it prints numbers that are the noise).
+pub(crate) fn is_numerically_constant(x: &[f64]) -> bool {
+    let level = x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    peak_to_peak(x) <= CONSTANT_REL * level
+}
+
+/// Relative spread at or below which a series counts as constant.
+pub(crate) const CONSTANT_REL: f64 = 1e-12;
+
 pub(crate) fn mean(x: &[f64]) -> f64 {
     fsum(x.iter().copied()) / x.len() as f64
 }

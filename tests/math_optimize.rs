@@ -187,3 +187,13 @@ fn stall_gtol_alone_separates_the_two() {
     let r = bfgs(flat_with_gradient(1e-7), &[3.0], &none).unwrap();
     assert_eq!(r.status, BfgsStatus::LineSearchFailed);
 }
+
+#[test]
+fn a_step_below_xtol_at_a_large_gradient_is_stalled_not_converged() {
+    // An xtol this loose ends the run after one step, far from the minimiser of the quadratic.
+    let opts = BfgsOptions { xtol: 1e3, ..BfgsOptions::default() };
+    let r = bfgs(quadratic, &[0.0, 0.0, 0.0], &opts).unwrap();
+    assert_eq!(r.status, BfgsStatus::Stalled);
+    assert!(!r.converged());
+    assert!(r.grad.iter().fold(0.0_f64, |m, g| m.max(g.abs())) > 1e-3, "grad {:?}", r.grad);
+}

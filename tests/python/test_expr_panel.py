@@ -659,3 +659,121 @@ def test_forward_returns_do_not_exist_outside_the_report():
     same_bits(before[: last_unmoved + 1], after[: last_unmoved + 1])
     # Dates whose window reaches row 90 and whose own factor is unchanged do move.
     assert (before[last_unmoved + 1 : 90] != after[last_unmoved + 1 : 90]).any()
+
+
+# -- factor report: alignment by hand, overlap calibration, adjusted prices, leavers -----------------------
+
+
+def test_factor_report_alignment_by_hand():
+    # 10 names, a factor equal to the name index, flat prices at 100 but for one step: from row 42
+    # name a is 100 * (1 + a / 100). With lag 1 and h 1 the only forward return that crosses the
+    # step is that of signal date 40 (it earns price[42] / price[41] - 1 = a / 100). Two buckets:
+    # the long-short is mean(5..9) / 100 - mean(0..4) / 100 = 7/100 - 2/100 = 0.05.
+    n, m = 80, 10
+    p = np.full((n, m), 100.0)
+    for a in range(m):
+        p[42:, a] = 100.0 * (1.0 + a / 100.0)
+    f = np.tile(np.arange(m, dtype=float), (n, 1))
+    h = rb.expressions.factor_report(f, p, [1], 2)["horizons"][1]
+    hits = np.flatnonzero(np.nan_to_num(h["long_short"]) != 0.0)
+    assert hits.tolist() == [40]
+    assert h["long_short"][40] == pytest.approx(0.05)
+    assert h["ic"][40] == pytest.approx(1.0)
+    h0 = rb.expressions.factor_report(f, p, [1], 2, lag=0)["horizons"][1]
+    assert np.flatnonzero(np.nan_to_num(h0["long_short"]) != 0.0).tolist() == [41]
+
+
+def null_panels(h, count, n=500, m=30, seed=1000):
+    """A no-skill factor: iid 1 % returns, a random factor that never changes."""
+    for s in range(count):
+        rng = np.random.default_rng(seed + s)
+        px = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, (n, m)), axis=0)
+        f = np.tile(rng.permutation(m).astype(float), (n, 1))
+        yield rb.expressions.factor_report(f, px, [h])["horizons"][h]
+
+
+def test_the_headline_t_is_calibrated_under_the_null_and_the_hac_one_is_not():
+    # Measured once at 1000 panels: t_nonoverlap sd 1.03, p < 0.05 on 5.2 % (long-short 6.8 %);
+    # t_hac sd 1.29, |t| > 1.96 on 12.9 %. 600 panels with a seed, and the bound is four
+    # binomial standard errors of the nominal 5 %.
+    h, count = 20, 600
+    reps = list(null_panels(h, count))
+    se = math.sqrt(0.05 * 0.95 / count)
+    rate = np.mean([r["p_nonoverlap"] < 0.05 for r in reps])
+    rate_ls = np.mean([r["long_short_p_nonoverlap"] < 0.05 for r in reps])
+    assert abs(rate - 0.05) < 4 * se, rate
+    assert abs(rate_ls - 0.05) < 4 * se, rate_ls
+    # scored signal dates are 0..478; the multiples of 20 among them are 0, 20, .., 460
+    assert all(r["n_independent"] == 24 for r in reps)
+    hac = np.array([r["t_hac"] for r in reps])
+    # Newey-West with h - 1 lags still over-rejects: the doc and the skill say so, this pins it
+    assert np.mean(np.abs(hac) > 1.96) > 0.05 + 4 * se, np.mean(np.abs(hac) > 1.96)
+    assert hac.std() > 1.15
+
+
+def test_the_nonoverlapping_t_uses_every_hth_date_by_hand():
+    ret, close = ic_data(n=120, m=30, seed=3)
+    f = -ret
+    h = 5
+    d = rb.expressions.factor_report(f, close, horizons=[h])["horizons"][h]
+    x = d["ic"][::h]
+    x = x[np.isfinite(x)]
+    assert d["n_independent"] == len(x)
+    assert d["t_nonoverlap"] == pytest.approx(x.mean() / (x.std(ddof=1) / math.sqrt(len(x))), rel=1e-12)
+    # h = 1: every date, the same number as the naive t
+    d1 = rb.expressions.factor_report(f, close, horizons=[1])["horizons"][1]
+    assert d1["t_nonoverlap"] == pytest.approx(d1["t_naive"], rel=1e-9)
+    # too few independent windows: NaN, said in flags
+    rep = rb.expressions.factor_report(f[:60], close[:60], horizons=[20])
+    assert rep["horizons"][20]["n_independent"] < 10
+    assert math.isnan(rep["horizons"][20]["t_nonoverlap"])
+    assert any("non-overlapping" in s for s in rep["flags"])
+
+
+def test_factor_report_states_its_price_assumptions_and_flags_an_unadjusted_split():
+    # Flat prices at 100 but the top-factor name splits 1:10 at date 60 (100 -> 10). The true return
+    # of every name is 0, but every window across the split reads -90 % for that name: with two
+    # buckets of five the long-short is -0.9 / 5 = -18 %. The report cannot repair that; it says so.
+    n, m = 120, 10
+    p = np.full((n, m), 100.0)
+    p[60:, 9] = 10.0
+    f = np.tile(np.arange(m, dtype=float), (n, 1))
+    rep = rb.expressions.factor_report(f, p, [5], 2, instruments=list("ABCDEFGHIJ"))
+    h = rep["horizons"][5]
+    assert np.nanmin(h["long_short"]) == pytest.approx(-0.18)
+    assert rep["big_move_count"] == 1
+    move = rep["big_moves"][0]
+    assert (move["date"], move["asset"], move["instrument"]) == (60, 9, "J")
+    assert move["ret"] == pytest.approx(-0.9)
+    assert any("split" in s and "J" in s for s in rep["flags"])
+    text = " ".join(rep["assumptions"]).lower() + (rb.expressions.factor_report.__doc__ or "").lower()
+    assert "adjusted" in text and "survivorship" in text
+    # Clean prices raise no flag; a threshold above the move raises none either.
+    clean = 100.0 * np.cumprod(1.0 + np.random.default_rng(5).normal(0.0, 0.01, (n, m)), axis=0)
+    assert rb.expressions.factor_report(f, clean, [5], 2)["flags"] == []
+    assert rb.expressions.factor_report(f, p, [5], 2, jump_ratio=20.0)["big_move_count"] == 0
+    with pytest.raises(RaptorBTError) as e:
+        rb.expressions.factor_report(f, p, [5], 2, jump_ratio=1.0)
+    assert e.value.code == "invalid_parameter"
+
+
+@pytest.mark.parametrize("fill", [0.0, NAN], ids=["to_zero", "to_nan"])
+def test_a_name_that_leaves_is_dropped_and_counted_not_scored_as_a_loss(fill):
+    # Flat prices at 100; the top-factor name leaves at date 60 (a price of 0, or no print). Its
+    # true return over any window across 60 is -100 %, but a name without an exit price drops out
+    # of the window: the long-short stays 0 (a true delisting would read -1.0 / 5 = -20 %). The
+    # report says so and counts the name-windows lost. Windows (h = 5, lag 1) entering at row
+    # 55..59 end at 60..64: 5 signal dates, one name each.
+    n, m = 120, 10
+    p = np.full((n, m), 100.0)
+    p[60:, 9] = fill
+    f = np.tile(np.arange(m, dtype=float), (n, 1))
+    rep = rb.expressions.factor_report(f, p, [5], 2)
+    h = rep["horizons"][5]
+    assert np.nanmin(h["long_short"]) == 0.0
+    assert h["names_left_total"] == 5
+    assert np.flatnonzero(np.nan_to_num(h["names_left"]) > 0).tolist() == [54, 55, 56, 57, 58]
+    # entered name-windows: dates 0..113; ten names while the entry row (d + 1) is before 60, nine after
+    assert h["names_left_share"] == pytest.approx(5 / (59 * 10 + 55 * 9))
+    assert any("not counted as losses" in s for s in rep["flags"])
+    assert "delist" in (rb.expressions.factor_report.__doc__ or "").lower()

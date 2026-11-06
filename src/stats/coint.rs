@@ -44,6 +44,12 @@ use crate::math::linalg::{cholesky, qr_pivoted, sym_eigen, Cholesky, Mat};
 
 /// Observations per series Engle-Granger and Johansen need.
 pub const MIN_OBS: usize = 60;
+/// Lagged differences of the Johansen fit in [`cointegration`].
+const KAR_DIFF: usize = 1;
+
+/// Below this scale factor the correction removes over a tenth of the statistic: a small sample.
+const SMALL_SAMPLE_SCALE: f64 = 0.9;
+
 /// Johansen's critical values stop at 12 series.
 pub const MAX_SERIES: usize = 12;
 /// The significance level the tests are read at.
@@ -400,10 +406,25 @@ pub fn johansen(m: &Mat, det_order: i32, k_ar_diff: usize) -> Result<Johansen, S
 /// The Johansen part of the result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JohansenSummary {
-    /// Hypotheses rejected in turn at 5% by the trace statistic, until one is not.
+    /// Hypotheses rejected in turn at 5% by the raw trace statistic against the asymptotic
+    /// critical values, until one is not. The oracle pins it; it over-rejects at small `n / q`
+    /// (see `rank`).
     pub rank_at_5pct: usize,
     pub trace_statistics: Vec<f64>,
     pub trace_critical_5pct: Vec<f64>,
+    /// The same rule on the Reinsel-Ahn scaled statistics: the rank to read.
+    pub rank: usize,
+    /// `trace_statistics * scale_factor`.
+    pub trace_statistics_scaled: Vec<f64>,
+    /// Reinsel and Ahn's `(T - q k) / T`, `T` the observations used and `k = k_ar_diff + 1` the
+    /// order of the VAR in levels.
+    pub scale_factor: f64,
+    /// Observations the statistics were computed on.
+    pub effective_observations: usize,
+    /// True when the correction removes more than a tenth of the statistic (`T < 20 q` for the
+    /// one lagged difference used): the critical values are then far from the finite-sample
+    /// distribution and even the scaled rank is a rough guide.
+    pub small_sample: bool,
     /// The first eigenvector over its first entry (the raw vector when that entry is 0).
     pub cointegrating_vector: Vec<f64>,
 }
@@ -449,16 +470,17 @@ pub fn cointegration(cols: &[&[f64]], alpha: f64) -> Result<Cointegration, Stats
     }
     let eg = engle_granger(cols[0], &cols[1..], alpha)?;
     let levels = from_columns(n, &cols.iter().map(|c| c.to_vec()).collect::<Vec<_>>())?;
-    let jo = johansen(&levels, 0, 1)?;
+    let jo = johansen(&levels, 0, KAR_DIFF)?;
     let q = cols.len();
-    let mut rank = 0;
-    for r in 0..q {
-        if jo.lr1[r] > jo.cvt[r][1] {
-            rank += 1;
-        } else {
-            break;
-        }
-    }
+    let rank_of =
+        |stats: &[f64]| stats.iter().zip(&jo.cvt).take_while(|(stat, cv)| **stat > cv[1]).count();
+    let rank = rank_of(&jo.lr1);
+    // Reinsel and Ahn (1992): the asymptotic critical values are for T -> infinity at fixed q;
+    // `(T - q k) / T` removes the bias of the statistic when q k is not small against T.
+    let t_obs = jo.nobs;
+    let k_var = KAR_DIFF + 1;
+    let scale_factor = (t_obs as f64 - (q * k_var) as f64).max(0.0) / t_obs as f64;
+    let trace_scaled: Vec<f64> = jo.lr1.iter().map(|v| v * scale_factor).collect();
     let first = jo.evec.col(0);
     let vector = if first[0] != 0.0 { first.iter().map(|v| v / first[0]).collect() } else { first };
     Ok(Cointegration {
@@ -469,6 +491,11 @@ pub fn cointegration(cols: &[&[f64]], alpha: f64) -> Result<Cointegration, Stats
             rank_at_5pct: rank,
             trace_statistics: jo.lr1,
             trace_critical_5pct: jo.cvt.iter().map(|r| r[1]).collect(),
+            rank: rank_of(&trace_scaled),
+            trace_statistics_scaled: trace_scaled,
+            scale_factor,
+            effective_observations: t_obs,
+            small_sample: scale_factor < SMALL_SAMPLE_SCALE,
             cointegrating_vector: vector,
         },
     })

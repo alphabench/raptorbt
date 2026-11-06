@@ -87,7 +87,7 @@ All keyword parameters below have the default shown; the first positional argume
 | Name | What it returns |
 | --- | --- |
 | `raptorbt.stats.stationarity(x, *, alpha=0.05)` | ADF and KPSS side by side and a `reading` (`stationary`, `unit_root`, `contradictory`, `inconclusive`). |
-| `raptorbt.stats.cointegration(cols, *, alpha=0.05)` | Engle-Granger (statistic, p-value, hedge ratios, spread z-score, half-life) and Johansen (rank, trace statistics, cointegrating vector). `cols` maps names to level series; the first is the dependent one. |
+| `raptorbt.stats.cointegration(cols, *, alpha=0.05)` | Engle-Granger (statistic, p-value, hedge ratios, spread z-score, half-life) and Johansen (`rank` to read, `rank_at_5pct` unscaled, trace statistics raw and scaled, `small_sample`, cointegrating vector). `cols` maps names to level series; the first is the dependent one. |
 | `raptorbt.stats.hurst(increments)` | Hurst exponent by rescaled range and by DFA, and a `reading`. |
 | `raptorbt.stats.garch(returns, *, model="garch", dist="t", horizon=10, periods_per_year=None)` | Parameters, persistence, half-life, forecast volatility path, recent conditional volatility, robust standard errors. |
 | `raptorbt.stats.markov_regimes(returns, *, k=2, min_support_bars=10.0, min_duration_periods=2.0, series=False)` | Regime statistics, transition matrix, smoothed and filtered probabilities, timeline. |
@@ -116,6 +116,51 @@ All keyword parameters below have the default shown; the first positional argume
 5. If you searched many variants to find the one you are testing, say so to the test: use
    `pbo_cscv` and `spa_test` on all of them, not `hac_tstat` on the winner.
 6. Round only when you display.
+7. Read `warnings` and the flags before the number (section 4.1): they name the cases in which
+   a fit or a test prints a confident figure that means little.
+
+### 4.1 Where a result is not to be read at face value
+
+**Johansen rank.** Read `johansen["rank"]`, not `rank_at_5pct`. The asymptotic critical values
+assume many observations against the number of series `q`. On independent random walks the
+unscaled `rank_at_5pct` reports a relation far too often when `q` is large against the sample:
+100% of 400 samples at twelve series and 60 observations. `rank` applies Reinsel and Ahn's
+`(T - q k) / T` (here `k = 2`, `T` the `effective_observations`) to the trace statistics
+(`trace_statistics_scaled`) and then reads the same 5% critical values. `small_sample` is true
+when the factor is under 0.9 (`T < 20 q`); the critical values are then far from the finite-sample
+distribution and the test has little power, so rank 0 there is not evidence of no relation.
+Measured on independent driftless random walks, 400 samples per cell, one lagged difference,
+share of samples with rank above 0 (5% nominal), unscaled `rank_at_5pct` then scaled `rank`:
+
+| Series | 60 obs | 120 obs | 250 obs | 500 obs |
+| --- | --- | --- | --- | --- |
+| 2 | 15% then 13% | 14% then 11% | 14% then 14% | 14% then 14% |
+| 4 | 22% then 6% | 10% then 6% | 11% then 8% | 10% then 9% |
+| 6 | 43% then 2% | 20% then 5% | 11% then 7% | 8% then 5% |
+| 12 | 100% then 0.3% | 80% then 1% | 32% then 2% | 15% then 3% |
+
+Two things stay true after the correction. At two to four series the rate stays above 5% at any
+length (about 13% at two): the critical values for a constant in the model are not exact for
+driftless walks, so a rank of 1 is a lead to confirm with Engle-Granger and out of sample, not a
+finding. And the correction costs power: with one real cointegrated pair among the walks, `rank`
+above 0 on 69%, 100%, 100% of samples at two series (60, 120, 250 observations); 4%, 30%, 95% at
+six; 0%, 2%, 27% at twelve. With many series, bring many observations.
+
+**GARCH.** Returns constant to a few ulps (spread at most 1e-12 of the level) are refused as
+`degenerate_series`. Read `warnings`: `integrated` is true when persistence is within 1e-6 of
+1 or above, which is what a level shift in volatility looks like (a step from 0.5% to 3% daily
+volatility fits to persistence 0.9999999999996): the half-life and unconditional volatility are
+then `None` and `stationary_variance` false, not 1.9e12 bars and 578. `shape_at_bound` is true
+when the t shape sits at its bound of 2.05 or 500; `std_errors` is `None` when the Hessian cannot
+be inverted. An illiquid name that is 95% exactly zero returns gives both, with a confident
+half-life nobody should read.
+
+**Regimes.** The fit does not depend on the units of the returns (`rescale` is the power of ten
+applied when the percent variance is outside 0.1 to 10000, as for GARCH). Returns constant to a
+few ulps are refused as `degenerate_series`.
+
+**SPA.** When every strategy's excess over the benchmark is constant (all zero against cash, or
+identical to the benchmark) there is nothing to bootstrap: `degenerate_series`, not p = 0.
 
 ## 5. Examples
 

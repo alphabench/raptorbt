@@ -85,6 +85,16 @@ the Engle-Granger answer depends on which one that is. Engle-Granger regresses t
 constant and the others and tests the residual (the spread) for a unit root; Johansen reads
 the rank of the whole system (constant in the relation, one lagged difference, 5% trace).
 
+``johansen["rank"]`` is the rank to read: the 5% trace test on statistics multiplied by
+Reinsel and Ahn's ``(T - q k) / T`` (``trace_statistics_scaled``, ``scale_factor``; ``T``
+the ``effective_observations``, ``q`` the number of series, ``k = 2``). The unscaled
+``rank_at_5pct`` and ``trace_statistics`` are kept as the asymptotic test gives them, and
+over-reject when ``q`` is large against ``T``: independent random walks gave a rank above 0
+on 100% of samples at twelve series and 60 observations (scaled: 0.3%). ``small_sample`` is
+true when the correction removes over a tenth of the statistic (``T < 20 q``); then the test
+also has little power. ``johansen["calibration"]`` and ``["warnings"]`` say so in words, and
+the measured false-positive rates are in the statistics skill.
+
 From seven series the Engle-Granger ``p_value`` is ``None`` (MacKinnon's 1994 table stops at
 six); ``critical_values`` are the 2010 ones and ``cointegrated`` falls back to the statistic
 against the critical value when ``alpha`` is 0.01, 0.05 or 0.10, else ``None``. A statistic of
@@ -137,6 +147,16 @@ the Hessian cannot be inverted; ``parameter_names`` is their order), and ``resca
 power of ten the percent series was multiplied by to fit; returns of scale 1e-7 now fit
 instead of raising ``did_not_converge``). ``log_likelihood`` is of the series in percent.
 ``recent_conditional_vol`` is causal; the parameters are fitted on the whole sample.
+
+A series that varies by no more than 1e-12 of its level (returns constant to a few ulps) is
+refused with ``degenerate_series``: the fit would be to the rounding noise. Where the fit is
+not to be read at face value the result says so, in ``warnings`` and in flags:
+``integrated`` is true when persistence is within 1e-6 of 1 or above (a volatility level
+shift or a break in the sample looks like this): ``stationary_variance`` is then false and
+``half_life_periods`` and ``unconditional_vol_per_period`` are ``None``, not a huge number;
+``shape_at_bound`` is true when the t shape sits at its bound (2.05 or 500), where it is
+the bound that was estimated; ``std_errors`` is ``None`` when the Hessian cannot be
+inverted.
 
 ### `hac_tstat`
 
@@ -219,6 +239,12 @@ under ``min_support_bars`` or its expected duration is under ``min_duration_peri
 ``low_support_regimes`` lists them and ``warnings`` says so in words. ``log_likelihood`` is of
 the series in percent.
 
+The fit does not depend on the units of the returns: a series whose percent variance is
+outside 0.1 to 10000 is scaled by a power of ten (``rescale``, 1.0 when none) as ``garch``
+does, and everything is returned in the units given. A series that varies by no more than
+1e-12 of its level is refused with ``degenerate_series`` (the fit would be to the rounding
+noise); a fit that does not settle is ``did_not_converge``.
+
 ### `pbo_cscv`
 
 *function*
@@ -286,7 +312,9 @@ Whether the best strategy beats the benchmark after allowing for the search acro
 
 Hansen's superior predictive ability and White's reality check, by the stationary bootstrap.
 ``cols`` maps strategy names to per-period returns of one length (at least 60, up to 200
-strategies); ``benchmark`` is cash (zero) when ``None``. ``reps`` is 200 to 5000;
+strategies); ``benchmark`` is cash (zero) when ``None``. When every strategy's excess over
+the benchmark is constant (identical to it, or all zero) there is nothing to bootstrap and
+``degenerate_series`` is raised, not p = 0. ``reps`` is 200 to 5000;
 ``block_size`` is the mean block, default ``max(2, round(n ** (1 / 3)))``. The p-values are
 Monte Carlo estimates: the same ``seed`` gives the same numbers on any machine and thread
 count.

@@ -780,7 +780,8 @@ fn array2<'py>(
 /// numbers and per-date arrays; `raptorbt.expressions.factor_report` is its surface. Forward
 /// returns exist only in here.
 #[pyfunction]
-#[pyo3(signature = (factor, prices, horizons, quantiles, lag, min_names))]
+#[pyo3(signature = (factor, prices, horizons, quantiles, lag, min_names, jump_ratio))]
+#[allow(clippy::too_many_arguments)]
 pub fn factor_report_native<'py>(
     py: Python<'py>,
     factor: PyReadonlyArray2<'py, f64>,
@@ -789,6 +790,7 @@ pub fn factor_report_native<'py>(
     quantiles: usize,
     lag: usize,
     min_names: usize,
+    jump_ratio: f64,
 ) -> PyResult<Bound<'py, PyDict>> {
     const OP: &str = "factor_report";
     let (n, m) = (factor.shape()[0], factor.shape()[1]);
@@ -796,7 +798,7 @@ pub fn factor_report_native<'py>(
         return Err(shape_fail(OP, "prices", prices.shape(), (n, m)));
     }
     let (f, p) = (panel_cow(&factor), panel_cow(&prices));
-    let params = FactorParams { horizons, quantiles, lag, min_names };
+    let params = FactorParams { horizons, quantiles, lag, min_names, jump_ratio };
     let r = py.detach(|| factor_report(&f, &p, n, m, &params)).map_err(|e| {
         let fail = Fail::new(e.code(), e.to_string()).op(OP);
         PyErr::from(match &e {
@@ -811,6 +813,17 @@ pub fn factor_report_native<'py>(
     out.set_item("lag", r.lag)?;
     out.set_item("quantiles", r.quantiles)?;
     out.set_item("min_names", r.min_names)?;
+    out.set_item("jump_ratio", r.jump_ratio)?;
+    out.set_item("big_move_count", r.big_move_count)?;
+    let moves = pyo3::types::PyList::empty(py);
+    for b in &r.big_moves {
+        let d = PyDict::new(py);
+        d.set_item("date", b.date)?;
+        d.set_item("asset", b.asset)?;
+        d.set_item("ret", b.ret)?;
+        moves.append(d)?;
+    }
+    out.set_item("big_moves", moves)?;
     out.set_item("names", array1(py, r.names))?;
     out.set_item("coverage", array1(py, r.coverage))?;
     out.set_item("autocorr", array1(py, r.autocorr))?;
@@ -829,6 +842,12 @@ pub fn factor_report_native<'py>(
         d.set_item("t_naive", h.t_naive)?;
         d.set_item("t_hac", h.t_hac)?;
         d.set_item("hac_lags", h.hac_lags)?;
+        d.set_item("t_nonoverlap", h.t_nonoverlap)?;
+        d.set_item("p_nonoverlap", h.p_nonoverlap)?;
+        d.set_item("n_independent", h.n_independent)?;
+        d.set_item("names_left", array1(py, h.names_left))?;
+        d.set_item("names_left_total", h.names_left_total)?;
+        d.set_item("names_left_share", h.names_left_share)?;
         d.set_item("quantile_returns", array1(py, h.quantile_returns))?;
         d.set_item(
             "quantile_returns_by_date",
@@ -837,6 +856,9 @@ pub fn factor_report_native<'py>(
         d.set_item("long_short", array1(py, h.long_short))?;
         d.set_item("long_short_mean", h.long_short_mean)?;
         d.set_item("long_short_t_hac", h.long_short_t_hac)?;
+        d.set_item("long_short_t_nonoverlap", h.long_short_t_nonoverlap)?;
+        d.set_item("long_short_p_nonoverlap", h.long_short_p_nonoverlap)?;
+        d.set_item("long_short_n_independent", h.long_short_n_independent)?;
         d.set_item("long_short_n", h.long_short_n)?;
         by_h.set_item(h.horizon, d)?;
     }

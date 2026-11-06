@@ -181,6 +181,11 @@ fn stats_cointegration<'py>(
     jo.set_item("rank_at_5pct", r.johansen.rank_at_5pct)?;
     jo.set_item("trace_statistics", &r.johansen.trace_statistics)?;
     jo.set_item("trace_critical_5pct", &r.johansen.trace_critical_5pct)?;
+    jo.set_item("rank", r.johansen.rank)?;
+    jo.set_item("trace_statistics_scaled", &r.johansen.trace_statistics_scaled)?;
+    jo.set_item("scale_factor", r.johansen.scale_factor)?;
+    jo.set_item("effective_observations", r.johansen.effective_observations)?;
+    jo.set_item("small_sample", r.johansen.small_sample)?;
     jo.set_item("cointegrating_vector", named(py, &names, &r.johansen.cointegrating_vector)?)?;
     let d = PyDict::new(py);
     d.set_item("n", r.n)?;
@@ -277,6 +282,8 @@ fn stats_garch<'py>(
     d.set_item("parameter_names", r.parameter_names.clone())?;
     d.set_item("persistence", r.persistence)?;
     d.set_item("stationary_variance", r.stationary_variance)?;
+    d.set_item("integrated", r.integrated)?;
+    d.set_item("shape_at_bound", r.shape_at_bound)?;
     d.set_item("half_life_periods", r.half_life_periods)?;
     d.set_item("unconditional_vol_per_period", r.unconditional_vol_per_period)?;
     d.set_item("log_likelihood", r.log_likelihood)?;
@@ -359,6 +366,7 @@ fn stats_regimes<'py>(
     d.set_item("filtered_is_causal", r.filtered_is_causal)?;
     d.set_item("start_log_likelihoods", &r.start_log_likelihoods)?;
     d.set_item("winning_start", r.winning_start)?;
+    d.set_item("rescale", r.rescale)?;
     if series {
         d.set_item("smoothed_probabilities", PyArray2::from_vec2(py, &r.smoothed_probabilities)?)?;
         d.set_item("filtered_probabilities", PyArray2::from_vec2(py, &r.filtered_probabilities)?)?;

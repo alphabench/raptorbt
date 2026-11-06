@@ -32,7 +32,18 @@
 //!
 //! No costs of any kind are charged: `no_costs` is true in the report, and a spread here is a
 //! gross figure.
+//!
+//! # What the prices must be
+//!
+//! Prices are assumed adjusted for splits, bonuses and dividends, and the panel is assumed to be
+//! free of survivorship bias. Neither is checked or repaired. A name that leaves (its exit price
+//! is NaN or not positive) drops out of that window: it is **not** counted as a loss, so a
+//! factor that picks names that go to zero is flattered. Delisting returns are not invented;
+//! `names_left` counts, per horizon, the name-windows lost this way. A one-bar price ratio
+//! beyond `jump_ratio` (default 1.5, either way) on any name is reported in `big_moves`: it is
+//! most likely an unadjusted split, which reads as a loss and corrupts the IC and the spreads.
 
+use crate::math::special::t_two_sided_p;
 use crate::portfolio::factor_panel::{rank_ic, rank_row, RowScratch};
 use crate::stats::error::StatsError;
 use crate::stats::hac::{hac_tstat, MIN_HAC_OBS};
@@ -40,18 +51,70 @@ use crate::stats::hac::{hac_tstat, MIN_HAC_OBS};
 /// Fewest names a date needs to be scored, unless the caller says otherwise.
 pub const DEFAULT_MIN_NAMES: usize = 10;
 
+/// Fewest non-overlapping dates the headline t-statistic is computed on.
+pub const MIN_INDEPENDENT: usize = 10;
+
+/// A one-bar price ratio above this, or below its inverse, is reported as a big move.
+pub const DEFAULT_JUMP_RATIO: f64 = 1.5;
+
+/// At most this many big moves are listed (the count is of all).
+const MAX_BIG_MOVES: usize = 50;
+
 #[derive(Debug, Clone)]
 pub struct FactorParams {
     pub horizons: Vec<usize>,
     pub quantiles: usize,
     pub lag: usize,
     pub min_names: usize,
+    pub jump_ratio: f64,
 }
 
 impl Default for FactorParams {
     fn default() -> Self {
-        Self { horizons: vec![1, 5, 20], quantiles: 5, lag: 1, min_names: DEFAULT_MIN_NAMES }
+        Self {
+            horizons: vec![1, 5, 20],
+            quantiles: 5,
+            lag: 1,
+            min_names: DEFAULT_MIN_NAMES,
+            jump_ratio: DEFAULT_JUMP_RATIO,
+        }
     }
+}
+
+/// A one-bar price ratio beyond the report's `jump_ratio`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BigMove {
+    pub date: usize,
+    pub asset: usize,
+    /// `price[date] / price[date - 1] - 1`.
+    pub ret: f64,
+}
+
+/// A t-statistic of the mean of a series, with its two-sided p-value on `n - 1` degrees of
+/// freedom; both NaN under [`MIN_INDEPENDENT`] values or when the series is constant.
+#[derive(Debug, Clone, Copy)]
+pub struct Independent {
+    pub t: f64,
+    pub p: f64,
+    pub n: usize,
+}
+
+/// The t-statistic of every `step`-th entry (index a multiple of `step`) of `v` that is finite.
+fn independent_t(v: &[f64], step: usize) -> Independent {
+    let x: Vec<f64> = v.iter().step_by(step).copied().filter(|x| x.is_finite()).collect();
+    let n = x.len();
+    let nan = Independent { t: f64::NAN, p: f64::NAN, n };
+    if n < MIN_INDEPENDENT {
+        return nan;
+    }
+    let nf = n as f64;
+    let m = x.iter().sum::<f64>() / nf;
+    let var = x.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / (nf - 1.0);
+    if var <= 0.0 {
+        return nan;
+    }
+    let t = m / (var / nf).sqrt();
+    Independent { t, p: t_two_sided_p(t, nf - 1.0).unwrap_or(f64::NAN), n }
 }
 
 /// One forward horizon.
@@ -68,6 +131,16 @@ pub struct HorizonReport {
     pub t_naive: f64,
     pub t_hac: f64,
     pub hac_lags: usize,
+    /// The IC of every `horizon`-th date: the headline t-statistic, which does not overlap.
+    pub t_nonoverlap: f64,
+    pub p_nonoverlap: f64,
+    pub n_independent: usize,
+    /// Per signal date, the names that had a usable entry price and a factor value but no
+    /// usable exit price (NaN or not positive): they left within the horizon and were dropped.
+    pub names_left: Vec<f64>,
+    pub names_left_total: usize,
+    /// `names_left_total` over the name-windows that were entered.
+    pub names_left_share: f64,
     /// Mean forward return of each quantile over the scored dates.
     pub quantile_returns: Vec<f64>,
     /// `n_dates x quantiles`, row-major; NaN where the date has no return for that bucket.
@@ -76,6 +149,9 @@ pub struct HorizonReport {
     pub long_short: Vec<f64>,
     pub long_short_mean: f64,
     pub long_short_t_hac: f64,
+    pub long_short_t_nonoverlap: f64,
+    pub long_short_p_nonoverlap: f64,
+    pub long_short_n_independent: usize,
     pub long_short_n: usize,
 }
 
@@ -86,6 +162,10 @@ pub struct FactorReport {
     pub lag: usize,
     pub quantiles: usize,
     pub min_names: usize,
+    pub jump_ratio: f64,
+    /// One-bar price moves beyond `jump_ratio`, in date order (at most the first 50 listed).
+    pub big_moves: Vec<BigMove>,
+    pub big_move_count: usize,
     /// Always true: nothing here charges a cost.
     pub no_costs: bool,
     /// Names with a finite factor value and a finite positive price, per date.
@@ -150,8 +230,8 @@ pub fn factor_report(
     n_assets: usize,
     params: &FactorParams,
 ) -> Result<FactorReport, StatsError> {
-    let FactorParams { horizons, quantiles, lag, min_names } = params;
-    let (quantiles, lag, min_names) = (*quantiles, *lag, *min_names);
+    let FactorParams { horizons, quantiles, lag, min_names, jump_ratio } = params;
+    let (quantiles, lag, min_names, jump_ratio) = (*quantiles, *lag, *min_names, *jump_ratio);
     let (n, m) = (n_dates, n_assets);
     let invalid = |s: String| StatsError::Invalid(s);
     if horizons.is_empty() || horizons.contains(&0) {
@@ -162,6 +242,9 @@ pub fn factor_report(
     }
     if min_names < 2 {
         return Err(invalid(format!("min_names must be at least 2, got {min_names}")));
+    }
+    if !(jump_ratio.is_finite() && jump_ratio > 1.0) {
+        return Err(invalid(format!("jump_ratio must be a number above 1, got {jump_ratio}")));
     }
     if factor.len() != n * m || prices.len() != n * m {
         return Err(invalid(format!(
@@ -190,6 +273,23 @@ pub fn factor_report(
             found: n,
             needed: need_dates,
         });
+    }
+
+    let mut big_moves = Vec::new();
+    let mut big_move_count = 0usize;
+    for d in 1..n {
+        for a in 0..m {
+            let (p0, p1) = (prices[(d - 1) * m + a], prices[d * m + a]);
+            if p0.is_finite() && p1.is_finite() && p0 > 0.0 && p1 > 0.0 {
+                let ratio = p1 / p0;
+                if ratio > jump_ratio || ratio < 1.0 / jump_ratio {
+                    big_move_count += 1;
+                    if big_moves.len() < MAX_BIG_MOVES {
+                        big_moves.push(BigMove { date: d, asset: a, ret: ratio - 1.0 });
+                    }
+                }
+            }
+        }
     }
 
     // Per date: coverage and the quantile of each name on the factor alone (turnover, autocorr).
@@ -263,16 +363,27 @@ pub fn factor_report(
 
         let mut by_date = vec![f64::NAN; n * quantiles];
         let mut spread = vec![f64::NAN; n];
+        let mut left = vec![f64::NAN; n];
+        let (mut left_total, mut entered) = (0usize, 0usize);
         let mut row = vec![f64::NAN; m];
         let mut u = vec![f64::NAN; m];
         for d in 0..n.saturating_sub(lag + h) {
             let (p0, p1) = ((d + lag) * m, (d + lag + h) * m);
+            let mut gone = 0usize;
             for a in 0..m {
                 let f = factor[d * m + a];
                 let (a0, a1) = (prices[p0 + a], prices[p1 + a]);
                 let ok = f.is_finite() && a0.is_finite() && a1.is_finite() && a0 > 0.0 && a1 > 0.0;
                 row[a] = if ok { f } else { f64::NAN };
+                if f.is_finite() && a0.is_finite() && a0 > 0.0 {
+                    entered += 1;
+                    if !(a1.is_finite() && a1 > 0.0) {
+                        gone += 1;
+                    }
+                }
             }
+            left[d] = gone as f64;
+            left_total += gone;
             u.fill(f64::NAN);
             rank_row(&row, need_names, &mut u, &mut scratch);
             let (mut sum, mut cnt) = (vec![0.0; quantiles], vec![0usize; quantiles]);
@@ -297,6 +408,8 @@ pub fn factor_report(
             })
             .collect();
         let (ls_mean, ls_n) = mean_of(&spread);
+        let ic_ind = independent_t(&daily, h);
+        let ls_ind = independent_t(&spread, h);
         reports.push(HorizonReport {
             horizon: h,
             n_scored: ic.n_dates_scored,
@@ -307,10 +420,23 @@ pub fn factor_report(
             t_naive: ic.t_stat,
             t_hac: hac_t(&daily, lags),
             hac_lags: lags,
+            t_nonoverlap: ic_ind.t,
+            p_nonoverlap: ic_ind.p,
+            n_independent: ic_ind.n,
+            names_left: left,
+            names_left_total: left_total,
+            names_left_share: if entered == 0 {
+                f64::NAN
+            } else {
+                left_total as f64 / entered as f64
+            },
             ic: daily,
             quantile_returns,
             quantile_returns_by_date: by_date,
             long_short_t_hac: hac_t(&spread, lags),
+            long_short_t_nonoverlap: ls_ind.t,
+            long_short_p_nonoverlap: ls_ind.p,
+            long_short_n_independent: ls_ind.n,
             long_short: spread,
             long_short_mean: ls_mean,
             long_short_n: ls_n,
@@ -323,6 +449,9 @@ pub fn factor_report(
         lag,
         quantiles,
         min_names,
+        jump_ratio,
+        big_moves,
+        big_move_count,
         no_costs: true,
         names,
         coverage,
@@ -368,6 +497,57 @@ mod tests {
         // A static factor never changes buckets.
         assert!(r.turnover.iter().all(|t| *t == 0.0));
         assert!((r.autocorr_mean - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_nonoverlapping_t_takes_every_hth_entry_by_hand() {
+        // 0, 2, .., 38: 20 values, mean 19, variance 4 * var(0..19) = 4 * (20 * 21 / 12) = 140,
+        // t = 19 / sqrt(140 / 20) = 19 / sqrt(7), on 19 degrees of freedom.
+        let v: Vec<f64> = (0..40).map(f64::from).collect();
+        let r = independent_t(&v, 2);
+        assert_eq!(r.n, 20);
+        assert!((r.t - 19.0 / 7.0f64.sqrt()).abs() < 1e-12, "{}", r.t);
+        assert!(r.p > 0.0 && r.p < 1e-5, "{}", r.p);
+        // NaN entries do not count, and fewer than MIN_INDEPENDENT is NaN
+        let mut w = v.clone();
+        w[4] = f64::NAN;
+        assert_eq!(independent_t(&w, 2).n, 19);
+        let short = independent_t(&v[..12], 2);
+        assert_eq!(short.n, 6);
+        assert!(short.t.is_nan() && short.p.is_nan());
+        // a constant series has no variance
+        assert!(independent_t(&[1.0; 40], 2).t.is_nan());
+    }
+
+    #[test]
+    fn a_name_without_an_exit_price_is_counted_as_left_not_scored() {
+        let (f, mut p) = ladder(80, 20);
+        // name 19 prints nothing from row 50: windows entered at row 45..=49 (signal dates 44..=48,
+        // lag 1, h 5) end at 50..=54 without a price
+        for d in 50..80 {
+            p[d * 20 + 19] = f64::NAN;
+        }
+        let params = FactorParams { horizons: vec![5], ..FactorParams::default() };
+        let r = factor_report(&f, &p, 80, 20, &params).unwrap();
+        let h = &r.horizons[0];
+        assert_eq!(h.names_left_total, 5);
+        let at: Vec<usize> = (0..80).filter(|d| h.names_left[*d] > 0.0).collect();
+        assert_eq!(at, vec![44, 45, 46, 47, 48]);
+    }
+
+    #[test]
+    fn a_split_is_a_big_move() {
+        let (f, mut p) = ladder(80, 20);
+        for d in 40..80 {
+            p[d * 20 + 7] /= 10.0;
+        }
+        let r = factor_report(&f, &p, 80, 20, &FactorParams::default()).unwrap();
+        assert_eq!(r.big_move_count, 1);
+        assert_eq!((r.big_moves[0].date, r.big_moves[0].asset), (40, 7));
+        // the ladder's name 7 also grows 0.8 % that bar: 1.008 / 10 - 1
+        assert!((r.big_moves[0].ret - (1.008 / 10.0 - 1.0)).abs() < 1e-12);
+        let bad = FactorParams { jump_ratio: 1.0, ..FactorParams::default() };
+        assert!(matches!(factor_report(&f, &p, 80, 20, &bad), Err(StatsError::Invalid(_))));
     }
 
     #[test]

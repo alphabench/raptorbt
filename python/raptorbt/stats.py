@@ -86,6 +86,15 @@ _SPA_REPS = 1000  # bootstrap repetitions of the superior-predictive-ability tes
 _PERSISTENT_ABOVE = 0.55
 _ANTI_PERSISTENT_BELOW = 0.45
 
+# Measured: independent driftless random walks, 400 samples per cell, one lagged difference, a
+# nominal 5%, rank above 0 (unscaled -> scaled). Its source is the statistics skill's table.
+_JOHANSEN_CALIBRATION = (
+    "independent driftless random walks, rank > 0 on (unscaled -> scaled): 2 series at 60 / 250 / "
+    "500 observations 15% -> 13%, 14% -> 14%, 14% -> 14%; 6 series at 60 / 120 / 250 43% -> 2%, "
+    "20% -> 5%, 11% -> 7%; 12 series at 60 / 120 / 250 / 500 100% -> 0.3%, 80% -> 1%, 32% -> 2%, "
+    "15% -> 3% (5% nominal)"
+)
+
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 
 
@@ -176,6 +185,16 @@ def cointegration(cols: Columns, *, alpha: float = _ALPHA) -> dict[str, Any]:
     constant and the others and tests the residual (the spread) for a unit root; Johansen reads
     the rank of the whole system (constant in the relation, one lagged difference, 5% trace).
 
+    ``johansen["rank"]`` is the rank to read: the 5% trace test on statistics multiplied by
+    Reinsel and Ahn's ``(T - q k) / T`` (``trace_statistics_scaled``, ``scale_factor``; ``T``
+    the ``effective_observations``, ``q`` the number of series, ``k = 2``). The unscaled
+    ``rank_at_5pct`` and ``trace_statistics`` are kept as the asymptotic test gives them, and
+    over-reject when ``q`` is large against ``T``: independent random walks gave a rank above 0
+    on 100% of samples at twelve series and 60 observations (scaled: 0.3%). ``small_sample`` is
+    true when the correction removes over a tenth of the statistic (``T < 20 q``); then the test
+    also has little power. ``johansen["calibration"]`` and ``["warnings"]`` say so in words, and
+    the measured false-positive rates are in the statistics skill.
+
     From seven series the Engle-Granger ``p_value`` is ``None`` (MacKinnon's 1994 table stops at
     six); ``critical_values`` are the 2010 ones and ``cointegrated`` falls back to the statistic
     against the critical value when ``alpha`` is 0.01, 0.05 or 0.10, else ``None``. A statistic of
@@ -186,6 +205,28 @@ def cointegration(cols: Columns, *, alpha: float = _ALPHA) -> dict[str, Any]:
     op = "raptorbt.stats.cointegration"
     names, arrays = _columns(cols, "series", op)
     out = _raptorbt.stats_cointegration(names, arrays, alpha)
+    jo = out["johansen"]
+    jo["calibration"] = _JOHANSEN_CALIBRATION
+    jo["warnings"] = []
+    if jo["small_sample"]:
+        jo["warnings"].append(
+            f"small sample: {jo['effective_observations']} observations for {len(arrays)} series "
+            f"(Reinsel-Ahn factor {jo['scale_factor']:.2f}): the asymptotic critical values do "
+            "not apply. Read `rank`, not `rank_at_5pct` (independent random walks showed rank "
+            "above 0 on 43% at six series and 60 observations, on 100% at twelve); the scaled "
+            "test has little power here, so rank 0 is not evidence of no relation either"
+        )
+    elif jo["rank"] != jo["rank_at_5pct"]:
+        jo["warnings"].append(
+            "the scaled rank differs from the unscaled one: the unscaled test over-rejects at "
+            "this number of series and observations; read `rank`"
+        )
+    if jo["rank"] > 0:
+        jo["warnings"].append(
+            "a rank above 0 is a lead, not a finding: on independent driftless random walks the "
+            "test reports one on about 13% of samples at two series however long the sample "
+            "(5% nominal). Confirm with Engle-Granger and out of sample"
+        )
     out["johansen"]["vector_note"] = (
         "first eigenvector, normalised to the first series; meaningful when the rank is at "
         "least 1"
@@ -264,6 +305,16 @@ def garch(
     power of ten the percent series was multiplied by to fit; returns of scale 1e-7 now fit
     instead of raising ``did_not_converge``). ``log_likelihood`` is of the series in percent.
     ``recent_conditional_vol`` is causal; the parameters are fitted on the whole sample.
+
+    A series that varies by no more than 1e-12 of its level (returns constant to a few ulps) is
+    refused with ``degenerate_series``: the fit would be to the rounding noise. Where the fit is
+    not to be read at face value the result says so, in ``warnings`` and in flags:
+    ``integrated`` is true when persistence is within 1e-6 of 1 or above (a volatility level
+    shift or a break in the sample looks like this): ``stationary_variance`` is then false and
+    ``half_life_periods`` and ``unconditional_vol_per_period`` are ``None``, not a huge number;
+    ``shape_at_bound`` is true when the t shape sits at its bound (2.05 or 500), where it is
+    the bound that was estimated; ``std_errors`` is ``None`` when the Hessian cannot be
+    inverted.
     """
     op = "raptorbt.stats.garch"
     out = _raptorbt.stats_garch(
@@ -273,6 +324,26 @@ def garch(
         _int(horizon, "horizon", op),
         None if periods_per_year is None else _int(periods_per_year, "periods_per_year", op),
     )
+    warnings: list[str] = []
+    if out["integrated"]:
+        warnings.append(
+            f"persistence {out['persistence']:.7f} is within 1e-6 of 1 or above: shocks do not "
+            "fade, so there is no half-life and no unconditional variance (both None, "
+            "stationary_variance False). Often a level shift or break in volatility inside the "
+            "sample, not a persistent GARCH process: look at the series, or fit a shorter window"
+        )
+    if out["shape_at_bound"]:
+        warnings.append(
+            f"the t shape nu = {out['parameters']['nu']:.4g} sits at its bound (2.05 or 500): "
+            "the tail weight is not estimated from this sample; do not read it, or fit "
+            "dist='normal'"
+        )
+    if out["std_errors"] is None:
+        warnings.append(
+            "no robust standard errors: the Hessian could not be inverted, typically because a "
+            "parameter sits on its boundary; the parameters are not precisely estimated"
+        )
+    out["warnings"] = warnings
     out["assumptions"] = [
         f"{dist} innovations, constant mean, one lag each; fitted on returns in percent",
         "variances are per bar; the horizon is in bars",
@@ -311,6 +382,12 @@ def markov_regimes(
     under ``min_support_bars`` or its expected duration is under ``min_duration_periods``;
     ``low_support_regimes`` lists them and ``warnings`` says so in words. ``log_likelihood`` is of
     the series in percent.
+
+    The fit does not depend on the units of the returns: a series whose percent variance is
+    outside 0.1 to 10000 is scaled by a power of ten (``rescale``, 1.0 when none) as ``garch``
+    does, and everything is returned in the units given. A series that varies by no more than
+    1e-12 of its level is refused with ``degenerate_series`` (the fit would be to the rounding
+    noise); a fit that does not settle is ``did_not_converge``.
     """
     op = "raptorbt.stats.markov_regimes"
     out = _raptorbt.stats_regimes(
@@ -412,7 +489,9 @@ def spa_test(
 
     Hansen's superior predictive ability and White's reality check, by the stationary bootstrap.
     ``cols`` maps strategy names to per-period returns of one length (at least 60, up to 200
-    strategies); ``benchmark`` is cash (zero) when ``None``. ``reps`` is 200 to 5000;
+    strategies); ``benchmark`` is cash (zero) when ``None``. When every strategy's excess over
+    the benchmark is constant (identical to it, or all zero) there is nothing to bootstrap and
+    ``degenerate_series`` is raised, not p = 0. ``reps`` is 200 to 5000;
     ``block_size`` is the mean block, default ``max(2, round(n ** (1 / 3)))``. The p-values are
     Monte Carlo estimates: the same ``seed`` gives the same numbers on any machine and thread
     count.

@@ -34,7 +34,8 @@ pub struct BfgsOptions {
     pub max_iter: usize,
     /// Converged when `max |g_i| <= gtol * max(1, |f|)`.
     pub gtol: f64,
-    /// Converged when a step moves no coordinate by more than `xtol * max(1, max |x_i|)`.
+    /// A step that moves no coordinate by more than `xtol * max(1, max |x_i|)` ends the run:
+    /// `Converged(Step)` when the gradient is within `stall_gtol` too, `Stalled` otherwise.
     pub xtol: f64,
     /// Sufficient-decrease constant of the Wolfe conditions.
     pub c1: f64,
@@ -58,7 +59,7 @@ impl Default for BfgsOptions {
 pub enum Convergence {
     /// The gradient is within `gtol`.
     Gradient,
-    /// The step fell below `xtol`.
+    /// The step fell below `xtol` and the gradient is within `stall_gtol`.
     Step,
     /// No descent step exists within the objective's rounding noise, and the gradient is
     /// within `stall_gtol`.
@@ -73,6 +74,9 @@ pub enum BfgsStatus {
     MaxIterations,
     /// No step along the steepest-descent direction satisfied the Wolfe conditions.
     LineSearchFailed,
+    /// The step fell below `xtol` while the gradient is still above `stall_gtol`: the iterate
+    /// stopped moving, not at a stationary point.
+    Stalled,
 }
 
 /// The best point found.
@@ -303,7 +307,11 @@ where
         fx = pt.f;
         g = g_new;
         if inf_norm(&s) <= opts.xtol * inf_norm(&x).max(1.0) {
-            status = BfgsStatus::Converged(Convergence::Step);
+            status = if inf_norm(&g) <= opts.stall_gtol * fx.abs().max(1.0) {
+                BfgsStatus::Converged(Convergence::Step)
+            } else {
+                BfgsStatus::Stalled
+            };
             break;
         }
         let sy: f64 = s.iter().zip(&y).map(|(a, b)| a * b).sum();

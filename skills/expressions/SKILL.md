@@ -481,11 +481,30 @@ the base clock.
   are the same for any thread count. Each name equals a stream fed its own present bars, and each
   date equals the plain function of that date's row, bit for bit.
 - *Factor evaluation.* `factor_report` is the only place a forward return exists; nothing in
-  it can feed an expression. It reports `no_costs: True`: every spread is gross. The t-statistic
-  of the IC and of the spread is Newey-West with `h - 1` lags (the daily ICs of an `h`-bar return
-  overlap; the naive t is about `sqrt(h)` too large and is reported beside it as `t_naive`), and
-  is NaN with fewer than 30 scored dates. It refuses (`insufficient_observations`) fewer than
-  `max(min_names, quantiles)` names or fewer than `lag + max(horizons) + 30` dates.
+  it can feed an expression. It reports `no_costs: True`: every spread is gross.
+  - *Which t to quote.* The headline is `t_nonoverlap` (with `p_nonoverlap` and
+    `n_independent`): the IC of every `h`-th date, whose forward windows share no bar, against
+    Student's t. `long_short_t_nonoverlap` is the spread's twin. NaN under 10 such dates. The
+    daily ICs of an `h`-bar return overlap, so `t_naive` is about `sqrt(h)` too large, and the
+    Newey-West `t_hac` (`h - 1` lags) is still too large: on 1,000 no-skill panels at `h = 20`
+    (30 names, 500 dates, a random factor) `t_hac` had standard deviation 1.29 and exceeded
+    1.96 on 12.9% of them (14.3% on the first 300; the long-short one 15.0%; with `2 (h - 1)`
+    lags 11.7%, so more lags is not the repair), where `t_nonoverlap` had 1.03 and rejected at
+    5% on 5.2% (long-short 6.8%). `t_hac` is NaN with fewer than 30 scored dates.
+  - *What the prices must be.* Adjusted for splits, bonuses and dividends, and free of
+    survivorship bias: neither is checked (`assumptions` says so). An unadjusted 1:10 split on a
+    name reads as a -90% return in every window across it: on a panel whose true returns are all
+    zero, with the split name on top of two buckets of five, the long-short is -18% and the IC
+    about -0.5. `big_moves` lists one-bar price ratios beyond `jump_ratio` (default 1.5, either
+    way), `big_move_count` counts them, and `flags` says so; adjust or drop the name.
+  - *Names that leave.* A name with no usable exit price (NaN, or not positive) drops out of the
+    window: it is **not** counted as a loss, no delisting return is invented, and a factor that
+    holds names going to zero is flattered (the same panel with the name going to zero gives a
+    long-short of 0, where the truth is -20%). Per horizon, `names_left` (per signal date),
+    `names_left_total` and `names_left_share` count the name-windows lost this way and `flags`
+    reports them; with a survivor-only universe none is ever counted.
+  - It refuses (`insufficient_observations`) fewer than `max(min_names, quantiles)` names or
+    fewer than `lag + max(horizons) + 30` dates.
 - *Limits.* Group labels are read as numbers, equal labels are one group, a NaN label leaves the
   name out. Panels are held in memory as dates times names floats per intermediate; the group
   forms and `quantile_xs` sort each date. There are no cross-sectional functions across
@@ -558,8 +577,10 @@ same expression values as one that never stopped.
   (`expr_unsupported_here`). Passing 1-D arrays to `eval_panel` is `invalid_array`.
 - Reading a NaN close as a bar that exists: without `present=` a cell whose fields are all NaN is
   absent, and does not step a function.
-- Quoting a factor's `t_naive` for a 5- or 20-day horizon: it ignores that the daily ICs overlap.
-  Use `t_hac`.
+- Quoting a factor's `t_naive` or `t_hac` for a 5- or 20-day horizon: the daily ICs overlap, and
+  even the Newey-West t over-rejects. Use `t_nonoverlap`.
+- Scoring a factor on unadjusted prices or a survivor-only universe: a split reads as a loss and a
+  name that left is not counted. Read `flags` and `big_moves` before the numbers.
 - Evaluating `at(...)` without timestamps or `bar_stamp`: `missing_field` / `missing_bar_stamp`.
   Nothing is assumed; open- and close-stamped bars cut different windows near a boundary.
 - Cutting IST days in UTC: pass `tz_offset_ns=19_800 * 10**9` (or a `session`), or a bar at

@@ -425,7 +425,7 @@ character offset), ``snippet`` (the line with a caret) and ``valid`` (the closes
 *function*
 
 ```python
-factor_report(factor: 'Any', prices: 'Any', horizons: 'Sequence[int]' = (1, 5, 20), quantiles: 'int' = 5, *, lag: 'int' = 1, min_names: 'int' = 10, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'dict[str, Any]'
+factor_report(factor: 'Any', prices: 'Any', horizons: 'Sequence[int]' = (1, 5, 20), quantiles: 'int' = 5, *, lag: 'int' = 1, min_names: 'int' = 10, jump_ratio: 'float' = 1.5, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'dict[str, Any]'
 ```
 
 Score a factor against the returns that follow it.
@@ -442,13 +442,34 @@ charged**: the result says ``no_costs: True``, and every spread is gross.
 
 Returns a dict. Per horizon (``result["horizons"][h]``): ``ic`` (rank IC per date, NaN
 where not scored), ``ic_mean``, ``ic_std``, ``hit_rate`` (share of scored dates with IC > 0),
-``t_naive`` and ``t_hac`` (Newey-West, Bartlett weights, ``h - 1`` lags: the daily ICs of an
-``h``-bar return overlap, so the naive t is about ``sqrt(h)`` too large; NaN under 30
-scored dates), ``quantile_returns`` (mean forward return per factor bucket, bucket
-``quantiles - 1`` the highest), ``quantile_returns_by_date``, ``long_short`` (top minus
-bottom per date) with ``long_short_mean`` and ``long_short_t_hac``. Beside them:
+``t_nonoverlap`` with ``p_nonoverlap`` and ``n_independent`` (**the headline t**: the IC of
+every ``h``-th date, whose forward windows share no bar, against Student's t; NaN under 10
+such dates), ``t_naive`` and ``t_hac`` (Newey-West, Bartlett weights, ``h - 1`` lags; NaN
+under 30 scored dates). The daily ICs of an ``h``-bar return overlap, so ``t_naive`` is about
+``sqrt(h)`` too large, and ``t_hac`` is **still too large**: on 1,000 no-skill panels at
+``h = 20`` its standard deviation was 1.29 and it passed 1.96 on 12.9 % of them (14.3 % on
+the first 300; the long-short one 15.0 %; with ``2 (h - 1)`` lags 11.7 %), against about
+5 % expected. The non-overlapping t measured 1.03 and 5.2 % (long-short 6.8 %). Read
+``t_nonoverlap``; ``long_short_t_nonoverlap`` is its long-short twin. Beside them:
+``quantile_returns`` (mean forward return per factor bucket, bucket ``quantiles - 1`` the
+highest), ``quantile_returns_by_date``, ``long_short`` (top minus
+bottom per date) with ``long_short_mean`` and ``long_short_t_hac``. Per horizon also
+``names_left`` (per signal date), ``names_left_total`` and ``names_left_share``: the
+name-windows whose exit price was missing or not positive, which are dropped, not scored. Also
 ``coverage`` and ``names`` per date, ``autocorr`` (rank autocorrelation of the factor with
 its previous date) and ``turnover`` per quantile (``turnover_by_date`` per date).
+
+**What the prices must be.** Prices are assumed adjusted for splits, bonuses and dividends,
+and the panel free of survivorship bias; neither is checked or repaired, and the result's
+``assumptions`` says so. An unadjusted 1:10 split reads as a -90 % return and turns a
+zero-return panel into a long-short of -18 %. A name that leaves (NaN or a price of zero
+after its last print) is dropped from the window, **not counted as a loss**: a factor that
+holds names going to zero is flattered, and no delisting return is invented (see
+``names_left``). A one-bar price ratio above ``jump_ratio`` (default 1.5) or below its
+inverse, on any name, is listed in ``big_moves`` (the first 50: ``date`` and ``asset``
+indices, ``instrument`` when ``instruments`` names the columns, ``ret``) and counted in
+``big_move_count``; ``flags`` says so in words, with the leavers and any horizon with
+too few independent windows, and is empty when none applies.
 
 Refused with ``insufficient_observations``: fewer than ``max(min_names, quantiles)`` names or
 fewer than ``lag + max(horizons) + 30`` dates; ``invalid_input``: an infinite value;

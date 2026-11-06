@@ -72,6 +72,9 @@ use thiserror::Error;
 use crate::math::linalg::{inverse, Mat};
 use crate::math::optimize::{bfgs, BfgsOptions};
 
+use super::garch::rescale_factor;
+use super::hac::is_numerically_constant;
+
 /// Returns are fitted in percent.
 pub const SCALE: f64 = 100.0;
 /// Observations needed per regime beyond the first: the fit needs `200 * (k - 1)`.
@@ -209,6 +212,10 @@ pub struct HmmResult {
     /// converge or collapsed a regime.
     pub start_log_likelihoods: Vec<Option<f64>>,
     pub winning_start: usize,
+    /// The power of ten the percent series was multiplied by to fit (1.0: none), as GARCH's:
+    /// the fit would otherwise depend on the units of the returns (returns of scale 1e-7 did
+    /// not converge, of 1e-9 gave other regimes). Every result is in the units passed in.
+    pub rescale: f64,
 }
 
 // ------------------------------------------------------------------------------- the parameters
@@ -672,12 +679,13 @@ pub fn markov_regimes(returns: &[f64], opts: &HmmOptions) -> Result<HmmResult, H
     if !returns.iter().all(|v| v.is_finite()) {
         return Err(HmmError::NonFinite);
     }
-    let (lo, hi) =
-        returns.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
-    if hi - lo == 0.0 {
+    // spread of a few ulps around a level is constant: the fit would be to the rounding noise
+    if is_numerically_constant(returns) {
         return Err(HmmError::DegenerateSeries);
     }
-    let y: Vec<f64> = returns.iter().map(|v| v * SCALE).collect();
+    let pct: Vec<f64> = returns.iter().map(|v| v * SCALE).collect();
+    let rescale = rescale_factor(&pct);
+    let y: Vec<f64> = if rescale == 1.0 { pct } else { pct.iter().map(|v| v * rescale).collect() };
 
     let mut candidates: Vec<Option<Candidate>> = Vec::new();
     for start in starts(&y, k) {
@@ -705,7 +713,11 @@ pub fn markov_regimes(returns: &[f64], opts: &HmmOptions) -> Result<HmmResult, H
         });
     };
     let best = candidates[w].take().expect("winner is a fit");
-    assemble(&y, best.nat, best.llf, w, start_log_likelihoods, opts).ok_or(HmmError::DidNotConverge)
+    // the likelihood of the percent series moves by n ln(rescale) back
+    let shift = y.len() as f64 * rescale.ln();
+    let start_log_likelihoods = start_log_likelihoods.into_iter().map(|l| l.map(|v| v + shift));
+    assemble(&y, best.nat, best.llf + shift, w, start_log_likelihoods.collect(), rescale, opts)
+        .ok_or(HmmError::DidNotConverge)
 }
 
 fn assemble(
@@ -714,8 +726,10 @@ fn assemble(
     llf: f64,
     winning_start: usize,
     start_log_likelihoods: Vec<Option<f64>>,
+    rescale: f64,
     opts: &HmmOptions,
 ) -> Option<HmmResult> {
+    let q = SCALE * rescale;
     let k = nat.k;
     let n = y.len();
     let (pi0, _) = steady_state(&nat.p, k)?;
@@ -770,8 +784,8 @@ fn assemble(
             let support: f64 = smoothed.iter().map(|row| row[i]).sum();
             RegimeStat {
                 regime: i,
-                mean_per_period: nat.mu[o] / SCALE,
-                vol_per_period: nat.var[o].sqrt() / SCALE,
+                mean_per_period: nat.mu[o] / q,
+                vol_per_period: nat.var[o].sqrt() / q,
                 share_of_periods: label.iter().filter(|g| **g == i).count() as f64 / n as f64,
                 stay_probability: stay,
                 expected_duration_periods: duration,
@@ -805,5 +819,6 @@ fn assemble(
         filtered_is_causal: true,
         start_log_likelihoods,
         winning_start,
+        rescale,
     })
 }

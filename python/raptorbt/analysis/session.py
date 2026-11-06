@@ -681,10 +681,13 @@ class Session:
         first. The forward return of a date starts ``lag`` bars later and runs ``h`` bars over the
         loaded ``close``; nothing here charges costs, and the summary says ``no_costs: true``.
 
-        The summary holds, per horizon, ``n_scored`` dates, ``ic_mean`` (rank IC), ``t_hac`` (its
-        t-statistic with a Newey-West correction for the overlap of ``h``-bar returns, ``hac_lags``
-        lags) beside ``t_naive``, ``hit_rate``, ``long_short_mean`` (top minus bottom quantile,
-        gross) and ``long_short_t_hac``; and ``turnover`` of the top and bottom quantile, the
+        The summary holds, per horizon, ``n_scored`` dates, ``ic_mean`` (rank IC), ``t_nonoverlap``
+        (the headline t: the IC of every ``h``-th date, with ``p_nonoverlap`` and
+        ``n_independent``) beside ``t_hac`` (Newey-West, ``hac_lags`` lags; known to over-reject
+        for ``h > 1``) and ``t_naive``, ``hit_rate``, ``long_short_mean`` (top minus bottom
+        quantile, gross), ``long_short_t_nonoverlap``, ``long_short_t_hac`` and
+        ``names_left_share`` (names that left within the horizon, dropped not scored). Top level:
+        ``flags`` (unadjusted-split and leaver warnings) and ``assumptions``; and ``turnover`` of the top and bottom quantile, the
         rank ``autocorr`` of the factor, and ``names`` held per date (min, median, max). The
         per-date arrays (IC, long-short, coverage, turnover, quantile returns) stay behind the
         summary's ``handle``: ``series(handle)`` returns them by name.
@@ -913,6 +916,10 @@ def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, 
         "names": {"min": int(live.min()), "median": show(np.median(live)), "max": int(live.max())} if live.size else None,
         "autocorr": show(report["autocorr_mean"]),
         "turnover": {"top": show(turnover[-1]), "bottom": show(turnover[0])},
+        "headline": "t_nonoverlap",
+        "t_hac_note": "t_hac is known to over-reject for h > 1; read t_nonoverlap",
+        "flags": [f if len(f) <= 160 else f[:157] + "..." for f in report["flags"][:3]],
+        "assumptions": report["assumptions"][:2],
         "horizons": {},
         "per_date": ["ic_<h>", "long_short_<h>", "quantile_returns_by_date_<h>", "coverage", "names", "autocorr", "turnover_by_date"],
     }
@@ -920,11 +927,16 @@ def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, 
         out["horizons"][str(hz)] = {
             "n_scored": row["n_scored"],
             "ic_mean": show(row["ic_mean"]),
+            "t_nonoverlap": show(row["t_nonoverlap"]),
+            "p_nonoverlap": show(row["p_nonoverlap"]),
+            "n_independent": row["n_independent"],
+            "names_left_share": show(row["names_left_share"]),
             "t_hac": show(row["t_hac"]),
             "hac_lags": row["hac_lags"],
             "t_naive": show(row["t_naive"]),
             "hit_rate": show(row["hit_rate"]),
             "long_short_mean": show(row["long_short_mean"]),
+            "long_short_t_nonoverlap": show(row["long_short_t_nonoverlap"]),
             "long_short_t_hac": show(row["long_short_t_hac"]),
         }
     cut = []

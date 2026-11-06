@@ -2487,6 +2487,7 @@ def factor_report_native(
     quantiles: int,
     lag: int,
     min_names: int,
+    jump_ratio: float,
 ) -> dict[str, Any]: ...
 
 # --- Statistics --------------------------------------------------------------

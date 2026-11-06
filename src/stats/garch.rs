@@ -39,12 +39,22 @@
 //!   `H` the central difference of the analytic gradient and `S` the covariance of the per-bar
 //!   scores. `None` means that `H` could not be inverted.
 //!
+//! - a series whose spread is at most 1e-12 of its level is refused as `degenerate_series`
+//!   (returns constant to a few ulps otherwise fit to numbers that are the rounding noise);
+//! - persistence within [`INTEGRATED_EDGE`] of 1 is reported `integrated`: `stationary_variance`
+//!   is false, and the half-life and the unconditional variance are `None`, because they are
+//!   infinite or noise there (the softmax only approaches the boundary, so a fit that wants
+//!   the IGARCH edge prints 0.9999999 or 1.00000); a t shape within a hair of its bounds is
+//!   `shape_at_bound`.
+//!
 //! Deterministic: one thread, fixed order of operations, no randomness.
 
 use thiserror::Error;
 
 use crate::math::linalg::{inverse, Mat};
 use crate::math::optimize::{bfgs, BfgsOptions};
+
+use super::hac::is_numerically_constant;
 
 /// Fewest returns that are fitted.
 pub const MIN_OBS: usize = 250;
@@ -59,6 +69,10 @@ const BACKCAST_BARS: usize = 75;
 const EWMA_LAMBDA: f64 = 0.94;
 const NU_MIN: f64 = 2.05;
 const NU_MAX: f64 = 500.0;
+/// Persistence this close to 1 (or beyond) is the integrated edge, not a stationary variance.
+pub const INTEGRATED_EDGE: f64 = 1e-6;
+/// A t shape within this of its lower bound, or this share of its upper bound, is at the bound.
+const NU_BOUND_TOL: f64 = 1e-4;
 const LN_2PI: f64 = 1.837_877_066_409_345_3;
 /// BFGS runs from the previous end point before giving up (each resets the inverse Hessian).
 const MAX_RESTARTS: usize = 6;
@@ -166,8 +180,13 @@ pub struct GarchResult {
     pub covariance_robust: Option<Vec<Vec<f64>>>,
     pub parameter_names: Vec<&'static str>,
     pub persistence: f64,
-    /// `persistence < 1`
+    /// `persistence < 1 - INTEGRATED_EDGE`
     pub stationary_variance: bool,
+    /// Persistence within `INTEGRATED_EDGE` of 1 or above: shocks do not fade, the half-life and
+    /// the unconditional variance are undefined (`None`).
+    pub integrated: bool,
+    /// The t shape sits at its bound (2.05 or 500): it is not estimated, the bound is.
+    pub shape_at_bound: bool,
     pub half_life_periods: Option<f64>,
     pub unconditional_vol_per_period: Option<f64>,
     /// Of the series in percent.
@@ -574,7 +593,7 @@ fn start_values(fitter: &Fitter<'_>, t_dist: bool) -> Vec<f64> {
 }
 
 /// arch's rule: the power of ten that brings the variance of the residuals into `0.1..10000`.
-fn rescale_factor(y: &[f64]) -> f64 {
+pub(crate) fn rescale_factor(y: &[f64]) -> f64 {
     let orig = variance(y);
     let mut factor = 1.0f64;
     let mut scale = orig;
@@ -711,9 +730,7 @@ pub fn garch(returns: &[f64], opts: &GarchOptions) -> Result<GarchResult, GarchE
     if !returns.iter().all(|v| v.is_finite()) {
         return Err(GarchError::NonFinite);
     }
-    let (lo, hi) =
-        returns.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
-    if hi - lo == 0.0 {
+    if is_numerically_constant(returns) {
         return Err(GarchError::DegenerateSeries);
     }
     let n = returns.len();
@@ -734,7 +751,8 @@ pub fn garch(returns: &[f64], opts: &GarchOptions) -> Result<GarchResult, GarchE
     let nu = if t_dist { Some(th[4 + g]) } else { None };
     let persistence = alpha + beta + gamma_v / 2.0;
     let omega = omega_s / (q * q);
-    let (uncond, half) = if persistence < 1.0 {
+    let integrated = persistence >= 1.0 - INTEGRATED_EDGE;
+    let (uncond, half) = if !integrated {
         let u = omega_s / (1.0 - persistence) / (q * q);
         let h = if persistence > 0.0 { 0.5f64.ln() / persistence.ln() } else { 0.0 };
         (Some(u), Some(h))
@@ -816,7 +834,10 @@ pub fn garch(returns: &[f64], opts: &GarchOptions) -> Result<GarchResult, GarchE
         covariance_robust,
         parameter_names: names,
         persistence,
-        stationary_variance: persistence < 1.0,
+        stationary_variance: !integrated,
+        integrated,
+        shape_at_bound: nu
+            .is_some_and(|v| v - NU_MIN < NU_BOUND_TOL || NU_MAX - v < NU_BOUND_TOL * NU_MAX),
         half_life_periods: half,
         unconditional_vol_per_period: uncond.map(f64::sqrt),
         log_likelihood: llf,

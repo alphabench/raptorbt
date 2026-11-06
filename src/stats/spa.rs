@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use crate::research::SplitMix64;
 
 use super::error::StatsError;
-use super::hac::finite_series;
+use super::hac::{finite_series, peak_to_peak};
 
 pub const MIN_SPA_OBS: usize = 60;
 pub const MAX_STRATEGIES: usize = 200;
@@ -229,6 +229,16 @@ pub fn spa_test<C: AsRef<[f64]> + Sync>(
 
     let diff: Vec<Vec<f64>> =
         series.iter().map(|s| s.iter().zip(&bench).map(|(a, b)| a - b).collect()).collect();
+
+    // A constant excess has no sampling variation to bootstrap: the count of resamples strictly
+    // above the observed mean would be zero and read as p = 0 ("beats the benchmark at any level").
+    if diff.iter().all(|d| peak_to_peak(d) == 0.0) {
+        return Err(StatsError::DegenerateSeries(
+            "every strategy's excess over the benchmark is constant (identical to it, or all zero): \
+             there is no evidence to test"
+                .into(),
+        ));
+    }
 
     // One independent stream per repetition, started from a draw of the master stream.
     let mut master = SplitMix64::new(seed);
