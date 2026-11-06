@@ -11,3 +11,7 @@ code of them is included or linked into raptorbt.
   BSD 3-Clause. Reference output for the statistical tests and regressions.
 - arch (https://github.com/bashtage/arch), University of Illinois/NCSA Open Source
   License. Reference output for volatility models.
+- TA-Lib (https://ta-lib.org), BSD 3-Clause. The Hilbert transform functions (ht_dcperiod,
+  ht_dcphase, ht_phasor, ht_sine, ht_trendmode, ht_trendline) and mama in
+  src/quant/fns/hilbert.rs port TA-Lib's algorithm (itself after John Ehlers' work),
+  re-expressed as one-step kernels; no TA-Lib source text is included.

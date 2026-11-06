@@ -7,6 +7,7 @@
 //! [`MaCore`] and [`MaKind`] are the one-step moving averages that other kernels embed
 //! (TA-Lib's `matype`).
 
+use crate::quant::fns::hilbert::MamaSt;
 use crate::quant::kernel::{Adapter, Hist, Kernel, Node};
 use crate::quant::registry::{
     int_param, regs, Domain, Family, FnDef, InputDef, Invariance, Legacy, Memory, NanPolicy,
@@ -369,13 +370,16 @@ impl MaKind {
     pub(crate) fn settle(self, period: usize, eps: f64) -> usize {
         let alpha = 2.0 / (period as f64 + 1.0);
         match self {
-            Self::Sma | Self::Wma | Self::Trima | Self::Mama => 0,
+            Self::Sma | Self::Wma | Self::Trima => 0,
             Self::Ema => decay_bars(1.0 - alpha, 1, eps),
             Self::Dema => decay_bars(1.0 - alpha, 2, eps),
             Self::Tema => decay_bars(1.0 - alpha, 3, eps),
             Self::T3 => decay_bars(1.0 - alpha, 6, eps),
             // The smoothing constant is smallest when the efficiency ratio is 0.
             Self::Kama => decay_bars(1.0 - KAMA_MAX * KAMA_MAX, 1, eps),
+            // FAMA at the slow limit 0.05 smooths by half of it; the Hilbert state is slower
+            // still, so this is a guide (see `mama`).
+            Self::Mama => 32 + decay_bars(1.0 - 0.025, 1, eps),
         }
     }
 }
@@ -406,6 +410,8 @@ enum Inner {
     Trima(RingSma, RingSma),
     Kama(KamaSt),
     T3(Box<T3St>),
+    /// TA-Lib's MA with matype 7: fast and slow limits 0.5 and 0.05 whatever the period.
+    Mama(Box<MamaSt>),
 }
 
 /// A moving average of any TA-Lib `matype` as a one-step state machine over a single series, for
@@ -429,15 +435,8 @@ impl MaCore {
             return Err("moving average period must be at least 1".into());
         }
         let inner = match kind {
-            // Plug-in point for the Hilbert slice: add an `Inner::Mama(..)` variant, build it
-            // here (MAMA takes fast and slow limits, not a period; TA-Lib's MA uses 0.5 and
-            // 0.05), step it in `step`, and keep `MaKind::lookback`'s 32.
-            MaKind::Mama => {
-                return Err("matype 7 (MAMA) is not available yet: it needs the Hilbert \
-                            transform kernel, which the Hilbert slice wires into MaCore::new"
-                    .into())
-            }
             _ if period == 1 => Inner::Identity,
+            MaKind::Mama => Inner::Mama(Box::new(MamaSt::new(0.5, 0.05))),
             MaKind::Sma => Inner::Sma(RingSma::new(period)),
             MaKind::Ema => Inner::Ema(EmaSt::new(period)),
             MaKind::Wma => Inner::Wma(Ring::new(period), period),
@@ -505,6 +504,7 @@ impl MaCore {
             }
             Inner::Kama(k) => k.step(x),
             Inner::T3(t) => t.step(x),
+            Inner::Mama(m) => m.step(x),
         };
         self.warmed |= v.is_finite();
         v
@@ -1318,7 +1318,7 @@ pub const DEFS: &[FnDef] = &[
         memory: Memory::Infinite { settle: ma_settle },
         legacy: None,
         talib_name: Some("MA"),
-        doc: "Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3 (7, MAMA, is not available yet). Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.",
+        doc: "Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA (limits 0.5 and 0.05, whatever the period; see `mama`), 8 T3. Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
         rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
@@ -1717,7 +1717,7 @@ mod family_tests {
             ("mavp", vec![i(2), i(5), i(0)], 2, 1),
             ("mavp", vec![i(2), i(5), i(1)], 2, 1),
         ];
-        for m in [0, 1, 2, 3, 4, 5, 6, 8] {
+        for m in [0, 1, 2, 3, 4, 5, 6, 7, 8] {
             v.push(("ma", vec![i(5), i(m)], 1, 1));
         }
         v
@@ -1985,11 +1985,13 @@ mod family_tests {
     }
 
     #[test]
-    fn mama_is_refused_with_a_clear_error() {
-        let make = lookup("ma").unwrap().make;
-        let err = make(&[i(5), i(7)], &[0], &[1]).err().unwrap();
-        assert!(err.contains("MAMA") && err.contains("Hilbert"), "{err}");
-        assert!(MaCore::new(MaKind::Mama, 5).is_err());
+    fn ma_matype_7_is_mama_at_fixed_limits() {
+        // TA-Lib's MA with matype 7 ignores the period: it is MAMA at 0.5 and 0.05.
+        let x: Vec<f64> = (1..=80).map(|v| f64::from(v * 7 % 13) + 20.0).collect();
+        let want = &batch("mama", &[f(0.5), f(0.05)], &[&x], 2)[0];
+        assert_eq!(bits(&one("ma", &[i(5), i(7)], &x)), bits(want));
+        assert_eq!(bits(&one("ma", &[i(30), i(7)], &x)), bits(want));
+        assert_eq!(bits(&one("ma", &[i(1), i(7)], &x)), bits(&x));
         assert!(MaKind::from_code(9).is_err());
     }
 
