@@ -21,8 +21,7 @@
 //! composite that smooths one series with another starts the second on the first finite value of
 //! the first (a NaN that has not been preceded by a value never seeds anything).
 //!
-//! Moving averages selected by `matype` are [`MaCore`]; MAMA (7) is refused until the Hilbert
-//! slice lands.
+//! Moving averages selected by `matype` are [`MaCore`], MAMA (7) included.
 
 use crate::quant::fns::overlap::{MaCore, MaKind};
 use crate::quant::fns::vol_price::true_range;
@@ -67,6 +66,8 @@ struct EmaA {
     p: usize,
     alpha: f64,
     classic: bool,
+    /// TA-Lib's T3 form, `fma(alpha, x, (1 - alpha) * prev)`.
+    t3: bool,
     value: Option<f64>,
     seed_sum: f64,
     seen: usize,
@@ -74,7 +75,11 @@ struct EmaA {
 
 impl EmaA {
     fn new(p: usize, alpha: f64, classic: bool) -> Self {
-        Self { p: p.max(1), alpha, classic, value: None, seed_sum: 0.0, seen: 0 }
+        Self { p: p.max(1), alpha, classic, t3: false, value: None, seed_sum: 0.0, seen: 0 }
+    }
+
+    fn t3(p: usize) -> Self {
+        Self { t3: true, ..Self::new(p, 2.0 / (p as f64 + 1.0), false) }
     }
 
     fn step(&mut self, x: f64) -> f64 {
@@ -85,6 +90,8 @@ impl EmaA {
             Some(prev) => {
                 let v = if self.classic {
                     (x - prev).mul_add(self.alpha, prev)
+                } else if self.t3 {
+                    self.alpha.mul_add(x, (1.0 - self.alpha) * prev)
                 } else {
                     self.alpha * x + (1.0 - self.alpha) * prev
                 };
@@ -155,9 +162,252 @@ impl TaSma {
     }
 }
 
+/// A value as a rolling sum sees it: a non-finite one counts as 0 (and is tallied in `bad`, so
+/// the output is NaN while it is in the window; the sums are then right again once it leaves).
+fn summed(x: f64) -> f64 {
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
+}
+
+/// TA-Lib's weighted moving average, in TA-Lib's order: a rolling weighted total and a rolling
+/// plain total, the new value weighted by the period with a fused multiply-add (TA-Lib's C
+/// compiles `sum += x * p` to one on the machine the oracle fixtures were made on). A fresh
+/// weighted mean differs from it by the rounding it accumulates, which shows once two averages
+/// are subtracted near a crossing.
+struct TaWma {
+    p: usize,
+    div: f64,
+    ring: Box<[f64]>,
+    n: u64,
+    sub: f64,
+    total: f64,
+    trailing: f64,
+    bad: usize,
+}
+
+impl TaWma {
+    fn new(p: usize) -> Self {
+        Self {
+            p,
+            div: (p * (p + 1) / 2) as f64,
+            ring: vec![f64::NAN; p].into_boxed_slice(),
+            n: 0,
+            sub: 0.0,
+            total: 0.0,
+            trailing: 0.0,
+            bad: 0,
+        }
+    }
+
+    fn step(&mut self, x: f64) -> f64 {
+        let (p, t) = (self.p as u64, self.n);
+        let slot = (t % p) as usize;
+        let leaving = self.ring[slot];
+        self.ring[slot] = x;
+        self.n += 1;
+        if !x.is_finite() {
+            self.bad += 1;
+        }
+        if t >= p && !leaving.is_finite() {
+            self.bad -= 1;
+        }
+        let x = summed(x);
+        if t + 1 < p {
+            self.sub += x;
+            self.total = x.mul_add((t + 1) as f64, self.total);
+            return f64::NAN;
+        }
+        self.sub += x;
+        self.sub -= self.trailing;
+        self.total = x.mul_add(self.p as f64, self.total);
+        self.trailing = summed(self.ring[((t + 1) % p) as usize]);
+        let out = self.total / self.div;
+        self.total -= self.sub;
+        if self.bad > 0 {
+            f64::NAN
+        } else {
+            out
+        }
+    }
+}
+
+/// TA-Lib's triangular moving average, in TA-Lib's order: a rolling numerator built from two
+/// running sums (the half window ending `half` bars back and the half window ending now), scaled
+/// once by the reciprocal of the weight total. Two chained simple means differ from it by
+/// rounding. A window holding a non-finite value is NaN until it leaves.
+struct TaTrima {
+    p: usize,
+    half: usize,
+    odd: bool,
+    factor: f64,
+    ring: Box<[f64]>,
+    n: u64,
+    bad: usize,
+    num: f64,
+    sub: f64,
+    add: f64,
+    temp: f64,
+}
+
+impl TaTrima {
+    fn new(p: usize) -> Self {
+        let half = p / 2;
+        let odd = p % 2 == 1;
+        let weights = if odd { (half + 1) * (half + 1) } else { half * (half + 1) };
+        Self {
+            p,
+            half,
+            odd,
+            factor: 1.0 / weights as f64,
+            ring: vec![f64::NAN; p].into_boxed_slice(),
+            n: 0,
+            bad: 0,
+            num: 0.0,
+            sub: 0.0,
+            add: 0.0,
+            temp: 0.0,
+        }
+    }
+
+    /// The value `k` bars back (0 is the newest), once at least `k + 1` have been pushed.
+    fn ago(&self, k: usize) -> f64 {
+        summed(self.ring[((self.n - 1 - k as u64) % self.p as u64) as usize])
+    }
+
+    fn start(&mut self) {
+        let p = self.p;
+        let first_mid = if self.odd { self.half } else { self.half - 1 };
+        let (mut num, mut sub) = (0.0, 0.0);
+        for j in (0..=first_mid).rev() {
+            sub += self.ago(p - 1 - j);
+            num += sub;
+        }
+        let mut add = 0.0;
+        for j in first_mid + 1..p {
+            add += self.ago(p - 1 - j);
+            num += add;
+        }
+        (self.num, self.sub, self.add, self.temp) = (num, sub, add, self.ago(p - 1));
+    }
+
+    fn advance(&mut self) {
+        self.num -= self.sub;
+        self.sub -= self.temp;
+        self.temp = self.ago(self.half);
+        self.sub += self.temp;
+        if self.odd {
+            self.num += self.add;
+            self.add -= self.temp;
+        } else {
+            self.add -= self.temp;
+            self.num += self.add;
+        }
+        self.temp = self.ago(0);
+        self.add += self.temp;
+        self.num += self.temp;
+        self.temp = self.ago(self.p - 1);
+    }
+
+    fn step(&mut self, x: f64) -> f64 {
+        let p = self.p as u64;
+        let slot = (self.n % p) as usize;
+        let leaving = self.ring[slot];
+        self.ring[slot] = x;
+        if !x.is_finite() {
+            self.bad += 1;
+        }
+        if self.n >= p && !leaving.is_finite() {
+            self.bad -= 1;
+        }
+        self.n += 1;
+        if self.n < p {
+            return f64::NAN;
+        }
+        if self.n == p {
+            self.start();
+        } else {
+            self.advance();
+        }
+        if self.bad > 0 {
+            f64::NAN
+        } else {
+            self.num * self.factor
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChainKind {
+    Dema,
+    Tema,
+    T3,
+}
+
+/// TA-Lib's DEMA, TEMA and T3 in TA-Lib's order: chained EMAs (SMA-seeded, `(x - prev) * alpha +
+/// prev` fused, except T3's own form) and the fused combinations it compiles to on the machine
+/// the oracle fixtures were made on. The overlap cores round each of these differently, which is
+/// invisible in a price and shows when two averages are subtracted near a crossing.
+struct TaChain {
+    kind: ChainKind,
+    e: Box<[EmaA]>,
+    c: [f64; 4],
+}
+
+impl TaChain {
+    fn new(kind: ChainKind, p: usize) -> Self {
+        let alpha = 2.0 / (p as f64 + 1.0);
+        let stages = match kind {
+            ChainKind::Dema => 2,
+            ChainKind::Tema => 3,
+            ChainKind::T3 => 6,
+        };
+        // T3's volume factor is TA-Lib's default, 0.7.
+        let a: f64 = 0.7;
+        let (a2, a3) = (a * a, a * a * a);
+        Self {
+            kind,
+            e: (0..stages)
+                .map(
+                    |_| if kind == ChainKind::T3 { EmaA::t3(p) } else { EmaA::new(p, alpha, true) },
+                )
+                .collect(),
+            c: [
+                -a3,
+                3.0 * a2 + 3.0 * a3,
+                -6.0 * a2 - 3.0 * a - 3.0 * a3,
+                1.0 + 3.0 * a + a3 + 3.0 * a2,
+            ],
+        }
+    }
+
+    fn step(&mut self, x: f64) -> f64 {
+        let mut v = [f64::NAN; 6];
+        let mut x = x;
+        for (st, out) in self.e.iter_mut().zip(v.iter_mut()) {
+            x = st.step(x);
+            if x.is_nan() {
+                return f64::NAN;
+            }
+            *out = x;
+        }
+        match self.kind {
+            ChainKind::Dema => 2.0 * v[0] - v[1],
+            ChainKind::Tema => v[2] + 3.0f64.mul_add(v[0], -(3.0 * v[1])),
+            ChainKind::T3 => self.c[3]
+                .mul_add(v[2], self.c[2].mul_add(v[3], self.c[0].mul_add(v[5], self.c[1] * v[4]))),
+        }
+    }
+}
+
 enum Avg {
     Ema(EmaA),
     Sma(TaSma),
+    Wma(TaWma),
+    Trima(TaTrima),
+    Chain(TaChain),
     Core(Box<MaCore>),
 }
 
@@ -196,10 +446,15 @@ impl Fed {
     }
 
     fn core(kind: MaKind, p: usize, offset: usize) -> Result<Self, String> {
-        let avg = if kind == MaKind::Sma && p > 1 {
-            Avg::Sma(TaSma::new(p))
-        } else {
-            Avg::Core(Box::new(MaCore::new(kind, p)?))
+        let avg = match kind {
+            MaKind::Sma if p > 1 => Avg::Sma(TaSma::new(p)),
+            MaKind::Wma if p > 1 => Avg::Wma(TaWma::new(p)),
+            MaKind::Trima if p > 1 => Avg::Trima(TaTrima::new(p)),
+            MaKind::Ema if p > 1 => Avg::Ema(EmaA::new(p, 2.0 / (p as f64 + 1.0), true)),
+            MaKind::Dema if p > 1 => Avg::Chain(TaChain::new(ChainKind::Dema, p)),
+            MaKind::Tema if p > 1 => Avg::Chain(TaChain::new(ChainKind::Tema, p)),
+            MaKind::T3 if p > 1 => Avg::Chain(TaChain::new(ChainKind::T3, p)),
+            _ => Avg::Core(Box::new(MaCore::new(kind, p)?)),
         };
         Ok(Self { avg, offset, seen: 0 })
     }
@@ -217,6 +472,9 @@ impl Fed {
         match &mut self.avg {
             Avg::Ema(e) => e.step(x),
             Avg::Sma(a) => a.step(x),
+            Avg::Wma(a) => a.step(x),
+            Avg::Trima(a) => a.step(x),
+            Avg::Chain(a) => a.step(x),
             Avg::Core(c) => c.step(x),
         }
     }
@@ -1987,7 +2245,7 @@ pub const DEFS: &[FnDef] = &[
             tolerance: 0.0,
         }),
         talib_name: Some("ROC"),
-        doc: "Rate of change in percent, (x - base) / base * 100 with base the value `period` bars back. Same arithmetic as the streaming core, which agrees with TA-Lib's ((x / base) - 1) * 100 to rounding. On a base of exactly 0 it keeps the last value (the streaming core's behaviour); TA-Lib, rocp, rocr and rocr100 give 0 there.",
+        doc: "Rate of change in percent, (x - base) / base * 100 with base the value `period` bars back. Same arithmetic as the streaming core, which agrees with TA-Lib's ((x / base) - 1) * 100 to rounding. On a base of exactly 0 it keeps the last value (native behaviour, the streaming core's); TA-Lib, rocp, rocr and rocr100 give 0 there.",
         refs: &[],
         rev: 1,
         invariance: &[Invariance::ScaleInvariant],
@@ -2175,7 +2433,7 @@ pub const DEFS: &[FnDef] = &[
         memory: Memory::Infinite { settle: settle_macdext },
         legacy: None,
         talib_name: Some("MACDEXT"),
-        doc: "MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7, MAMA, is refused until the Hilbert slice lands) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.",
+        doc: "MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
         rev: 1,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant],
@@ -2219,7 +2477,7 @@ pub const DEFS: &[FnDef] = &[
         memory: Memory::Infinite { settle: settle_po },
         legacy: None,
         talib_name: Some("APO"),
-        doc: "Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7 is refused). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.",
+        doc: "Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
         rev: 1,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant],
@@ -2289,7 +2547,7 @@ pub const DEFS: &[FnDef] = &[
             tolerance: 0.0,
         }),
         talib_name: None,
-        doc: "raptorbt's FAST stochastic: k = 100 * (close - lowest low) / (highest high - lowest low) over `k_period` bars, d = the simple mean of the last `d_period` values of k. It is not TA-Lib's STOCH, which is the SLOW stochastic (its %K is already smoothed): for TA-Lib's use `stoch` (slow) or `stochf` (fast, whose fastd at matype 0 is this d). A range of 0 gives k = 50 (stoch and stochf give 0). Both outputs are NaN until d is ready (bar k_period + d_period - 2); the array function reports k from bar k_period - 1.",
+        doc: "raptorbt's FAST stochastic: k = 100 * (close - lowest low) / (highest high - lowest low) over `k_period` bars, d = the simple mean of the last `d_period` values of k. It is not TA-Lib's STOCH, which is the SLOW stochastic (its %K is already smoothed): for TA-Lib's use `stoch` (slow) or `stochf` (fast, whose fastd at matype 0 is this d). A range of 0 gives k = 50 (stoch and stochf give 0). Both outputs are NaN until d is ready (bar k_period + d_period - 2); the array function reports k from bar k_period - 1, so k is NaN on those earlier bars here. Wherever both define a value, the expression equals the array function bitwise.",
         refs: &["Lane, Lane's Stochastics, 1984"],
         rev: 1,
         invariance: &[Invariance::ScaleInvariant, Invariance::ShiftInvariant],
@@ -2863,7 +3121,7 @@ mod tests {
             v.push(("adx", vec![i(5), c], 1));
             v.push(("mfi", vec![i(5), c], 1));
         }
-        for m in [0, 1, 2, 3, 4, 5, 6, 8] {
+        for m in [0, 1, 2, 3, 4, 5, 6, 7, 8] {
             v.push(("apo", vec![i(4), i(9), i(m)], 1));
             v.push(("ppo", vec![i(4), i(9), i(m)], 1));
             v.push(("macdext", vec![i(4), i(m), i(9), i(m), i(3), i(1)], 3));
@@ -2940,14 +3198,19 @@ mod tests {
     }
 
     #[test]
-    fn mama_is_refused() {
-        for (name, params) in [
-            ("apo", vec![i(4), i(9), i(7)]),
-            ("macdext", vec![i(4), i(7), i(9), i(0), i(3), i(0)]),
-            ("stochf", vec![i(4), i(3), i(7)]),
+    fn mama_builds_and_runs_with_the_right_register_counts() {
+        let (_, h, l, c, _) = bars(120);
+        for (name, params, n_in, n_out) in [
+            ("apo", vec![i(4), i(9), i(7)], 1, 1),
+            ("macdext", vec![i(4), i(7), i(9), i(0), i(3), i(0)], 1, 3),
+            ("macdext", vec![i(4), i(0), i(9), i(7), i(3), i(7)], 1, 3),
+            ("stochf", vec![i(4), i(3), i(7)], 3, 2),
         ] {
-            let err = (lookup(name).unwrap().make)(&params, &[0, 1, 2], &[3, 4, 5]).err().unwrap();
-            assert!(err.contains("MAMA"), "{name}: {err}");
+            let cols: Vec<&[f64]> = [&h[..], &l[..], &c[..]][3 - n_in..].to_vec();
+            let out = batch(name, &params, &cols, n_out);
+            assert_eq!(out.len(), n_out, "{name}");
+            assert!(out.iter().all(|o| o.len() == 120 && !o[119].is_nan()), "{name} {params:?}");
+            assert_eq!(bits(&out[0]), bits(&stream(name, &params, &cols, n_out)[0]), "{name}");
         }
     }
 
