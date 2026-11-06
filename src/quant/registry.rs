@@ -291,6 +291,32 @@ pub fn int_param(params: &[ParamVal], i: usize) -> Result<usize, String> {
     }
 }
 
+/// Heap bytes of the slots a kernel keeps per bar of its window, beyond the history ring.
+const STATE_SLOTS_PER_BAR: usize = 8;
+/// A node's own allocation and small tables.
+const NODE_OVERHEAD_BYTES: usize = 1024;
+
+/// An upper bound on the heap the node `def` builds from `params` over `n_in` inputs holds,
+/// from the parameters alone: nothing is allocated to learn it. The window is the largest integer
+/// parameter or the warm-up, whichever is longer; the history ring is that window rounded up to
+/// a power of two per input, and the kernel keeps up to [`STATE_SLOTS_PER_BAR`] slots per bar of
+/// the window (a monotonic deque holds two, a covariance two rings). A test holds it at or above
+/// the measured `state_bytes` of every registered function, and within a factor of it.
+pub fn state_estimate(def: &FnDef, params: &[ParamVal], n_in: usize) -> usize {
+    let window = params
+        .iter()
+        .filter_map(|p| match p {
+            ParamVal::Int(v) if *v > 0 => Some(*v as usize),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .max((def.warmup)(params).saturating_add(1));
+    let ring = window.checked_next_power_of_two().unwrap_or(usize::MAX).saturating_mul(n_in.max(1));
+    let slots = ring.saturating_add(window.saturating_mul(STATE_SLOTS_PER_BAR));
+    slots.saturating_mul(std::mem::size_of::<f64>()).saturating_add(NODE_OVERHEAD_BYTES)
+}
+
 pub fn regs<const N: usize>(slice: &[usize], what: &str) -> Result<[usize; N], String> {
     slice.try_into().map_err(|_| format!("{what}: expected {N} registers, got {}", slice.len()))
 }

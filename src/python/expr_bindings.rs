@@ -272,15 +272,21 @@ impl PyExprProgram {
         self.program.warmup_bars(bar_ns)
     }
 
-    /// Heap one evaluation over `rows` bars holds: the kernels' windows, which are allocated
-    /// whole whatever `rows` is, and the buffers of the batch run. The windows are built to be
-    /// measured, so a program past the limit on one evaluation (512 MiB) is refused here with the
-    /// bytes it reached, as an evaluation would refuse it.
-    #[pyo3(signature = (rows=0))]
-    fn state_bytes(&self, rows: usize) -> PyResult<usize> {
-        let plan = self.series("Expr.state_bytes")?;
-        let kernels = plan.state_bytes().map_err(|e| eval_fail("Expr.state_bytes", e))?;
-        Ok(kernels.saturating_add(plan.batch_bytes(rows)))
+    /// An upper bound on the heap an evaluation holds, computed from the program's parameters
+    /// alone (nothing is allocated): the kernels' windows, which are allocated whole whatever
+    /// `rows` is, including those inside `at(...)`, for each of `names` names of a cross-sectional
+    /// program and each of `bindings` bindings of a sweep (counted without sharing), and the
+    /// buffers of a batch run over `rows` bars. The engine refuses an evaluation whose state
+    /// estimate is over 512 MiB before it allocates, on the same number.
+    #[pyo3(signature = (rows=0, names=1, bindings=1))]
+    fn state_bytes(&self, rows: usize, names: usize, bindings: usize) -> PyResult<usize> {
+        let copies = names.max(1).saturating_mul(bindings.max(1));
+        let (state, batch) = match (&self.plan, &self.panel) {
+            (Some(plan), _) => (plan.state_estimate(), plan.batch_bytes(rows)),
+            (None, Ok(panel)) => (panel.state_estimate(), panel.batch_estimate(rows, names.max(1))),
+            (None, Err(e)) => return Err(eval_fail("Expr.state_bytes", e.clone())),
+        };
+        Ok(state.saturating_mul(copies).saturating_add(batch.saturating_mul(bindings.max(1))))
     }
 
     /// Whether the program uses `at(...)`, so evaluating it needs timestamps and a bar stamp.

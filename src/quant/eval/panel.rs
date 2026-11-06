@@ -88,6 +88,47 @@ pub struct PanelPlan {
     last_use: BTreeMap<Key, usize>,
 }
 
+impl PanelPlan {
+    /// An upper bound on the heap of the time-series state of one name, from the parameters
+    /// alone ([`Plan::state_estimate`] of each phase); a panel over `m` names holds `m` times it.
+    pub fn state_estimate(&self) -> usize {
+        self.phases
+            .iter()
+            .map(|p| match p {
+                Phase::Ts(t) => t.plan.state_estimate(),
+                Phase::Cross(_) => 0,
+            })
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Heap a batch run over `rows` dates and `names` names holds besides that state: each
+    /// phase's buffer pool per name, and one panel for every value the phases hand on.
+    pub fn batch_estimate(&self, rows: usize, names: usize) -> usize {
+        let pools: usize = self
+            .phases
+            .iter()
+            .map(|p| match p {
+                Phase::Ts(t) => t.plan.batch_bytes(rows),
+                Phase::Cross(_) => 0,
+            })
+            .fold(0usize, usize::saturating_add);
+        let panels = (self.last_use.len() + self.finals.len()).max(1);
+        pools
+            .saturating_mul(names)
+            .saturating_add(panels.saturating_mul(rows).saturating_mul(names).saturating_mul(8))
+    }
+
+    /// Refuse a panel of `names` names whose state would pass the engine's limit, before any is
+    /// built.
+    fn check_state(&self, names: usize) -> Result<(), EvalError> {
+        let bytes = self.state_estimate().saturating_mul(names);
+        if bytes > super::STATE_LIMIT_BYTES {
+            return Err(EvalError::State { bytes, limit: super::STATE_LIMIT_BYTES });
+        }
+        Ok(())
+    }
+}
+
 fn node_inputs(op: &Op) -> Vec<NodeId> {
     match op {
         Op::Const(_) | Op::Field(_) | Op::Handle(_) | Op::At { .. } => Vec::new(),
@@ -562,6 +603,7 @@ pub fn eval_panel(plan: &PanelPlan, inputs: &PanelInputs) -> Result<Vec<Vec<f64>
             return Err(EvalError::MissingHandle(h.clone()));
         }
     }
+    plan.check_state(m)?;
     if plan.has_at {
         let ts = inputs.timestamps.ok_or(EvalError::NoTimestamps)?;
         check("timestamps", ts.len(), n)?;
@@ -666,6 +708,7 @@ impl std::fmt::Debug for PanelStream {
 
 impl PanelStream {
     pub fn new(plan: &PanelPlan, members: usize) -> Result<PanelStream, EvalError> {
+        plan.check_state(members)?;
         if plan.has_at {
             return Err(EvalError::Unsupported(
                 "at(...) in a live panel: the bank feeds bars without a clock".to_string(),
@@ -958,5 +1001,18 @@ mod tests {
         }
         let with_at = plan("rank(close)");
         assert!(PanelStream::new(&with_at, 3).is_ok());
+    }
+
+    /// The estimate times the names covers a built panel stream, and no more than 16 times it.
+    #[test]
+    fn the_state_estimate_covers_a_panel_per_name() {
+        let p = PanelPlan::new(&compile("rank(roc(close, 50))", &Env::default()).unwrap()).unwrap();
+        let m = 6;
+        let measured = PanelStream::new(&p, m).unwrap().state_bytes();
+        let est = p.state_estimate() * m;
+        assert!(est >= measured && est <= 16 * measured + 16384, "{est} vs {measured}");
+        let big = PanelPlan::new(&compile("rank(sma(close, 16777216))", &Env::default()).unwrap())
+            .unwrap();
+        assert!(matches!(PanelStream::new(&big, 3), Err(EvalError::State { .. })));
     }
 }

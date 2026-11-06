@@ -304,6 +304,11 @@ impl SweepPlan {
         Ok(SweepPlan { plan, sched, widths, independent_steps })
     }
 
+    /// An upper bound on the heap of the joint plan's kernels, from the parameters alone.
+    pub fn state_estimate(&self) -> usize {
+        self.plan.state_estimate()
+    }
+
     pub fn n_bindings(&self) -> usize {
         self.widths.len()
     }
@@ -623,5 +628,22 @@ mod tests {
         let space = Space::Grid(vec![("z".into(), vec![1.0])]);
         let e = sweep("close", &Env::default(), &space, &inputs, &SweepLimits::default());
         assert!(matches!(e, Err(SweepError::Unused { .. })));
+    }
+
+    /// The joint plan's estimate covers its built kernels and is no more than the bindings run
+    /// one by one.
+    #[test]
+    fn the_state_estimate_covers_the_joint_plan() {
+        let env = Env::default();
+        let programs: Vec<Program> = [10, 20, 30]
+            .iter()
+            .map(|n| compile(&format!("sma(close, {n}) + ema(close, 5)"), &env).unwrap())
+            .collect();
+        let plan = SweepPlan::new(&programs).unwrap();
+        let measured: usize =
+            plan.plan.d.instantiate().unwrap().iter().map(|n| n.state_bytes()).sum();
+        let est = plan.state_estimate();
+        let alone: usize = programs.iter().map(|p| Plan::new(p).unwrap().state_estimate()).sum();
+        assert!(est >= measured && est <= alone, "{measured} <= {est} <= {alone}");
     }
 }

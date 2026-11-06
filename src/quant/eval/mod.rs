@@ -38,6 +38,9 @@ pub type Columns = Vec<Vec<f64>>;
 /// plan is refused past this, with the bytes. The peak is this plus the last kernel built.
 pub const STATE_LIMIT_BYTES: usize = 512 << 20;
 
+/// What an `at(...)` node holds besides its body: the window builder and a session's tables.
+const AT_STATE_BYTES: usize = 8192;
+
 /// The one definition of every stateless operator. Batch loops and the streaming step both
 /// call these.
 pub mod ops {
@@ -561,8 +564,34 @@ impl PlanData {
         self.ats.iter().map(|a| AtState::new(a.spec, &a.body, clock)).collect()
     }
 
-    /// Fresh kernel nodes, one per call step, in call order.
+    /// An upper bound on the heap one stream over this plan holds, from the parameters alone:
+    /// the registers, every kernel ([`crate::quant::registry::state_estimate`]) and the bodies
+    /// of its `at(...)` nodes. Nothing is allocated to learn it.
+    pub fn state_estimate(&self) -> usize {
+        let f = std::mem::size_of::<f64>();
+        let mut total = (self.n_regs + self.out_regs.len()).saturating_mul(f).saturating_add(256);
+        for step in &self.steps {
+            if let Step::Call { def, params, ins, .. } = step {
+                total = total.saturating_add(crate::quant::registry::state_estimate(
+                    def,
+                    params,
+                    ins.len(),
+                ));
+            }
+        }
+        for at in &self.ats {
+            total = total.saturating_add(at.body.d.state_estimate()).saturating_add(AT_STATE_BYTES);
+        }
+        total
+    }
+
+    /// Fresh kernel nodes, one per call step, in call order. Refused before anything is
+    /// allocated when [`PlanData::state_estimate`] is over [`STATE_LIMIT_BYTES`].
     pub fn instantiate(&self) -> Result<Vec<Box<dyn KernelNode>>, EvalError> {
+        let estimate = self.state_estimate();
+        if estimate > STATE_LIMIT_BYTES {
+            return Err(EvalError::State { bytes: estimate, limit: STATE_LIMIT_BYTES });
+        }
         let mut nodes = Vec::with_capacity(self.n_calls);
         let mut bytes = 0usize;
         for step in &self.steps {
@@ -696,6 +725,12 @@ impl Plan {
     /// stream.
     pub fn state_bytes(&self) -> Result<usize, EvalError> {
         Ok(Stream::bound(self, ClockCtx::probe())?.state_bytes())
+    }
+
+    /// An upper bound on the heap of one stream over this plan, from its parameters alone (see
+    /// [`PlanData::state_estimate`]); allocates nothing.
+    pub fn state_estimate(&self) -> usize {
+        self.d.state_estimate()
     }
 
     /// Heap a batch run over `rows` bars holds besides the kernels' state: the buffer pool.
@@ -1183,5 +1218,68 @@ mod tests {
         assert_eq!(ops::ln(1.0), 0.0);
         assert!(ops::div(1.0, 0.0).is_nan() && ops::div(-1.0, 0.0).is_nan());
         assert!(ops::pow(0.0, -1.0).is_nan());
+    }
+
+    /// The estimate is an upper bound of what a built node holds, for every registered function
+    /// at three window sizes, and no more than 16 times it (plus a small constant).
+    #[test]
+    fn the_state_estimate_covers_every_function_within_a_factor() {
+        use crate::quant::registry::{all, state_estimate, ParamKind, ParamVal};
+        let mut checked = 0;
+        for def in all() {
+            for want in [8i64, 60, 1000] {
+                let params: Vec<ParamVal> = def
+                    .params
+                    .iter()
+                    .map(|p| match (p.default, p.kind) {
+                        (Some(d), _) if want == 60 => d,
+                        (_, ParamKind::Int { min, max }) => {
+                            ParamVal::Int(want.clamp(min, max.min(2000).max(min)))
+                        }
+                        (Some(d), _) => d,
+                        (None, ParamKind::Float { min, max }) => {
+                            ParamVal::Float(1.0f64.max(min).min(max))
+                        }
+                        (None, ParamKind::Enum(v)) => ParamVal::Enum(v[0]),
+                    })
+                    .collect();
+                let n_in = def.inputs.len();
+                let ins: Vec<usize> = (0..n_in).collect();
+                let outs: Vec<usize> = (n_in..n_in + def.outputs.len()).collect();
+                let Ok(node) = (def.make)(&params, &ins, &outs) else { continue };
+                let (est, measured) = (state_estimate(def, &params, n_in), node.state_bytes());
+                assert!(
+                    est >= measured,
+                    "{} {params:?}: estimate {est} < measured {measured}",
+                    def.name
+                );
+                assert!(
+                    est <= 16 * measured + 4096,
+                    "{} {params:?}: estimate {est} over 16x measured {measured}",
+                    def.name
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "only {checked} functions were built");
+    }
+
+    /// An `at(...)` body is counted, and a program past the limit is refused before any of it is
+    /// built, on the number the estimate gives.
+    #[test]
+    fn the_state_estimate_counts_an_at_body_and_gates_the_build() {
+        let p =
+            Plan::new(&compile("at(\"1w\", sma(close, 1000))", &Env::default()).unwrap()).unwrap();
+        let measured = Stream::bound(&p, ClockCtx::probe()).unwrap().state_bytes();
+        let est = p.state_estimate();
+        assert!(est >= measured && est <= 16 * measured + 16384, "{est} vs {measured}");
+        let big = Plan::new(
+            &compile("sma(close, 16777216) + sma(close, 16777215)", &Env::default()).unwrap(),
+        )
+        .unwrap();
+        match Stream::new(&big) {
+            Err(EvalError::State { bytes, limit }) => assert!(bytes > limit),
+            _ => panic!("a window of 16 million bars is refused before it is built"),
+        }
     }
 }

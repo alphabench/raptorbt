@@ -449,13 +449,18 @@ class Expr:
         each to :meth:`eval_panel` as a label per name."""
         return self._groups
 
-    def state_bytes(self, rows: int = 0) -> int:
-        """Heap one evaluation over ``rows`` bars holds, in bytes: the windows of the functions
-        (allocated whole, whatever the data holds: ``sma(close, 5_000_000)`` costs 40 MB on 400
-        bars) plus the buffers of a batch run. Budget with this before evaluating. A program
-        over the engine's limit on one evaluation (512 MiB) raises ``expr_unsupported_here``
-        stating the bytes, here and in :meth:`eval`; a cross-sectional program has none to give."""
-        return self._prog.state_bytes(rows)
+    def state_bytes(self, rows: int = 0, names: int = 1, bindings: int = 1) -> int:
+        """An upper bound on the heap an evaluation holds, in bytes, computed from the parameters
+        alone: nothing is allocated, so it is safe to ask of any expression before running it.
+
+        It counts the windows of the functions (allocated whole, whatever the data holds:
+        ``sma(close, 5_000_000)`` costs over 40 MB on 400 bars), those inside ``at(...)``, ``names``
+        times for a cross-sectional expression over that many names, ``bindings`` times for a
+        sweep of that many bindings (without the sharing between them), and the buffers of a
+        batch run over ``rows`` bars. Ask the score expression of a sweep separately. The engine
+        refuses an evaluation whose estimate is over 512 MiB, before it allocates, with
+        ``expr_unsupported_here`` stating the bytes."""
+        return self._prog.state_bytes(rows, names, bindings)
 
     @property
     def uses_at(self) -> bool:
