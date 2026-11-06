@@ -57,9 +57,13 @@ def fixture_cases(group, name):
     return _fx[path].get(name, {}).get("cases")
 
 
-def pin_keys(group, name):
+def pin_keys(group, name, suffix=""):
     cases = fixture_cases(group, name) or []
-    return [f"{name}|{c['scenario']}|{c['label']}|{o}" for c in cases for o in c["out"]]
+    return [f"{name}|{c['scenario']}|{c['label']}|{o}{suffix}" for c in cases for o in c["out"]]
+
+
+def has_compat(fn):
+    return any(p["name"] == "compat" for p in fn.get("params") or [])
 
 
 def analyse():
@@ -103,15 +107,24 @@ def analyse():
                 problems.append(
                     f"{fn['name']} ({name}): relation {rel!r} is not one of {RELATIONS}"
                 )
+            elif has_compat(fn) and rel != "defined_difference":
+                status.append("compat relation")
+                problems.append(
+                    f"{fn['name']} ({name}): has a compat parameter, so its native relation must be defined_difference, not {rel!r}"
+                )
             elif rel in PINNED_RELATIONS:
-                missing = [k for k in pin_keys(info["group"], name) if k not in pins]
+                # A compat function: the `talib` path is replayed Exact (no pin); its `native`
+                # path is a pinned defined difference, keyed with a `|native` suffix.
+                suffix = "|native" if has_compat(fn) else ""
+                missing = [k for k in pin_keys(info["group"], name, suffix) if k not in pins]
                 if missing:
                     status.append(f"unpinned x{len(missing)}")
                     problems.append(
                         f"{fn['name']} ({name}): relation {rel} has no pinned record for {len(missing)} case(s), e.g. {missing[0]}"
                     )
+            shown = f"native: {rel}; talib: exact" if has_compat(fn) and rel else rel or ""
             rows.append(
-                (name, info["group"], fn["name"], rel or "", ref or "", ", ".join(status) or "ok")
+                (name, info["group"], fn["name"], shown, ref or "", ", ".join(status) or "ok")
             )
 
     extra = [fn["name"] for fn in reg or [] if not talib_names(fn)]

@@ -610,7 +610,7 @@ pub const DEFS: &[FnDef] = &[
         legacy: None,
         talib_name: Some("HT_SINE"),
         doc: concat!(
-            "Ehlers' sine wave: the sine of the dominant cycle phase and of the phase plus 45 degrees (the lead). Crossings of the two are the classic cycle-turn signal; in a trend the two stay close together and the signal is meaningless.",
+            "Ehlers' sine wave: the sine of the dominant cycle phase and of the phase plus 45 degrees (the lead). Crossings of the two are the classic cycle-turn signal; in a trend the two stay close together and the signal is meaningless. Differs from TA-Lib 0.6.4 by rounding only: up to about 6e-13 absolute (9e-10 relative where the sine crosses zero), from the order of floating-point operations in the phase sum, which cancels heavily; the difference is pinned.",
             caveat!()
         ),
         refs: REFS,
@@ -620,7 +620,7 @@ pub const DEFS: &[FnDef] = &[
         nan_rule: NanRule::Recursive,
         domain: Domain::Any,
         reference: Reference::Fixture,
-        relation: Relation::Exact,
+        relation: Relation::DefinedDifference,
         make: make_sine,
     },
     FnDef {
