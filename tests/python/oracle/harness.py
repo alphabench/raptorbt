@@ -105,6 +105,10 @@ def evaluate(fn, data, params=None, columns=None):
     """Batch evaluation. `data` maps column name to a float64 array; `columns` names the
     columns the inputs read, in order (default: the fields). Returns {output: array}."""
     cols = list(columns) if columns is not None else input_names(fn)
+    if columns is not None and any(p["name"] == "compat" for p in fn.get("params") or []):
+        # Only replay names `columns`: a TA-Lib fixture is matched by the talib path of a name
+        # that has a compat parameter. An explicit `compat` in `params` wins.
+        params = {"compat": "talib", **(params or {})}
     fields, fdata = _bind(cols, data)
     return _as_dict(_compile(call_text(fn, params, fields)).eval(fdata), fn)
 
