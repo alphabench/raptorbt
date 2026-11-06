@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod portfolio;
 pub mod pricing;
 pub mod python;
+pub mod quant;
 pub mod research;
 pub mod runtime;
 pub mod signals;
