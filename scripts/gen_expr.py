@@ -65,7 +65,9 @@ def render(rows: list[dict]) -> str:
         for row in sorted(families[family], key=lambda r: r["name"]):
             out += ["", f"### `{row['signature']}`", "", row["doc"], ""]
             inputs = ", ".join(
-                f"`{i['name']}`" + (f" (default `{i['default_field']}`)" if i["default_field"] else "")
+                f"`{i['name']}`"
+                + (" (boolean)" if i.get("elem") == "bool" else "")
+                + (f" (default `{i['default_field']}`)" if i["default_field"] else "")
                 for i in row["inputs"]
             )
             out.append(f"- inputs: {inputs}")

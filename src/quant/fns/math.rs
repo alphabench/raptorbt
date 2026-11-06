@@ -727,9 +727,9 @@ pub const DEFS: &[FnDef] = &[
             "follow TA-Lib."),
         SCALE_SHIFT_INV, make_minmaxindex, Relation::Exact, None, &["minidx", "maxidx"]),
     // Math transforms
-    elementwise!("acos", "ACOS", IN_X, 1, "Arc cosine; outside [-1, 1] is NaN.", Domain::Any, &[],
+    elementwise!("acos", "ACOS", IN_X, 1, "Arc cosine; outside [-1, 1] is NaN.", Domain::Unit, &[],
         |x| fin(x[0].acos())),
-    elementwise!("asin", "ASIN", IN_X, 1, "Arc sine; outside [-1, 1] is NaN.", Domain::Any, &[],
+    elementwise!("asin", "ASIN", IN_X, 1, "Arc sine; outside [-1, 1] is NaN.", Domain::Unit, &[],
         |x| fin(x[0].asin())),
     elementwise!("atan", "ATAN", IN_X, 1, "Arc tangent, radians.", Domain::Any, &[],
         |x| fin(x[0].atan())),

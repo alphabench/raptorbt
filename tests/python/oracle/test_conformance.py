@@ -4,9 +4,13 @@ function is covered by being registered: nothing here names a function.
 Registry fields read (all declared by the function's row; a missing one fails the test that
 needs it, with the field's name, rather than being skipped):
     causal         bool; False is allowed only for names in noncausal.json
-    nan_policy     "elementwise" | "windowed" | "recursive"
+    nan_policy     "elementwise" | "lagged" | "delayed" | "windowed" | "recursive"
+                   lagged: the lag is the warm-up; a NaN at bar i spoils bars i and i + warm-up only
+                   delayed: the output is the input `warm-up` bars back; a NaN at bar i appears at
+                   bar i + warm-up only
     invariance     list of: scale_equivariant, scale_invariant, shift_equivariant, shift_invariant
-    domain         "positive" for functions that take a log or power (optional)
+    domain         "positive" for functions that take a log or power, "unit" for those defined
+                   on [-1, 1] (optional)
 """
 
 import json
@@ -44,7 +48,12 @@ def _clean():
 
 def _data(fn, base=None):
     d = dict(base or _clean())
-    return {c: d.get(c, d["close"]).copy() for c in input_names(fn)}
+    cols = {c: d.get(c, d["close"]).copy() for c in input_names(fn)}
+    if fn.get("domain") == "unit":
+        # Prices are far outside [-1, 1]; a unit-domain function is fed a series inside it.
+        top = max(float(np.max(np.abs(v))) for v in cols.values())
+        cols = {c: v / (1.1 * top) for c, v in cols.items()}
+    return cols
 
 
 def _period(fn, w):
@@ -103,7 +112,7 @@ def test_nan_head_middle_tail_and_all(fn):
     p = _period(fn, w)
     ref = _run(fn, base)
     policy = fn.get("nan_policy")
-    assert policy in ("elementwise", "windowed", "recursive"), (
+    assert policy in ("elementwise", "lagged", "delayed", "windowed", "recursive"), (
         f"{fn['name']}: registry has no usable nan_policy ({policy!r})"
     )
     for where, idx in (("head", 3), ("middle", N // 2), ("tail", N - 2)):
@@ -114,13 +123,37 @@ def test_nan_head_middle_tail_and_all(fn):
         for name, out in outs.items():
             _finite_or_nan([out])
             assert len(out) == N
-            if idx > w:
+            if idx > w and policy != "delayed":
                 assert np.isnan(out[idx]), f"{name}: NaN input at {where} ({idx}) did not give NaN"
             if policy == "elementwise" and idx > w:
                 keep = np.ones(N, bool)
                 keep[idx] = False
                 assert np.array_equal(canon_bits(out[keep]), canon_bits(ref[name][keep])), (
                     f"{name}: elementwise NaN leaked to other bars"
+                )
+            if policy == "delayed":
+                # Bar i keeps its value (it reads an earlier bar); bar i + warm-up is the one
+                # that shows the NaN.
+                spoiled = [i for i in (idx + w,) if i < N]
+                keep = np.ones(N, bool)
+                keep[spoiled] = False
+                assert np.isnan(out[spoiled]).all(), (
+                    f"{name}: NaN at {where} ({idx}) did not appear at bars {spoiled}"
+                )
+                assert np.array_equal(canon_bits(out[keep]), canon_bits(ref[name][keep])), (
+                    f"{name}: delayed NaN reached a bar other than {spoiled}"
+                )
+            if policy == "lagged":
+                # Exactly the NaN bar and the bar `warm-up` later, nothing else: not an
+                # exemption but a stricter rule than elementwise.
+                spoiled = [i for i in (idx, idx + w) if i < N]
+                keep = np.ones(N, bool)
+                keep[spoiled] = False
+                assert np.isnan(out[spoiled]).all(), (
+                    f"{name}: NaN at {where} ({idx}) did not reach bars {spoiled}"
+                )
+                assert np.array_equal(canon_bits(out[keep]), canon_bits(ref[name][keep])), (
+                    f"{name}: lagged NaN reached a bar other than {spoiled}"
                 )
             if policy == "windowed" and where != "tail":
                 assert not np.isnan(out[min(idx + p + w + 5, N - 1)]) or idx + p + w + 5 >= N, (
@@ -154,6 +187,8 @@ def test_flat_inf_extremes_zero_volume(fn):
     if positive_only:
         cases["zero"] = {k: np.zeros(N) for k in base}
         cases["negative"] = {k: -np.abs(v) for k, v in base.items()}
+    if fn.get("domain") == "unit":
+        cases["outside"] = {k: np.full(N, 100.0) for k in base}
     for label, d in cases.items():
         outs = _run(fn, d)  # must return, not panic
         for name, out in outs.items():
@@ -166,6 +201,10 @@ def test_flat_inf_extremes_zero_volume(fn):
             if label in ("zero", "negative"):
                 assert np.isnan(out[warmup(fn) :]).all(), (
                     f"{name}: non-positive input to a log/power function gave values ({label})"
+                )
+            if label == "outside":
+                assert np.isnan(out[warmup(fn) :]).all(), (
+                    f"{name}: input outside [-1, 1] to a unit-domain function gave values"
                 )
 
 

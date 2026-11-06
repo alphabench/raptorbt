@@ -83,6 +83,11 @@ def _bind(columns, data):
 def call_text(fn, params=None, fields=None):
     params = {**param_defaults(fn), **(params or {})}
     args = list(fields if fields is not None else input_names(fn))
+    for k, i in enumerate(fn.get("inputs") or []):
+        if i.get("elem") == "bool":
+            # A boolean input is fed a comparison of two of the function's own columns.
+            other = args[(k + 1) % len(args)] if len(args) > 1 else "0"
+            args[k] = f"({args[k]} > {other})"
     for p in fn.get("params") or []:
         v = params[p["name"]]
         args.append(f'"{v}"' if p["kind"] == "enum" else repr(v))
@@ -105,10 +110,6 @@ def evaluate(fn, data, params=None, columns=None):
     """Batch evaluation. `data` maps column name to a float64 array; `columns` names the
     columns the inputs read, in order (default: the fields). Returns {output: array}."""
     cols = list(columns) if columns is not None else input_names(fn)
-    if columns is not None and any(p["name"] == "compat" for p in fn.get("params") or []):
-        # Only replay names `columns`: a TA-Lib fixture is matched by the talib path of a name
-        # that has a compat parameter. An explicit `compat` in `params` wins.
-        params = {"compat": "talib", **(params or {})}
     fields, fdata = _bind(cols, data)
     return _as_dict(_compile(call_text(fn, params, fields)).eval(fdata), fn)
 

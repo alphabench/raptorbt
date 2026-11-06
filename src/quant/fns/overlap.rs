@@ -221,6 +221,10 @@ fn weighted_mean(window: impl Iterator<Item = f64>, p: usize) -> f64 {
 
 const KAMA_MAX: f64 = 2.0 / 31.0;
 const KAMA_DIFF: f64 = 2.0 / 3.0 - KAMA_MAX;
+/// A window whose path length is below this counts as flat (efficiency ratio 1). The rolling sum
+/// of a flat window after a volatile one is a rounding residue, not 0; TA-Lib's band is 1e-14,
+/// measured: it agrees there with this and not with an exact-zero test or a 1e-8 band.
+const KAMA_FLAT: f64 = 1e-14;
 
 /// Kaufman's adaptive average: efficiency ratio over `p` bars, smoothing constant between a
 /// 2-bar and a 30-bar EMA, seeded with the bar before the first output. A non-finite value is
@@ -272,7 +276,7 @@ impl KamaSt {
             self.prev = before;
         }
         let roc = x - self.xs.oldest();
-        let er = if self.sum <= roc || self.sum == 0.0 { 1.0 } else { (roc / self.sum).abs() };
+        let er = if self.sum <= roc || self.sum < KAMA_FLAT { 1.0 } else { (roc / self.sum).abs() };
         let s = er * KAMA_DIFF + KAMA_MAX;
         self.prev = (x - self.prev) * (s * s) + self.prev;
         self.prev
@@ -573,12 +577,17 @@ impl Kernel<1, 3> for BBands {
     }
 }
 
-/// Moving average with a per-bar period. Every period in `min..=max` runs its own average
-/// from the first bar, so the output at a bar is exactly that period's average there.
+/// Moving average with a per-bar period, seeded as TA-Lib's MAVP seeds it: the average of
+/// period `q` starts at bar `S - lookback(q)`, `S` being the longest period's lookback, so every
+/// period produces its first value at bar `S` and a recursive kind (EMA, DEMA, TEMA, KAMA, T3)
+/// carries no state from before it. For SMA, WMA and TRIMA this is the same as running from bar 0.
 pub struct Mavp {
     min: usize,
     max: usize,
     cores: Vec<MaCore>,
+    /// The bar at which each core takes its first value.
+    starts: Vec<usize>,
+    n: usize,
 }
 
 impl Kernel<2, 1> for Mavp {
@@ -595,11 +604,15 @@ impl Kernel<2, 1> for Mavp {
         };
         let mut out = f64::NAN;
         for (i, c) in self.cores.iter_mut().enumerate() {
+            if self.n < self.starts[i] {
+                continue;
+            }
             let r = c.step(v);
             if pick == Some(i) {
                 out = r;
             }
         }
+        self.n += 1;
         // TA-Lib's first output is the warm-up of the longest period.
         if self.cores.last().is_some_and(MaCore::warmed) {
             [out]
@@ -1065,7 +1078,9 @@ fn make_mavp(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn No
     }
     let kind = kind_param(p, 2)?;
     let cores = (min..=max).map(|q| MaCore::new(kind, q)).collect::<Result<Vec<_>, _>>()?;
-    let k = Mavp { min, max, cores };
+    let first = kind.lookback(max);
+    let starts = (min..=max).map(|q| first - kind.lookback(q)).collect();
+    let k = Mavp { min, max, cores, starts, n: 0 };
     Ok(Box::new(Adapter::new(k, regs::<2>(ins, "mavp inputs")?, regs::<1>(outs, "mavp outputs")?)))
 }
 
@@ -1259,9 +1274,9 @@ pub const DEFS: &[FnDef] = &[
         memory: Memory::Infinite { settle: kama_settle },
         legacy: None,
         talib_name: Some("KAMA"),
-        doc: "Kaufman adaptive moving average: smoothing between a 2-bar and a 30-bar EMA by the efficiency ratio over `period` bars; first value one bar after the first full window.",
+        doc: "Kaufman adaptive moving average: smoothing between a 2-bar and a 30-bar EMA by the efficiency ratio over `period` bars; first value one bar after the first full window. A window whose path length is under 1e-14 counts as flat (ratio 1), as in TA-Lib.",
         refs: &["Kaufman, Smarter Trading, 1995"],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Recursive,
@@ -1305,7 +1320,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("MA"),
         doc: "Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3 (7, MAMA, is not available yet). Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1325,9 +1340,9 @@ pub const DEFS: &[FnDef] = &[
         memory: Memory::Infinite { settle: mavp_settle },
         legacy: None,
         talib_name: Some("MAVP"),
-        doc: "Moving average whose period changes every bar: `periods` (cut to a whole number in minperiod..maxperiod) picks, per bar, which period's `matype` average to read. Every period runs from the first bar; a NaN period gives NaN. Warm-up is the longest period's.",
+        doc: "Moving average whose period changes every bar: `periods` (cut to a whole number in minperiod..maxperiod) picks, per bar, which period's `matype` average to read. Each period's average starts so that it takes its first value at the first output bar, as TA-Lib's does, so a recursive kind (matype 1, 3, 4, 6, 8) carries no state from before it; a NaN period gives NaN. Warm-up is the longest period's.",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1349,7 +1364,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("BBANDS"),
         doc: "Bollinger bands: a `matype` average of the last `period` values (default SMA) plus nbdevup and minus nbdevdn population standard deviations of the window around its simple mean. Outputs upper, middle, lower.",
         refs: &["Bollinger, Bollinger on Bollinger Bands, 2001"],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1867,6 +1882,16 @@ mod family_tests {
     }
 
     #[test]
+    fn kama_treats_a_window_flatter_than_1e_14_as_flat() {
+        // period 2 on 0, 1e-16, 0: the path is 2e-16 and the change 0, so the ratio would be 0,
+        // but the window is flat and the ratio is 1. Constant (2/3)^2 = 4/9 on the seed 1e-16:
+        // 1e-16 + (0 - 1e-16) * 4/9 = 5/9 * 1e-16. A ratio of 0 would give 2/31 squared
+        // and about 9.96e-17.
+        let o = one("kama", &[i(2)], &[0.0, 1e-16, 0.0]);
+        assert!((o[2] - 5.0 / 9.0 * 1e-16).abs() < 1e-30, "{}", o[2]);
+    }
+
+    #[test]
     fn midpoint_and_midprice_hand_values() {
         let o = one("midpoint", &[i(3)], &[1.0, 5.0, 3.0, 2.0]);
         assert!(o[0].is_nan() && o[1].is_nan());
@@ -1986,6 +2011,18 @@ mod family_tests {
         let per = [3.0, 3.0, 3.0, NAN, 3.0];
         let o = &batch("mavp", &[i(2), i(3), i(0)], &[&x[..5], &per], 1)[0];
         assert!(o[3].is_nan() && o[4] == 4.0);
+    }
+
+    #[test]
+    fn mavp_seeds_a_recursive_kind_at_the_first_output_bar() {
+        // minperiod 2, maxperiod 3, EMA: the first output is bar 2 (lookback of period 3). The
+        // period-2 average starts at bar 1, seeded with (0 + 3) / 2 = 1.5 at bar 2, then
+        // 2/3 * 9 + 1/3 * 1.5 = 6.5 at bar 3. Run from bar 0 it would be seeded at bar 1 with
+        // (10 + 0) / 2 = 5 and give 11/3 at bar 2: TA-Lib's MAVP does not.
+        let o = &batch("mavp", &[i(2), i(3), i(1)], &[&[10.0, 0.0, 3.0, 9.0], &[2.0; 4]], 1)[0];
+        assert!(o[0].is_nan() && o[1].is_nan());
+        assert_eq!(o[2], 1.5);
+        assert!(close(o[3], 6.5));
     }
 
     #[test]

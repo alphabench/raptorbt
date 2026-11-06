@@ -302,12 +302,14 @@ impl Checker<'_> {
             if i < k {
                 let id = self.value(&args[i])?;
                 let t = &self.dag.node(id).ty;
-                if t.elem != Elem::F64 {
+                let want = registry::input_elem(def, i);
+                if t.elem != want {
                     return Err(self.type_err(
                         args[i].start,
                         format!(
-                            "input `{}` of `{name}` must be numeric, found {}",
+                            "input `{}` of `{name}` must be {}, found {}",
                             inp.name,
+                            elem_name(want),
                             t.describe()
                         ),
                     ));

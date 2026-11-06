@@ -646,18 +646,18 @@ pub const DEFS: &[FnDef] = &[
         SCALE_SHIFT_INV, NanRule::Windowed, Domain::Any, "rank_ts_hand_values", make_rank_ts),
     nolib!("shift", IN_X, LAG, warm_lag, Memory::Finite,
         "The value `k` bars ago (k >= 1). There is no negative shift: the future cannot be addressed.",
-        SCALE_SHIFT_EQ, NanRule::Windowed, Domain::Any, "lag_functions_hand_values", make_shift),
+        SCALE_SHIFT_EQ, NanRule::Delayed, Domain::Any, "lag_functions_hand_values", make_shift),
     nolib!("diff", IN_X, LAG, warm_lag, Memory::Finite,
         "x - x[k bars ago].",
-        &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant], NanRule::Windowed,
+        &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant], NanRule::Lagged,
         Domain::Any, "lag_functions_hand_values", make_diff),
     nolib!("pct_change", IN_X, LAG, warm_lag, Memory::Finite,
         "x / x[k bars ago] - 1; NaN when the earlier value is 0.",
-        &[Invariance::ScaleInvariant], NanRule::Windowed, Domain::Any,
+        &[Invariance::ScaleInvariant], NanRule::Lagged, Domain::Any,
         "lag_functions_hand_values", make_pct_change),
     nolib!("log_return", IN_X, LAG, warm_lag, Memory::Finite,
         "ln(x / x[k bars ago]); NaN unless both prices are positive.",
-        &[Invariance::ScaleInvariant], NanRule::Windowed, Domain::Positive,
+        &[Invariance::ScaleInvariant], NanRule::Lagged, Domain::Positive,
         "lag_functions_hand_values", make_log_return),
     nolib!("abs", IN_X, &[], warm_none, Memory::Finite, "Absolute value.",
         &[Invariance::ScaleEquivariant], NanRule::Elementwise, Domain::Any,
@@ -732,7 +732,6 @@ mod tests {
             assert_eq!(d.relation, Relation::NoLibrary);
             assert!(d.talib_name.is_none());
         }
-        assert_eq!(DEFS.len(), 19);
     }
 
     #[test]

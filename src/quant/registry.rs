@@ -3,6 +3,7 @@
 
 use super::fns;
 use super::kernel::Node;
+use super::lang::Elem;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +60,15 @@ impl NanPolicy {
 /// How a function treats a NaN on its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NanRule {
-    /// The output at a bar depends on that bar only (plus fixed lags): a NaN spoils its own bar.
+    /// The output at a bar depends on that bar only: a NaN spoils its own bar and no other.
     Elementwise,
+    /// The output at a bar combines that bar with the bar `lag` back, `lag` being the warm-up: a
+    /// NaN at bar i spoils bar i and bar i + lag, and no other (`diff`, `pct_change`,
+    /// `log_return`, `gap`, `true_range_pct`).
+    Lagged,
+    /// The output at a bar is the input `lag` bars back, `lag` being the warm-up: a NaN at bar i
+    /// appears at bar i + lag only, and bar i itself is unaffected (`shift`).
+    Delayed,
     /// NaN while a NaN is inside the window, then recovers.
     Windowed,
     /// NaN on a NaN input without advancing state: the bar behaves as absent.
@@ -71,6 +79,8 @@ impl NanRule {
     fn name(self) -> &'static str {
         match self {
             NanRule::Elementwise => "elementwise",
+            NanRule::Lagged => "lagged",
+            NanRule::Delayed => "delayed",
             NanRule::Windowed => "windowed",
             NanRule::Recursive => "recursive",
         }
@@ -117,6 +127,8 @@ pub enum Domain {
     Any,
     /// Strictly positive (logs, powers); non-positive input gives NaN.
     Positive,
+    /// Within [-1, 1] (arc functions); outside it gives NaN.
+    Unit,
 }
 
 /// An identity the function satisfies, checked for every function that declares it.
@@ -178,6 +190,19 @@ pub struct InputDef {
     pub name: &'static str,
     /// The field read when the call omits this input (`atr(14)` reads high, low, close).
     pub default_field: Option<&'static str>,
+}
+
+/// The inputs that are boolean series, by function name and input position. Every other input
+/// is numeric. A table here, not a field on `InputDef`, so a family's literals need no edit.
+const BOOL_INPUTS: &[(&str, usize)] = &[("if_else", 0)];
+
+/// The element type input `i` of `def` must have.
+pub fn input_elem(def: &FnDef, i: usize) -> Elem {
+    if BOOL_INPUTS.iter().any(|&(n, k)| n == def.name && k == i) {
+        Elem::Bool
+    } else {
+        Elem::F64
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +311,11 @@ fn def_json(d: &FnDef) -> Value {
     json!({
         "name": d.name,
         "family": d.family.name(),
-        "inputs": d.inputs.iter().map(|i| json!({"name": i.name, "default_field": i.default_field})).collect::<Vec<_>>(),
+        "inputs": d.inputs.iter().enumerate().map(|(k, i)| json!({
+            "name": i.name,
+            "default_field": i.default_field,
+            "elem": if input_elem(d, k) == Elem::Bool { "bool" } else { "f64" },
+        })).collect::<Vec<_>>(),
         "params": d.params.iter().map(param_json).collect::<Vec<_>>(),
         "outputs": d.outputs,
         "out_kind": match d.out_kind { OutKind::Series => "series", OutKind::Bool => "bool" },
@@ -302,7 +331,11 @@ fn def_json(d: &FnDef) -> Value {
         "invariance": d.invariance.iter().map(|i| i.name()).collect::<Vec<_>>(),
         "causal": d.causal,
         "nan_policy": d.nan_rule.name(),
-        "domain": match d.domain { Domain::Any => "any", Domain::Positive => "positive" },
+        "domain": match d.domain {
+            Domain::Any => "any",
+            Domain::Positive => "positive",
+            Domain::Unit => "unit",
+        },
         "reference": match d.reference {
             Reference::Fixture => "fixture".to_string(),
             Reference::Hand(t) => format!("hand:{t}"),
@@ -345,6 +378,20 @@ mod tests {
         }
         assert!(lookup("sma").is_some() && lookup("ema").is_some());
         assert!(lookup("nope").is_none());
+    }
+
+    #[test]
+    fn a_boolean_input_names_a_real_input_and_the_row_says_so() {
+        for &(name, i) in BOOL_INPUTS {
+            assert!(i < lookup(name).unwrap().inputs.len(), "{name} has no input {i}");
+        }
+        let cond = lookup("if_else").unwrap();
+        assert_eq!(input_elem(cond, 0), Elem::Bool);
+        assert_eq!(input_elem(cond, 1), Elem::F64);
+        let row = &expr_registry_json()["functions"];
+        let row = row.as_array().unwrap().iter().find(|f| f["name"] == "if_else").unwrap();
+        assert_eq!(row["inputs"][0]["elem"], "bool");
+        assert_eq!(row["inputs"][1]["elem"], "f64");
     }
 
     #[test]

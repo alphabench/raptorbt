@@ -2,9 +2,1343 @@
 
 # Expression functions
 
-2 functions in 1 family, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+168 functions in 7 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+
+## candles
+
+### `cdl2crows([open], [high], [low], [close])`
+
+Two Crows (TA-Lib CDL2CROWS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL2CROWS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3blackcrows([open], [high], [low], [close])`
+
+Three Black Crows (TA-Lib CDL3BLACKCROWS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3BLACKCROWS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3inside([open], [high], [low], [close])`
+
+Three Inside Up/Down (TA-Lib CDL3INSIDE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3INSIDE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3linestrike([open], [high], [low], [close])`
+
+Three-Line Strike  (TA-Lib CDL3LINESTRIKE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 8 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3LINESTRIKE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3outside([open], [high], [low], [close])`
+
+Three Outside Up/Down (TA-Lib CDL3OUTSIDE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 3 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3OUTSIDE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3starsinsouth([open], [high], [low], [close])`
+
+Three Stars In The South (TA-Lib CDL3STARSINSOUTH): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3STARSINSOUTH`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdl3whitesoldiers([open], [high], [low], [close])`
+
+Three Advancing White Soldiers (TA-Lib CDL3WHITESOLDIERS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDL3WHITESOLDIERS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlabandonedbaby([open], [high], [low], [close], penetration=0.3)`
+
+Abandoned Baby (TA-Lib CDLABANDONEDBABY): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.3).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.3
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLABANDONEDBABY`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdladvanceblock([open], [high], [low], [close])`
+
+Advance Block (TA-Lib CDLADVANCEBLOCK): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLADVANCEBLOCK`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlbelthold([open], [high], [low], [close])`
+
+Belt-hold (TA-Lib CDLBELTHOLD): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLBELTHOLD`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlbreakaway([open], [high], [low], [close])`
+
+Breakaway (TA-Lib CDLBREAKAWAY): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 14 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLBREAKAWAY`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlclosingmarubozu([open], [high], [low], [close])`
+
+Closing Marubozu (TA-Lib CDLCLOSINGMARUBOZU): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLCLOSINGMARUBOZU`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlconcealbabyswall([open], [high], [low], [close])`
+
+Concealing Baby Swallow (TA-Lib CDLCONCEALBABYSWALL): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLCONCEALBABYSWALL`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlcounterattack([open], [high], [low], [close])`
+
+Counterattack (TA-Lib CDLCOUNTERATTACK): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLCOUNTERATTACK`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdldarkcloudcover([open], [high], [low], [close], penetration=0.5)`
+
+Dark Cloud Cover (TA-Lib CDLDARKCLOUDCOVER): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.5).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.5
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLDARKCLOUDCOVER`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdldoji([open], [high], [low], [close])`
+
+Doji (TA-Lib CDLDOJI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLDOJI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdldojistar([open], [high], [low], [close])`
+
+Doji Star (TA-Lib CDLDOJISTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLDOJISTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdldragonflydoji([open], [high], [low], [close])`
+
+Dragonfly Doji (TA-Lib CDLDRAGONFLYDOJI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLDRAGONFLYDOJI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlengulfing([open], [high], [low], [close])`
+
+Engulfing Pattern (TA-Lib CDLENGULFING): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. +-80 when the body ties the previous one on one side.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 2 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLENGULFING`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdleveningdojistar([open], [high], [low], [close], penetration=0.3)`
+
+Evening Doji Star (TA-Lib CDLEVENINGDOJISTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.3).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.3
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLEVENINGDOJISTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdleveningstar([open], [high], [low], [close], penetration=0.3)`
+
+Evening Star (TA-Lib CDLEVENINGSTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.3).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.3
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLEVENINGSTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlgapsidesidewhite([open], [high], [low], [close])`
+
+Up/Down-gap side-by-side white lines (TA-Lib CDLGAPSIDESIDEWHITE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 7 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLGAPSIDESIDEWHITE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlgravestonedoji([open], [high], [low], [close])`
+
+Gravestone Doji (TA-Lib CDLGRAVESTONEDOJI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLGRAVESTONEDOJI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhammer([open], [high], [low], [close])`
+
+Hammer (TA-Lib CDLHAMMER): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHAMMER`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhangingman([open], [high], [low], [close])`
+
+Hanging Man (TA-Lib CDLHANGINGMAN): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHANGINGMAN`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlharami([open], [high], [low], [close])`
+
+Harami Pattern (TA-Lib CDLHARAMI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. +-80 when the small body touches the long one.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHARAMI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlharamicross([open], [high], [low], [close])`
+
+Harami Cross Pattern (TA-Lib CDLHARAMICROSS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. +-80 when the doji touches the long body.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHARAMICROSS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhighwave([open], [high], [low], [close])`
+
+High-Wave Candle (TA-Lib CDLHIGHWAVE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHIGHWAVE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhikkake([open], [high], [low], [close])`
+
+Hikkake Pattern (TA-Lib CDLHIKKAKE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. +-200 on the bar that confirms a pattern within three bars.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 5 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHIKKAKE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhikkakemod([open], [high], [low], [close])`
+
+Modified Hikkake Pattern (TA-Lib CDLHIKKAKEMOD): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. +-200 on the bar that confirms a pattern within three bars.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHIKKAKEMOD`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlhomingpigeon([open], [high], [low], [close])`
+
+Homing Pigeon (TA-Lib CDLHOMINGPIGEON): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLHOMINGPIGEON`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlidentical3crows([open], [high], [low], [close])`
+
+Identical Three Crows (TA-Lib CDLIDENTICAL3CROWS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLIDENTICAL3CROWS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlinneck([open], [high], [low], [close])`
+
+In-Neck Pattern (TA-Lib CDLINNECK): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLINNECK`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlinvertedhammer([open], [high], [low], [close])`
+
+Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLINVERTEDHAMMER`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlkicking([open], [high], [low], [close])`
+
+Kicking (TA-Lib CDLKICKING): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLKICKING`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlkickingbylength([open], [high], [low], [close])`
+
+Kicking - bull/bear determined by the longer marubozu (TA-Lib CDLKICKINGBYLENGTH): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLKICKINGBYLENGTH`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlladderbottom([open], [high], [low], [close])`
+
+Ladder Bottom (TA-Lib CDLLADDERBOTTOM): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 14 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLLADDERBOTTOM`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdllongleggeddoji([open], [high], [low], [close])`
+
+Long Legged Doji (TA-Lib CDLLONGLEGGEDDOJI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLLONGLEGGEDDOJI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdllongline([open], [high], [low], [close])`
+
+Long Line Candle (TA-Lib CDLLONGLINE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLLONGLINE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlmarubozu([open], [high], [low], [close])`
+
+Marubozu (TA-Lib CDLMARUBOZU): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLMARUBOZU`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlmatchinglow([open], [high], [low], [close])`
+
+Matching Low (TA-Lib CDLMATCHINGLOW): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 6 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLMATCHINGLOW`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlmathold([open], [high], [low], [close], penetration=0.5)`
+
+Mat Hold (TA-Lib CDLMATHOLD): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.5).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.5
+- outputs: `value` (numeric)
+- warm-up: 14 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLMATHOLD`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlmorningdojistar([open], [high], [low], [close], penetration=0.3)`
+
+Morning Doji Star (TA-Lib CDLMORNINGDOJISTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.3).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.3
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLMORNINGDOJISTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlmorningstar([open], [high], [low], [close], penetration=0.3)`
+
+Morning Star (TA-Lib CDLMORNINGSTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent. `penetration` is the required depth of the third candle into the first body (default 0.3).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `penetration`: float in [0.0, 1000000.0], default 0.3
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLMORNINGSTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlonneck([open], [high], [low], [close])`
+
+On-Neck Pattern (TA-Lib CDLONNECK): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLONNECK`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlpiercing([open], [high], [low], [close])`
+
+Piercing Pattern (TA-Lib CDLPIERCING): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLPIERCING`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlrickshawman([open], [high], [low], [close])`
+
+Rickshaw Man (TA-Lib CDLRICKSHAWMAN): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLRICKSHAWMAN`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlrisefall3methods([open], [high], [low], [close])`
+
+Rising/Falling Three Methods (TA-Lib CDLRISEFALL3METHODS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 14 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLRISEFALL3METHODS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlseparatinglines([open], [high], [low], [close])`
+
+Separating Lines (TA-Lib CDLSEPARATINGLINES): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSEPARATINGLINES`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlshootingstar([open], [high], [low], [close])`
+
+Shooting Star (TA-Lib CDLSHOOTINGSTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSHOOTINGSTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlshortline([open], [high], [low], [close])`
+
+Short Line Candle (TA-Lib CDLSHORTLINE): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSHORTLINE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlspinningtop([open], [high], [low], [close])`
+
+Spinning Top (TA-Lib CDLSPINNINGTOP): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSPINNINGTOP`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlstalledpattern([open], [high], [low], [close])`
+
+Stalled Pattern (TA-Lib CDLSTALLEDPATTERN): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSTALLEDPATTERN`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlsticksandwich([open], [high], [low], [close])`
+
+Stick Sandwich (TA-Lib CDLSTICKSANDWICH): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 7 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLSTICKSANDWICH`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdltakuri([open], [high], [low], [close])`
+
+Takuri (Dragonfly Doji with very long lower shadow) (TA-Lib CDLTAKURI): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 10 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLTAKURI`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdltasukigap([open], [high], [low], [close])`
+
+Tasuki Gap (TA-Lib CDLTASUKIGAP): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 7 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLTASUKIGAP`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlthrusting([open], [high], [low], [close])`
+
+Thrusting Pattern (TA-Lib CDLTHRUSTING): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 11 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLTHRUSTING`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdltristar([open], [high], [low], [close])`
+
+Tristar Pattern (TA-Lib CDLTRISTAR): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLTRISTAR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlunique3river([open], [high], [low], [close])`
+
+Unique 3 River (TA-Lib CDLUNIQUE3RIVER): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLUNIQUE3RIVER`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlupsidegap2crows([open], [high], [low], [close])`
+
+Upside Gap Two Crows (TA-Lib CDLUPSIDEGAP2CROWS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 12 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLUPSIDEGAP2CROWS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cdlxsidegap3methods([open], [high], [low], [close])`
+
+Upside/Downside Gap Three Methods (TA-Lib CDLXSIDEGAP3METHODS): +100 for a bullish signal, -100 for a bearish one, 0 when the pattern is absent.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 2 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CDLXSIDEGAP3METHODS`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+## math
+
+### `acos([x])`
+
+Arc cosine; outside [-1, 1] is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ACOS`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `add([a], [b])`
+
+a + b.
+
+- inputs: `a` (default `high`), `b` (default `low`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ADD`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `asin([x])`
+
+Arc sine; outside [-1, 1] is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ASIN`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `atan([x])`
+
+Arc tangent, radians.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ATAN`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `avgprice([open], [high], [low], [close])`
+
+(open + high + low + close) / 4.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `AVGPRICE`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `beta([high], [low], period=5)`
+
+Beta of the second input on the first: covariance of their simple returns over the last `period` returns divided by the variance of the first's. Defined on returns, not levels; first valid at bar `period`. A first input with no movement gives NaN (TA-Lib gives 0).
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], default 5
+- outputs: `value` (numeric)
+- warm-up: 5 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `BETA`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `ceil([x])`
+
+Smallest integer not below x.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CEIL`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `correl([high], [low], period=30)`
+
+Pearson correlation of the two inputs over the last `period` values. A flat window gives NaN (TA-Lib gives 0).
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CORREL`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cos([x])`
+
+Cosine, radians.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `COS`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cosh([x])`
+
+Hyperbolic cosine; overflow is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `COSH`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `div([a], [b])`
+
+a / b; a zero divisor gives NaN, never infinity.
+
+- inputs: `a` (default `high`), `b` (default `low`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `DIV`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `exp([x])`
+
+e to the power x; overflow is NaN, never infinity.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `EXP`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `floor([x])`
+
+Largest integer not above x.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `FLOOR`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `linearreg([x], period=14)`
+
+Value at the newest bar of the least-squares line through the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], default 14
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LINEARREG`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `linearreg_angle([x], period=14)`
+
+Angle in degrees of the least-squares line through the last `period` values: atan(slope) * 180 / pi, with the slope per bar in the input's own units.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], default 14
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LINEARREG_ANGLE`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `linearreg_intercept([x], period=14)`
+
+Intercept (value at the oldest bar of the window) of the least-squares line through the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], default 14
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LINEARREG_INTERCEPT`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `linearreg_slope([x], period=14)`
+
+Slope per bar of the least-squares line through the last `period` values. A flat window has slope exactly 0.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], default 14
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LINEARREG_SLOPE`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `ln([x])`
+
+Natural logarithm; zero and negative are NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LN`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `log10([x])`
+
+Base-10 logarithm; zero and negative are NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `LOG10`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `max([x], period=30)`
+
+Highest value of the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MAX`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `maxindex([x], period=30)`
+
+Absolute bar index of the highest value of the last `period` values. The index counts from the first bar of the series it is run on, so it changes with where the series starts: correct for TA-Lib parity, useless live. Use bars_since_max for the causal relative form. Ties follow TA-Lib.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MAXINDEX`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `medprice([high], [low])`
+
+(high + low) / 2.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MEDPRICE`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `min([x], period=30)`
+
+Lowest value of the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MIN`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `minindex([x], period=30)`
+
+Absolute bar index of the lowest value of the last `period` values. The index counts from the first bar of the series it is run on, so it changes with where the series starts: correct for TA-Lib parity, useless live. Use bars_since_min for the causal relative form. Ties follow TA-Lib.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MININDEX`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `minmax([x], period=30) -> (min, max)`
+
+Lowest and highest value of the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `min`, `max` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MINMAX`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `minmaxindex([x], period=30) -> (minidx, maxidx)`
+
+Absolute bar indexes of the lowest and highest values of the last `period` values. The indexes count from the first bar of the series they are run on, so they change with where the series starts: correct for TA-Lib parity, useless live. Use bars_since_min / bars_since_max for the causal relative form. Ties follow TA-Lib.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `minidx`, `maxidx` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MINMAXINDEX`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `mult([a], [b])`
+
+a * b.
+
+- inputs: `a` (default `high`), `b` (default `low`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MULT`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sin([x])`
+
+Sine, radians.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `SIN`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sinh([x])`
+
+Hyperbolic sine; overflow is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `SINH`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sqrt([x])`
+
+Square root; negative is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `SQRT`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `stddev([x], period=5, nbdev=1.0)`
+
+Population standard deviation of the last `period` values (divisor `period`), times `nbdev`. A flat window is exactly 0.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 5; `nbdev`: float in [-1e+300, 1e+300], default 1.0
+- outputs: `value` (numeric)
+- warm-up: 4 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::streaming::StreamingStdDev` (within 1e-12 on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `STDDEV`
+- invariance: shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sub([a], [b])`
+
+a - b.
+
+- inputs: `a` (default `high`), `b` (default `low`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `SUB`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sum([x], period=30)`
+
+Sum of the last `period` values (compensated).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 30
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `SUM`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `tan([x])`
+
+Tangent, radians.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `TAN`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `tanh([x])`
+
+Hyperbolic tangent.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `TANH`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `tsf([x], period=14)`
+
+Time series forecast: the least-squares line through the last `period` values, one bar past the newest.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], default 14
+- outputs: `value` (numeric)
+- warm-up: 13 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `TSF`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `typprice([high], [low], [close])`
+
+(high + low + close) / 3.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `TYPPRICE`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `var([x], period=5)`
+
+Population variance of the last `period` values (divisor `period`). A flat window is exactly 0.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], default 5
+- outputs: `value` (numeric)
+- warm-up: 4 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `VAR`
+- invariance: shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `wclprice([high], [low], [close])`
+
+(high + low + 2 * close) / 4.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `WCLPRICE`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
 
 ## overlap
+
+### `bbands([x], period, nbdevup=2.0, nbdevdn=2.0, matype=0) -> (upperband, middleband, lowerband)`
+
+Bollinger bands: a `matype` average of the last `period` values (default SMA) plus nbdevup and minus nbdevdn population standard deviations of the window around its simple mean. Outputs upper, middle, lower.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `nbdevup`: float in [-1000000.0, 1000000.0], default 2.0; `nbdevdn`: float in [-1000000.0, 1000000.0], default 2.0; `matype`: int in [0, 8], default 0
+- outputs: `upperband`, `middleband`, `lowerband` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::streaming::StreamingBollinger` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `BBANDS`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
+- reference: Bollinger, Bollinger on Bollinger Bands, 2001
+
+### `dema([x], period)`
+
+Double exponential moving average: 2 * EMA - EMA of the EMA, each stage seeded with the mean of the previous stage's first `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `DEMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Mulloy, Smoothing Data with Less Lag, 1994
 
 ### `ema([x], period)`
 
@@ -20,6 +1354,100 @@ Exponential moving average, alpha = 2/(period+1), seeded with the mean of the fi
 - invariance: scale_equivariant, shift_equivariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
 
+### `kama([x], period)`
+
+Kaufman adaptive moving average: smoothing between a 2-bar and a 30-bar EMA by the efficiency ratio over `period` bars; first value one bar after the first full window. A window whose path length is under 1e-14 counts as flat (ratio 1), as in TA-Lib.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `KAMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
+- reference: Kaufman, Smarter Trading, 1995
+
+### `ma([x], period, matype=0)`
+
+Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3 (7, MAMA, is not available yet). Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `matype`: int in [0, 8], default 0
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
+
+### `mavp([x], periods, minperiod=2, maxperiod=30, matype=0)`
+
+Moving average whose period changes every bar: `periods` (cut to a whole number in minperiod..maxperiod) picks, per bar, which period's `matype` average to read. Each period's average starts so that it takes its first value at the first output bar, as TA-Lib's does, so a recursive kind (matype 1, 3, 4, 6, 8) carries no state from before it; a NaN period gives NaN. Warm-up is the longest period's.
+
+- inputs: `x` (default `close`), `periods`
+- parameters: `minperiod`: int in [1, 1000], default 2; `maxperiod`: int in [1, 1000], default 30; `matype`: int in [0, 8], default 0
+- outputs: `value` (numeric)
+- warm-up: 29 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MAVP`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
+
+### `midpoint([x], period)`
+
+Midpoint of the range: (highest + lowest) / 2 of the last `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MIDPOINT`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `midprice([high], [low], period)`
+
+Midpoint of the price range: (highest high + lowest low) / 2 of the last `period` bars.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MIDPRICE`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sar([high], [low], acceleration=0.02, maximum=0.2)`
+
+Parabolic SAR. The first direction comes from the minus directional move of the first two bars; a bar with a NaN high or low is skipped.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `acceleration`: float in [0.0, 1000000.0], default 0.02; `maximum`: float in [0.0, 1000000.0], default 0.2
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `SAR`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, New Concepts in Technical Trading Systems, 1978
+
+### `sarext([high], [low], startvalue=0.0, offsetonreverse=0.0, accelerationinitlong=0.02, accelerationlong=0.02, accelerationmaxlong=0.2, accelerationinitshort=0.02, accelerationshort=0.02, accelerationmaxshort=0.2)`
+
+Parabolic SAR, extended: separate long and short factors, a start value (positive long, negative short, 0 to decide from the first two bars), an offset on reversal; short values are reported negative.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `startvalue`: float in [-1000000000000000.0, 1000000000000000.0], default 0.0; `offsetonreverse`: float in [-1000000.0, 1000000.0], default 0.0; `accelerationinitlong`: float in [0.0, 1000000.0], default 0.02; `accelerationlong`: float in [0.0, 1000000.0], default 0.02; `accelerationmaxlong`: float in [0.0, 1000000.0], default 0.2; `accelerationinitshort`: float in [0.0, 1000000.0], default 0.02; `accelerationshort`: float in [0.0, 1000000.0], default 0.02; `accelerationmaxshort`: float in [0.0, 1000000.0], default 0.2
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `SAREXT`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, New Concepts in Technical Trading Systems, 1978
+
 ### `sma([x], period)`
 
 Simple moving average of the last `period` values.
@@ -31,5 +1459,753 @@ Simple moving average of the last `period` values.
 - memory: finite: it forgets any bar after its window
 - legacy: pinned to `indicators::streaming::StreamingSma` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `SMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `t3([x], period, vfactor=0.7)`
+
+Tillson T3: six cascaded EMAs combined by `vfactor`, each stage seeded with the mean of the previous stage's first `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `vfactor`: float in [0.0, 1.0], default 0.7
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `T3`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Tillson, Smoothing Techniques for More Accurate Signals, 1998
+
+### `tema([x], period)`
+
+Triple exponential moving average: 3 * EMA1 - 3 * EMA2 + EMA3, each stage seeded with the mean of the previous stage's first `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `TEMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Mulloy, Smoothing Data with Less Lag, 1994
+
+### `trima([x], period)`
+
+Triangular moving average: a simple average of a simple average, weights rising then falling over `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `TRIMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `wilder([x], period)`
+
+Wilder smoothing: alpha = 1/period, seeded with the mean of the first `period` values.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::streaming::StreamingEma::wilder` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, New Concepts in Technical Trading Systems, 1978
+
+### `wma([x], period)`
+
+Linear-weighted moving average of the last `period` values, newest weighted heaviest.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::streaming::StreamingWma` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `WMA`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+## quant
+
+### `autocorr([x], period, lag=1)`
+
+Sample autocorrelation at `lag` over the window: sum over i >= lag of (x[i] - m)(x[i-lag] - m) divided by the sum of (x[i] - m)^2, m the window mean. `lag` defaults to 1 and must not exceed period - 2. NaN when the window is flat or nearly so. O(p) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [3, 16777216], required; `lag`: int in [1, 16777216], default 1
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Box, G.E.P. and Jenkins, G.M. (1976) Time Series Analysis: Forecasting and Control, Holden-Day
+
+### `body_pct([open], [close])`
+
+Candle body as a signed fraction of the open: (close - open) / open. A non-positive price gives NaN. O(1) per bar.
+
+- inputs: `open` (default `open`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Nison, S. (1991) Japanese Candlestick Charting Techniques, New York Institute of Finance
+
+### `downside_dev([x], period, mar=0.0)`
+
+Downside deviation of the returns `x` below the minimum acceptable return `mar` over the window: sqrt(mean of min(x - mar, 0)^2), divisor p. Per-bar; annualising is the caller's. O(p) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `mar`: float in [-1000000000000.0, 1000000000000.0], default 0.0
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Sortino, F.A. and van der Meer, R. (1991) Downside risk, Journal of Portfolio Management 17(4), 27-31
+
+### `fracdiff([x], d, threshold)`
+
+Fixed-width-window fractional differencing of order `d`: sum of w[k] x[t-k] with w[0] = 1, w[k] = -w[k-1] (d - k + 1) / k, the series of weights cut at the first |w[k]| below `threshold`. Causal: the window is the weights' length L, so the first value is at bar L - 1; a smaller threshold keeps more memory and a longer window (refused above 2^20). d = 1 is the first difference. O(L) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `d`: float in [0.0, 2.0], required; `threshold`: float in [1e-12, 1.0], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Lopez de Prado, M. (2018) Advances in Financial Machine Learning, Wiley, chapter 5
+- reference: Hosking, J.R.M. (1981) Fractional differencing, Biometrika 68(1), 165-176
+
+### `gap([open], [close])`
+
+Overnight gap: today's open over the previous close, minus 1. Today's close must be present (a bar is complete) but is not used. A non-positive price gives NaN. O(1) per bar.
+
+- inputs: `open` (default `open`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Nison, S. (1991) Japanese Candlestick Charting Techniques, New York Institute of Finance
+
+### `half_life([x], period)`
+
+Ornstein-Uhlenbeck half-life in bars from an AR(1) fit x[t] = a + phi x[t-1] over the window: -ln 2 / ln phi. NaN unless 0 < phi < 1, so a trending, random-walk or oscillating window gives NaN, never a negative. NaN when the lagged series is flat. O(p) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [3, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Uhlenbeck, G.E. and Ornstein, L.S. (1930) On the Theory of the Brownian Motion, Physical Review 36, 823-841
+- reference: Chan, E.P. (2013) Algorithmic Trading: Winning Strategies and Their Rationale, Wiley, chapter 2
+
+### `hurst_rs([x], period)`
+
+Rescaled-range Hurst exponent over the window, as the slope between two scales: H = ln(RS(p) / mean(RS of the first and last floor(p/2) values)) / ln(p / floor(p/2)), RS = range of the cumulative mean-deviations over the population standard deviation. Feed it increments (returns), not levels. Two scales only and not bias-corrected for short samples (Anis-Lloyd), so read it relative to its own history. NaN when any block is flat. Three passes over at most p values per bar: O(p).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [8, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Hurst, H.E. (1951) Long-term storage capacity of reservoirs, Transactions of the American Society of Civil Engineers 116, 770-808
+
+### `max_drawdown([x], period)`
+
+Largest peak-to-trough fall of the level series `x` inside the window, as a fraction of the peak (0.25 is a 25% drawdown); 0 for a rising window. A non-positive level in the window gives NaN. O(p) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Magdon-Ismail, M. and Atiya, A.F. (2004) Maximum drawdown, Risk 17(10), 99-102
+
+### `range_pos([high], [low], [close], period)`
+
+Where the close sits in the rolling range: (close - lowest low) / (highest high - lowest low) over `period` bars, 0 at the low and 1 at the high. NaN when the range is flat (at most 1e-12 of the price level). Amortised O(1) per bar.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Williams, L. (1973) How I Made $1,000,000 Last Year Trading Commodities, Windsor Books
+
+### `rolling_alpha(y, x, period)`
+
+OLS intercept of `y` on `x` over the window (mean y minus beta times mean x), on the inputs as given. NaN when `x` is flat or nearly so (see rolling_beta). Not annualised. O(p) per bar.
+
+- inputs: `y`, `x`
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Jensen, M.C. (1968) The Performance of Mutual Funds in the Period 1945-1964, Journal of Finance 23(2), 389-416
+- reference: Greene, W.H. (2012) Econometric Analysis, 7th ed., Pearson, chapter 3 (least squares)
+
+### `rolling_beta(y, x, period)`
+
+OLS slope of `y` on `x` over the window, on the inputs as given (levels or returns, whichever you pass). Differs from TA-Lib BETA, which regresses returns derived from its inputs. NaN when `x` is flat or nearly so: the centred sum of squares of x is at most 1e-12 of its raw sum of squares. O(p) per bar.
+
+- inputs: `y`, `x`
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Sharpe, W.F. (1964) Capital Asset Prices: A Theory of Market Equilibrium under Conditions of Risk, Journal of Finance 19(3), 425-442
+- reference: Greene, W.H. (2012) Econometric Analysis, 7th ed., Pearson, chapter 3 (least squares)
+
+### `rolling_corr_spearman(a, b, period)`
+
+Spearman rank correlation of `a` and `b` over the window: Pearson on average ranks, so ties share their mean rank. NaN when either window is constant. O(p log p) per bar (a sort per input).
+
+- inputs: `a`, `b`
+- parameters: `period`: int in [3, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Spearman, C. (1904) The Proof and Measurement of Association between Two Things, American Journal of Psychology 15(1), 72-101
+
+### `rolling_cvar_hist([x], period, q)`
+
+Historical expected shortfall of the returns `x` over the window at tail probability `q`: minus the mean of the sorted observations up to and including the index floor(q(p - 1)). A loss is positive and never smaller than rolling_var_hist at the same q. O(p log p) per bar (a sort).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required; `q`: float in [0.0, 1.0], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Rockafellar, R.T. and Uryasev, S. (2000) Optimization of conditional value-at-risk, Journal of Risk 2(3), 21-41
+
+### `rolling_r2(y, x, period)`
+
+R-squared of the OLS fit of `y` on `x` over the window: squared Pearson correlation. NaN when either input is flat or nearly so. O(p) per bar.
+
+- inputs: `y`, `x`
+- parameters: `period`: int in [3, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Greene, W.H. (2012) Econometric Analysis, 7th ed., Pearson, chapter 3 (least squares)
+
+### `rolling_residual(y, x, period)`
+
+Residual of the current bar against the OLS line fitted on the window that includes the current bar: y[t] - (alpha + beta x[t]). In-sample, so it shrinks toward zero for short windows. NaN when `x` is flat or nearly so. O(p) per bar.
+
+- inputs: `y`, `x`
+- parameters: `period`: int in [3, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Greene, W.H. (2012) Econometric Analysis, 7th ed., Pearson, chapter 3 (least squares)
+
+### `rolling_sharpe([x], period)`
+
+Mean over sample standard deviation (divisor p - 1) of the returns `x` in the window. No risk-free rate and no annualisation: both are the caller's. NaN when the window is flat or nearly so. O(p) per bar.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Sharpe, W.F. (1966) Mutual fund performance, Journal of Business 39(1), 119-138
+
+### `rolling_var_hist([x], period, q)`
+
+Historical value-at-risk of the returns `x` over the window at tail probability `q` (0.05 for the 5% tail): minus the q-quantile with linear interpolation at position q(p - 1) of the sorted window (Hyndman-Fan type 7). A loss is positive. O(p log p) per bar (a sort).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required; `q`: float in [0.0, 1.0], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Hyndman, R.J. and Fan, Y. (1996) Sample quantiles in statistical packages, The American Statistician 50(4), 361-365
+- reference: Jorion, P. (2006) Value at Risk, 3rd ed., McGraw-Hill
+
+### `true_range_pct([high], [low], [close])`
+
+True range as a fraction of the previous close: max(H - L, |H - Cprev|, |L - Cprev|) / Cprev. A non-positive price gives NaN. O(1) per bar.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J.W. (1978) New Concepts in Technical Trading Systems, Trend Research
+
+### `vol_close([close], period)`
+
+Close-to-close realised volatility: the sample standard deviation (divisor p - 1) of the `period` log returns ln(c[t]/c[t-1]) ending at the current bar, so the window spans `period + 1` closes and the first value is at bar `period`. Per-bar volatility; annualising (times sqrt of bars per year) is the caller's. A non-positive close in the window gives NaN. O(p) per bar.
+
+- inputs: `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Hull, J. (2018) Options, Futures, and Other Derivatives, 10th ed., Pearson, on estimating volatility from historical data
+
+### `vol_garman_klass([open], [high], [low], [close], period)`
+
+Garman-Klass (1980) volatility: sqrt(mean of 0.5 ln(H/L)^2 - (2 ln 2 - 1) ln(C/O)^2). Per-bar volatility; annualising is the caller's. Assumes no drift and no overnight gap. A non-positive price in the window gives NaN, as does a negative mean (inconsistent OHLC). O(p) per bar.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Garman, M.B. and Klass, M.J. (1980) On the Estimation of Security Price Volatilities from Historical Data, Journal of Business 53(1), 67-78
+
+### `vol_parkinson([high], [low], period)`
+
+Parkinson (1980) range volatility: sqrt(mean over the window of ln(high/low)^2 / (4 ln 2)). Per-bar volatility; annualising is the caller's. Assumes driftless continuous prices, so it understates when the market gaps. A non-positive price in the window gives NaN. O(p) per bar.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Parkinson, M. (1980) The Extreme Value Method for Estimating the Variance of the Rate of Return, Journal of Business 53(1), 61-65
+
+### `vol_rogers_satchell([open], [high], [low], [close], period)`
+
+Rogers-Satchell (1991) volatility: sqrt(mean of ln(H/C) ln(H/O) + ln(L/C) ln(L/O)); unbiased with drift. Per-bar volatility; annualising is the caller's. Assumes no overnight gap. A non-positive price in the window gives NaN, as does a negative mean (inconsistent OHLC). O(p) per bar.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Rogers, L.C.G. and Satchell, S.E. (1991) Estimating Variance From High, Low and Closing Prices, Annals of Applied Probability 1(4), 504-512
+
+### `vol_yang_zhang([open], [high], [low], [close], period)`
+
+Yang-Zhang (2000) volatility over `period` bars: sqrt(s_o^2 + k s_c^2 + (1 - k) s_rs^2), with s_o^2 the sample variance (divisor n - 1) of the overnight log return ln(O[t]/C[t-1]), s_c^2 that of ln(C[t]/O[t]), s_rs^2 the mean Rogers-Satchell term, and k = 0.34 / (1.34 + (n + 1) / (n - 1)) as in the paper. Handles drift and overnight gaps. The window needs the close before its first bar, so the first value is at bar `period`. Per-bar volatility; annualising is the caller's. A non-positive price in the window gives NaN. O(p) per bar.
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Yang, D. and Zhang, Q. (2000) Drift-Independent Volatility Estimation Based on High, Low, Open, and Close Prices, Journal of Business 73(3), 477-492
+
+## rolling
+
+### `abs([x])`
+
+Absolute value.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `bars_since_max([x], period)`
+
+Bars since the highest value of the last `period` values: 0 when the current bar is the high. A tie goes to the most recent bar. The causal, relative form of maxindex.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `bars_since_min([x], period)`
+
+Bars since the lowest value of the last `period` values: 0 when the current bar is the low. A tie goes to the most recent bar. The causal, relative form of minindex.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `clip([x], lo, hi)`
+
+x limited to [lo, hi]; lo must not exceed hi.
+
+- inputs: `x` (default `close`)
+- parameters: `lo`: float in [-1e+300, 1e+300], required; `hi`: float in [-1e+300, 1e+300], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `cov([a], [b], period)`
+
+Population covariance of the two inputs' levels over the last `period` values (divisor `period`). 0 when either is flat.
+
+- inputs: `a` (default `high`), `b` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `diff([x], k=1)`
+
+x - x[k bars ago].
+
+- inputs: `x` (default `close`)
+- parameters: `k`: int in [1, 16777216], default 1
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `ewm_mean([x], alpha=0.1)`
+
+Exponentially weighted mean with smoothing factor `alpha` in (0, 1], seeded with the first value: m += alpha * (x - m). Unlike `ema` it takes alpha, not a period, and has no averaging seed. A NaN holds the state.
+
+- inputs: `x` (default `close`)
+- parameters: `alpha`: float in [1e-06, 1.0], default 0.1
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `ewm_var([x], alpha=0.1)`
+
+Exponentially weighted variance (biased) about the weighted mean, factor `alpha`: with d = x - m, m += alpha * d and var = (1 - alpha) * (var + alpha * d * d). 0 at the first value. A NaN holds the state.
+
+- inputs: `x` (default `close`)
+- parameters: `alpha`: float in [1e-06, 1.0], default 0.1
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- invariance: shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `if_else(cond, a, b)`
+
+a where `cond` is true (non-zero), b where false (zero), NaN where `cond` is unknown (NaN) whatever a and b hold. A NaN in the chosen branch passes through.
+
+- inputs: `cond` (boolean), `a`, `b`
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `kurt([x], period)`
+
+Biased (population) excess kurtosis of the last `period` values: m4 / m2^2 - 3. NaN for a flat window.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [4, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `log_return([x], k=1)`
+
+ln(x / x[k bars ago]); NaN unless both prices are positive.
+
+- inputs: `x` (default `close`)
+- parameters: `k`: int in [1, 16777216], default 1
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `pct_change([x], k=1)`
+
+x / x[k bars ago] - 1; NaN when the earlier value is 0.
+
+- inputs: `x` (default `close`)
+- parameters: `k`: int in [1, 16777216], default 1
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `quantile([x], period, q=0.5)`
+
+Quantile `q` in [0, 1] of the last `period` values, linear interpolation between order statistics at position q * (period - 1). q = 0 is the minimum, 1 the maximum, 0.5 the median.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `q`: float in [0.0, 1.0], default 0.5
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rank_ts([x], period)`
+
+Time-series percentile rank of the current value in the last `period` values: its average 1-based rank, ties sharing the mean rank, divided by `period`. In (0, 1]: 1 when it is the highest, 1 / period when the lowest.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `shift([x], k=1)`
+
+The value `k` bars ago (k >= 1). There is no negative shift: the future cannot be addressed.
+
+- inputs: `x` (default `close`)
+- parameters: `k`: int in [1, 16777216], default 1
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `sign([x])`
+
+-1, 0 or 1 by the sign of x.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `skew([x], period)`
+
+Biased (population) skewness of the last `period` values: m3 / m2^1.5. NaN for a flat window.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [3, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `zscore([x], period)`
+
+(x - mean) / stdev over the last `period` values, population stdev. NaN when the window is flat or its spread is under 1e-12 of its level.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+## vol_price
+
+### `atr([high], [low], [close], period, compat='native')`
+
+Average true range, Wilder smoothing. compat="native" (default): the first bar's range is high - low, the seed is the mean of the first `period` ranges, first value on bar period - 1. compat="talib": the first bar has no range, the seed is the mean of ranges 1..=period, first value on bar `period`, matching TA-Lib. The two differ by the seed, which decays as (1 - 1/period) per bar.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::streaming::StreamingAtr` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `ATR`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `donchian([high], [low], period) -> (upper, middle, lower)`
+
+Donchian channel: upper = highest high and lower = lowest low of the last `period` bars, middle = their midpoint (the legacy core has no middle). NaN while a NaN is in the window.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `upper`, `middle`, `lower` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::streaming::StreamingDonchian` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `keltner([high], [low], [close], ema_period, atr_period, multiplier=2.0) -> (middle, upper, lower)`
+
+Keltner channel: middle = EMA(close, ema_period), upper and lower = middle +/- multiplier * ATR(atr_period) with the native ATR. All three outputs are NaN until both are seeded, so the middle is later than a bare EMA when atr_period is longer.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `ema_period`: int in [1, 16777216], required; `atr_period`: int in [1, 16777216], required; `multiplier`: float in [0.0, 1000000000.0], default 2.0
+- outputs: `middle`, `upper`, `lower` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::volatility::keltner_channels` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `natr([high], [low], [close], period)`
+
+Normalised ATR: 100 * ATR / close with TA-Lib's ATR (first value on bar `period`). NaN where the close is zero.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `NATR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `supertrend([high], [low], [close], period, multiplier=3.0) -> (line, direction)`
+
+Supertrend: bands (high + low) / 2 +/- multiplier * ATR(period) (native ATR) that only tighten while the close stays on their side, and a line that follows the lower band when the direction is 1 (bullish) and the upper band when it is -1 (bearish). The direction flips when the close crosses the active band; it is NaN, not 0, before the first value. Path-dependent: the result depends on where the series starts and never settles.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `multiplier`: float in [0.0, 1000000000.0], default 3.0
+- outputs: `line`, `direction` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::trend::supertrend` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `trange([high], [low], [close])`
+
+True range: the greatest of high - low, |high - previous close| and |low - previous close|. NaN on the first bar, and on the bar after a NaN bar.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 1 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::volatility::true_range` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `TRANGE`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+## volume
+
+### `ad([high], [low], [close], [volume])`
+
+Chaikin accumulation/distribution line: the running sum of ((close - low) - (high - close)) / (high - low) * volume, zero on a bar with no range. Cumulative: the value depends on where the series starts (the first bar the expression sees is the origin), so a number is comparable only across the same start; a bar with a non-finite input is skipped.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::volume::ad_line` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `AD`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Chaikin, M. (1970s), Accumulation/Distribution
+
+### `adosc([high], [low], [close], [volume], fast=3, slow=10)`
+
+Chaikin A/D oscillator: EMA(ad, fast) - EMA(ad, slow), both EMAs seeded with the first A/D value as TA-Lib does. A constant offset of the A/D line cancels, so the start matters only through the EMA seed, which decays at the slow rate.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`)
+- parameters: `fast`: int in [2, 16777216], default 3; `slow`: int in [2, 16777216], default 10
+- outputs: `value` (numeric)
+- warm-up: 9 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `ADOSC`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `obv([close], [volume])`
+
+On-balance volume: the first bar's volume, then plus the volume when the close rises and minus it when the close falls. Cumulative: the value depends on where the series starts, so only changes in it are comparable across starts; a bar with a non-finite input is skipped and the next close is compared with the last accepted one.
+
+- inputs: `close` (default `close`), `volume` (default `volume`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::volume::obv` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `OBV`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Granville, J. (1963), Granville's New Key to Stock Market Profits
+
+### `volume_roc([volume], period)`
+
+Percent change of volume over `period` bars: (v - v[period]) / v[period] * 100; NaN where the earlier volume is zero.
+
+- inputs: `volume` (default `volume`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::volume::volume_roc` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `vwap([high], [low], [close], [volume])`
+
+Volume-weighted average of the typical price (high + low + close) / 3, cumulative from the first bar the expression sees and never reset (there is no session input); NaN until the cumulative volume is positive. The value depends on where the series starts.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::volume::vwap` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
 - invariance: scale_equivariant, shift_equivariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)

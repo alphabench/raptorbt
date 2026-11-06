@@ -239,28 +239,89 @@ def pin_key(talib_name, case, oname):
 
 
 def save_pins(pins):
-    with open(PINNED, "w") as f:
+    """Replace the pin file in one step: write a sibling, then rename it over."""
+    tmp = PINNED + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(pins, f, indent=1, sort_keys=True)
         f.write("\n")
+    os.replace(tmp, PINNED)
+
+
+# A function whose first valid bar may differ from TA-Lib's outside a compat `native` path, by
+# TA-Lib name, each with the reason. Empty: a different first valid bar is a wiring error until
+# someone declares otherwise here.
+FIRST_VALID_MAY_DIFFER = {}
+
+
+def refuse_blessed(pins):
+    """Pins that would record a wiring error: first valid differs from the reference for a
+    function not declared in FIRST_VALID_MAY_DIFFER and not a compat `native` record."""
+    bad = []
+    for k, rec in sorted(pins.items()):
+        name = k.split("|")[0]
+        if k.endswith("|native") or name in FIRST_VALID_MAY_DIFFER:
+            continue
+        if rec["first_valid_ours"] != rec["first_valid_ref"]:
+            bad.append(
+                f"{k}: first valid {rec['first_valid_ours']} vs TA-Lib {rec['first_valid_ref']}"
+            )
+    return bad
+
+
+def summarise(pins):
+    by = {}
+    for k, rec in pins.items():
+        name = k.split("|")[0] + ("|native" if k.endswith("|native") else "")
+        m = float.fromhex(rec.get("max_abs", rec.get("early_max_abs", "0x0.0p+0")))
+        cur = by.setdefault(name, [0.0, False])
+        cur[0] = max(cur[0], m)
+        cur[1] |= rec["first_valid_ours"] != rec["first_valid_ref"]
+    for name in sorted(by):
+        m, d = by[name]
+        print(f"  {name:24s} max_abs {m:.6g}  first_valid {'DIFFERS' if d else 'same'}")
 
 
 # ------------------------------------------------------------------------- replay
 
 
+def has_compat(fn):
+    return any(p["name"] == "compat" for p in fn.get("params") or [])
+
+
 def replay_case(fn, talib_name, entry, case, pins, collect=None):
     """Run one fixture case through the engine and judge it by fn['relation'].
     Returns a list of problems. With `collect` (a dict), pinned records are stored there
-    instead of being compared."""
+    instead of being compared.
+
+    A function with a `compat` parameter is judged twice: its "talib" path must match TA-Lib
+    by the Exact rule whatever its declared relation, and its "native" path is pinned as a
+    defined difference from TA-Lib (key suffix `|native`)."""
+    if not has_compat(fn):
+        return _replay(fn, talib_name, entry, case, pins, collect, fn.get("relation"), None, "")
+    problems = [
+        f"compat=talib: {p}"
+        for p in _replay(fn, talib_name, entry, case, pins, collect, "exact", "talib", "")
+    ]
+    problems += [
+        f"compat=native: {p}"
+        for p in _replay(
+            fn, talib_name, entry, case, pins, collect, "defined_difference", "native", "|native"
+        )
+    ]
+    return problems
+
+
+def _replay(fn, talib_name, entry, case, pins, collect, relation, compat, suffix):
     from harness import evaluate, output_names
 
-    relation = fn.get("relation")
     if relation not in RELATIONS:
         return [f"{fn['name']}: registry relation {relation!r} is not one of {RELATIONS}"]
     cols = columns(case["scenario"], entry["inputs"])
     params = {k: v for k, v in case["params"].items()}
-    ours_all = evaluate(
-        fn, cols, params=_registry_params(fn, talib_name, params), columns=entry["inputs"]
-    )
+    reg_params = _registry_params(fn, talib_name, params)
+    if compat is not None:
+        reg_params["compat"] = compat
+    ours_all = evaluate(fn, cols, params=reg_params, columns=entry["inputs"])
     problems = []
     outs = output_names(fn)
     for oname, out in case["out"].items():
@@ -273,7 +334,7 @@ def replay_case(fn, talib_name, entry, case, pins, collect=None):
             continue
         ours = ours_all[key]
         ref = reference_array(out, case["lookback"], relation)
-        pk = pin_key(talib_name, case, oname)
+        pk = pin_key(talib_name, case, oname) + suffix
         if relation == "exact":
             problems += [f"{oname}: {p}" for p in check_exact(ours, ref)]
         elif relation == "candle":
@@ -301,20 +362,48 @@ def _judge_pin(pk, rec, pins, collect):
     return []
 
 
+# TA-Lib parameter names the registry spells differently; any other name must match exactly.
+TALIB_ALIASES = {
+    "timeperiod": ("period",),
+    "fastperiod": ("fast",),
+    "slowperiod": ("slow",),
+    "signalperiod": ("signal",),
+}
+
+
+# TA-Lib parameters a function accepts and ignores, so the registry has no counterpart. Each
+# claim is measured, and test_talib_replay.py asserts it on the fixtures.
+TALIB_IGNORED = {
+    # VAR with nbdev 1.0 and 2.5 gives identical output (fixture cases `default` and `nbdev_2_5`).
+    "VAR": {"nbdev"},
+}
+
+
 def _registry_params(fn, talib_name, params):
-    """TA-Lib parameter name -> registry parameter name. A registry param may carry
-    `talib_param`; otherwise names are matched in order of declaration."""
+    """TA-Lib parameter name -> registry parameter name, bound by name (never by position).
+    A registry param may carry `talib_param`; otherwise the name is the same or one of
+    TALIB_ALIASES. A fixture parameter with no registered counterpart is an error: the
+    engine would otherwise silently run on its defaults."""
+    reg = {p["name"] for p in (fn.get("params") or []) if isinstance(p, dict)}
+    by_talib = {
+        p["talib_param"]: p["name"]
+        for p in (fn.get("params") or [])
+        if isinstance(p, dict) and p.get("talib_param")
+    }
     out = {}
-    reg = [p for p in (fn.get("params") or []) if isinstance(p, dict)]
-    by_talib = {p.get("talib_param"): p["name"] for p in reg if p.get("talib_param")}
-    order = list(params)
-    for i, k in enumerate(order):
-        if k in by_talib:
-            out[by_talib[k]] = params[k]
-        elif i < len(reg) and not by_talib:
-            out[reg[i]["name"]] = params[k]
-        elif any(p["name"] == k for p in reg):
-            out[k] = params[k]
+    for k, v in params.items():
+        if k in TALIB_IGNORED.get(talib_name, ()):
+            continue
+        name = by_talib.get(k) or next((c for c in (k, *TALIB_ALIASES.get(k, ())) if c in reg), None)
+        if name is None:
+            raise AssertionError(
+                f"{fn['name']} ({talib_name}): fixture parameter {k!r} has no registered "
+                f"counterpart (registered: {sorted(reg)}; add an alias to TALIB_ALIASES only "
+                "if it is the same parameter)"
+            )
+        if name in out:
+            raise AssertionError(f"{fn['name']}: two fixture parameters bind to {name!r}")
+        out[name] = v
     return out
 
 
@@ -331,16 +420,20 @@ def main(argv):
         print(__doc__)
         return 2
     sys.path.insert(0, HERE)
-    pins = {}
+    pins, hard = {}, []
     for fn, t in registered_with_reference():
-        if fn.get("relation") not in ("converges", "defined_difference"):
+        if fn.get("relation") not in ("converges", "defined_difference") and not has_compat(fn):
             continue
         entry = function_fixture(t)
         for case in entry["cases"]:
             problems = replay_case(fn, t, entry, case, {}, collect=pins)
-            hard = [p for p in problems if "pinned" not in p]
-            if hard:
-                print(t, case["scenario"], case["label"], hard)
+            hard += [f"{t} {case['scenario']} {case['label']}: {p}" for p in problems]
+    hard += refuse_blessed(pins)
+    summarise(pins)
+    if hard:
+        print("refusing to pin; pinned.json is unchanged:")
+        print("\n".join(hard))
+        return 1
     save_pins(pins)
     print(f"pinned {len(pins)} records -> {PINNED}")
     return 0

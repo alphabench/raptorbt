@@ -426,16 +426,42 @@ def test_every_method_builds_what_the_text_form_parses():
         if not ins:
             continue
         args = sample_args(row)
+
+        def operand(i):
+            # a boolean input is fed a comparison; any other reads its default field or close
+            if i.get("elem") == "bool":
+                return "(close > open)", c > rb.col.open
+            f = i["default_field"] or "close"
+            return f, getattr(rb.col, f)
+
         # the method supplies the first input; name the rest as the language would default them
-        rest = [i["default_field"] or "close" for i in ins[1:]]
-        text = f"{name}({', '.join(['close', *rest, *map(literal, args)])})"
-        built = getattr(c, name)(*[getattr(rb.col, f) for f in rest], *args)
+        first, recv = operand(ins[0])
+        rest = [operand(i) for i in ins[1:]]
+        text = f"{name}({', '.join([first, *(t for t, _ in rest), *map(literal, args)])})"
+        built = getattr(recv, name)(*[e for _, e in rest], *args)
         assert built.canonical == rb.expr(text).canonical, name
         assert built.hash == rb.expr(text).hash, name
         if all(i["default_field"] for i in ins):
             defaults = [i["default_field"] for i in ins]
             via_col = getattr(rb.col, name)(*args)
             assert via_col.canonical == rb.expr(f"{name}({', '.join([*defaults, *map(literal, args)])})").canonical
+
+
+def test_if_else_takes_a_boolean_condition_and_describe_says_so():
+    d = series()
+    d["open"][5] = NAN
+    want = np.where(d["close"] > d["open"], d["high"], d["low"])
+    want[5] = NAN  # an unknown condition is unknown, whatever the branches hold
+    got = rb.expr("if_else(close > open, high, low)").eval(d)
+    assert np.array_equal(bits(got), bits(want))
+    built = (c > rb.col.open).if_else(rb.col.high, rb.col.low)
+    assert built.canonical == rb.expr("if_else(close > open, high, low)").canonical
+    assert [i["elem"] for i in rb.expressions.describe("if_else")["inputs"]] == ["bool", "f64", "f64"]
+    assert {i["elem"] for i in rb.expressions.describe("sma")["inputs"]} == {"f64"}
+    for text in ("if_else(close, high, low)", "if_else(close > open, close > open, low)"):
+        with pytest.raises(ExpressionError) as info:
+            rb.expr(text)
+        assert info.value.code == "expr_type"
 
 
 def test_functions_filters_by_word_and_describe_returns_the_whole_row():

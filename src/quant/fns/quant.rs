@@ -701,7 +701,11 @@ const P8: &[ParamDef] = &[period_param(8)];
 const NONE: &[ParamDef] = &[];
 const P_AUTOCORR: &[ParamDef] = &[
     period_param(3),
-    ParamDef { name: "lag", kind: ParamKind::Int { min: 1, max: MAX_PERIOD }, default: None },
+    ParamDef {
+        name: "lag",
+        kind: ParamKind::Int { min: 1, max: MAX_PERIOD },
+        default: Some(ParamVal::Int(1)),
+    },
 ];
 const P_TAIL: &[ParamDef] = &[
     period_param(2),
@@ -773,7 +777,7 @@ macro_rules! def {
 
 use Domain::{Any, Positive};
 use Invariance::{ScaleEquivariant, ScaleInvariant, ShiftInvariant};
-use NanRule::{Elementwise, Windowed};
+use NanRule::{Elementwise, Lagged, Windowed};
 
 const REF_HULL: &str = "Hull, J. (2018) Options, Futures, and Other Derivatives, 10th ed., Pearson, on estimating volatility from historical data";
 const REF_PARKINSON: &str = "Parkinson, M. (1980) The Extreme Value Method for Estimating the Variance of the Rate of Return, Journal of Business 53(1), 61-65";
@@ -998,7 +1002,7 @@ pub const DEFS: &[FnDef] = &[
         P_AUTOCORR,
         warm_p_minus_1,
         "Sample autocorrelation at `lag` over the window: sum over i >= lag of (x[i] - m)(x[i-lag] \
-         - m) divided by the sum of (x[i] - m)^2, m the window mean. Needs lag <= period - 2. \
+         - m) divided by the sum of (x[i] - m)^2, m the window mean. `lag` defaults to 1 and must not exceed period - 2. \
          NaN when the window is flat or nearly so. O(p) per bar.",
         &["Box, G.E.P. and Jenkins, G.M. (1976) Time Series Analysis: Forecasting and Control, Holden-Day"],
         &[ScaleInvariant, ShiftInvariant],
@@ -1090,7 +1094,7 @@ pub const DEFS: &[FnDef] = &[
          Cprev. A non-positive price gives NaN. O(1) per bar.",
         &["Wilder, J.W. (1978) New Concepts in Technical Trading Systems, Trend Research"],
         &[ScaleInvariant],
-        Elementwise,
+        Lagged,
         Positive,
         make_true_range_pct
     ),
@@ -1104,7 +1108,7 @@ pub const DEFS: &[FnDef] = &[
          bar.",
         &[REF_NISON],
         &[ScaleInvariant],
-        Elementwise,
+        Lagged,
         Positive,
         make_gap
     ),

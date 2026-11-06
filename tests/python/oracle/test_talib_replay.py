@@ -3,6 +3,7 @@ fixture, by the relation the registry declares. Needs numpy only (no TA-Lib)."""
 
 import os
 
+import numpy as np
 import pytest
 
 import replay
@@ -89,7 +90,7 @@ def test_every_compared_function_replays_at_least_one_case():
     no fixture cases, or none that were run."""
     empty = []
     for fn in registry():
-        if fn.get("relation") not in COMPARED_RELATIONS:
+        if fn.get("relation") not in COMPARED_RELATIONS and not replay.has_compat(fn):
             continue
         for t in talib_names(fn):
             entry = replay.function_fixture(t)
@@ -135,3 +136,32 @@ def test_candle_comparison_detects_a_changed_integer():
     i = int(ours.nonzero()[0][0])
     ours[i] = 0.0
     assert replay.check_candle(ours, ref, case["lookback"]), "a missed firing went unnoticed"
+
+
+def test_ignored_talib_parameters_really_are_ignored():
+    """TALIB_IGNORED claims TA-Lib gives the same output whatever the parameter; prove it on
+    the fixtures, comparing each case with the default case of its scenario."""
+    for talib_name, ignored in replay.TALIB_IGNORED.items():
+        entry = replay.function_fixture(talib_name)
+        by = {(c["scenario"], c["label"]): c for c in entry["cases"]}
+        tested = 0
+        for (scen, label), c in by.items():
+            if label == "default":
+                continue
+            base = by[(scen, "default")]
+            if any(c["params"][k] != base["params"][k] for k in ignored):
+                assert c["out"] == base["out"], (
+                    f"{talib_name}: {sorted(ignored)} changed the output in {scen}/{label}"
+                )
+                tested += 1
+        assert tested, f"{talib_name}: no fixture case varies {sorted(ignored)}"
+
+
+def test_stddev_nbdev_scales_the_output_in_the_fixtures():
+    entry = replay.function_fixture("STDDEV")
+    by = {(c["scenario"], c["label"]): c for c in entry["cases"]}
+    scen = "random_walk"
+    one = replay.decode(by[(scen, "default")]["out"]["real"])
+    k = replay.decode(by[(scen, "nbdev_2_5")]["out"]["real"])
+    ok = ~np.isnan(one)
+    assert np.allclose(k[ok], one[ok] * 2.5, rtol=1e-12)
