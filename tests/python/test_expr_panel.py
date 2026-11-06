@@ -777,3 +777,41 @@ def test_a_name_that_leaves_is_dropped_and_counted_not_scored_as_a_loss(fill):
     assert h["names_left_share"] == pytest.approx(5 / (59 * 10 + 55 * 9))
     assert any("not counted as losses" in s for s in rep["flags"])
     assert "delist" in (rb.expressions.factor_report.__doc__ or "").lower()
+
+
+def test_factor_report_net_of_cost_by_hand_and_the_breakeven():
+    # Flat prices that step at row 42 (name a to 100 * (1 + a / 100)); the factor reverses its order
+    # every date, so with two buckets of five every name changes bucket every date: turnover 1 on
+    # both legs. The one spread is date 40's: 0.07 - 0.02 = 0.05. At 10 bps a side the cost is
+    # 2 * 0.001 * (1 + 1) = 0.004. Dates 1..77 have a spread and a turnover (77 of them).
+    n, m = 80, 10
+    p = np.full((n, m), 100.0)
+    for a in range(m):
+        p[42:, a] = 100.0 * (1.0 + a / 100.0)
+    f = np.array([np.arange(m) if d % 2 == 0 else np.arange(m)[::-1] for d in range(n)], dtype=float)
+    gross = rb.expressions.factor_report(f, p, [1], 2)
+    assert gross["no_costs"] is True and "long_short_net" not in gross["horizons"][1]
+    g = gross["horizons"][1]
+    assert g["rebalance_turnover_top"] == pytest.approx(1.0) and g["rebalance_turnover_bottom"] == pytest.approx(1.0)
+    assert g["breakeven_cost_bps_per_side"] == pytest.approx(1e4 * 0.05 / (77 * 4))
+    net = rb.expressions.factor_report(f, p, [1], 2, cost_bps_per_side=10.0)
+    assert net["no_costs"] is False and "net_d" in net["cost_formula"]
+    h = net["horizons"][1]
+    assert h["long_short_net"][40] == pytest.approx(0.046)
+    assert h["long_short_net"][41] == pytest.approx(-0.004)
+    assert np.isnan(h["long_short_net"][0])
+    assert h["long_short_net_mean"] == pytest.approx(0.05 / 77 - 0.004)
+    assert any("pay its costs" in x for x in net["flags"])  # breakeven 1.6 bps < 10 bps
+    # a static factor never turns over: net is gross and the breakeven is unbounded
+    ret, close = ic_data(n=120, m=30, seed=3)
+    still = np.tile(np.arange(30, dtype=float), (120, 1))
+    st = rb.expressions.factor_report(still, np.exp(np.cumsum(still * 1e-4 + ret, axis=0)), [1], cost_bps_per_side=50.0)
+    sh = st["horizons"][1]
+    assert (sh["breakeven_cost_bps_per_side"] == math.inf) == bool(np.nanmean(sh["long_short"]) > 0)
+    ok = np.isfinite(sh["long_short"]) & np.isfinite(sh["long_short_net"])
+    assert ok.sum() > 50 and np.array_equal(sh["long_short_net"][ok], sh["long_short"][ok])
+    assert np.isnan(sh["long_short_net"][0])  # the first h dates have no earlier bucket
+    for bad in (-1.0, math.nan, True):
+        with pytest.raises(RaptorBTError) as e:
+            rb.expressions.factor_report(f, p, [1], 2, cost_bps_per_side=bad)
+        assert e.value.code == "invalid_parameter"

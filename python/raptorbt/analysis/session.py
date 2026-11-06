@@ -30,6 +30,7 @@ import copy
 import difflib
 import hashlib
 import json
+import math
 import re
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
@@ -761,13 +762,19 @@ class Session:
         quantiles: int = 5,
         lag: int = 1,
         min_names: int = 10,
+        cost_bps_per_side: float | None = None,
         data: str | None = None,
     ) -> dict[str, Any]:
         """Score a panel factor against the returns that follow it (``factor_report``).
 
         ``target`` is the handle of a panel result (one output) or an expression, evaluated
         first. The forward return of a date starts ``lag`` bars later and runs ``h`` bars over the
-        loaded ``close``; nothing here charges costs, and the summary says ``no_costs: true``.
+        loaded ``close``; nothing here charges costs unless ``cost_bps_per_side`` is given, and the
+        summary says ``no_costs: true``. With it each horizon also holds ``long_short_net_mean``
+        and ``long_short_net_t_nonoverlap`` (the spread less ``2 c (T_top + T_bottom)``, both legs,
+        entry and exit: see :func:`raptorbt.expressions.factor_report`); every horizon holds
+        ``breakeven_cost_bps_per_side``, the flat cost per side at which the spread is gone. A
+        signal whose breakeven is below its costs is not a strategy.
 
         The summary holds, per horizon, ``n_scored`` dates, ``ic_mean`` (rank IC), ``t_nonoverlap``
         (the headline t: the IC of every ``h``-th date, with ``p_nonoverlap`` and
@@ -815,7 +822,7 @@ class Session:
         hs = [horizons] if isinstance(horizons, int) and not isinstance(horizons, bool) else horizons
         key = hashlib.sha256(
             f"factor\n{name}\n{list(hs) if not isinstance(hs, int) else hs}\n{quantiles}\n{lag}\n{min_names}"
-            f"\n{ds.sha256}\n{raptorbt.__version__}".encode()
+            f"\n{cost_bps_per_side}\n{ds.sha256}\n{raptorbt.__version__}".encode()
         ).hexdigest()
         rid = "h_" + key[:10]
         self._handles.move_to_end(h.id)
@@ -824,12 +831,15 @@ class Session:
             self._handles.move_to_end(rid)
             return copy.deepcopy(held.result)
         report = expressions.factor_report(
-            h.get()[out], ds.arrays["close"], horizons=hs, quantiles=quantiles, lag=lag, min_names=min_names
+            h.get()[out], ds.arrays["close"], horizons=hs, quantiles=quantiles, lag=lag, min_names=min_names,
+            cost_bps_per_side=cost_bps_per_side,
         )
         arrays: dict[str, np.ndarray] = {}
         for hz, row in report["horizons"].items():
             arrays[f"ic_{hz}"] = row["ic"]
             arrays[f"long_short_{hz}"] = row["long_short"]
+            if "long_short_net" in row:
+                arrays[f"long_short_net_{hz}"] = row["long_short_net"]
             arrays[f"quantile_returns_by_date_{hz}"] = row["quantile_returns_by_date"]
         for k in ("coverage", "names", "autocorr", "turnover_by_date"):
             arrays[k] = report[k]
@@ -1044,6 +1054,13 @@ def _short(text: str, n: int = 60) -> str:
 
 
 
+def _flags_by_weight(flags: list[str]) -> list[str]:
+    """The first flag that a signal does not pay its costs, then the rest in order: the cap keeps
+    three, and one cost flag per horizon must not crowd out the split and leaver warnings."""
+    cost = [f for f in flags if "pay its costs" in f][:1]
+    return cost + [f for f in flags if f not in cost]
+
+
 def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, Any]) -> dict[str, Any]:
     """The report as numbers: per horizon the IC, its overlap-corrected t, the hit rate and the
     long-short spread; no per-date array (``per_date`` names the ones behind the handle). Cut to
@@ -1057,7 +1074,8 @@ def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, 
         "kind": "report",
         "factor": factor,
         "data": ds.name,
-        "no_costs": True,
+        "no_costs": report["no_costs"],
+        "cost_bps_per_side": report["cost_bps_per_side"],
         "lag": report["lag"],
         "quantiles": report["quantiles"],
         "min_names": report["min_names"],
@@ -1067,10 +1085,13 @@ def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, 
         "turnover": {"top": show(turnover[-1]), "bottom": show(turnover[0])},
         "headline": "t_nonoverlap",
         "t_hac_note": "t_hac is known to over-reject for h > 1; read t_nonoverlap",
-        "flags": [f if len(f) <= 160 else f[:157] + "..." for f in report["flags"][:3]],
+        "flags": [
+            f if len(f) <= 160 else f[:157] + "..."
+            for f in _flags_by_weight(report["flags"])[:3]
+        ],
         "assumptions": report["assumptions"][:2],
         "horizons": {},
-        "per_date": ["ic_<h>", "long_short_<h>", "quantile_returns_by_date_<h>", "coverage", "names", "autocorr", "turnover_by_date"],
+        "per_date": ["ic_<h>", "long_short_<h>", "long_short_net_<h> (with a cost)", "quantile_returns_by_date_<h>", "coverage", "names", "autocorr", "turnover_by_date"],
     }
     for hz, row in report["horizons"].items():
         out["horizons"][str(hz)] = {
@@ -1087,7 +1108,14 @@ def _factor_summary(rid: str, factor: str, ds: _data.Dataset, report: dict[str, 
             "long_short_mean": show(row["long_short_mean"]),
             "long_short_t_nonoverlap": show(row["long_short_t_nonoverlap"]),
             "long_short_t_hac": show(row["long_short_t_hac"]),
+            "breakeven_cost_bps_per_side": (
+                "unbounded" if row["breakeven_cost_bps_per_side"] == math.inf
+                else show(row["breakeven_cost_bps_per_side"])
+            ),
         }
+        if "long_short_net" in row:
+            out["horizons"][str(hz)]["long_short_net_mean"] = show(row["long_short_net_mean"])
+            out["horizons"][str(hz)]["long_short_net_t_nonoverlap"] = show(row["long_short_net_t_nonoverlap"])
     cut = []
     while _sum.size(out) > _sum.OUTPUT_BYTES and len(out["horizons"]) > 1:
         k = next(reversed(out["horizons"]))

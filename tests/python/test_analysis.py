@@ -865,6 +865,7 @@ def test_the_factor_summary_is_factor_report_in_numbers():
             "hit_rate": r(row["hit_rate"]), "long_short_mean": r(row["long_short_mean"]),
             "long_short_t_nonoverlap": r(row["long_short_t_nonoverlap"]),
             "long_short_t_hac": r(row["long_short_t_hac"]),
+            "breakeven_cost_bps_per_side": r(row["breakeven_cost_bps_per_side"]),
         }
         assert got["hac_lags"] == hz - 1  # the overlap correction that was used
         assert same(s.series(f"{f['handle']}_ic_{hz}"), row["ic"])
@@ -897,6 +898,27 @@ def test_the_factor_summary_with_many_horizons_and_full_flags_fits_the_cap():
     assert len(f["flags"]) == 3 and f["assumptions"]
     assert f["horizons"] and f["truncated_horizons"]
     assert set(f["horizons"]) | set(f["truncated_horizons"]) == {"1", "2", "3", "5", "10", "20", "40", "60"}
+
+
+def test_the_factor_summary_headlines_net_beside_gross_when_a_cost_is_given():
+    s = psession(200, 40)
+    h = s.eval("zscore_xs(roc(close, 20))")["handle"]
+    f = s.factor(h, horizons=(1, 5), quantiles=5, cost_bps_per_side=10.0)
+    rep = expressions.factor_report(
+        s.series(h), panel_data(200, 40)["close"], horizons=(1, 5), quantiles=5, cost_bps_per_side=10.0
+    )
+    r = asum.show
+    assert f["no_costs"] is False and f["cost_bps_per_side"] == 10.0
+    for hz in (1, 5):
+        row, got = rep["horizons"][hz], f["horizons"][str(hz)]
+        assert got["long_short_net_mean"] == r(row["long_short_net_mean"])
+        assert got["long_short_net_t_nonoverlap"] == r(row["long_short_net_t_nonoverlap"])
+        assert got["breakeven_cost_bps_per_side"] == r(row["breakeven_cost_bps_per_side"])
+        assert same(s.series(f["handle"])[f"long_short_net_{hz}"], row["long_short_net"])
+    assert size(f) <= asum.OUTPUT_BYTES
+    plain = s.factor(h, horizons=(1, 5), quantiles=5)
+    assert plain["no_costs"] is True and "long_short_net_mean" not in plain["horizons"]["1"]
+    assert plain["handle"] != f["handle"]
 
 
 def test_a_factor_can_be_an_expression_and_a_repeat_is_not_recomputed(monkeypatch):

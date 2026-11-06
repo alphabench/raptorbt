@@ -559,7 +559,14 @@ the base clock.
   are the same for any thread count. Each name equals a stream fed its own present bars, and each
   date equals the plain function of that date's row, bit for bit.
 - *Factor evaluation.* `factor_report` is the only place a forward return exists; nothing in
-  it can feed an expression. It reports `no_costs: True`: every spread is gross.
+  it can feed an expression. It reports `no_costs: True`: every spread is gross, unless `cost_bps_per_side=` is given.
+  - *Net of a flat cost.* With `cost_bps_per_side=c` each horizon adds `long_short_net` (per
+    date), `long_short_net_mean` and `long_short_net_t_nonoverlap`: the spread less
+    `2 c/10000 (T_top + T_bottom)`, both legs, entry and exit, `T` the share of a leg's names
+    replaced between rebalances `h` bars apart. `breakeven_cost_bps_per_side` (always given) is
+    the rate at which the mean spread is gone; a signal whose breakeven is below the costs it will
+    pay is not a strategy. A flat rate is not the broker's schedule (no minimums, no side-specific
+    charges, no slippage model): it rules a signal out, a backtest prices the survivors.
   - *Which t to quote.* The headline is `t_nonoverlap` (with `p_nonoverlap` and
     `n_independent`): the IC of every `h`-th date, whose forward windows share no bar, against
     Student's t. `long_short_t_nonoverlap` is the spread's twin. NaN under 10 such dates. The

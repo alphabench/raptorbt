@@ -52,7 +52,7 @@ numpy arrays, read-only.
 | `describe_handle(self, handle: 'str') -> 'dict[str, Any]'` | What a handle is: its expression, data, outputs, size and the call that remakes it. |
 | `drop(self, handle: 'str') -> 'None'` | Release a handle; later use raises ``handle_expired`` with its recipe. |
 | `eval(self, expr: 'Any', *, data: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None) -> 'dict[str, Any]'` | Evaluate ``expr`` (text, or an ``Expr``) over the loaded bars and keep the result. |
-| `factor(self, target: 'Any', *, horizons: 'Any' = (1, 5, 20), quantiles: 'int' = 5, lag: 'int' = 1, min_names: 'int' = 10, data: 'str | None' = None) -> 'dict[str, Any]'` | Score a panel factor against the returns that follow it (``factor_report``). |
+| `factor(self, target: 'Any', *, horizons: 'Any' = (1, 5, 20), quantiles: 'int' = 5, lag: 'int' = 1, min_names: 'int' = 10, cost_bps_per_side: 'float | None' = None, data: 'str | None' = None) -> 'dict[str, Any]'` | Score a panel factor against the returns that follow it (``factor_report``). |
 | `handles(self) -> 'list[str]'` | The held handles, least recently used first. |
 | `load(self, bars: 'Any', bar_stamp: 'str | None' = None, bar_ns: 'int | None' = None, name: 'str | None' = None, session: 'Any' = None) -> 'dict[str, Any]'` | Hold a copy of ``bars`` and return its facts. |
 | `load_panel(self, bars: 'Any', bar_stamp: 'str | None' = None, bar_ns: 'int | None' = None, instruments: 'Any' = None, name: 'str | None' = None) -> 'dict[str, Any]'` | Hold a copy of a panel (many instruments over many dates) and return its facts. |

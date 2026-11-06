@@ -803,7 +803,7 @@ fn array2<'py>(
 /// numbers and per-date arrays; `raptorbt.expressions.factor_report` is its surface. Forward
 /// returns exist only in here.
 #[pyfunction]
-#[pyo3(signature = (factor, prices, horizons, quantiles, lag, min_names, jump_ratio))]
+#[pyo3(signature = (factor, prices, horizons, quantiles, lag, min_names, jump_ratio, cost_bps_per_side))]
 #[allow(clippy::too_many_arguments)]
 pub fn factor_report_native<'py>(
     py: Python<'py>,
@@ -814,6 +814,7 @@ pub fn factor_report_native<'py>(
     lag: usize,
     min_names: usize,
     jump_ratio: f64,
+    cost_bps_per_side: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     const OP: &str = "factor_report";
     let (n, m) = (factor.shape()[0], factor.shape()[1]);
@@ -821,7 +822,7 @@ pub fn factor_report_native<'py>(
         return Err(shape_fail(OP, "prices", prices.shape(), (n, m)));
     }
     let (f, p) = (panel_cow(&factor), panel_cow(&prices));
-    let params = FactorParams { horizons, quantiles, lag, min_names, jump_ratio };
+    let params = FactorParams { horizons, quantiles, lag, min_names, jump_ratio, cost_bps_per_side };
     let r = py.detach(|| factor_report(&f, &p, n, m, &params)).map_err(|e| {
         let fail = Fail::new(e.code(), e.to_string()).op(OP);
         PyErr::from(match &e {
@@ -837,6 +838,7 @@ pub fn factor_report_native<'py>(
     out.set_item("quantiles", r.quantiles)?;
     out.set_item("min_names", r.min_names)?;
     out.set_item("jump_ratio", r.jump_ratio)?;
+    out.set_item("cost_bps_per_side", r.cost_bps_per_side)?;
     out.set_item("big_move_count", r.big_move_count)?;
     let moves = pyo3::types::PyList::empty(py);
     for b in &r.big_moves {
@@ -883,6 +885,16 @@ pub fn factor_report_native<'py>(
         d.set_item("long_short_p_nonoverlap", h.long_short_p_nonoverlap)?;
         d.set_item("long_short_n_independent", h.long_short_n_independent)?;
         d.set_item("long_short_n", h.long_short_n)?;
+        d.set_item("rebalance_turnover_top", h.rebalance_turnover_top)?;
+        d.set_item("rebalance_turnover_bottom", h.rebalance_turnover_bottom)?;
+        d.set_item("breakeven_cost_bps_per_side", h.breakeven_cost_bps_per_side)?;
+        if r.cost_bps_per_side.is_some() {
+            d.set_item("long_short_net", array1(py, h.long_short_net))?;
+            d.set_item("long_short_net_mean", h.long_short_net_mean)?;
+            d.set_item("long_short_net_t_nonoverlap", h.long_short_net_t_nonoverlap)?;
+            d.set_item("long_short_net_p_nonoverlap", h.long_short_net_p_nonoverlap)?;
+            d.set_item("long_short_net_n_independent", h.long_short_net_n_independent)?;
+        }
         by_h.set_item(h.horizon, d)?;
     }
     out.set_item("horizons", by_h)?;

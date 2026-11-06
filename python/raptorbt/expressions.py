@@ -1299,6 +1299,7 @@ def factor_report(
     lag: int = 1,
     min_names: int = 10,
     jump_ratio: float = 1.5,
+    cost_bps_per_side: float | None = None,
     instruments: Sequence[str] | None = None,
     present: Any = None,
     bar_stamp: str | None = None,
@@ -1316,7 +1317,27 @@ def factor_report(
     The forward return of a signal date starts ``lag`` bars later (default 1: a signal computed
     at a close cannot trade that close) and runs ``h`` bars: ``price[d + lag + h] / price[d +
     lag] - 1``. Forward returns exist only here and never feed an expression. **No costs are
-    charged**: the result says ``no_costs: True``, and every spread is gross.
+    charged** unless ``cost_bps_per_side`` is given: the result says ``no_costs: True``, and
+    every spread is gross.
+
+    **Net of a flat cost.** With ``cost_bps_per_side`` (a rate, ``c = bps / 10000``) each horizon
+    also carries ``long_short_net`` (per signal date), ``long_short_net_mean`` and
+    ``long_short_net_t_nonoverlap`` (the headline t, every ``h``-th date; with
+    ``long_short_net_p_nonoverlap`` and ``long_short_net_n_independent``), and ``cost_formula``
+    says how. The portfolio is rebalanced every ``h`` bars into the top and bottom quantile at
+    unit notional each, so the spread is its ``h``-bar return, and a share ``T`` of each leg's
+    names (turnover between the buckets of dates ``d - h`` and ``d``) is sold and replaced, two
+    sides each: ``cost_d = 2 * c * (T_top + T_bottom)``, ``net_d = long_short_d - cost_d``, both
+    legs, entry and exit; the first ``h`` dates have no earlier bucket and are NaN.
+    ``breakeven_cost_bps_per_side`` (with ``rebalance_turnover_top`` and
+    ``rebalance_turnover_bottom``, always given) is the rate at which the mean net spread is
+    zero: ``mean(long_short) / (2 (mean T_top + mean T_bottom))`` in basis points, ``inf`` when
+    nothing turns over and the spread is positive. It is the number to read first: **a signal
+    whose breakeven is below the costs it will pay is not a strategy.** This approximates the
+    fees by one flat per-side rate, not the broker's schedule: a schedule has minimums, charges
+    that differ by side and by product, and slippage that depends on size and time, none of which
+    a turnover share can know; and it assumes the whole bucket is traded, so a holding rule that
+    trades less pays less. Use it to rule a signal out, then price the survivors in a backtest.
 
     Returns a dict. Per horizon (``result["horizons"][h]``): ``ic`` (rank IC per date, NaN
     where not scored), ``ic_mean``, ``ic_std``, ``hit_rate`` (share of scored dates with IC > 0),
@@ -1364,6 +1385,20 @@ def factor_report(
     q = _count("quantiles", quantiles, 2, op)
     lg = _count("lag", lag, 0, op)
     mn = _count("min_names", min_names, 2, op)
+    if cost_bps_per_side is not None and (
+        isinstance(cost_bps_per_side, bool)
+        or not isinstance(cost_bps_per_side, numbers.Real)
+        or not math.isfinite(cost_bps_per_side)
+        or cost_bps_per_side < 0
+    ):
+        raise _refuse(
+            "invalid_parameter",
+            f"cost_bps_per_side must be a number of at least 0, got {cost_bps_per_side!r}",
+            operation=op,
+            parameter="cost_bps_per_side",
+            value=cost_bps_per_side if isinstance(cost_bps_per_side, (int, float, str)) else repr(cost_bps_per_side),
+            valid=["a number of at least 0, e.g. 10 (basis points per side)", "None: no costs"],
+        )
     if (
         isinstance(jump_ratio, bool)
         or not isinstance(jump_ratio, numbers.Real)
@@ -1410,7 +1445,10 @@ def factor_report(
                 operation=op,
                 parameter=name,
             )
-    result = _raptorbt.factor_report_native(panel, px, hs, q, lg, mn, float(jump_ratio))
+    result = _raptorbt.factor_report_native(
+        panel, px, hs, q, lg, mn, float(jump_ratio),
+        None if cost_bps_per_side is None else float(cost_bps_per_side),
+    )
     flags: list[str] = []
     names = list(instruments) if instruments is not None else None
     if names is not None and len(names) != result["n_assets"]:
@@ -1446,8 +1484,26 @@ def factor_report(
         "survivorship: names that leave (missing or non-positive exit price) are dropped from "
         "the window, not counted as losses; no delisting return is assumed",
         "the headline t is t_nonoverlap (every h-th date); t_hac still over-rejects at h > 1",
-        "no costs of any kind; every spread is gross",
     ]
+    if cost_bps_per_side is None:
+        result["assumptions"].append("no costs of any kind; every spread is gross")
+    else:
+        result["cost_formula"] = (
+            "net_d = long_short_d - 2 * c * (T_top_d + T_bottom_d), c = cost_bps_per_side / 10000; "
+            "T is the share of a leg's names replaced between rebalances h bars apart; both legs, "
+            "entry and exit"
+        )
+        result["assumptions"].append(
+            f"a flat {cost_bps_per_side:g} bps per side on the traded share of both legs: not "
+            "the broker's schedule, no slippage model, no capacity; use it to rule a signal out"
+        )
+        for h, rep in result["horizons"].items():
+            be = rep["breakeven_cost_bps_per_side"]
+            if be < cost_bps_per_side:
+                flags.append(
+                    f"horizon {h}: breakeven {be:.3g} bps per side is below the {cost_bps_per_side:g} "
+                    "bps charged: the signal does not pay its costs"
+                )
     return {**meta, **result}
 
 

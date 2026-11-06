@@ -2489,6 +2489,7 @@ def factor_report_native(
     lag: int,
     min_names: int,
     jump_ratio: float,
+    cost_bps_per_side: float | None,
 ) -> dict[str, Any]: ...
 
 # --- Statistics --------------------------------------------------------------

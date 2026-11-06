@@ -30,8 +30,27 @@
 //! turnover of each quantile (the share of the previous date's bucket that is not in the same
 //! bucket now), and the coverage per date.
 //!
-//! No costs of any kind are charged: `no_costs` is true in the report, and a spread here is a
-//! gross figure.
+//! No costs are charged unless the caller gives `cost_bps_per_side`: `no_costs` is then true in
+//! the report and a spread is a gross figure.
+//!
+//! # Net of a flat cost
+//!
+//! The portfolio is rebalanced every `h` bars into the top and the bottom bucket, each held at
+//! unit notional, so the signal-date spread is its `h`-bar return. Between two rebalances `h`
+//! bars apart a share `T` of a bucket's names is replaced (`T` is [`bucket_turnover`] between the
+//! buckets of date `d - h` and date `d`: the share of the earlier bucket not in the same bucket
+//! now). Each replaced name is sold and a new one bought: two sides. With a flat rate `c` per
+//! side the cost of date `d` is
+//!
+//! `cost_d = 2 c (T_top,d + T_bottom,d)`, `long_short_net_d = long_short_d - cost_d`,
+//!
+//! both legs, entry and exit, in the units of the spread. The first `h` dates have no earlier
+//! bucket and are NaN. The breakeven rate is the `c` at which the mean net spread is zero over
+//! the dates that have both: `mean(long_short) / (2 (mean T_top + mean T_bottom))`, in basis
+//! points; it needs no cost from the caller. This approximates a broker's fee schedule by one
+//! flat per-side rate (no minimums, no taxes that differ by side, no market impact, no capacity)
+//! and assumes the buckets are the whole portfolio; a strategy with a holding rule that trades
+//! less than the buckets do pays less.
 //!
 //! # What the prices must be
 //!
@@ -67,6 +86,8 @@ pub struct FactorParams {
     pub lag: usize,
     pub min_names: usize,
     pub jump_ratio: f64,
+    /// A flat cost per side in basis points; `None` charges nothing (`no_costs`).
+    pub cost_bps_per_side: Option<f64>,
 }
 
 impl Default for FactorParams {
@@ -77,6 +98,7 @@ impl Default for FactorParams {
             lag: 1,
             min_names: DEFAULT_MIN_NAMES,
             jump_ratio: DEFAULT_JUMP_RATIO,
+            cost_bps_per_side: None,
         }
     }
 }
@@ -117,6 +139,23 @@ fn independent_t(v: &[f64], step: usize) -> Independent {
     Independent { t, p: t_two_sided_p(t, nf - 1.0).unwrap_or(f64::NAN), n }
 }
 
+/// The share of the names in `bucket` at the earlier date that are not in it at the later one;
+/// NaN when the earlier bucket is empty.
+fn bucket_turnover(prev: &[f64], cur: &[f64], q: usize, bucket: usize) -> f64 {
+    let (mut before, mut kept) = (0usize, 0usize);
+    for (p, c) in prev.iter().zip(cur) {
+        if p.is_finite() && bucket_of(*p, q) == bucket {
+            before += 1;
+            kept += usize::from(c.is_finite() && bucket_of(*c, q) == bucket);
+        }
+    }
+    if before == 0 {
+        f64::NAN
+    } else {
+        1.0 - kept as f64 / before as f64
+    }
+}
+
 /// One forward horizon.
 #[derive(Debug, Clone)]
 pub struct HorizonReport {
@@ -153,6 +192,20 @@ pub struct HorizonReport {
     pub long_short_p_nonoverlap: f64,
     pub long_short_n_independent: usize,
     pub long_short_n: usize,
+    /// Mean turnover of the top and the bottom bucket between rebalances `horizon` bars apart,
+    /// over the dates that have a spread and both turnovers.
+    pub rebalance_turnover_top: f64,
+    pub rebalance_turnover_bottom: f64,
+    /// Cost per side at which the mean net spread is zero, in basis points (see the module
+    /// header). `INFINITY` when the spread is positive and nothing turns over; NaN when no date
+    /// has both a spread and turnovers, or the spread is zero and nothing turns over.
+    pub breakeven_cost_bps_per_side: f64,
+    /// Spread less cost per signal date; empty without a cost.
+    pub long_short_net: Vec<f64>,
+    pub long_short_net_mean: f64,
+    pub long_short_net_t_nonoverlap: f64,
+    pub long_short_net_p_nonoverlap: f64,
+    pub long_short_net_n_independent: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -163,10 +216,11 @@ pub struct FactorReport {
     pub quantiles: usize,
     pub min_names: usize,
     pub jump_ratio: f64,
+    pub cost_bps_per_side: Option<f64>,
     /// One-bar price moves beyond `jump_ratio`, in date order (at most the first 50 listed).
     pub big_moves: Vec<BigMove>,
     pub big_move_count: usize,
-    /// Always true: nothing here charges a cost.
+    /// True unless `cost_bps_per_side` was given: then every spread without `net` is gross.
     pub no_costs: bool,
     /// Names with a finite factor value and a finite positive price, per date.
     pub names: Vec<f64>,
@@ -230,8 +284,10 @@ pub fn factor_report(
     n_assets: usize,
     params: &FactorParams,
 ) -> Result<FactorReport, StatsError> {
-    let FactorParams { horizons, quantiles, lag, min_names, jump_ratio } = params;
+    let FactorParams { horizons, quantiles, lag, min_names, jump_ratio, cost_bps_per_side } =
+        params;
     let (quantiles, lag, min_names, jump_ratio) = (*quantiles, *lag, *min_names, *jump_ratio);
+    let cost_bps_per_side = *cost_bps_per_side;
     let (n, m) = (n_dates, n_assets);
     let invalid = |s: String| StatsError::Invalid(s);
     if horizons.is_empty() || horizons.contains(&0) {
@@ -245,6 +301,11 @@ pub fn factor_report(
     }
     if !(jump_ratio.is_finite() && jump_ratio > 1.0) {
         return Err(invalid(format!("jump_ratio must be a number above 1, got {jump_ratio}")));
+    }
+    if cost_bps_per_side.is_some_and(|c| !(c.is_finite() && c >= 0.0)) {
+        return Err(invalid(format!(
+            "cost_bps_per_side must be a number of at least 0, got {cost_bps_per_side:?}"
+        )));
     }
     if factor.len() != n * m || prices.len() != n * m {
         return Err(invalid(format!(
@@ -408,6 +469,42 @@ pub fn factor_report(
             })
             .collect();
         let (ls_mean, ls_n) = mean_of(&spread);
+        // cost between rebalances h bars apart: both legs, each replaced name sold and bought
+        let mut cost_base = vec![f64::NAN; n]; // T_top + T_bottom
+        let (mut sum_top, mut sum_bot, mut sum_spread, mut both) = (0.0, 0.0, 0.0, 0usize);
+        for d in h..n {
+            let (cur, prev) = (&u_all[d * m..(d + 1) * m], &u_all[(d - h) * m..(d - h + 1) * m]);
+            let top = bucket_turnover(prev, cur, quantiles, quantiles - 1);
+            let bottom = bucket_turnover(prev, cur, quantiles, 0);
+            if top.is_finite() && bottom.is_finite() {
+                cost_base[d] = top + bottom;
+                if spread[d].is_finite() {
+                    sum_top += top;
+                    sum_bot += bottom;
+                    sum_spread += spread[d];
+                    both += 1;
+                }
+            }
+        }
+        let (rebalance_turnover_top, rebalance_turnover_bottom, breakeven) = if both == 0 {
+            (f64::NAN, f64::NAN, f64::NAN)
+        } else {
+            let k = both as f64;
+            let (mean_spread, turn) = (sum_spread / k, (sum_top + sum_bot) / k);
+            let be = if turn > 0.0 {
+                mean_spread / (2.0 * turn) * 1e4
+            } else if mean_spread > 0.0 {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            };
+            (sum_top / k, sum_bot / k, be)
+        };
+        let net: Vec<f64> = match cost_bps_per_side {
+            Some(bps) => (0..n).map(|d| spread[d] - 2.0 * bps * 1e-4 * cost_base[d]).collect(),
+            None => Vec::new(),
+        };
+        let net_ind = independent_t(&net, h);
         let ic_ind = independent_t(&daily, h);
         let ls_ind = independent_t(&spread, h);
         reports.push(HorizonReport {
@@ -437,6 +534,14 @@ pub fn factor_report(
             long_short_t_nonoverlap: ls_ind.t,
             long_short_p_nonoverlap: ls_ind.p,
             long_short_n_independent: ls_ind.n,
+            rebalance_turnover_top,
+            rebalance_turnover_bottom,
+            breakeven_cost_bps_per_side: breakeven,
+            long_short_net_mean: mean_of(&net).0,
+            long_short_net_t_nonoverlap: net_ind.t,
+            long_short_net_p_nonoverlap: net_ind.p,
+            long_short_net_n_independent: if net.is_empty() { 0 } else { net_ind.n },
+            long_short_net: net,
             long_short: spread,
             long_short_mean: ls_mean,
             long_short_n: ls_n,
@@ -450,9 +555,10 @@ pub fn factor_report(
         quantiles,
         min_names,
         jump_ratio,
+        cost_bps_per_side,
         big_moves,
         big_move_count,
-        no_costs: true,
+        no_costs: cost_bps_per_side.is_none(),
         names,
         coverage,
         autocorr_mean: mean_of(&autocorr).0,
@@ -533,6 +639,66 @@ mod tests {
         assert_eq!(h.names_left_total, 5);
         let at: Vec<usize> = (0..80).filter(|d| h.names_left[*d] > 0.0).collect();
         assert_eq!(at, vec![44, 45, 46, 47, 48]);
+    }
+
+    /// Ten names on flat prices that step at row 42 (name `a` to `100 (1 + a / 100)`): the only
+    /// spread is date 40's, `mean(5..9) / 100 - mean(0..4) / 100 = 0.05`. The factor reverses its
+    /// order every date, so with two buckets of five every name changes bucket at every date:
+    /// turnover 1 on both legs, and at 10 bps a side the cost is `2 * 0.001 * (1 + 1) = 0.004`.
+    #[test]
+    fn net_of_cost_by_hand_with_full_turnover() {
+        let (n, m) = (80, 10);
+        let mut p = vec![100.0; n * m];
+        let mut f = vec![0.0; n * m];
+        for d in 0..n {
+            for a in 0..m {
+                if d >= 42 {
+                    p[d * m + a] = 100.0 * (1.0 + a as f64 / 100.0);
+                }
+                f[d * m + a] = if d % 2 == 0 { a as f64 } else { (m - 1 - a) as f64 };
+            }
+        }
+        let gross = FactorParams { horizons: vec![1], quantiles: 2, ..FactorParams::default() };
+        let r = factor_report(&f, &p, n, m, &gross).unwrap();
+        assert!(r.no_costs && r.cost_bps_per_side.is_none());
+        let h = &r.horizons[0];
+        assert!(h.long_short_net.is_empty());
+        assert!((h.long_short[40] - 0.05).abs() < 1e-12);
+        assert!((h.rebalance_turnover_top - 1.0).abs() < 1e-12);
+        assert!((h.rebalance_turnover_bottom - 1.0).abs() < 1e-12);
+        // spread dates 1..=77 have a turnover (date 0 has no earlier bucket): mean spread
+        // 0.05 / 77, breakeven 0.05 / 77 / (2 * 2) = 1.6234 bps
+        assert!((h.breakeven_cost_bps_per_side - 1e4 * 0.05 / (77.0 * 4.0)).abs() < 1e-9);
+
+        let priced = FactorParams { cost_bps_per_side: Some(10.0), ..gross };
+        let r = factor_report(&f, &p, n, m, &priced).unwrap();
+        assert!(!r.no_costs);
+        let h = &r.horizons[0];
+        assert!((h.long_short_net[40] - 0.046).abs() < 1e-12);
+        assert!((h.long_short_net[41] + 0.004).abs() < 1e-12);
+        assert!(h.long_short_net[0].is_nan());
+        assert!(h.long_short_net_t_nonoverlap.is_finite());
+        // net mean = gross mean over dates 1..=77 less 0.004
+        assert!((h.long_short_net_mean - (0.05 / 77.0 - 0.004)).abs() < 1e-12);
+        let bad = FactorParams { cost_bps_per_side: Some(-1.0), ..FactorParams::default() };
+        assert!(matches!(factor_report(&f, &p, n, m, &bad), Err(StatsError::Invalid(_))));
+    }
+
+    /// A static factor never changes bucket: nothing is paid, net equals gross, and a positive
+    /// spread has an unbounded breakeven.
+    #[test]
+    fn a_static_factor_pays_nothing_and_breaks_even_at_infinity() {
+        let (f, p) = ladder(80, 20);
+        let params = FactorParams { cost_bps_per_side: Some(50.0), ..FactorParams::default() };
+        let r = factor_report(&f, &p, 80, 20, &params).unwrap();
+        for h in &r.horizons {
+            assert_eq!(h.breakeven_cost_bps_per_side, f64::INFINITY);
+            for d in 0..80 {
+                if h.long_short[d].is_finite() && h.long_short_net[d].is_finite() {
+                    assert_eq!(h.long_short_net[d], h.long_short[d]);
+                }
+            }
+        }
     }
 
     #[test]

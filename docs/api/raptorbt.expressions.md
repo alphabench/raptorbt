@@ -426,7 +426,7 @@ character offset), ``snippet`` (the line with a caret) and ``valid`` (the closes
 *function*
 
 ```python
-factor_report(factor: 'Any', prices: 'Any', horizons: 'Sequence[int]' = (1, 5, 20), quantiles: 'int' = 5, *, lag: 'int' = 1, min_names: 'int' = 10, jump_ratio: 'float' = 1.5, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'dict[str, Any]'
+factor_report(factor: 'Any', prices: 'Any', horizons: 'Sequence[int]' = (1, 5, 20), quantiles: 'int' = 5, *, lag: 'int' = 1, min_names: 'int' = 10, jump_ratio: 'float' = 1.5, cost_bps_per_side: 'float | None' = None, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'dict[str, Any]'
 ```
 
 Score a factor against the returns that follow it.
@@ -439,7 +439,27 @@ price panel, or such a dict holding ``"close"``.
 The forward return of a signal date starts ``lag`` bars later (default 1: a signal computed
 at a close cannot trade that close) and runs ``h`` bars: ``price[d + lag + h] / price[d +
 lag] - 1``. Forward returns exist only here and never feed an expression. **No costs are
-charged**: the result says ``no_costs: True``, and every spread is gross.
+charged** unless ``cost_bps_per_side`` is given: the result says ``no_costs: True``, and
+every spread is gross.
+
+**Net of a flat cost.** With ``cost_bps_per_side`` (a rate, ``c = bps / 10000``) each horizon
+also carries ``long_short_net`` (per signal date), ``long_short_net_mean`` and
+``long_short_net_t_nonoverlap`` (the headline t, every ``h``-th date; with
+``long_short_net_p_nonoverlap`` and ``long_short_net_n_independent``), and ``cost_formula``
+says how. The portfolio is rebalanced every ``h`` bars into the top and bottom quantile at
+unit notional each, so the spread is its ``h``-bar return, and a share ``T`` of each leg's
+names (turnover between the buckets of dates ``d - h`` and ``d``) is sold and replaced, two
+sides each: ``cost_d = 2 * c * (T_top + T_bottom)``, ``net_d = long_short_d - cost_d``, both
+legs, entry and exit; the first ``h`` dates have no earlier bucket and are NaN.
+``breakeven_cost_bps_per_side`` (with ``rebalance_turnover_top`` and
+``rebalance_turnover_bottom``, always given) is the rate at which the mean net spread is
+zero: ``mean(long_short) / (2 (mean T_top + mean T_bottom))`` in basis points, ``inf`` when
+nothing turns over and the spread is positive. It is the number to read first: **a signal
+whose breakeven is below the costs it will pay is not a strategy.** This approximates the
+fees by one flat per-side rate, not the broker's schedule: a schedule has minimums, charges
+that differ by side and by product, and slippage that depends on size and time, none of which
+a turnover share can know; and it assumes the whole bucket is traded, so a holding rule that
+trades less pays less. Use it to rule a signal out, then price the survivors in a backtest.
 
 Returns a dict. Per horizon (``result["horizons"][h]``): ``ic`` (rank IC per date, NaN
 where not scored), ``ic_mean``, ``ic_std``, ``hit_rate`` (share of scored dates with IC > 0),

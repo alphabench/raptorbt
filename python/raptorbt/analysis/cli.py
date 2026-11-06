@@ -110,6 +110,7 @@ def _parser() -> argparse.ArgumentParser:
     fa.add_argument("--quantiles", type=int, default=5)
     fa.add_argument("--lag", type=int, default=1, help="bars between the signal and the start of its return (default 1)")
     fa.add_argument("--min-names", type=int, default=10)
+    fa.add_argument("--cost-bps-per-side", type=float, default=None, help="a flat cost per side in basis points: net long-short and its t beside the gross (default: none charged)")
     fa.add_argument("--use", help="which loaded panel (default: the newest)")
 
     x = sessioned(sub.add_parser("export", help="write a handle's series to .csv, .npy or .npz"))
@@ -348,7 +349,7 @@ def _factor(a: argparse.Namespace) -> Any:
         ) from None
     return _with_session(
         a, lambda s: s.factor(a.target, horizons=horizons, quantiles=a.quantiles, lag=a.lag,
-                              min_names=a.min_names, data=a.use),
+                              min_names=a.min_names, cost_bps_per_side=a.cost_bps_per_side, data=a.use),
     )
 
 
