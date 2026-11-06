@@ -365,6 +365,16 @@ impl PyIndicator {
     #[staticmethod]
     #[pyo3(signature = (program, output=0))]
     fn expr(program: &PyExprProgram, output: usize) -> PyResult<Self> {
+        if program.is_cross_sectional() {
+            return Err(Fail::new(
+                "expr_unsupported_here",
+                "this expression is cross-sectional: it has a value only over a panel \
+                 (Expr.eval_panel), and sealing one on the indicator bank is not supported yet",
+            )
+            .op("Indicator.expr")
+            .param("expression")
+            .into());
+        }
         let id = program.intern().map_err(PyErr::from)?;
         let spec = IndSpec::expr(id, output).map_err(|e| {
             PyErr::from(

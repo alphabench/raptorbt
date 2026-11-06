@@ -10,7 +10,7 @@ use std::cell::Cell;
 use raptorbt::data::BarStamp;
 use raptorbt::quant::eval::{Bar, ClockCtx, Plan, Stream};
 use raptorbt::quant::lang::{compile, Env};
-use raptorbt::quant::registry::{all, Domain, FnDef, ParamKind, ParamVal};
+use raptorbt::quant::registry::{all, Domain, Family, FnDef, ParamKind, ParamVal};
 use raptorbt::runtime::exprs::{self, ExprCore};
 
 struct Counting;
@@ -228,6 +228,11 @@ fn every_registered_function_updates_without_allocating() {
     let unit = rough_bars(4200, true);
     let (mut checked, mut failures) = (0usize, Vec::new());
     for def in all() {
+        // A cross-sectional function has a value only over a panel and is not a bank cell: it
+        // is sealed on the bank in the next slice (3.4), and these checks join it there.
+        if def.family == Family::Cross {
+            continue;
+        }
         let (src, _, plan) = match plan_of(def) {
             Ok(x) => x,
             Err(e) => {
@@ -264,6 +269,11 @@ fn every_registered_function_updates_without_allocating() {
 fn every_registered_function_reports_the_heap_it_holds() {
     let (mut checked, mut failures) = (0usize, Vec::new());
     for def in all() {
+        // A cross-sectional function has a value only over a panel and is not a bank cell: it
+        // is sealed on the bank in the next slice (3.4), and these checks join it there.
+        if def.family == Family::Cross {
+            continue;
+        }
         let (src, program, plan) = match plan_of(def) {
             Ok(x) => x,
             Err(e) => {

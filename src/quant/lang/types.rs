@@ -1,9 +1,10 @@
 //! Types and the checker: AST against the registry, building the DAG as it goes.
 //!
 //! `Ty` carries shape, element and clock from the start so the cross-sectional (`Panel`) and
-//! multi-timeframe (`Clock::Tf`) slices add rules, not fields. Today only `Scalar`/`Series`,
-//! `F64`/`Bool` and `Base` are produced; a `Panel` input is accepted from an environment
-//! handle and propagates.
+//! multi-timeframe (`Clock::Tf`) slices add rules, not fields. A call of a `cross`-family
+//! function is a `Panel` (its inputs must not be constants), and a `Panel` propagates through
+//! everything that reads it: time-series kernels lift per column. A cross-sectional function
+//! inside `at(...)` is refused.
 //!
 //! `at(tf, body)` checks `body` in a checker of its own with its own DAG, so the body's `close`
 //! is the window's close and shares no node with the outside; the `at` node itself is a series
@@ -17,7 +18,7 @@ use super::dag::{BinOp, Dag, Field, NodeId, UnOp};
 use super::parser::{Expr, ExprKind};
 use super::{canon, suggest, ErrorCode, ExprError, Program, MAX_PERIOD};
 use crate::quant::fns::at as at_fn;
-use crate::quant::registry::{self, FnDef, OutKind, ParamDef, ParamKind, ParamVal};
+use crate::quant::registry::{self, Family, FnDef, OutKind, ParamDef, ParamKind, ParamVal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Shape {
@@ -299,6 +300,17 @@ impl Checker<'_> {
                 .err(ErrorCode::UnknownFunction, e.start, format!("unknown function `{name}`"))
                 .with_valid(suggest(name, registry::all().map(|d| d.name))));
         };
+        let cross = def.family == Family::Cross;
+        if cross && self.in_at {
+            return Err(self.err(
+                ErrorCode::UnsupportedHere,
+                e.start,
+                format!(
+                    "`{name}` is cross-sectional (it needs every name of a date); `at(...)` \
+                     evaluates one instrument's bars, so it cannot hold it"
+                ),
+            ));
+        }
         let sig = signature(def);
         let classified: Vec<Arg> = args.iter().map(|a| self.arg(a)).collect::<Result<_, _>>()?;
         let (n_in, n_p) = (def.inputs.len(), def.params.len());
@@ -357,6 +369,21 @@ impl Checker<'_> {
             }
         }
 
+        if cross {
+            // A cross-section needs names to compare: a constant has none.
+            for (k, &i) in inputs.iter().enumerate() {
+                if self.dag.node(i).ty.shape == Shape::Scalar {
+                    let at = args.get(k).map_or(e.start, |a| a.start);
+                    return Err(self.type_err(
+                        at,
+                        format!(
+                            "input `{}` of `{name}` must be a series or a panel, found a number",
+                            def.inputs[k].name
+                        ),
+                    ));
+                }
+            }
+        }
         let mut joined: Option<Ty> = None;
         for &i in &inputs {
             let t = self.dag.node(i).ty.clone();
@@ -366,7 +393,7 @@ impl Checker<'_> {
             });
         }
         let mut ty = joined.unwrap_or_else(Ty::series);
-        ty.shape = ty.shape.max(Shape::Series);
+        ty.shape = if cross { Shape::Panel } else { ty.shape.max(Shape::Series) };
         ty.elem = if def.out_kind == OutKind::Bool { Elem::Bool } else { Elem::F64 };
         let id = self.dag.call(def, params, inputs, ty);
         Ok(Checked { id, call: Some(def) })

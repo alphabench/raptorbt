@@ -957,6 +957,16 @@ class IndicatorsView:
             compiled = expression
         else:
             compiled = Expr(expression, params)
+        if compiled.is_panel:
+            raise errors.make(
+                "expr_unsupported_here",
+                "this expression is cross-sectional (rank, zscore_xs, ...): it has a value only "
+                "over a panel of names, so evaluate it with Expr.eval_panel; registering one on "
+                "the indicator bank is not supported yet",
+                operation="ctx.indicators.expr",
+                parameter="expression",
+                valid=["a per-instrument expression"],
+            )
         names = tuple(compiled.outputs)
         if output is None and len(names) > 1:
             raise errors.make(

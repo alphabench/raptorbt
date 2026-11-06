@@ -2388,7 +2388,14 @@ def capabilities_json() -> str: ...
 class ExprProgram:
     """A compiled expression. See ``raptorbt.expressions``."""
 
-    def __init__(self, source: str, params: dict[str, float] | None = None) -> None: ...
+    def __init__(
+        self,
+        source: str,
+        params: dict[str, float] | None = None,
+        groups: list[str] | None = None,
+    ) -> None: ...
+    @property
+    def is_panel(self) -> bool: ...
     @property
     def source(self) -> str: ...
     @property
@@ -2421,6 +2428,15 @@ class ExprProgram:
         session: SessionSchedule | None = ...,
         bar_ns: int | None = ...,
     ) -> list[_F64]: ...
+    def eval_panel(
+        self,
+        data: dict[str, Any],
+        present: Any = ...,
+        bar_stamp: str | None = ...,
+        tz_offset_ns: int = ...,
+        session: SessionSchedule | None = ...,
+        bar_ns: int | None = ...,
+    ) -> list[Any]: ...
     def stream(
         self,
         bar_stamp: str | None = ...,
@@ -2443,6 +2459,14 @@ class ExprStream:
     def reset(self) -> None: ...
 
 def expr_registry_json() -> str: ...
+def factor_report_native(
+    factor: Any,
+    prices: Any,
+    horizons: list[int],
+    quantiles: int,
+    lag: int,
+    min_names: int,
+) -> dict[str, Any]: ...
 
 # --- Statistics --------------------------------------------------------------
 # Natives behind ``raptorbt.stats``: arrays in, a dict of full-precision results out. The

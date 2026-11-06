@@ -73,6 +73,10 @@ pub enum NanRule {
     Windowed,
     /// NaN on a NaN input without advancing state: the bar behaves as absent.
     Recursive,
+    /// A cross-sectional function: the output of a name at a date depends on every name of that
+    /// date and on no other date. A NaN input gives NaN at that name and drops it from the
+    /// comparison of the others on its date, and nowhere else.
+    CrossSection,
 }
 
 impl NanRule {
@@ -83,6 +87,7 @@ impl NanRule {
             NanRule::Delayed => "delayed",
             NanRule::Windowed => "windowed",
             NanRule::Recursive => "recursive",
+            NanRule::CrossSection => "cross_section",
         }
     }
 }

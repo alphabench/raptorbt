@@ -166,6 +166,12 @@ impl Program {
         self.dag.nodes().iter().any(|n| matches!(n.op, Op::At { .. }))
     }
 
+    /// Whether the program has a cross-sectional call, so it has a value only over a panel
+    /// (`Expr.eval_panel`): its root, or something under it, is a `Panel`.
+    pub fn is_panel(&self) -> bool {
+        self.dag.nodes().iter().any(|n| n.ty.shape == Shape::Panel)
+    }
+
     /// The warm-up of each clock: `("base", n)` first, then one entry per `at` timeframe with
     /// the most bars of that timeframe any body of it needs before it is known.
     pub fn clock_warmups(&self) -> Vec<(String, usize)> {

@@ -2,6 +2,7 @@
 //! a time, the causal window primitives they share, and the registry that names them.
 
 pub mod eval;
+pub mod factor;
 pub mod fns;
 pub mod kernel;
 pub mod lang;

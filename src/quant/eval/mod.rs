@@ -10,9 +10,11 @@
 //! Values are finite or NaN. Booleans are `1.0`, `0.0` or NaN (unknown) with Kleene logic.
 
 mod batch;
+pub mod panel;
 mod stream;
 
 pub use batch::{eval, eval_many};
+pub use panel::{eval_panel, PanelInputs, PanelPlan};
 pub use stream::Stream;
 
 use std::collections::BTreeMap;
@@ -21,7 +23,7 @@ use std::sync::Arc;
 
 use super::fns::at::AtState;
 use super::kernel::Node as KernelNode;
-use super::lang::{BinOp, Clock, Field, Op, Program, Shape, UnOp};
+use super::lang::{BinOp, Clock, Field, NodeId, Op, Program, Shape, UnOp};
 use super::registry::{FnDef, ParamVal};
 use crate::core::session_schedule::SessionSchedule;
 use crate::data::{BarSpec, BarStamp};
@@ -553,6 +555,15 @@ pub struct Plan {
 
 impl Plan {
     pub fn new(program: &Program) -> Result<Plan, EvalError> {
+        Self::with_outputs(program, &program.outputs())
+    }
+
+    /// A plan whose outputs are `outs` (node, output index) rather than the program's root: the
+    /// panel evaluator hands each time-series phase to the same planner this way.
+    pub(crate) fn with_outputs(
+        program: &Program,
+        outs: &[(NodeId, u8)],
+    ) -> Result<Plan, EvalError> {
         let nodes = program.dag.nodes();
         let mut reg_of = vec![0usize; nodes.len()];
         let mut n_regs = 0;
@@ -565,7 +576,8 @@ impl Plan {
         for (id, node) in nodes.iter().enumerate() {
             if node.ty.shape == Shape::Panel || node.ty.clock != Clock::Base {
                 return Err(EvalError::Unsupported(format!(
-                    "node {id} is a panel or on another clock"
+                    "node {id} is a panel or on another clock; a panel expression runs through \
+                     Expr.eval_panel"
                 )));
             }
             if let Op::Out { call, index } = &node.op {
@@ -625,7 +637,7 @@ impl Plan {
         }
 
         let out_regs: Vec<usize> =
-            program.outputs().iter().map(|(id, i)| reg_of[*id] + *i as usize).collect();
+            outs.iter().map(|(id, i)| reg_of[*id] + *i as usize).collect();
         let (locs, n_slots) = assign_locs(&steps, n_regs, &out_regs);
         Ok(Plan {
             d: Arc::new(PlanData {
@@ -636,7 +648,7 @@ impl Plan {
                 locs,
                 n_slots,
                 out_regs,
-                warm: program.warmup(),
+                warm: outs.iter().map(|(id, _)| nodes[*id].warm).max().unwrap_or(0),
                 n_calls,
                 ats,
             }),

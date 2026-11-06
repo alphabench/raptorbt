@@ -494,4 +494,6 @@ def test_the_root_exports_expr_and_col_and_the_rest_lives_in_the_module():
     assert rb.expr is rb.expressions.expr and rb.col is rb.expressions.col
     assert {"expr", "col"} <= set(rb.__all__)
     assert not {"Expr", "ExprStream", "functions", "describe"} & set(rb.__all__)
-    assert set(rb.expressions.__all__) == {"Expr", "ExprStream", "col", "describe", "expr", "functions"}
+    assert set(rb.expressions.__all__) == {
+        "Expr", "ExprStream", "col", "describe", "expr", "factor_report", "functions"
+    }  # fmt: skip

@@ -20,6 +20,13 @@ daily bars cut from the base bars and held on the base clock, so ``close > at("1
 bar of the next day. Such an expression needs the bars' timestamps and what they mean:
 ``expr.eval({"timestamps": ts, ...}, bar_stamp="close")``.
 
+Over many names at once, ``rank(roc(close, 20))`` is a cross-sectional expression: it has a
+value only over a panel (2-D arrays, dates by names), evaluated with :meth:`Expr.eval_panel`.
+Time-series functions run per name; ``rank``, ``zscore_xs``, ``demean_xs``, ``winsorize_xs``,
+``quantile_xs``, ``count_xs`` and the ``group_*`` forms compare the names of each date. A
+name with no bar at a date is *absent*: it does not step a function, takes no rank and gets NaN.
+:func:`factor_report` scores a factor against the returns that follow it.
+
 >>> from raptorbt import col, expr
 >>> a = (col.close.sma(3) < col.close) & (col.close > 1)
 >>> b = expr("sma(close, 3) < close and close > 1")
@@ -34,13 +41,15 @@ import difflib
 import json
 import math
 import numbers
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
+
 from raptorbt import _raptorbt, errors
 
-__all__ = ["Expr", "ExprStream", "col", "describe", "expr", "functions"]
+__all__ = ["Expr", "ExprStream", "col", "describe", "expr", "factor_report", "functions"]
 
 _FIELDS = ("open", "high", "low", "close", "volume")
 _NAN = float("nan")
@@ -186,11 +195,18 @@ class Expr:
     ``x.macd().macdsignal``.
     """
 
-    __slots__ = ("_src", "_params", "_prog", "_atom", "_outputs")
+    __slots__ = ("_src", "_params", "_prog", "_atom", "_outputs", "_groups")
     #: Make NumPy defer to the reflected operators instead of broadcasting over an Expr.
     __array_ufunc__ = None
 
-    def __init__(self, source: str, params: Mapping[str, float] | None = None, *, _atom: bool = False):
+    def __init__(
+        self,
+        source: str,
+        params: Mapping[str, float] | None = None,
+        *,
+        groups: tuple[str, ...] = (),
+        _atom: bool = False,
+    ):
         if not isinstance(source, str):
             raise _refuse(
                 "expr_type",
@@ -203,7 +219,8 @@ class Expr:
         self._src = source
         self._params = bound
         self._atom = _atom
-        self._prog = _raptorbt.ExprProgram(source, bound or None)
+        self._groups = tuple(dict.fromkeys(groups))
+        self._prog = _raptorbt.ExprProgram(source, bound or None, list(self._groups) or None)
         names = self._prog.outputs
         self._outputs = tuple(names) if len(names) > 1 else ()
 
@@ -246,6 +263,18 @@ class Expr:
         return self._prog.warmup_bars(bar_ns)
 
     @property
+    def is_panel(self) -> bool:
+        """True when the expression has a cross-sectional call (``rank``, ``zscore_xs``, ...):
+        it has a value only over a panel, through :meth:`eval_panel`."""
+        return self._prog.is_panel
+
+    @property
+    def groups(self) -> tuple[str, ...]:
+        """The names of the group series the expression reads (``col.group("sector")``); give
+        each to :meth:`eval_panel` as a label per name."""
+        return self._groups
+
+    @property
     def uses_at(self) -> bool:
         """True when the expression uses ``at(...)``: evaluating it needs timestamps."""
         return self._prog.uses_at
@@ -258,7 +287,7 @@ class Expr:
     def at(self, timeframe: str) -> Expr:
         """This expression evaluated on ``timeframe`` bars and held on the base clock:
         ``col.close.sma(200).at("1d")`` is ``at("1d", sma(close, 200))``."""
-        return Expr(f"at({_quote(str(timeframe))}, {self._src})", self._params)
+        return Expr(f"at({_quote(str(timeframe))}, {self._src})", self._params, groups=self._groups)
 
     @property
     def outputs(self) -> tuple[str, ...]:
@@ -309,6 +338,49 @@ class Expr:
         cols = self._prog.evaluate(data, bar_stamp, tz_offset_ns, session, bar_ns)
         return cols[0] if len(cols) == 1 else dict(zip(self._prog.outputs, cols))
 
+    def eval_panel(
+        self,
+        data: Mapping[str, Any],
+        *,
+        instruments: Sequence[str] | None = None,
+        present: Any = None,
+        bar_stamp: str | None = None,
+        tz_offset_ns: int = 0,
+        session: Any = None,
+        bar_ns: int | None = None,
+    ):
+        """Evaluate over many names at once. Returns a 2-D float64 array ``(n_dates, n_assets)``
+        for one output, or a dict of them.
+
+        ``data`` is either
+
+        * a dict of 2-D float64 arrays, one per field (``{"close": C, "volume": V}``), all of
+          shape ``(n_dates, n_assets)``; or
+        * a mapping of instrument to its columns (``{"AAA": {"timestamps": ts, "close": c}, ...}``,
+          1-D arrays of that instrument's own bars). The bars are aligned on the sorted union of
+          the instruments' timestamps (int64 nanoseconds, each strictly increasing), a name is
+          absent at the dates it has no bar, and the rows of the result are those dates
+          (``np.unique(np.concatenate(timestamps))``). ``instruments`` selects and orders the
+          names, which otherwise follow the mapping.
+
+        Absent bars. A time-series function never sees an absent bar: it does not step, so a name
+        listed later counts its warm-up from its own first bar, and the result is NaN at the
+        dates it has no bar. A bar that is present with a NaN value does step the function. In
+        the 2-D form ``present`` (a bool array of the same shape) says which cells are bars;
+        without it a cell is absent when every field the expression reads is NaN there, so a NaN
+        close and a missing bar are the same thing unless you pass ``present``. A cross-sectional
+        function leaves absent names out of the date's comparison and gives them NaN.
+
+        A group series (``col.group("sector")``) is given in ``data`` under its name: a 2-D
+        array, or 1-D with one numeric label per name (in the mapping form, a number beside the
+        columns). An expression with ``at(...)`` reads ``data["timestamps"]`` (one int64
+        timestamp per date) and needs ``bar_stamp`` as :meth:`eval` does. The GIL is released
+        while it runs, and the numbers do not depend on the number of threads.
+        """
+        arrays, mask, _ = _panel_inputs(self, data, instruments, present, "Expr.eval_panel")
+        cols = self._prog.eval_panel(arrays, mask, bar_stamp, tz_offset_ns, session, bar_ns)
+        return cols[0] if len(cols) == 1 else dict(zip(self._prog.outputs, cols))
+
     def stream(
         self,
         *,
@@ -345,7 +417,8 @@ class Expr:
         a, b = (src, self._src), (self._src, src)
         left, right = a if flip else b
         merged = _merge(self._params, params, "Expr")
-        return Expr(f"({left} {op} {right})", merged)
+        groups = self._groups + (other._groups if isinstance(other, Expr) else ())
+        return Expr(f"({left} {op} {right})", merged, groups=groups)
 
     def __add__(self, o): return self._binary("+", o)
     def __radd__(self, o): return self._binary("+", o, flip=True)
@@ -371,7 +444,11 @@ class Expr:
         if not isinstance(other, Expr):
             return NotImplemented
         left, right = (other._src, self._src) if flip else (self._src, other._src)
-        return Expr(f"({left} {op} {right})", _merge(self._params, other._params, "Expr"))
+        return Expr(
+            f"({left} {op} {right})",
+            _merge(self._params, other._params, "Expr"),
+            groups=self._groups + other._groups,
+        )
 
     def __and__(self, o): return self._logic("and", o)
     def __rand__(self, o): return self._logic("and", o, flip=True)
@@ -379,10 +456,10 @@ class Expr:
     def __ror__(self, o): return self._logic("or", o, flip=True)
 
     def __invert__(self) -> Expr:
-        return Expr(f"(not {self._src})", self._params)
+        return Expr(f"(not {self._src})", self._params, groups=self._groups)
 
     def __neg__(self) -> Expr:
-        return Expr(f"(-{self._src})", self._params)
+        return Expr(f"(-{self._src})", self._params, groups=self._groups)
 
     def __pos__(self) -> Expr:
         return self
@@ -394,7 +471,8 @@ class Expr:
             base = object.__getattribute__(self, "_src")
             atom = object.__getattribute__(self, "_atom")
             params = object.__getattribute__(self, "_params")
-            return Expr(f"{base if atom else f'({base})'}.{name}", params)
+            groups = object.__getattribute__(self, "_groups")
+            return Expr(f"{base if atom else f'({base})'}.{name}", params, groups=groups)
         hint = f"; outputs: {', '.join(outputs)}" if outputs else ""
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}{hint}")
 
@@ -442,6 +520,7 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
 
     parts: list[str] = []
     params: dict[str, float] = {}
+    groups: tuple[str, ...] = ()
     for inp in ins:
         if inp["name"] in given:
             v = given[inp["name"]]
@@ -455,6 +534,7 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
                 )
             parts.append(v._src)
             params = _merge(params, v._params, op)
+            groups += v._groups
         elif inp["default_field"]:
             parts.append(inp["default_field"])
         else:
@@ -492,7 +572,7 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
                 valid=["a number, or a string for an enumerated parameter"],
             ) from None
         parts.append(text)
-    return Expr(f"{name}({', '.join(parts)})", params, _atom=True)
+    return Expr(f"{name}({', '.join(parts)})", params, groups=groups, _atom=True)
 
 
 def _method(row: dict[str, Any]):
@@ -523,6 +603,21 @@ class _Col:
 
     __slots__ = ()
 
+    @staticmethod
+    def group(name: str) -> Expr:
+        """A group series supplied per name to :meth:`Expr.eval_panel` under ``name`` (a numeric
+        label such as a sector code): ``col.close.group_demean(col.group("sector"))``."""
+        if not isinstance(name, str) or not name.isidentifier() or name in _FIELDS:
+            raise _refuse(
+                "expr_type",
+                f"a group name is an identifier that is not a field, got {name!r}",
+                operation="col.group",
+                parameter="name",
+                value=name,
+                valid=["an identifier such as sector"],
+            )
+        return Expr(name, groups=(name,), _atom=True)
+
     def __repr__(self) -> str:
         return "col"
 
@@ -550,14 +645,236 @@ _SHADOWED = _install()
 col = _Col()
 
 
-def expr(source: str, params: Mapping[str, float] | None = None) -> Expr:
+def expr(
+    source: str, params: Mapping[str, float] | None = None, *, groups: Sequence[str] = ()
+) -> Expr:
     """Compile an expression from text.
 
     ``params`` binds the ``$name`` constants the text uses (``sma(close, $n)`` with
     ``params={"n": 20}``). A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
     character offset), ``snippet`` (the line with a caret) and ``valid`` (the closest names).
+
+    ``groups`` names the group series the text reads (``group_demean(x, sector)`` with
+    ``groups=["sector"]``), supplied per name to :meth:`Expr.eval_panel`.
     """
-    return Expr(source, params)
+    return Expr(source, params, groups=tuple(groups))
+
+
+# ------------------------------------------------------------------ panels
+
+
+def _panel_inputs(
+    e: Expr, data: Any, instruments: Sequence[str] | None, present: Any, operation: str,
+    extra: Sequence[str] = (),
+):
+    """``(arrays, mask, axis)`` for the native panel evaluator: 2-D fields, group labels, the
+    presence mask and (mapping form) the date axis. ``extra`` are fields to align besides the
+    ones the expression reads."""
+    if not isinstance(data, Mapping):
+        raise _refuse(
+            "invalid_input_type",
+            f"data must be a dict of 2-D arrays or a mapping of instrument to columns, got "
+            f"{type(data).__name__}",
+            operation=operation,
+            parameter="data",
+        )
+    keys = list(data)
+    nested = bool(keys) and all(isinstance(data[k], Mapping) for k in keys)
+    if not nested:
+        arrays = dict(data)
+        if instruments is not None:
+            shape = next(
+                (np.shape(arrays[f]) for f in (*_FIELDS,) if f in arrays and np.ndim(arrays[f]) == 2),
+                None,
+            )
+            if shape is not None and len(instruments) != shape[1]:
+                raise _refuse(
+                    "length_mismatch",
+                    f"{len(instruments)} instruments for panels with {shape[1]} columns",
+                    operation=operation,
+                    parameter="instruments",
+                    valid=[f"{shape[1]} names"],
+                )
+        return arrays, present, None
+
+    names = list(instruments) if instruments is not None else keys
+    missing = [n for n in names if n not in data]
+    if missing:
+        raise _refuse(
+            "invalid_input",
+            f"no columns for instrument {missing[0]!r}",
+            operation=operation,
+            parameter="instruments",
+            value=missing[0],
+            valid=keys,
+        )
+    if present is not None:
+        raise _refuse(
+            "invalid_input",
+            "`present` is derived from each instrument's timestamps in the mapping form",
+            operation=operation,
+            parameter="present",
+        )
+    need = sorted({*e.fields, *extra})
+    stamps = []
+    for n in names:
+        ts = data[n].get("timestamps")
+        if ts is None or not isinstance(ts, np.ndarray) or ts.dtype != np.int64 or ts.ndim != 1:
+            raise _refuse(
+                "missing_field",
+                f"instrument {n!r} needs 'timestamps': a 1-D int64 array of nanoseconds, to align "
+                "its bars with the other names",
+                operation=operation,
+                parameter="timestamps",
+                valid=["timestamps=<int64 array>"],
+            )
+        if len(ts) > 1 and not (np.diff(ts) > 0).all():
+            raise _refuse(
+                "invalid_input",
+                f"instrument {n!r}: timestamps must be strictly increasing",
+                operation=operation,
+                parameter="timestamps",
+            )
+        stamps.append(ts)
+    axis = np.unique(np.concatenate(stamps)) if stamps else np.empty(0, np.int64)
+    n_dates, n_assets = len(axis), len(names)
+    arrays: dict[str, Any] = {f: np.full((n_dates, n_assets), np.nan) for f in need}
+    mask = np.zeros((n_dates, n_assets), dtype=bool)
+    for j, (n, ts) in enumerate(zip(names, stamps)):
+        rows = np.searchsorted(axis, ts)
+        mask[rows, j] = True
+        for f in need:
+            col = data[n].get(f)
+            if col is None:
+                raise _refuse(
+                    "missing_field",
+                    f"instrument {n!r} lacks the column {f!r} the expression reads",
+                    operation=operation,
+                    parameter=f,
+                    valid=need,
+                )
+            col = np.asarray(col)
+            if col.dtype != np.float64 or col.shape != ts.shape:
+                raise _refuse(
+                    "invalid_array",
+                    f"instrument {n!r}: {f!r} must be a float64 array with one value per timestamp",
+                    operation=operation,
+                    parameter=f,
+                )
+            arrays[f][rows, j] = col
+    for g in e.groups:
+        try:
+            arrays[g] = np.array([float(data[n][g]) for n in names], dtype=np.float64)
+        except (KeyError, TypeError, ValueError):
+            raise _refuse(
+                "missing_field",
+                f"every instrument needs a number {g!r} (its group label)",
+                operation=operation,
+                parameter=g,
+            ) from None
+    if e.uses_at:
+        arrays["timestamps"] = axis
+    return arrays, mask, axis
+
+
+def _count(name: str, v: Any, lo: int, operation: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, numbers.Integral) or v < lo:
+        raise _refuse(
+            "invalid_parameter",
+            f"{name} must be an integer >= {lo}, got {v!r}",
+            operation=operation,
+            parameter=name,
+            value=v if isinstance(v, (int, float, str)) else repr(v),
+            valid=[f"an integer >= {lo}"],
+        )
+    return int(v)
+
+
+def factor_report(
+    factor: Any,
+    prices: Any,
+    horizons: Sequence[int] = (1, 5, 20),
+    quantiles: int = 5,
+    *,
+    lag: int = 1,
+    min_names: int = 10,
+    instruments: Sequence[str] | None = None,
+    present: Any = None,
+    bar_stamp: str | None = None,
+    tz_offset_ns: int = 0,
+    session: Any = None,
+    bar_ns: int | None = None,
+) -> dict[str, Any]:
+    """Score a factor against the returns that follow it.
+
+    ``factor`` is a 2-D float64 panel ``(n_dates, n_assets)`` or an :class:`Expr` evaluated with
+    :meth:`Expr.eval_panel` (then ``prices`` may be a dict of panels, or a mapping of instrument
+    to columns, and the expression reads from it; ``close`` is the price). ``prices`` is the
+    price panel, or such a dict holding ``"close"``.
+
+    The forward return of a signal date starts ``lag`` bars later (default 1: a signal computed
+    at a close cannot trade that close) and runs ``h`` bars: ``price[d + lag + h] / price[d +
+    lag] - 1``. Forward returns exist only here and never feed an expression. **No costs are
+    charged**: the result says ``no_costs: True``, and every spread is gross.
+
+    Returns a dict. Per horizon (``result["horizons"][h]``): ``ic`` (rank IC per date, NaN
+    where not scored), ``ic_mean``, ``ic_std``, ``hit_rate`` (share of scored dates with IC > 0),
+    ``t_naive`` and ``t_hac`` (Newey-West, Bartlett weights, ``h - 1`` lags: the daily ICs of an
+    ``h``-bar return overlap, so the naive t is about ``sqrt(h)`` too large; NaN under 30
+    scored dates), ``quantile_returns`` (mean forward return per factor bucket, bucket
+    ``quantiles - 1`` the highest), ``quantile_returns_by_date``, ``long_short`` (top minus
+    bottom per date) with ``long_short_mean`` and ``long_short_t_hac``. Beside them:
+    ``coverage`` and ``names`` per date, ``autocorr`` (rank autocorrelation of the factor with
+    its previous date) and ``turnover`` per quantile (``turnover_by_date`` per date).
+
+    Refused with ``invalid_input``: fewer than ``max(min_names, quantiles)`` names, fewer than
+    ``lag + max(horizons) + 30`` dates, an infinite value, shapes that differ.
+    """
+    op = "factor_report"
+    hs = [horizons] if isinstance(horizons, numbers.Integral) else list(horizons)
+    if not hs:
+        raise _refuse(
+            "invalid_parameter", "horizons is empty", operation=op, parameter="horizons",
+            valid=["a list of integers >= 1, e.g. [1, 5, 20]"],
+        )
+    hs = [_count("horizons", h, 1, op) for h in hs]
+    q = _count("quantiles", quantiles, 2, op)
+    lg = _count("lag", lag, 0, op)
+    mn = _count("min_names", min_names, 2, op)
+
+    meta: dict[str, Any] = {}
+    if isinstance(factor, Expr):
+        data = prices if isinstance(prices, Mapping) else {"close": prices}
+        arrays, mask, _ = _panel_inputs(factor, data, instruments, present, op, extra=("close",))
+        if "close" not in arrays:
+            raise _refuse(
+                "missing_field", "prices must hold 'close'", operation=op, parameter="close",
+                valid=["close"],
+            )
+        if len(factor.outputs) != 1:
+            raise _refuse(
+                "expr_type",
+                "a factor has one output; select one (macd(close).macdsignal)",
+                operation=op,
+                parameter="factor",
+                valid=list(factor.outputs),
+            )
+        out = factor._prog.eval_panel(arrays, mask, bar_stamp, tz_offset_ns, session, bar_ns)
+        panel, px = out[0], arrays["close"]
+        meta = {"expression": factor.canonical, "hash": factor.hash}
+    else:
+        px = prices["close"] if isinstance(prices, Mapping) and "close" in prices else prices
+        panel = factor
+    for name, a in (("factor", panel), ("prices", px)):
+        if not isinstance(a, np.ndarray) or a.ndim != 2 or a.dtype != np.float64:
+            raise _refuse(
+                "invalid_array",
+                f"{name} must be a 2-D numpy float64 array (n_dates, n_assets)",
+                operation=op,
+                parameter=name,
+            )
+    result = _raptorbt.factor_report_native(panel, px, hs, q, lg, mn)
+    return {**meta, **result}
 
 
 # ------------------------------------------------------------------ streaming

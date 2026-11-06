@@ -106,11 +106,57 @@ def _as_dict(res, fn):
     return {output_names(fn)[0]: np.asarray(res, dtype=np.float64)}
 
 
+# A cross-sectional function has a value only over a panel. The harness folds a series into a
+# panel of ROW names per date (bar i is name i % ROW of date i // ROW; the last date may be
+# short, its missing names absent), so every bar is a cell, the cross-section is made of real
+# data, and a uniform scale or shift of the series is a uniform scale or shift of the panel.
+# A group input is replaced by the labels i % ROW // 2 (names in pairs).
+ROW = 6
+
+
+def is_cross(fn):
+    return fn.get("family") == "cross"
+
+
+def row_start(i):
+    """First bar of the date (row) that bar `i` belongs to."""
+    return (i // ROW) * ROW
+
+
+def _fold(x):
+    n = len(x)
+    rows = -(-n // ROW)
+    flat = np.full(rows * ROW, np.nan)
+    flat[:n] = x
+    return flat.reshape(rows, ROW)
+
+
+def _panel_fields(fn, fields, fdata):
+    panels = {f: _fold(v) for f, v in fdata.items()}
+    if any(i.get("name") == "group" for i in fn.get("inputs") or []):
+        g = fields[1]
+        labels = np.tile((np.arange(ROW) // 2).astype(np.float64), (panels[g].shape[0], 1))
+        panels[g] = labels
+    return panels
+
+
+def _eval_panel_series(fn, text, fields, fdata, rows=None):
+    n = len(next(iter(fdata.values())))
+    panels = _panel_fields(fn, fields, fdata)
+    if rows is not None:
+        panels = {f: p[rows : rows + 1] for f, p in panels.items()}
+    res = _compile(text).eval_panel(panels)
+    return np.asarray(res, dtype=np.float64).reshape(-1)[: n if rows is None else ROW]
+
+
 def evaluate(fn, data, params=None, columns=None):
     """Batch evaluation. `data` maps column name to a float64 array; `columns` names the
     columns the inputs read, in order (default: the fields). Returns {output: array}."""
     cols = list(columns) if columns is not None else input_names(fn)
     fields, fdata = _bind(cols, data)
+    if is_cross(fn):
+        text = call_text(fn, params, fields)
+        return {output_names(fn)[0]: _eval_panel_series(fn, text, fields, fdata)}
     return _as_dict(_compile(call_text(fn, params, fields)).eval(fdata), fn)
 
 
@@ -120,6 +166,15 @@ def evaluate_stream(fn, data, params=None, columns=None):
     n = len(next(iter(fdata.values())))
     outs = output_names(fn)
     rec = {o: np.full(n, np.nan) for o in outs}
+    if is_cross(fn):
+        # "Streaming" a cross-section is evaluating one date on its own: the result of the
+        # whole panel must be the date-by-date result, bit for bit.
+        text = call_text(fn, params, fields)
+        for r in range(-(-n // ROW)):
+            row = _eval_panel_series(fn, text, fields, fdata, rows=r)
+            lo = r * ROW
+            rec[outs[0]][lo : min(lo + ROW, n)] = row[: min(ROW, n - lo)]
+        return rec
     st = _compile(call_text(fn, params, fields)).stream()
     for i in range(n):
         res = st.update({f: float(fdata[f][i]) for f in fdata})

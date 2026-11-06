@@ -8,7 +8,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::ndarray::Array2;
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -17,8 +20,11 @@ use super::errors::Fail;
 use super::numpy_bridge::numpy_cow_f64;
 use super::schedule_bindings::PySessionSchedule;
 use crate::data::BarStamp;
-use crate::quant::eval::{eval, Bar, ClockCtx, EvalError, Inputs, Plan, Stream};
-use crate::quant::lang::{compile, Env, ExprError, Field, Op, Program};
+use crate::quant::eval::{
+    eval, eval_panel, Bar, ClockCtx, EvalError, Inputs, PanelInputs, PanelPlan, Plan, Stream,
+};
+use crate::quant::factor::{factor_report, FactorParams};
+use crate::quant::lang::{compile, Env, ExprError, Field, Handle, Op, Program, Ty};
 use crate::quant::registry::expr_registry_json as registry_json;
 
 /// A compile refusal as the structured error: the position is a character offset.
@@ -77,29 +83,110 @@ fn clock_from(
     Ok(Some(clock))
 }
 
+/// A float64 panel, borrowed when it is C-contiguous and copied in logical order when not.
+fn panel_cow<'a>(a: &'a PyReadonlyArray2<'_, f64>) -> Cow<'a, [f64]> {
+    match a.as_slice() {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+    }
+}
+
+fn shape_fail(operation: &str, name: &str, got: &[usize], want: (usize, usize)) -> PyErr {
+    Fail::new(
+        "length_mismatch",
+        format!(
+            "'{name}' has shape {got:?}, expected ({}, {}) as the other panels",
+            want.0, want.1
+        ),
+    )
+    .op(operation)
+    .param(name)
+    .into()
+}
+
+fn not_a_panel(operation: &str, name: &str, got: &Bound<'_, PyAny>, what: &str) -> PyErr {
+    Fail::new(
+        "invalid_array",
+        format!(
+            "'{name}' must be {what}, got {}; convert with np.asarray(x, dtype=np.float64)",
+            got.get_type().name().map(|n| n.to_string()).unwrap_or_default()
+        ),
+    )
+    .op(operation)
+    .param(name)
+    .into()
+}
+
+/// A group series: a full panel, or one value per name repeated on every date.
+enum Labels<'py> {
+    Full(PyReadonlyArray2<'py, f64>),
+    PerName(PyReadonlyArray1<'py, f64>),
+}
+
 /// A checked expression and the plan that runs it. Immutable: evaluation and streams take
 /// their own state.
 #[pyclass(name = "ExprProgram", frozen)]
 pub struct PyExprProgram {
     program: Program,
-    plan: Plan,
+    /// The series plan; none for a panel program (a cross-sectional call), which has only
+    /// `panel`.
+    plan: Option<Plan>,
+    /// The panel plan; an error for a program with no field to make a panel of (a constant).
+    panel: Result<PanelPlan, EvalError>,
     source: String,
 }
 
 impl PyExprProgram {
-    /// This program's id in the bank's interner: equal canonical text, equal id.
+    /// This program's id in the bank's interner: equal canonical text, equal id. A panel
+    /// program has none: sealing one on the bank is a later slice.
     pub(crate) fn intern(&self) -> crate::core::Result<crate::runtime::exprs::ProgramId> {
-        crate::runtime::exprs::intern(&self.program, &self.plan)
+        match &self.plan {
+            Some(plan) => crate::runtime::exprs::intern(&self.program, plan),
+            None => Err(crate::core::RaptorError::invalid_parameter(
+                "a cross-sectional expression has a value only over a panel (Expr.eval_panel); \
+                 sealing one on the indicator bank is not supported yet",
+            )),
+        }
+    }
+
+    /// Whether this is a cross-sectional program (no series plan).
+    pub(crate) fn is_cross_sectional(&self) -> bool {
+        self.plan.is_none()
+    }
+
+    /// The series plan, or the refusal for a panel program.
+    fn series(&self, operation: &str) -> PyResult<&Plan> {
+        self.plan.as_ref().ok_or_else(|| {
+            Fail::new(
+                "expr_unsupported_here",
+                "this expression is cross-sectional: it has a value only over a panel, so \
+                 evaluate it with eval_panel (it cannot be evaluated or streamed one series at \
+                 a time)",
+            )
+            .op(operation)
+            .param("expression")
+            .into()
+        })
     }
 }
 
 #[pymethods]
 impl PyExprProgram {
     /// Compile `source`. `params` binds the `$name` constants the source uses.
+    ///
+    /// `groups` names series the caller supplies per name and date to `eval_panel` (a sector
+    /// code for `group_demean`); they read as numbers.
     #[new]
-    #[pyo3(signature = (source, params=None))]
-    fn new(source: &str, params: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+    #[pyo3(signature = (source, params=None, groups=None))]
+    fn new(
+        source: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        groups: Option<Vec<String>>,
+    ) -> PyResult<Self> {
         let mut env = Env::default();
+        for g in groups.unwrap_or_default() {
+            env.series.insert(g, Handle { ty: Ty::series(), warm: 0 });
+        }
         if let Some(params) = params {
             let bound: BTreeMap<String, f64> = params.extract().map_err(|e| {
                 PyErr::from(
@@ -114,8 +201,16 @@ impl PyExprProgram {
             env.params = bound;
         }
         let program = compile(source, &env).map_err(|e| compile_fail(source, e))?;
-        let plan = Plan::new(&program).map_err(|e| eval_fail("expr", e))?;
-        Ok(Self { program, plan, source: source.to_string() })
+        let panel = PanelPlan::new(&program);
+        let plan = if program.is_panel() {
+            if let Err(e) = &panel {
+                return Err(eval_fail("expr", e.clone()));
+            }
+            None
+        } else {
+            Some(Plan::new(&program).map_err(|e| eval_fail("expr", e))?)
+        };
+        Ok(Self { program, plan, panel, source: source.to_string() })
     }
 
     #[getter]
@@ -161,6 +256,12 @@ impl PyExprProgram {
     #[getter]
     fn uses_at(&self) -> bool {
         self.program.has_at()
+    }
+
+    /// Whether the program has a cross-sectional call: it has a value only over a panel.
+    #[getter]
+    fn is_panel(&self) -> bool {
+        self.program.is_panel()
     }
 
     /// The program hash with the clock folded in when the program uses `at(...)`: the zone, the
@@ -218,7 +319,12 @@ impl PyExprProgram {
     /// The columns the program reads, sorted.
     #[getter]
     fn fields(&self) -> Vec<&'static str> {
-        let mut names: Vec<&'static str> = self.plan.fields().iter().map(|f| f.name()).collect();
+        let fields = match (&self.plan, &self.panel) {
+            (Some(plan), _) => plan.fields(),
+            (None, Ok(panel)) => panel.fields().to_vec(),
+            (None, Err(_)) => Vec::new(),
+        };
+        let mut names: Vec<&'static str> = fields.iter().map(|f| f.name()).collect();
         names.sort_unstable();
         names.dedup();
         names
@@ -243,6 +349,7 @@ impl PyExprProgram {
         bar_ns: Option<i64>,
     ) -> PyResult<Vec<Bound<'py, PyArray1<f64>>>> {
         const OP: &str = "ExprProgram.evaluate";
+        let plan = self.series(OP)?;
         let dict = data.cast::<PyDict>().map_err(|_| {
             PyErr::from(
                 Fail::new(
@@ -278,7 +385,7 @@ impl PyExprProgram {
         }
         let cols: Vec<(Field, Cow<'_, [f64]>)> =
             held.iter().map(|(f, a)| (*f, numpy_cow_f64(a))).collect();
-        let stamps: Option<PyReadonlyArray1<'py, i64>> = if self.plan.has_at() {
+        let stamps: Option<PyReadonlyArray1<'py, i64>> = if plan.has_at() {
             match dict.get_item("timestamps")? {
                 None => None,
                 Some(v) => Some(v.extract::<PyReadonlyArray1<'py, i64>>().map_err(|_| {
@@ -302,7 +409,7 @@ impl PyExprProgram {
             }),
             None => None,
         };
-        let clock = if self.plan.has_at() {
+        let clock = if plan.has_at() {
             clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)?
         } else {
             None
@@ -318,10 +425,184 @@ impl PyExprProgram {
             if let Some(clock) = clock {
                 inputs = inputs.clock(clock);
             }
-            eval(&self.plan, &inputs)
+            eval(plan, &inputs)
         });
         let columns = result.map_err(|e| eval_fail(OP, e))?;
         Ok(columns.into_iter().map(|v| PyArray1::from_vec(py, v)).collect())
+    }
+
+    /// Evaluate over a panel: `data` maps field names to 2-D float64 arrays of one shape
+    /// `(n_dates, n_assets)`; keys that are not fields (or group series) are ignored. Returns one
+    /// 2-D array per output.
+    ///
+    /// `present` is a boolean array of that shape saying which names have a bar at each date; an
+    /// absent bar does not step a time-series function, so a name listed late counts its
+    /// warm-up from its own first bar. Without it a cell is absent where every field the
+    /// expression reads is NaN. A group series (see `groups` in the constructor) is a 2-D
+    /// array, or a 1-D array with one value per name.
+    ///
+    /// An expression with `at(...)` also reads `data["timestamps"]` (int64 nanoseconds, one per
+    /// date, shared by the names) and needs `bar_stamp` and the optional zone arguments as for
+    /// `evaluate`. The GIL is released while it runs.
+    #[pyo3(signature = (data, present=None, bar_stamp=None, tz_offset_ns=0, session=None, bar_ns=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn eval_panel<'py>(
+        &self,
+        py: Python<'py>,
+        data: &Bound<'py, PyAny>,
+        present: Option<&Bound<'py, PyAny>>,
+        bar_stamp: Option<&str>,
+        tz_offset_ns: i64,
+        session: Option<&PySessionSchedule>,
+        bar_ns: Option<i64>,
+    ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
+        const OP: &str = "ExprProgram.eval_panel";
+        let plan = self.panel.as_ref().map_err(|e| eval_fail(OP, e.clone()))?;
+        let dict = data.cast::<PyDict>().map_err(|_| {
+            PyErr::from(
+                Fail::new(
+                    "invalid_input_type",
+                    format!(
+                        "data must be a dict of 2-D float64 numpy arrays, got {}",
+                        data.get_type().name().map(|n| n.to_string()).unwrap_or_default()
+                    ),
+                )
+                .op(OP)
+                .param("data"),
+            )
+        })?;
+        const WANT2: &str = "a 2-D numpy float64 array (n_dates, n_assets)";
+        let mut held: Vec<(Field, PyReadonlyArray2<'py, f64>)> = Vec::new();
+        for f in Field::ALL {
+            let Some(v) = dict.get_item(f.name())? else { continue };
+            let arr = v
+                .extract::<PyReadonlyArray2<'py, f64>>()
+                .map_err(|_| not_a_panel(OP, f.name(), &v, WANT2))?;
+            held.push((f, arr));
+        }
+        let mut labels: Vec<(String, Labels<'py>)> = Vec::new();
+        for name in plan.handles() {
+            let Some(v) = dict.get_item(name)? else { continue };
+            let l = if let Ok(a) = v.extract::<PyReadonlyArray2<'py, f64>>() {
+                Labels::Full(a)
+            } else if let Ok(a) = v.extract::<PyReadonlyArray1<'py, f64>>() {
+                Labels::PerName(a)
+            } else {
+                return Err(not_a_panel(
+                    OP,
+                    name,
+                    &v,
+                    "a 2-D (n_dates, n_assets) or 1-D (n_assets) float64 array",
+                ));
+            };
+            labels.push((name.clone(), l));
+        }
+        let shape_of = |a: &[usize]| (a[0], a[1]);
+        let (n, m) = if let Some((_, a)) = held.first() {
+            shape_of(a.shape())
+        } else if let Some(Labels::Full(a)) = labels.iter().map(|(_, l)| l).next() {
+            shape_of(a.shape())
+        } else {
+            return Err(eval_fail(OP, EvalError::NoInput));
+        };
+        for (f, a) in &held {
+            if a.shape() != [n, m] {
+                return Err(shape_fail(OP, f.name(), a.shape(), (n, m)));
+            }
+        }
+        let cols: Vec<(Field, Cow<'_, [f64]>)> =
+            held.iter().map(|(f, a)| (*f, panel_cow(a))).collect();
+        let mut label_cols: Vec<(&str, Cow<'_, [f64]>)> = Vec::new();
+        for (name, l) in &labels {
+            let cow = match l {
+                Labels::Full(a) => {
+                    if a.shape() != [n, m] {
+                        return Err(shape_fail(OP, name, a.shape(), (n, m)));
+                    }
+                    panel_cow(a)
+                }
+                Labels::PerName(a) => {
+                    if a.len() != m {
+                        return Err(shape_fail(OP, name, &[a.len()], (n, m)));
+                    }
+                    let per: Vec<f64> = a.as_array().iter().copied().collect();
+                    Cow::Owned((0..n).flat_map(|_| per.iter().copied()).collect())
+                }
+            };
+            label_cols.push((name.as_str(), cow));
+        }
+        let mask: Option<PyReadonlyArray2<'py, bool>> = match present {
+            None => None,
+            Some(v) => Some(v.extract::<PyReadonlyArray2<'py, bool>>().map_err(|_| {
+                not_a_panel(OP, "present", v, "a 2-D numpy bool array (n_dates, n_assets)")
+            })?),
+        };
+        let mask: Option<Cow<'_, [bool]>> = match &mask {
+            None => None,
+            Some(a) => {
+                if a.shape() != [n, m] {
+                    return Err(shape_fail(OP, "present", a.shape(), (n, m)));
+                }
+                Some(match a.as_slice() {
+                    Ok(s) => Cow::Borrowed(s),
+                    Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+                })
+            }
+        };
+        let stamps: Option<PyReadonlyArray1<'py, i64>> = if plan.has_at() {
+            match dict.get_item("timestamps")? {
+                None => None,
+                Some(v) => Some(v.extract::<PyReadonlyArray1<'py, i64>>().map_err(|_| {
+                    PyErr::from(
+                        Fail::new(
+                            "invalid_array",
+                            "'timestamps' must be a 1-D numpy int64 array of nanoseconds, one per date",
+                        )
+                        .op(OP)
+                        .param("timestamps"),
+                    )
+                })?),
+            }
+        } else {
+            None
+        };
+        let stamps: Option<Cow<'_, [i64]>> = stamps.as_ref().map(|a| match a.as_slice() {
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+        });
+        let clock = if plan.has_at() {
+            clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)?
+        } else {
+            None
+        };
+        let result = py.detach(|| {
+            let mut inputs = PanelInputs::new(n, m);
+            for (f, c) in &cols {
+                inputs = inputs.field(*f, c);
+            }
+            for (name, c) in &label_cols {
+                inputs = inputs.handle(name, c);
+            }
+            if let Some(mk) = &mask {
+                inputs = inputs.present(mk);
+            }
+            if let Some(ts) = &stamps {
+                inputs = inputs.timestamps(ts);
+            }
+            if let Some(clock) = clock {
+                inputs = inputs.clock(clock);
+            }
+            eval_panel(plan, &inputs)
+        });
+        let panels = result.map_err(|e| eval_fail(OP, e))?;
+        panels
+            .into_iter()
+            .map(|v| {
+                Array2::from_shape_vec((n, m), v)
+                    .map(|a| a.into_pyarray(py))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            })
+            .collect()
     }
 
     /// A streaming evaluator over this program: one bar in, the outputs for that bar out. A
@@ -336,13 +617,14 @@ impl PyExprProgram {
         bar_ns: Option<i64>,
     ) -> PyResult<PyExprStream> {
         const OP: &str = "ExprProgram.stream";
-        let inner = if self.plan.has_at() {
+        let plan = self.series(OP)?;
+        let inner = if plan.has_at() {
             match clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)? {
-                Some(clock) => Stream::bound(&self.plan, clock),
+                Some(clock) => Stream::bound(plan, clock),
                 None => Err(EvalError::NoClock),
             }
         } else {
-            Stream::new(&self.plan)
+            Stream::new(plan)
         }
         .map_err(|e| eval_fail(OP, e))?;
         Ok(PyExprStream { inner: Mutex::new(inner) })
@@ -415,6 +697,90 @@ impl PyExprStream {
     }
 }
 
+fn array1<'py>(py: Python<'py>, v: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
+    PyArray1::from_vec(py, v)
+}
+
+fn array2<'py>(
+    py: Python<'py>,
+    v: Vec<f64>,
+    rows: usize,
+    cols: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    Array2::from_shape_vec((rows, cols), v)
+        .map(|a| a.into_pyarray(py))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+/// The factor report of `factor` against `prices` (both `(n_dates, n_assets)`), as a dict of
+/// numbers and per-date arrays; `raptorbt.expressions.factor_report` is its surface. Forward
+/// returns exist only in here.
+#[pyfunction]
+#[pyo3(signature = (factor, prices, horizons, quantiles, lag, min_names))]
+pub fn factor_report_native<'py>(
+    py: Python<'py>,
+    factor: PyReadonlyArray2<'py, f64>,
+    prices: PyReadonlyArray2<'py, f64>,
+    horizons: Vec<usize>,
+    quantiles: usize,
+    lag: usize,
+    min_names: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    const OP: &str = "factor_report";
+    let (n, m) = (factor.shape()[0], factor.shape()[1]);
+    if prices.shape() != [n, m] {
+        return Err(shape_fail(OP, "prices", prices.shape(), (n, m)));
+    }
+    let (f, p) = (panel_cow(&factor), panel_cow(&prices));
+    let params = FactorParams { horizons, quantiles, lag, min_names };
+    let r = py.detach(|| factor_report(&f, &p, n, m, &params)).map_err(|e| {
+        // `invalid_input` for every refusal: the stats codes have no Python entry yet.
+        let fail = Fail::new("invalid_input", e.to_string()).op(OP);
+        PyErr::from(match &e {
+            crate::stats::StatsError::InsufficientObservations { what, .. } => fail.param(what),
+            _ => fail,
+        })
+    })?;
+    let out = PyDict::new(py);
+    out.set_item("no_costs", r.no_costs)?;
+    out.set_item("n_dates", r.n_dates)?;
+    out.set_item("n_assets", r.n_assets)?;
+    out.set_item("lag", r.lag)?;
+    out.set_item("quantiles", r.quantiles)?;
+    out.set_item("min_names", r.min_names)?;
+    out.set_item("names", array1(py, r.names))?;
+    out.set_item("coverage", array1(py, r.coverage))?;
+    out.set_item("autocorr", array1(py, r.autocorr))?;
+    out.set_item("autocorr_mean", r.autocorr_mean)?;
+    out.set_item("turnover", array1(py, r.turnover))?;
+    out.set_item("turnover_by_date", array2(py, r.turnover_by_date, n, r.quantiles)?)?;
+    let by_h = PyDict::new(py);
+    for h in r.horizons {
+        let d = PyDict::new(py);
+        d.set_item("ic", array1(py, h.ic))?;
+        d.set_item("n_scored", h.n_scored)?;
+        d.set_item("ic_mean", h.mean_ic)?;
+        d.set_item("ic_std", h.std_ic)?;
+        d.set_item("hit_rate", h.hit_rate)?;
+        d.set_item("mean_names", h.mean_names)?;
+        d.set_item("t_naive", h.t_naive)?;
+        d.set_item("t_hac", h.t_hac)?;
+        d.set_item("hac_lags", h.hac_lags)?;
+        d.set_item("quantile_returns", array1(py, h.quantile_returns))?;
+        d.set_item(
+            "quantile_returns_by_date",
+            array2(py, h.quantile_returns_by_date, n, r.quantiles)?,
+        )?;
+        d.set_item("long_short", array1(py, h.long_short))?;
+        d.set_item("long_short_mean", h.long_short_mean)?;
+        d.set_item("long_short_t_hac", h.long_short_t_hac)?;
+        d.set_item("long_short_n", h.long_short_n)?;
+        by_h.set_item(h.horizon, d)?;
+    }
+    out.set_item("horizons", by_h)?;
+    Ok(out)
+}
+
 /// The function registry as JSON text; `raptorbt.expressions` parses it.
 #[pyfunction]
 pub fn expr_registry_json() -> String {
@@ -425,5 +791,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExprProgram>()?;
     m.add_class::<PyExprStream>()?;
     m.add_function(wrap_pyfunction!(expr_registry_json, m)?)?;
+    m.add_function(wrap_pyfunction!(factor_report_native, m)?)?;
     Ok(())
 }

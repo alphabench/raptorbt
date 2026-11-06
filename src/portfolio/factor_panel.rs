@@ -49,23 +49,30 @@ pub fn winsorize_panel(
     let mut out = values.to_vec();
     for d in 0..n_dates {
         let row = &values[d * n_assets..(d + 1) * n_assets];
-        let cols = finite_cols(row);
-        if cols.len() < 2 {
-            continue;
-        }
-        let mut sorted: Vec<f64> = cols.iter().map(|&c| row[c]).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // Symmetric count-based winsorization: clip the k lowest and k
-        // highest, k = floor(m * pct). On a cross-section too small for pct
-        // to cover one name (k = 0), nothing clips -- by design.
-        let k = (sorted.len() as f64 * pct).floor() as usize;
-        let lo = sorted[k];
-        let hi = sorted[sorted.len() - 1 - k];
-        for &c in &cols {
-            out[d * n_assets + c] = row[c].clamp(lo, hi);
-        }
+        winsorize_row(row, pct, &mut out[d * n_assets..(d + 1) * n_assets]);
     }
     Ok(out)
+}
+
+/// One date of [`winsorize_panel`]: `out` holds a copy of `row` and is clipped in place. A row
+/// with fewer than two finite values is left as it is. The expression engine's `winsorize_xs`
+/// calls this, so there is one definition.
+pub(crate) fn winsorize_row(row: &[f64], pct: f64, out: &mut [f64]) {
+    let cols = finite_cols(row);
+    if cols.len() < 2 {
+        return;
+    }
+    let mut sorted: Vec<f64> = cols.iter().map(|&c| row[c]).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // Symmetric count-based winsorization: clip the k lowest and k
+    // highest, k = floor(m * pct). On a cross-section too small for pct
+    // to cover one name (k = 0), nothing clips -- by design.
+    let k = (sorted.len() as f64 * pct).floor() as usize;
+    let lo = sorted[k];
+    let hi = sorted[sorted.len() - 1 - k];
+    for &c in &cols {
+        out[c] = row[c].clamp(lo, hi);
+    }
 }
 
 /// Z-score each date's cross-section: (x - mean) / std.
@@ -87,22 +94,28 @@ pub fn zscore_panel(
     let mut out = vec![f64::NAN; n_dates * n_assets];
     for d in 0..n_dates {
         let row = &values[d * n_assets..(d + 1) * n_assets];
-        let cols = finite_cols(row);
-        if cols.len() < min_names {
-            continue;
-        }
-        let m = cols.len() as f64;
-        let mean: f64 = cols.iter().map(|&c| row[c]).sum::<f64>() / m;
-        let var: f64 = cols.iter().map(|&c| (row[c] - mean).powi(2)).sum::<f64>() / m;
-        if var <= 0.0 {
-            continue; // degenerate cross-section stays NaN
-        }
-        let std = var.sqrt();
-        for &c in &cols {
-            out[d * n_assets + c] = (row[c] - mean) / std;
-        }
+        zscore_row(row, min_names, &mut out[d * n_assets..(d + 1) * n_assets]);
     }
     Ok(out)
+}
+
+/// One date of [`zscore_panel`]: `out` is all NaN on entry and receives the z-scores of the
+/// finite values. Shared with the expression engine's `zscore_xs`.
+pub(crate) fn zscore_row(row: &[f64], min_names: usize, out: &mut [f64]) {
+    let cols = finite_cols(row);
+    if cols.len() < min_names {
+        return;
+    }
+    let m = cols.len() as f64;
+    let mean: f64 = cols.iter().map(|&c| row[c]).sum::<f64>() / m;
+    let var: f64 = cols.iter().map(|&c| (row[c] - mean).powi(2)).sum::<f64>() / m;
+    if var <= 0.0 {
+        return; // degenerate cross-section stays NaN
+    }
+    let std = var.sqrt();
+    for &c in &cols {
+        out[c] = (row[c] - mean) / std;
+    }
 }
 
 /// Rank each date's cross-section into [0, 1], ties averaged.
@@ -121,29 +134,35 @@ pub fn rank_panel(
     let mut out = vec![f64::NAN; n_dates * n_assets];
     for d in 0..n_dates {
         let row = &values[d * n_assets..(d + 1) * n_assets];
-        let cols = finite_cols(row);
-        if cols.len() < min_names {
-            continue;
-        }
-        let mut order: Vec<usize> = cols.clone();
-        order.sort_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap());
-        let m = order.len();
-        // Average-rank ties.
-        let mut i = 0;
-        while i < m {
-            let mut j = i;
-            while j + 1 < m && row[order[j + 1]] == row[order[i]] {
-                j += 1;
-            }
-            let avg_rank = (i + j) as f64 / 2.0;
-            let denom = (m - 1) as f64;
-            for &col in &order[i..=j] {
-                out[d * n_assets + col] = if denom > 0.0 { avg_rank / denom } else { 0.5 };
-            }
-            i = j + 1;
-        }
+        rank_row(row, min_names, &mut out[d * n_assets..(d + 1) * n_assets]);
     }
     Ok(out)
+}
+
+/// One date of [`rank_panel`]: `out` is all NaN on entry and receives the ranks of the finite
+/// values. Shared with the expression engine's `rank`.
+pub(crate) fn rank_row(row: &[f64], min_names: usize, out: &mut [f64]) {
+    let cols = finite_cols(row);
+    if cols.len() < min_names {
+        return;
+    }
+    let mut order: Vec<usize> = cols.clone();
+    order.sort_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap());
+    let m = order.len();
+    // Average-rank ties.
+    let mut i = 0;
+    while i < m {
+        let mut j = i;
+        while j + 1 < m && row[order[j + 1]] == row[order[i]] {
+            j += 1;
+        }
+        let avg_rank = (i + j) as f64 / 2.0;
+        let denom = (m - 1) as f64;
+        for &col in &order[i..=j] {
+            out[col] = if denom > 0.0 { avg_rank / denom } else { 0.5 };
+        }
+        i = j + 1;
+    }
 }
 
 /// Price momentum with a skip window: p[t-skip] / p[t-lookback] - 1.

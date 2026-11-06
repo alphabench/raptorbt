@@ -4,7 +4,10 @@ function is covered by being registered: nothing here names a function.
 Registry fields read (all declared by the function's row; a missing one fails the test that
 needs it, with the field's name, rather than being skipped):
     causal         bool; False is allowed only for names in noncausal.json
-    nan_policy     "elementwise" | "lagged" | "delayed" | "windowed" | "recursive"
+    nan_policy     "elementwise" | "lagged" | "delayed" | "windowed" | "recursive" | "cross_section"
+                   cross_section: a cross-sectional function, run over a series folded into a
+                   panel of ROW names per date (see harness): a NaN spoils its own bar and
+                   changes the other bars of its date only
                    lagged: the lag is the warm-up; a NaN at bar i spoils bars i and i + warm-up only
                    delayed: the output is the input `warm-up` bars back; a NaN at bar i appears at
                    bar i + warm-up only
@@ -25,8 +28,10 @@ from harness import (
     evaluate,
     evaluate_stream,
     input_names,
+    ROW,
     param_defaults,
     registry,
+    row_start,
     warmup,
 )
 
@@ -112,7 +117,9 @@ def test_nan_head_middle_tail_and_all(fn):
     p = _period(fn, w)
     ref = _run(fn, base)
     policy = fn.get("nan_policy")
-    assert policy in ("elementwise", "lagged", "delayed", "windowed", "recursive"), (
+    assert policy in (
+        "elementwise", "lagged", "delayed", "windowed", "recursive", "cross_section"
+    ), (
         f"{fn['name']}: registry has no usable nan_policy ({policy!r})"
     )
     for where, idx in (("head", 3), ("middle", N // 2), ("tail", N - 2)):
@@ -125,6 +132,14 @@ def test_nan_head_middle_tail_and_all(fn):
             assert len(out) == N
             if idx > w and policy != "delayed":
                 assert np.isnan(out[idx]), f"{name}: NaN input at {where} ({idx}) did not give NaN"
+            if policy == "cross_section" and idx > w:
+                # Only the NaN bar and the other names of its own date may change.
+                keep = np.ones(N, bool)
+                lo = row_start(idx)
+                keep[lo : lo + ROW] = False
+                assert np.array_equal(canon_bits(out[keep]), canon_bits(ref[name][keep])), (
+                    f"{name}: a NaN reached a date other than its own"
+                )
             if policy == "elementwise" and idx > w:
                 keep = np.ones(N, bool)
                 keep[idx] = False
@@ -248,9 +263,11 @@ def test_prefix_identity_under_poisoned_future(fn):
                 v[cut + 1 :] = np.nan if poison == "nan" else rng.uniform(-1e6, 1e6, N - cut - 1)
             outs = _run(fn, d)
             for name, out in outs.items():
-                assert np.array_equal(
-                    canon_bits(out[: cut + 1]), canon_bits(ref[name][: cut + 1])
-                ), f"{name}: prefix changed with {poison} future after bar {cut}"
+                # A cross-sectional date is whole or not at all: dates before the cut's date.
+                end = row_start(cut) if fn.get("family") == "cross" else cut + 1
+                assert np.array_equal(canon_bits(out[:end]), canon_bits(ref[name][:end])), (
+                    f"{name}: prefix changed with {poison} future after bar {cut}"
+                )
 
 
 def test_noncausal_list_is_explicit():
