@@ -8,6 +8,8 @@ expression on one stream share one cell. The single-instrument runners without t
 refuse it with a typed error rather than run it differently.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -435,3 +437,194 @@ def test_the_single_instrument_runner_feeds_a_hand_registered_expression_its_vol
 def test_capabilities_lists_the_expression_indicator():
     streaming = {i["name"] for i in rb.capabilities()["indicators"]["streaming"]}
     assert "expr" in streaming
+
+
+# -- a fill off an expression, by hand ----------------------------------------------
+
+
+FILL_CLOSES = [10.0, 10.0, 10.0, 10.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
+
+
+def fill_bars():
+    c = np.array(FILL_CLOSES)
+    o = np.concatenate([[10.0], c[:-1] + 0.25])
+    return {
+        "timestamps": T0 + np.arange(1, len(c) + 1, dtype=np.int64) * MIN,
+        "open": o,
+        "high": np.maximum(o, c) + 0.5,
+        "low": np.minimum(o, c) - 0.5,
+        "close": c,
+        "volume": np.full(len(c), 1000.0),
+    }
+
+
+class FlagTrader(Strategy):
+    """`close > sma(close, 3)`: bars 0-3 close 10 (unknown, then false), bar 4 closes 12 against
+    (10 + 10 + 12) / 3 = 10.667: first true. Buys 10 on it, sells on bar 8."""
+
+    def on_start(self, ctx):
+        self.flag = ctx.indicators.expr("close > sma(close, 3)", instrument="ASSET")
+        self.seen, self.state = [], 0
+
+    def on_bar(self, ctx):
+        self.seen.append(self.flag.value)
+        if self.state == 0 and self.flag.value is True:
+            self.submit_order(O.Market(side="buy", units=10.0), client_id="in")
+            self.state = 1
+        elif self.state == 1 and ctx.idx == 8:
+            self.submit_order(O.Market(side="sell", units=10.0), client_id="out")
+            self.state = 2
+
+
+@pytest.mark.parametrize("mode", ["batch", "node"])
+@pytest.mark.parametrize(
+    "timing,entry,exit_",
+    [
+        # Decided at bar 4's close: same_bar_close fills at 12, next_bar_open at open[5] = 12.25.
+        # Out at bar 8: close 16, or open[9] = 16.25. Ten units: P&L 40 either way.
+        ("same_bar_close", 12.0, 16.0),
+        ("next_bar_open", 12.25, 16.25),
+    ],
+)
+def test_the_fill_price_off_an_expression_is_what_the_hand_computation_says(mode, timing, entry, exit_):
+    s = FlagTrader()
+    res = run(s, {"ASSET": fill_bars()}, mode, fill_timing=timing)
+    assert s.seen[:5] == [None, None, False, False, True]
+    trades = res.result.trades()
+    assert len(trades) == 1
+    t = trades[0]
+    assert (t.entry_price, t.exit_price, t.size) == (entry, exit_, 10.0)
+    assert t.pnl == pytest.approx(40.0)
+
+
+# -- a private cell (share=False) is the same cell, one clock and one instrument ----------
+
+HOUR = 60 * MIN
+DAY = 24 * HOUR
+
+
+def hourly(days=6):
+    """Close-stamped hourly bars of whole days: the hour-24 bar is stamped on the midnight."""
+    n = days * 24
+    c = 100.0 + np.arange(n, dtype=float) + np.sin(np.arange(n))
+    return {
+        "timestamps": 20_000 * DAY + np.arange(1, n + 1, dtype=np.int64) * HOUR,
+        "open": c - 0.2,
+        "high": c + 1.0,
+        "low": c - 1.0,
+        "close": c,
+        "volume": np.full(n, 10.0),
+    }
+
+
+def values(rows, key):
+    return np.array([np.nan if r[key][1] is None else float(r[key][1]) for _, r in rows])
+
+
+@pytest.mark.parametrize("share", [True, False])
+def test_at_on_a_private_cell_gives_the_numbers_of_a_shared_one(share):
+    """A private cell without a clock used to stay unknown for the whole run (0 of 300 bars)."""
+    d = hourly()
+    s = Watch({"d": 'at("1d", close)', "m": 'close > at("1d", sma(close, 2))'})
+    run_strategies([s], {"ASSET": d}, config(), bar_stamp="close", share=share)
+    for key, text in s.exprs.items():
+        want = rb.expr(text).eval(d, bar_stamp="close")
+        got = values(s.rows, key)
+        assert (~np.isnan(want)).sum() > 50
+        np.testing.assert_array_equal(np.isnan(got), np.isnan(want))
+        np.testing.assert_array_equal(got[~np.isnan(got)], want[~np.isnan(want)])
+
+
+def test_private_at_cells_on_two_symbols_each_read_their_own_bars():
+    a, b = hourly(), hourly()
+    b["close"] = b["close"] * 2.0
+    data = {"A": a, "B": b}
+    text = 'at("1d", close)'
+
+    class Two(Strategy):
+        def on_start(self, ctx):
+            self.h = {s: ctx.indicators.expr(text, instrument=s) for s in data}
+            self.seen = {s: [] for s in data}
+
+        def on_bar(self, ctx):
+            self.seen[ctx.symbol].append(self.h[ctx.symbol].value)
+
+    s = Two()
+    run_strategies([s], data, config(), bar_stamp="close", share=False)
+    for sym, d in data.items():
+        want = rb.expr(text).eval(d, bar_stamp="close")
+        got = np.array([np.nan if v is None else v for v in s.seen[sym]])
+        assert (~np.isnan(want)).sum() > 50
+        np.testing.assert_array_equal(got[~np.isnan(got)], want[~np.isnan(want)])
+        np.testing.assert_array_equal(np.isnan(got), np.isnan(want))
+
+
+def test_a_timeframe_as_fine_as_the_primary_bars_is_refused_typed():
+    """at("1h") on 1h bars was silently "the previous bar". The width is read from the stored
+    bars, so a node that has seen none cannot say (it has no refusal to give)."""
+    with pytest.raises(RaptorBTError) as e:
+        run(Watch({"h": 'at("1h", close)'}), {"ASSET": hourly(3)}, "batch")
+    assert e.value.code == "expr_type" and "2h" in e.value.valid and "1d" in e.value.valid
+
+
+@pytest.mark.parametrize("mode", ["batch", "node"])
+def test_a_timeframe_as_fine_as_a_composite_stream_is_refused_typed_never_a_panic(mode):
+    with pytest.raises(RaptorBTError) as e:
+        run(Watch({"h": 'at("1h", close)'}, timeframe="1h"), {"ASSET": bars(200)}, mode)
+    assert e.value.code == "expr_type" and e.value.valid
+
+
+def refusal_of(strategy_cls, mode):
+    n = 12
+    c = 100.0 + np.arange(n, dtype=float)
+    ts = T0 + np.arange(1, n + 1, dtype=np.int64) * MIN
+    a = {"timestamps": ts, "open": c, "high": c, "low": c, "close": c, "volume": np.ones(n)}
+    b = {**a, "close": c * 2, "open": c * 2, "high": c * 2, "low": c * 2}
+    data = {"A": a, "B": b}
+    with warnings.catch_warnings():
+        # register_indicator() without symbol= warns that it interleaves the symbols
+        warnings.simplefilter("ignore")
+        with pytest.raises(RaptorBTError) as e:
+            run(strategy_cls(), data, mode)
+    return e.value
+
+
+@pytest.mark.parametrize("mode", ["batch", "node"])
+def test_an_expression_with_no_symbol_is_refused_alike_by_a_batch_run_and_a_node(mode):
+    class NoSymbol(Strategy):
+        def on_start(self, ctx):
+            self.ind = Indicator.expr(rb.expr("sma(close, 2)")._prog)
+            self.register_indicator(self.ind)
+
+        def on_bar(self, ctx):
+            pass
+
+    err = refusal_of(NoSymbol, mode)
+    assert err.code == "expr_unsupported_here" and err.parameter == "symbol"
+
+
+@pytest.mark.parametrize("mode", ["batch", "node"])
+def test_one_expression_indicator_on_two_symbols_is_refused_alike(mode):
+    class Twice(Strategy):
+        def on_start(self, ctx):
+            self.ind = Indicator.expr(rb.expr('at("1d", close)')._prog)
+            self.register_indicator(self.ind, symbol="A")
+            self.register_indicator(self.ind, symbol="B")
+
+        def on_bar(self, ctx):
+            pass
+
+    err = refusal_of(Twice, mode)
+    assert err.code == "expr_unsupported_here" and err.parameter == "indicator"
+
+
+def test_expressions_made_one_after_another_do_not_fill_the_process_table():
+    """The table holds the expressions in use. Dropping an indicator releases its program, so a
+    long-lived worker that makes more distinct expressions than the table holds (65,536) keeps
+    working, and an indicator still alive keeps its program."""
+    kept = Indicator.expr(rb.expr("close + 0")._prog)
+    for i in range(1, 65_600):
+        Indicator.expr(rb.expr(f"close + {i}")._prog)
+    assert kept.update_bar(1.0, 1.0, 1.0, 5.0) == 5.0
+    again = Indicator.expr(rb.expr("close + 0")._prog)
+    assert again.update_bar(1.0, 1.0, 1.0, 7.0) == 7.0

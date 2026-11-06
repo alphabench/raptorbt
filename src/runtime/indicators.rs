@@ -265,6 +265,14 @@ impl IndSpec {
 
     /// Whether the indicator uses `at(...)`, so it needs its stream's clock and the bars'
     /// timestamps, which a hand-fed `update_bar` does not have.
+    /// The expression this spec reads, if it is one.
+    pub fn program(self) -> Option<ProgramId> {
+        match self {
+            IndSpec::Expr { program, .. } => Some(program),
+            _ => None,
+        }
+    }
+
     pub fn needs_clock(self) -> bool {
         matches!(self, IndSpec::Expr { program, .. } if exprs::info(program).needs_clock)
     }
@@ -397,6 +405,9 @@ pub struct IndicatorRegistry {
     orders: Vec<Box<[InstrumentId]>>,
     order_index: HashMap<Box<[InstrumentId]>, PrimaryOrder>,
     slots: Vec<SlotReg>,
+    /// One lease per expression cell: the programs stay interned while the registry, or the
+    /// bank built from it, lives.
+    leases: Vec<std::sync::Arc<exprs::ProgramInfo>>,
 }
 
 fn full(what: &str) -> RaptorError {
@@ -511,6 +522,14 @@ impl IndicatorRegistry {
             Some(&ind) => (ind, true),
             None => {
                 let ind = IndId::new(u32::try_from(self.keys.len()).map_err(|_| full("cells"))?);
+                if key.kind == IndKind::Expr {
+                    let id = ProgramId::from_param(key.params[0]);
+                    self.leases.push(exprs::lease(id).ok_or_else(|| {
+                        RaptorError::invalid_parameter(
+                            "the expression is no longer interned; build the indicator again",
+                        )
+                    })?);
+                }
                 self.keys.push(key);
                 self.index.insert(key, ind);
                 (ind, false)
@@ -698,12 +717,18 @@ pub struct CellCore {
 impl CellCore {
     /// The core of an indicator a strategy owns, reading the close (or the
     /// whole bar), as a bank cell of the same spec would.
-    pub fn for_spec(spec: IndSpec) -> Self {
-        Self::new(&IndKey::new(IndInput::Primary(InstrumentId::new(0)), spec), None)
+    pub fn for_spec(spec: IndSpec) -> Result<Self> {
+        Self::with_clock(spec, None)
+    }
+
+    /// [`CellCore::for_spec`] on the stream `clock` describes (an expression using `at(...)`
+    /// is cut by it).
+    pub fn with_clock(spec: IndSpec, clock: Option<ClockCtx>) -> Result<Self> {
+        Self::new(&IndKey::new(IndInput::Primary(InstrumentId::new(0)), spec), clock)
     }
 
     /// `clock` is the zone, bar stamp and session of the stream an expression cell runs on.
-    fn new(key: &IndKey, clock: Option<ClockCtx>) -> Self {
+    fn new(key: &IndKey, clock: Option<ClockCtx>) -> Result<Self> {
         let p = |i: usize| key.params[i] as usize;
         let core = match key.kind {
             IndKind::Sma => Core::Sma(StreamingSma::new(p(0))),
@@ -724,9 +749,22 @@ impl CellCore {
                 ProgramId::from_param(key.params[0]),
                 p(1) as u8,
                 clock,
-            ))),
+            )?)),
         };
-        Self { core, field: key.field }
+        Ok(Self { core, field: key.field })
+    }
+
+    /// Whether an expression cell is still working out its base width.
+    pub fn infers(&self) -> bool {
+        matches!(&self.core, Core::Expr(c) if c.infers())
+    }
+
+    /// The refusal an expression cell found in the width of its first bars, typed as `expr_type`
+    /// (the message carries that code and the valid timeframes). Call after `update` while
+    /// [`CellCore::infers`].
+    pub fn refusal(&mut self) -> Option<RaptorError> {
+        let Core::Expr(c) = &mut self.core else { return None };
+        c.refusal().map(|e| RaptorError::invalid_parameter(format!("expr_type: {e}")))
     }
 
     /// Feed one bar; the value after it.
@@ -904,13 +942,19 @@ pub struct IndicatorBank {
     universe_off: Box<[u32]>,
     universe_items: Box<[u32]>,
     panel_count: usize,
+    /// Some cell works out its base width from its first bars (a live `at(...)` told none).
+    infers: bool,
+    /// Keeps the registered expressions interned while the bank lives.
+    _leases: Box<[std::sync::Arc<exprs::ProgramInfo>]>,
 }
 
 impl IndicatorBank {
     /// Freeze `registry`'s registrations into a bank. The registry is no
     /// longer needed afterwards.
     pub fn new(registry: &IndicatorRegistry) -> std::sync::Arc<Self> {
-        Self::with_clocks(registry, &[])
+        // Without clocks a cell is the stream interning already built once, so it cannot fail;
+        // a run with expressions builds through `with_clocks` and gets the typed error.
+        Self::with_clocks(registry, &[]).unwrap_or_else(|e| panic!("cells without clocks: {e}"))
     }
 
     /// [`IndicatorBank::new`] with the clock of each cell's stream (`clocks[i]` for cell `i`; a
@@ -918,7 +962,7 @@ impl IndicatorBank {
     pub fn with_clocks(
         registry: &IndicatorRegistry,
         clocks: &[Option<ClockCtx>],
-    ) -> std::sync::Arc<Self> {
+    ) -> Result<std::sync::Arc<Self>> {
         let keys: Box<[IndKey]> = registry.keys().into();
 
         let mut by_primary: Vec<Vec<u32>> = Vec::new();
@@ -1022,16 +1066,19 @@ impl IndicatorBank {
             .iter()
             .enumerate()
             .map(|(i, key)| CellCore::new(key, clocks.get(i).cloned().flatten()))
-            .collect();
+            .collect::<Result<_>>()?;
+        let infers = cores.iter().any(CellCore::infers);
         let hist = vec![Vec::new(); keys.len()];
         let panels: Vec<PanelRun> = panel_defs
             .iter()
             .zip(member_cells)
-            .map(|((order, program), member_cells)| PanelRun {
-                core: PanelCore::new(*program, registry.orders()[order.index()].len()),
-                member_cells,
+            .map(|((order, program), member_cells)| {
+                Ok(PanelRun {
+                    core: PanelCore::new(*program, registry.orders()[order.index()].len())?,
+                    member_cells,
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let panel_count = panels.len();
         let bank = std::sync::Arc::new(Self {
             event: AtomicU64::new(0),
@@ -1053,11 +1100,13 @@ impl IndicatorBank {
             universe_off,
             universe_items,
             panel_count,
+            infers,
+            _leases: registry.leases.clone().into(),
         });
         // Some platforms box a mutex on its first lock: take it now, so the first bar allocates
         // no more than the others.
         drop(bank.writer.lock());
-        bank
+        Ok(bank)
     }
 
     /// Distinct cells.
@@ -1223,6 +1272,11 @@ impl IndicatorBank {
                 w.hist[i].clear();
             }
             let value = w.cores[i].update(bar);
+            if self.infers {
+                if let Some(e) = w.cores[i].refusal() {
+                    return Err(e);
+                }
+            }
             c.cur.store(value);
             c.emissions.fetch_add(1, Ordering::Relaxed);
             c.total.fetch_add(1, Ordering::Relaxed);

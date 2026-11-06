@@ -13,7 +13,8 @@ use pyo3::IntoPyObjectExt;
 
 use super::errors::Fail;
 use super::expr_bindings::PyExprProgram;
-use crate::runtime::exprs;
+use crate::quant::eval::ClockCtx;
+use crate::runtime::exprs::{self, ProgramInfo};
 use crate::runtime::{CellCore, IndKind, IndSpec, IndicatorBank, Ohlc, Reading, SlotId};
 
 /// Where an indicator's value comes from.
@@ -63,9 +64,10 @@ struct Private {
 const NOT_FED: u64 = 0;
 
 impl Private {
-    fn new(spec: IndSpec) -> Self {
-        Self {
-            core: CellCore::for_spec(spec),
+    fn new(spec: IndSpec, clock: Option<ClockCtx>) -> PyResult<Self> {
+        let core = CellCore::with_clock(spec, clock).map_err(PyErr::from)?;
+        Ok(Self {
+            core,
             cur: Reading::UNINIT,
             prev: Reading::UNINIT,
             hist: Vec::new(),
@@ -74,10 +76,10 @@ impl Private {
             revealed: (NOT_FED, 0),
             bank: None,
             fleet: false,
-        }
+        })
     }
 
-    fn feed(&mut self, event: u64, floor: u64, bar: Ohlc) {
+    fn feed(&mut self, event: u64, floor: u64, bar: Ohlc) -> Result<(), crate::core::RaptorError> {
         if event == NOT_FED || self.touched < floor {
             self.prev = self.cur;
             self.hist.clear();
@@ -88,6 +90,12 @@ impl Private {
         }
         self.cur = self.core.update(bar);
         self.emissions += 1;
+        if self.core.infers() {
+            if let Some(e) = self.core.refusal() {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Emissions of the selected event the strategy has been shown, or `None`
@@ -122,16 +130,35 @@ pub struct PyIndicator {
     updates: u64,
     #[pyo3(get)]
     kind: String,
+    /// Keeps an expression interned while this indicator lives.
+    lease: Option<Arc<ProgramInfo>>,
+    /// The clock of the stream a runtime fed it on (`set_clock`), kept for `reset`.
+    clock: Option<ClockCtx>,
 }
 
 impl PyIndicator {
-    fn private(spec: IndSpec, kind: &str) -> Self {
-        Self {
-            state: State::Private(Box::new(Private::new(spec))),
+    fn private(spec: IndSpec, kind: &str) -> PyResult<Self> {
+        Ok(Self {
+            state: State::Private(Box::new(Private::new(spec, None)?)),
             spec,
             updates: 0,
             kind: kind.into(),
+            lease: None,
+            clock: None,
+        })
+    }
+
+    /// Run on the stream `clock` describes, before the first bar: an expression using `at(...)`
+    /// is cut by it. A private core only; a linked indicator takes its clock from the bank.
+    pub fn set_clock(&mut self, clock: ClockCtx) -> PyResult<()> {
+        if let State::Private(p) = &mut self.state {
+            if self.updates != 0 {
+                return Err(PyRuntimeError::new_err("the clock is set before the first bar"));
+            }
+            **p = Private::new(self.spec, Some(clock.clone()))?;
+            self.clock = Some(clock);
         }
+        Ok(())
     }
 
     /// What a bank needs to key this indicator.
@@ -166,13 +193,14 @@ impl PyIndicator {
 
     /// The runtime applies one emission of the selected event: feed the core.
     /// Counts as an `update_bar` call. A linked indicator is fed by the bank.
-    pub fn feed(&mut self, bar: Ohlc) {
+    pub fn feed(&mut self, bar: Ohlc) -> PyResult<()> {
         if let State::Private(p) = &mut self.state {
             self.updates += 1;
             let (event, floor) =
                 p.bank.as_ref().map_or((NOT_FED, 0), |b| (b.event_mark(), b.floor()));
-            p.feed(event, floor, bar);
+            p.feed(event, floor, bar).map_err(PyErr::from)?;
         }
+        Ok(())
     }
 
     /// The strategy has processed emission `emission` of the selected event's
@@ -265,59 +293,59 @@ impl PyIndicator {
     #[staticmethod]
     fn sma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.sma", "period", period)?;
-        Ok(Self::private(IndSpec::Sma(period), "sma"))
+        Self::private(IndSpec::Sma(period), "sma")
     }
 
     #[staticmethod]
     fn ema(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.ema", "period", period)?;
-        Ok(Self::private(IndSpec::Ema(period), "ema"))
+        Self::private(IndSpec::Ema(period), "ema")
     }
 
     /// Wilder-smoothed moving average (alpha = 1/period).
     #[staticmethod]
     fn wilder_ma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.wilder_ma", "period", period)?;
-        Ok(Self::private(IndSpec::WilderMa(period), "wilder_ma"))
+        Self::private(IndSpec::WilderMa(period), "wilder_ma")
     }
 
     #[staticmethod]
     fn wma(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.wma", "period", period)?;
-        Ok(Self::private(IndSpec::Wma(period), "wma"))
+        Self::private(IndSpec::Wma(period), "wma")
     }
 
     /// Rate of change over `period` bars, in percent.
     #[staticmethod]
     fn roc(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.roc", "period", period)?;
-        Ok(Self::private(IndSpec::Roc(period), "roc"))
+        Self::private(IndSpec::Roc(period), "roc")
     }
 
     /// Rolling population standard deviation.
     #[staticmethod]
     fn stddev(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.stddev", "period", period)?;
-        Ok(Self::private(IndSpec::StdDev(period), "stddev"))
+        Self::private(IndSpec::StdDev(period), "stddev")
     }
 
     #[staticmethod]
     fn rsi(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.rsi", "period", period)?;
-        Ok(Self::private(IndSpec::Rsi(period), "rsi"))
+        Self::private(IndSpec::Rsi(period), "rsi")
     }
 
     #[staticmethod]
     fn atr(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.atr", "period", period)?;
-        Ok(Self::private(IndSpec::Atr(period), "atr"))
+        Self::private(IndSpec::Atr(period), "atr")
     }
 
     /// Highest-high / lowest-low channel; value is `(upper, lower)`.
     #[staticmethod]
     fn donchian(period: i64) -> PyResult<Self> {
         let period = period_of("Indicator.donchian", "period", period)?;
-        Ok(Self::private(IndSpec::Donchian(period), "donchian"))
+        Self::private(IndSpec::Donchian(period), "donchian")
     }
 
     /// Bollinger bands; value is `BollingerBands(upper, middle, lower)`.
@@ -335,7 +363,7 @@ impl PyIndicator {
             .value(k)
             .into());
         }
-        Ok(Self::private(IndSpec::Bollinger { period, k }, "bollinger"))
+        Self::private(IndSpec::Bollinger { period, k }, "bollinger")
     }
 
     /// MACD; value is `(macd, signal, histogram)`.
@@ -357,7 +385,7 @@ impl PyIndicator {
             .value(fast)
             .into());
         }
-        Ok(Self::private(IndSpec::Macd { fast, slow, signal }, "macd"))
+        Self::private(IndSpec::Macd { fast, slow, signal }, "macd")
     }
 
     /// An expression over one instrument's bars, as output `output` of `program` (an
@@ -365,7 +393,7 @@ impl PyIndicator {
     #[staticmethod]
     #[pyo3(signature = (program, output=0))]
     fn expr(program: &PyExprProgram, output: usize) -> PyResult<Self> {
-        let id = program.intern().map_err(PyErr::from)?;
+        let (id, lease) = program.intern().map_err(PyErr::from)?;
         let spec = IndSpec::expr(id, output).map_err(|e| {
             PyErr::from(
                 Fail::new("invalid_parameter", e.to_string())
@@ -374,7 +402,9 @@ impl PyIndicator {
                     .value(output),
             )
         })?;
-        Ok(Self::private(spec, "expr"))
+        let mut indicator = Self::private(spec, "expr")?;
+        indicator.lease = Some(lease);
+        Ok(indicator)
     }
 
     /// Feed one bar. Price-series cores consume the close; bar cores (atr,
@@ -426,7 +456,7 @@ impl PyIndicator {
         }
         self.updates += 1;
         let volume = volume.unwrap_or(f64::NAN);
-        p.feed(NOT_FED, 0, Ohlc { open, high, low, close, volume, ts: 0 });
+        p.feed(NOT_FED, 0, Ohlc { open, high, low, close, volume, ts: 0 }).map_err(PyErr::from)?;
         reading_value(py, self.spec, p.cur)
     }
 
@@ -474,7 +504,7 @@ impl PyIndicator {
             return Err(linked_error("reset"));
         };
         let (fleet, bank) = (p.fleet, p.bank.take());
-        **p = Private::new(self.spec);
+        **p = Private::new(self.spec, self.clock.clone())?;
         (p.fleet, p.bank) = (fleet, bank);
         self.updates = 0;
         Ok(())

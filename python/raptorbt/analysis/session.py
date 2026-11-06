@@ -52,6 +52,12 @@ _CALL = re.compile(r"\b([a-z_][a-z0-9_]*)\s*\(")
 _TOMBSTONES = 4096
 _FIELD_PRICES = ("open", "high", "low", "close")
 
+#: ``SessionSchedule`` presets a ``session=`` can name (and a stored session can restore).
+_PRESETS = (
+    "nse_equity", "nse_fo", "bse_equity", "bse_fo", "mcx", "mcx_select_agri", "mcx_other_agri",
+    "cds", "cds_cross", "bcd",
+)
+
 _STATS_ONE = ("stationarity", "hurst", "garch", "markov_regimes", "hac_tstat")
 _STATS_MANY = ("cointegration", "pbo_cscv", "spa_test", "pca_factors")
 _STATS_BARS = ("audit_bars", "impact_estimate")
@@ -79,6 +85,9 @@ class _Handle:
     arrays: dict[str, np.ndarray] | None = None
     loader: Callable[[], dict[str, np.ndarray]] | None = field(default=None, repr=False)
     path: Any = field(default=None, repr=False)
+    #: The session schedule the numbers were cut by (a preset name, or ``custom:<digest>``), when
+    #: the expression uses ``at(...)``; none otherwise.
+    session: str | None = None
 
     def series_name(self, output: str) -> str:
         return self.id if len(self.outputs) == 1 else f"{self.id}_{output}"
@@ -131,6 +140,7 @@ class Session:
         self._current: str | None = None
         self._handles: OrderedDict[str, _Handle] = OrderedDict()
         self._gone: OrderedDict[str, tuple[str, str]] = OrderedDict()  # id -> (recipe, reason)
+        self._schedules: dict[str, Any] = {}  # label -> SessionSchedule, for custom ones
         self._used = 0
 
     # ------------------------------------------------------------------ data
@@ -141,6 +151,7 @@ class Session:
         bar_stamp: str | None = None,
         bar_ns: int | None = None,
         name: str | None = None,
+        session: Any = None,
     ) -> dict[str, Any]:
         """Hold a copy of ``bars`` and return its facts.
 
@@ -149,12 +160,67 @@ class Session:
         answers ``bars["close"]`` works, and nothing is imported to read it. ``bar_stamp``
         (``"open"`` or ``"close"``: whether a timestamp starts or ends its bar) is required.
         The input is never modified. The newest dataset is the default for :meth:`eval`.
+
+        ``session`` is the instrument's trading calendar: a ``raptorbt.SessionSchedule``, or the
+        name of a preset (``"nse_equity"``, ``"mcx"``, ...). It is the default of every
+        :meth:`eval` and :meth:`sweep` over these bars, and decides what an ``at(...)`` window
+        is: without it windows are clock hours and days of the zone, with it they are cut from
+        the session's open and a day is the session. Pass the one the instrument's strategy runs
+        with, or an ``at("1h", ...)`` here is not the strategy's.
         """
-        return self._adopt(_data.build(bars, bar_stamp, bar_ns, name), "Session.load")
+        ds = _data.build(bars, bar_stamp, bar_ns, name)
+        _, ds.session = self._schedule_of(session, "Session.load")
+        return self._adopt(ds, "Session.load")
+
+    def _schedule_of(self, session: Any, op: str) -> tuple[Any, str | None]:
+        """A ``session=`` argument as (schedule, label): a preset name, or a schedule object."""
+        if session is None:
+            return None, None
+        if isinstance(session, str):
+            if session not in _PRESETS:
+                raise errors.InvalidParameter(
+                    f"session {session!r} is not a schedule preset", code="invalid_parameter",
+                    operation=op, parameter="session", value=session, valid=list(_PRESETS),
+                )
+            self._schedules.setdefault(session, getattr(raptorbt.SessionSchedule, session)())
+            return self._schedules[session], session
+        if not isinstance(session, raptorbt.SessionSchedule):
+            raise errors.InvalidType(
+                f"session is a SessionSchedule or a preset name, got {type(session).__name__}",
+                code="invalid_argument_type", operation=op, parameter="session",
+                value=type(session).__name__, valid=["a raptorbt.SessionSchedule", *_PRESETS],
+            )
+        digest = hashlib.sha256(json.dumps(
+            [session.tz_offset_ns, session.squareoff_minute, session.holidays, session.windows,
+             sorted(session.overrides.items()), session.coverage], sort_keys=True, default=str,
+        ).encode()).hexdigest()[:12]
+        label = f"custom:{digest}"
+        self._schedules[label] = session
+        return session, label
+
+    def _schedule(self, ds: _data.Dataset, session: Any, program: expressions.Expr, op: str) -> tuple[Any, str | None]:
+        """The schedule ``program`` is cut by over ``ds``: ``session``, else the dataset's own.
+        None when the program does not use ``at(...)``: it would not read it."""
+        if session is not None:
+            schedule, label = self._schedule_of(session, op)
+        elif ds.session is None:
+            return None, None
+        else:
+            label = ds.session
+            schedule = self._schedules.get(label)
+            if schedule is None and label in _PRESETS:
+                schedule, _ = self._schedule_of(label, op)
+        if schedule is None:
+            raise errors.InvalidParameter(
+                f"{ds.name!r} was loaded with the schedule {label}, which a stored session cannot "
+                "restore: pass session= again", code="invalid_parameter", operation=op,
+                parameter="session", value=label, valid=["a raptorbt.SessionSchedule", *_PRESETS],
+            )
+        return (schedule, label) if _expressions_at(program) else (None, None)
 
     def _adopt(self, ds: _data.Dataset, op: str) -> dict[str, Any]:
         old = self._data.get(ds.name)
-        if old is not None and old.sha256 == ds.sha256:
+        if old is not None and old.sha256 == ds.sha256 and old.session == ds.session:
             self._current = old.name  # the same bars again: nothing to store
             return old.facts()
         extra = ds.nbytes - (old.nbytes if old else 0)
@@ -200,7 +266,9 @@ class Session:
 
     # ------------------------------------------------------------------ eval
 
-    def eval(self, expr: Any, *, data: str | None = None, tz_offset_ns: int = 0) -> dict[str, Any]:
+    def eval(
+        self, expr: Any, *, data: str | None = None, tz_offset_ns: int = 0, session: Any = None
+    ) -> dict[str, Any]:
         """Evaluate ``expr`` (text, or an ``Expr``) over the loaded bars and keep the result.
 
         Returns the summary (see :mod:`raptorbt.analysis.summary`): ``handle``, ``kind``,
@@ -209,7 +277,10 @@ class Session:
         returns ``{"handle", "outputs": [summary, ...]}`` and each output is the handle
         ``<handle>_<output>``. Name an earlier result in the text to use it as a series.
         ``data`` picks a loaded dataset (default: the newest); ``tz_offset_ns`` is the zone
-        daily windows of ``at(...)`` are cut in.
+        daily windows of ``at(...)`` are cut in; ``session`` (a ``raptorbt.SessionSchedule`` or a
+        preset name, default: the one the dataset was loaded with) is the calendar they are cut
+        by, and an ``at(...)`` over bars outside the dates it covers raises
+        ``session_not_covered``. The schedule is part of the handle's hash.
         """
         op = "Session.eval"
         text = expr.source if isinstance(expr, expressions.Expr) else expr
@@ -222,7 +293,8 @@ class Session:
         used = self._resolve_text(text, ds, op)
         env = {name: h.leading[out] for name, (h, out) in used.items()}
         program = expressions.Expr(text, series=env)
-        bound = program.bound_hash(ds.bar_stamp, tz_offset_ns)
+        schedule, label = self._schedule(ds, session, program, op)
+        bound = program.bound_hash(ds.bar_stamp, tz_offset_ns, schedule)
         key = hashlib.sha256(f"{bound}\n{ds.sha256}\n{raptorbt.__version__}".encode()).hexdigest()
         hid = "h_" + key[:10]
         for h, _ in used.values():
@@ -231,10 +303,10 @@ class Session:
         if held is not None:
             self._handles.move_to_end(hid)
             return copy.deepcopy(held.result)
-        arrays = self._evaluate(program, ds, {n: h.get()[o] for n, (h, o) in used.items()}, tz_offset_ns)
+        arrays = self._evaluate(program, ds, {n: h.get()[o] for n, (h, o) in used.items()}, tz_offset_ns, schedule)
         nbytes = sum(a.nbytes for a in arrays.values())
         self._room(nbytes, op, keep=[h.id for h, _ in used.values()], what=f"the result of {_short(text)}")
-        entry = self._summarise(hid, text, program, ds, tz_offset_ns, arrays, used, nbytes)
+        entry = self._summarise(hid, text, program, ds, tz_offset_ns, arrays, used, nbytes, label)
         self._gone.pop(hid, None)
         self._handles[hid] = entry
         self._used += nbytes
@@ -247,6 +319,7 @@ class Session:
         *,
         data: str | None = None,
         tz_offset_ns: int = 0,
+        session: Any = None,
         score: str | None = None,
         grid: Mapping[str, Any] | None = None,
         points: Any = None,
@@ -265,7 +338,8 @@ class Session:
         ``$name``s and is reduced to the mean of its known values. A table too long for the
         size cap keeps the highest scores, in score order, and says how many it left out; every
         binding still has its handle. The table states the selection bias: the best of
-        ``n_trials`` scores is not the score of one chosen in advance.
+        ``n_trials`` scores is not the score of one chosen in advance. ``tz_offset_ns`` and
+        ``session`` are as for :meth:`eval`.
         """
         op = "Session.sweep"
         text = expr.source if isinstance(expr, expressions.Expr) else expr
@@ -286,11 +360,12 @@ class Session:
         used = self._resolve_text(text, ds, op)
         env = {name: h.leading[out] for name, (h, out) in used.items()}
         template = expressions.Expr(text, series=env)
+        schedule, label = self._schedule(ds, session, template, op)
         feed = {**ds.arrays, **{n: h.get()[o] for n, (h, o) in used.items()}}
         swept = _sweep_names(grid, axes, points)
         found = template.sweep(
             feed, grid=grid, points=points, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns,
-            bar_ns=ds.bar_ns, **axes,
+            session=schedule, bar_ns=ds.bar_ns, **axes,
         )
         if len(found.outputs) != 1 or found.outputs[0] != "value":
             raise errors.make(
@@ -307,7 +382,7 @@ class Session:
                 bound[key] = expressions.Expr(text, point.params, series=env)
         ids = {
             key: "h_" + hashlib.sha256(
-                f"{e.bound_hash(ds.bar_stamp, tz_offset_ns)}\n{ds.sha256}\n{raptorbt.__version__}".encode()
+                f"{e.bound_hash(ds.bar_stamp, tz_offset_ns, schedule)}\n{ds.sha256}\n{raptorbt.__version__}".encode()
             ).hexdigest()[:10]
             for key, e in bound.items()
         }
@@ -333,7 +408,7 @@ class Session:
             a.setflags(write=False)
             e = bound[key]
             entry = self._summarise(
-                hid, e.canonical, e, ds, tz_offset_ns, {e.outputs[0]: a}, used, a.nbytes
+                hid, e.canonical, e, ds, tz_offset_ns, {e.outputs[0]: a}, used, a.nbytes, label
             )
             self._gone.pop(hid, None)
             self._handles[hid] = entry
@@ -344,14 +419,14 @@ class Session:
                 self._handles.move_to_end(h.id)
 
         kind = bound[next(iter(bound))].kinds[0]
-        label, scores = self._scores(score, kind, found, tz_offset_ns, ds, op)
+        score_label, scores = self._scores(score, kind, found, tz_offset_ns, schedule, ds, op)
         rows = [
             [ids[tuple(sorted(p.params.items()))], *[_whole(p.params[n]) for n in swept], _sum.show(sc) if sc is not None else None]
             for p, sc in zip(found, scores)
         ]
         result: dict[str, Any] = {
             "expression": text, "data": ds.name, "n_trials": found.n_trials, "n_distinct": distinct,
-            "swept": swept, "score": label, "columns": ["handle", *swept, "score"], "rows": rows,
+            "swept": swept, "score": score_label, "columns": ["handle", *swept, "score"], "rows": rows,
             "order": "input",
             "kernel_steps": {"joint": found.n_kernel_steps, "independent": found.independent_kernel_steps},
             "note": f"best of n_trials={found.n_trials}: a selection among them is biased upward; "
@@ -367,7 +442,7 @@ class Session:
             result["omitted"] = len(rows) - keep_n
         return result
 
-    def _scores(self, score: str | None, kind: str, found: Any, tz_offset_ns: int, ds: _data.Dataset, op: str) -> tuple[str, list[float | None]]:
+    def _scores(self, score: str | None, kind: str, found: Any, tz_offset_ns: int, schedule: Any, ds: _data.Dataset, op: str) -> tuple[str, list[float | None]]:
         """The label and one score per binding of ``found``: a statistic or an expression."""
         label = score if score is not None else ("true_rate" if kind == "bool" else "mean")
         if label in _SCORES:
@@ -381,11 +456,12 @@ class Session:
         probe = expressions.Expr(label)
         names = list(probe.parameters)
         if not names:
-            out = probe.eval(ds.arrays, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns)
+            out = probe.eval(ds.arrays, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, session=schedule, bar_ns=ds.bar_ns)
             return label, [_known_mean(out)] * len(found)
         pts = [{n: p.params[n] for n in names if n in p.params} for p in found]
         scored = probe.sweep(
-            ds.arrays, points=pts, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns
+            ds.arrays, points=pts, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns,
+            session=schedule, bar_ns=ds.bar_ns,
         )
         return label, [_known_mean(p.value) for p in scored]
 
@@ -395,6 +471,7 @@ class Session:
         ds: _data.Dataset,
         handles: dict[str, np.ndarray],
         tz_offset_ns: int,
+        schedule: Any = None,
     ) -> dict[str, np.ndarray]:
         """Run ``program`` over ``ds`` and the handle series it reads: output name -> array.
 
@@ -405,11 +482,14 @@ class Session:
             feed.update(handles)
             got = program.eval_panel(
                 feed, present=ds.arrays.get("present"), bar_stamp=ds.bar_stamp,
-                tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns,
+                tz_offset_ns=tz_offset_ns, session=schedule, bar_ns=ds.bar_ns,
             )
         else:
             feed = {**ds.arrays, **handles}
-            got = program.eval(feed, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns)
+            got = program.eval(
+                feed, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, session=schedule,
+                bar_ns=ds.bar_ns,
+            )
         if not isinstance(got, dict):
             got = {program.outputs[0]: got}
         out = {}
@@ -429,6 +509,7 @@ class Session:
         arrays: dict[str, np.ndarray],
         used: dict[str, tuple[_Handle, str]],
         nbytes: int,
+        session: str | None = None,
     ) -> _Handle:
         registry = expressions._registry()
         own = [f for f in dict.fromkeys(_CALL.findall(program.canonical)) if f in registry]
@@ -477,6 +558,7 @@ class Session:
             outputs=names, kinds=kinds, deps=tuple(dict.fromkeys(h.id for h, _ in used.values())),
             functions=functions, causal=not non_causal, result=result, nbytes=nbytes,
             leading=leading, shapes={o: a.shape for o, a in arrays.items()}, arrays=arrays,
+            session=session,
         )
 
     def _resolve_text(self, text: str, ds: _data.Dataset, op: str) -> dict[str, tuple[_Handle, str]]:
@@ -489,7 +571,7 @@ class Session:
                     f"{name} was computed on data {h.data!r} (sha256 {h.data_sha[:12]}), not on "
                     f"{ds.name!r} (sha256 {ds.sha256[:12]}); a series of other bars cannot be mixed in",
                     code="invalid_input", operation=op, parameter=name, value=name,
-                    valid=[self._recipe(h.expression, h.data, h.tz_offset_ns)],
+                    valid=[self._recipe(h.expression, h.data, h.tz_offset_ns, h.session)],
                 )
             if "report" in h.kinds:
                 raise self._no_output(name, h, op, "is a factor report, not a series: read it with Session.series")
@@ -542,12 +624,18 @@ class Session:
 
     # ------------------------------------------------------------------ the store
 
-    def _recipe(self, expression: str, data: str, tz_offset_ns: int = 0) -> str:
+    def _recipe(self, expression: str, data: str, tz_offset_ns: int = 0, session: str | None = None) -> str:
         tz = f", tz_offset_ns={tz_offset_ns}" if tz_offset_ns else ""
-        return f"Session.eval({json.dumps(expression)}, data={data!r}{tz})"
+        if session is None:
+            cut = ""
+        elif session in _PRESETS:
+            cut = f", session={session!r}"
+        else:
+            cut = f", session=<the SessionSchedule {session}>"
+        return f"Session.eval({json.dumps(expression)}, data={data!r}{tz}{cut})"
 
     def _forget(self, h: _Handle, reason: str) -> None:
-        self._gone[h.id] = (self._recipe(h.expression, h.data, h.tz_offset_ns), reason)
+        self._gone[h.id] = (self._recipe(h.expression, h.data, h.tz_offset_ns, h.session), reason)
         while len(self._gone) > _TOMBSTONES:
             self._gone.popitem(last=False)
         self._used -= h.nbytes
@@ -645,7 +733,7 @@ class Session:
             "bytes": h.nbytes,
             "depends_on": list(h.deps),
             "causal": h.causal,
-            "recipe": self._recipe(h.expression, h.data, h.tz_offset_ns),
+            "recipe": self._recipe(h.expression, h.data, h.tz_offset_ns, h.session),
             "highlights": self._highlights(h),
         }
 
@@ -777,8 +865,11 @@ class Session:
           (``interval_seconds`` defaults from ``bar_ns``).
 
         The leading unknown values (warm-up) of the handles are cut, in step, because a test
-        refuses NaN; the result's ``analysis`` entry says how many. Other keywords go to the
-        function unchanged.
+        refuses NaN; the result's ``analysis`` entry says how many. Series made on different bars
+        are joined on their timestamps, never by position: only the instants they all have are
+        used, and ``analysis["aligned"]`` says how many, from when to when, and how many each
+        series lost; series with no common instant (or bars no longer loaded) are refused.
+        Other keywords go to the function unchanged.
         """
         op = "Session.stats"
         if name not in _STATS_ALL:
@@ -793,29 +884,81 @@ class Session:
             return self._stats_bars(name, fn, self.dataset(data), kwargs)
         if not handles or (name in _STATS_ONE and len(handles) != 1):
             raise self._arity(op, name, "takes one handle" if name in _STATS_ONE else "takes one or more handles")
-        series = {}
+        entries = {}
         for h in handles:
             entry, out = self._lookup(h, op)
             if out == "":
                 raise self._no_output(h, entry, op)
             self._handles.move_to_end(entry.id)
-            series[h] = entry.get()[out]
-            if series[h].ndim != 1:
+            entries[h] = (entry, out)
+            if entry.get()[out].ndim != 1:
                 raise errors.InvalidParameter(
                     f"{h} is a panel (or a report), and {name} runs on one series: pick a name with "
                     f"Session.series(..., instruments=...) and run raptorbt.stats on it",
                     code="invalid_parameter", operation=op, parameter="handles", value=h,
                     valid=["a handle of a series over bars"],
                 )
-        lead = max(_sum.leading_nan(a) for a in series.values())
-        series = {k: a[lead:] for k, a in series.items()}
-        for key, v in list(kwargs.items()):
+        for key, v in kwargs.items():
             if isinstance(v, str) and _HANDLE_FULL.fullmatch(v):
                 entry, out = self._lookup(v, op)
-                kwargs[key] = entry.get()[out][lead:]
+                if out == "":
+                    raise self._no_output(v, entry, op)
+                self._handles.move_to_end(entry.id)
+                entries[v] = (entry, out)
+        columns, alignment = self._aligned({h: e.get()[out] for h, (e, out) in entries.items()},
+                                           {h: e for h, (e, _) in entries.items()}, op)
+        lead = max(_sum.leading_nan(columns[h]) for h in handles)
+        series = {h: columns[h][lead:] for h in handles}
+        for key, v in list(kwargs.items()):
+            if isinstance(v, str) and v in columns:
+                kwargs[key] = columns[v][lead:]
         first = next(iter(series.values()))
         result = fn(first, **kwargs) if name in _STATS_ONE else fn(series, **kwargs)
-        return {**result, "analysis": {"handles": list(handles), "trimmed_leading": lead}}
+        analysis = {"handles": list(handles), "trimmed_leading": lead}
+        if alignment is not None:
+            analysis["aligned"] = alignment
+        return {**result, "analysis": analysis}
+
+    def _aligned(
+        self, arrays: dict[str, np.ndarray], entries: dict[str, _Handle], op: str
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any] | None]:
+        """The series on the timestamps they all have, in step.
+
+        Series made on the same bars are already in step. Series of different bars (two
+        instruments, two date ranges) are joined on their timestamps, never by position: a
+        statistic of rows that are not the same instant is a number about nothing. Their common
+        timestamps are returned (``aligned``: how many, from when to when); with none, or bars
+        no longer held to read the timestamps from, the call is refused.
+        """
+        if len({e.data_sha for e in entries.values()}) <= 1:
+            return arrays, None
+        stamps: dict[str, np.ndarray] = {}
+        for h, e in entries.items():
+            ds = self._data.get(e.data)
+            if ds is None or ds.sha256 != e.data_sha or ds.kind != "bars":
+                raise errors.InvalidParameter(
+                    f"{h} was computed on bars ({e.data!r}) that are no longer loaded, so its "
+                    "timestamps cannot be matched with the other series",
+                    code="invalid_input", operation=op, parameter=h, value=h,
+                    valid=[f"Session.load the bars of {e.data!r} again and recompute {h}"],
+                )
+            stamps[h] = ds.arrays["timestamps"]
+        common = None
+        for ts in stamps.values():
+            common = ts if common is None else np.intersect1d(common, ts, assume_unique=True)
+        if common is None or common.size < 2:
+            raise errors.InvalidData(
+                f"the series share {int(common.size)} timestamp(s): a statistic needs at least two",
+                code="invalid_input", operation=op, parameter="handles",
+                valid=["handles of series over bars with common timestamps"],
+            )
+        out = {h: a[np.isin(stamps[h], common, assume_unique=True)] for h, a in arrays.items()}
+        info = {
+            "common": int(common.size), "first_timestamp": int(common[0]),
+            "last_timestamp": int(common[-1]),
+            "dropped": {h: int(len(stamps[h]) - common.size) for h in arrays},
+        }
+        return out, info
 
     def _arity(self, op: str, name: str, why: str) -> errors.RaptorBTError:
         return errors.InvalidParameter(
@@ -848,6 +991,12 @@ class Session:
                 )
             kw["interval_seconds"] = max(1, ds.bar_ns // 10**9)
         return fn(a["timestamps"] / 1e9, a["open"], a["high"], a["low"], a["close"], a["volume"], **kw)
+
+
+def _expressions_at(program: expressions.Expr) -> bool:
+    """Whether the program calls ``at(...)``, read from its text: a sweep template may still have
+    an unbound ``$name``, which compiling would refuse."""
+    return bool(expressions._AT_CALL.search(program.source))
 
 
 def _whole(x: float) -> float | int:

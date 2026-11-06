@@ -70,6 +70,9 @@ def _parser() -> argparse.ArgumentParser:
     e.add_argument("--instruments", help="comma-separated instrument names to select, in order (names the columns of an .npz)")
     e.add_argument("--use", help="which loaded dataset to evaluate over (default: the newest)")
     e.add_argument("--tz-offset-ns", type=int, default=0, help="zone daily windows of at(...) are cut in")
+    e.add_argument("--schedule", help="the trading calendar at(...) windows are cut by: a preset (nse_equity, nse_fo, "
+                   "bse_equity, bse_fo, mcx, mcx_select_agri, mcx_other_agri, cds, cds_cross, bcd); "
+                   "with --data it becomes the dataset's default")
 
     w = sessioned(sub.add_parser(
         "sweep", allow_abbrev=False,
@@ -80,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     data_options(w)
     w.add_argument("--use", help="which loaded dataset to evaluate over (default: the newest)")
     w.add_argument("--tz-offset-ns", type=int, default=0, help="zone daily windows of at(...) are cut in")
+    w.add_argument("--schedule", help="the trading calendar at(...) windows are cut by (a preset such as nse_equity or mcx)")
     w.add_argument("--score", help="what each row shows: a statistic (true_rate, mean, std, min, max, last, known, "
                    "leading_nan) or an expression")
     w.add_argument("--grid", action="append", default=[], metavar="NAME=V1,V2",
@@ -186,14 +190,14 @@ def _eval(a: argparse.Namespace) -> Any:
     def work(s: Session) -> Any:
         if a.data is not None:
             bars = read_bars(a.data, time_unit=a.time_unit, field=a.field, timestamps=a.timestamps)
-            s.load(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, name=a.name)
+            s.load(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, name=a.name, session=a.schedule)
         if a.panel is not None:
             bars, named = read_panel(a.panel, time_unit=a.time_unit)
             picked = a.instruments.split(",") if a.instruments else named
             if named is not None and a.instruments:
                 bars, picked = _select_columns(bars, named, picked)
             s.load_panel(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, instruments=picked, name=a.name)
-        return s.eval(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns)
+        return s.eval(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns, session=a.schedule)
 
     return _with_session(a, work)
 
@@ -254,8 +258,8 @@ def _sweep(a: argparse.Namespace) -> Any:
     def work(s: Session) -> Any:
         if a.data is not None:
             bars = read_bars(a.data, time_unit=a.time_unit, field=a.field, timestamps=a.timestamps)
-            s.load(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, name=a.name)
-        return s.sweep(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns, score=a.score,
+            s.load(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, name=a.name, session=a.schedule)
+        return s.sweep(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns, session=a.schedule, score=a.score,
                        grid=axes or None, points=points)
 
     return _with_session(a, work)

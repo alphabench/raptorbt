@@ -62,6 +62,11 @@ impl Stream {
         }
     }
 
+    /// The refusal an `at(...)` found once it had seen two bars with no width given, if any.
+    pub fn width_refusal(&self) -> Option<&EvalError> {
+        self.ats.iter().find_map(AtState::refusal)
+    }
+
     /// Back to the state after construction (allocates: not for the per-bar path). Used to
     /// prime a stream from history, then feed live bars.
     pub fn reset(&mut self) -> Result<(), EvalError> {

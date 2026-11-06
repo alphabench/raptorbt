@@ -269,6 +269,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `sma(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sma([x], period)`` with this expression as the first input. |
 | `source` | The text this expression was made from (a built expression: its full rendering). |
 | `sqrt(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sqrt([x])`` with this expression as the first input. |
+| `state_bytes(self, rows: 'int' = 0) -> 'int'` | Heap one evaluation over ``rows`` bars holds, in bytes: the windows of the functions (allocated whole, whatever the data holds: ``sma(close, 5_000_000)`` costs 40 MB on 400 bars) plus the buffers of a batch run. Budget with this before evaluating. A program over the engine's limit on one evaluation (512 MiB) raises ``expr_unsupported_here`` stating the bytes, here and in :meth:`eval`; a cross-sectional program has none to give. |
 | `stddev(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stddev([x], period=5, nbdev=1.0)`` with this expression as the first input. |
 | `stoch(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stoch([high], [low], [close], fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0) -> (slowk, slowd)`` with this expression as the first input. |
 | `stochastic(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`` with this expression as the first input. |
@@ -316,7 +317,7 @@ from the function registry. A call with several outputs is selected by attribute
 
 ```python
 class ExprStream
-ExprStream(program: 'Any', native: 'Any' = None)
+ExprStream(program: 'Any', native: 'Any' = None, cover: 'Any' = None)
 ```
 
 Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`.

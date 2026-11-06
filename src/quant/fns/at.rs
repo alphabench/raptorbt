@@ -98,14 +98,59 @@ pub fn width_ns(spec: BarSpec) -> Option<i64> {
     spec.unit.fixed_ns().map(|u| u * i64::from(spec.step))
 }
 
-/// The examples that are a coarser exact multiple of `base_ns`.
-pub fn valid_for(base_ns: i64) -> Vec<String> {
-    EXAMPLES
+/// Whether `spec` is a coarser clock the base bars of width `base` (ns) can be cut into. A
+/// fixed-width timeframe must be a coarser exact multiple of the base. A day (or week) of a run
+/// with a session is cut by the session's date, not by 24 hours, so bars finer than the session
+/// are enough: 75-minute bars make five to an NSE session though they do not divide the
+/// 24-hour day.
+fn accepts(spec: BarSpec, base: i64, session_ns: Option<i64>) -> bool {
+    let Some(tf) = width_ns(spec) else { return true };
+    if base <= 0 {
+        return false;
+    }
+    if matches!(spec.unit, AggregationUnit::Day | AggregationUnit::Week)
+        && session_ns.is_some_and(|day| base < day)
+    {
+        return true;
+    }
+    tf > base && tf % base == 0
+}
+
+/// The length of a trading session in nanoseconds, when the clock has a schedule.
+fn session_len_ns(clock: &ClockCtx) -> Option<i64> {
+    let minutes = clock.session.as_ref()?.trading_minutes();
+    Some((minutes * 60.0 * 1e9).round() as i64).filter(|ns| *ns > 0)
+}
+
+/// `ns` as the largest whole unit that holds it exactly (`"14h"`), when that spelling parses.
+fn multiple_text(ns: i64) -> Option<String> {
+    const UNITS: [(i64, &str); 5] = [
+        (86_400_000_000_000, "d"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "m"),
+        (1_000_000_000, "s"),
+        (1_000_000, "ms"),
+    ];
+    let (size, unit) = UNITS.iter().find(|(size, _)| ns % size == 0)?;
+    let text = format!("{}{unit}", ns / size);
+    parse_timeframe(&text).ok().map(|_| text)
+}
+
+/// The timeframes `base_ns` bars can be cut into: the examples that are a coarser exact
+/// multiple (a day being the session's length, if `session_ns` is known). Never empty: when no
+/// example fits, the first multiples of the base itself.
+pub fn valid_for(base_ns: i64, session_ns: Option<i64>) -> Vec<String> {
+    let base = base_ns.max(1);
+    let mut valid: Vec<String> = EXAMPLES
         .iter()
         .filter_map(|t| parse_timeframe(t).ok().map(|s| (*t, s)))
-        .filter(|(_, s)| width_ns(*s).is_some_and(|w| w > base_ns && w % base_ns == 0))
+        .filter(|(_, s)| accepts(*s, base, session_ns))
         .map(|(t, _)| t.to_string())
-        .collect()
+        .collect();
+    if valid.is_empty() {
+        valid = (2..=5).filter_map(|k| multiple_text(base.checked_mul(k)?)).collect();
+    }
+    valid
 }
 
 /// One `at` node's run state: the window builder, the inner expression's stream and the held
@@ -116,6 +161,12 @@ pub struct AtState {
     spec: BarSpec,
     sub: Stream,
     held: f64,
+    /// No base width was given and the clock asks for it to be inferred: the first bar's stamp
+    /// until the second arrives, then done.
+    inferring: bool,
+    first_ts: Option<i64>,
+    session_ns: Option<i64>,
+    refusal: Option<EvalError>,
 }
 
 impl AtState {
@@ -123,12 +174,13 @@ impl AtState {
     /// not coarser than the base bars, or not an exact multiple of them, when the base width is
     /// known.
     pub fn new(spec: BarSpec, inner: &Plan, clock: &ClockCtx) -> Result<Self, EvalError> {
-        if let (Some(base), Some(tf)) = (clock.base_ns, width_ns(spec)) {
-            if base <= 0 || tf <= base || tf % base != 0 {
+        if let Some(base) = clock.base_ns {
+            let session = session_len_ns(clock);
+            if !accepts(spec, base, session) {
                 return Err(EvalError::Timeframe {
                     tf: timeframe_text(spec),
                     base_ns: base,
-                    valid: valid_for(base.max(1)),
+                    valid: valid_for(base, session),
                 });
             }
         }
@@ -136,13 +188,26 @@ impl AtState {
             .map_err(|e| EvalError::Node(e.to_string()))?;
         let (key, session) = key.with_session(clock.session.as_deref());
         let builder = key.builder(session).map_err(|e| EvalError::Node(e.to_string()))?;
-        Ok(Self { builder, key, spec, sub: Stream::new(inner)?, held: f64::NAN })
+        Ok(Self {
+            builder,
+            key,
+            spec,
+            sub: Stream::new(inner)?,
+            held: f64::NAN,
+            inferring: clock.infer_width && clock.base_ns.is_none(),
+            first_ts: None,
+            session_ns: session_len_ns(clock),
+            refusal: None,
+        })
     }
 
     /// Feed one base bar stamped `ts`; the held value after it. The value changes only on the
     /// bar that completes a window, and then it is the inner expression on that window.
     #[inline]
     pub fn step(&mut self, ts: i64, bar: &Bar) -> f64 {
+        if self.inferring {
+            self.infer(ts);
+        }
         let rec = SourceRecord {
             timestamp: ts,
             open: bar.open,
@@ -160,12 +225,48 @@ impl AtState {
                 close: done.close,
                 volume: done.volume,
             };
-            let out = self.sub.update(&window, &[]).expect(
-                "the body of an at(...) reads no named series, so it takes no handle values",
-            );
-            self.held = out[0];
+            // The body reads no named series (the checker gives it none), so it takes no handle
+            // values and cannot fail; were it to, the held value would read unknown.
+            self.held = self
+                .sub
+                .update(&window, &[])
+                .ok()
+                .and_then(|o| o.first().copied())
+                .unwrap_or(f64::NAN);
         }
         self.held
+    }
+
+    /// The base width from the first two stamps. Once only: the cell then neither looks nor
+    /// allocates. A timeframe no coarser than it is a refusal for the runtime to raise before any
+    /// hook reads a value.
+    fn infer(&mut self, ts: i64) {
+        let Some(first) = self.first_ts else {
+            self.first_ts = Some(ts);
+            return;
+        };
+        let gap = ts - first;
+        if gap <= 0 {
+            return;
+        }
+        self.inferring = false;
+        if !accepts(self.spec, gap, self.session_ns) {
+            self.refusal = Some(EvalError::Timeframe {
+                tf: timeframe_text(self.spec),
+                base_ns: gap,
+                valid: valid_for(gap, self.session_ns),
+            });
+        }
+    }
+
+    /// The refusal found by the width inference, if any.
+    pub fn refusal(&self) -> Option<&EvalError> {
+        self.refusal.as_ref()
+    }
+
+    /// True while the width is still being worked out.
+    pub fn inferring(&self) -> bool {
+        self.inferring
     }
 
     /// True once the inner expression is past its own warm-up.
@@ -264,7 +365,12 @@ mod tests {
         for t in ["", "d", "0d", "1", "1x", "1tick", "100volume", "1renko", "-1d", "1 d", "1D"] {
             assert!(parse_timeframe(t).is_err(), "{t:?}");
         }
-        assert_eq!(valid_for(HOUR), vec!["2h", "4h", "1d", "1w"]);
+        assert_eq!(valid_for(HOUR, None), vec!["2h", "4h", "1d", "1w"]);
+        // 75-minute bars: no example divides them, and a refusal still names what is valid;
+        // a 375-minute session is five of them, so a day and a week are.
+        let m75 = 75 * 60_000_000_000;
+        assert_eq!(valid_for(m75, None), vec!["150m", "225m", "5h", "375m"]);
+        assert_eq!(valid_for(m75, Some(375 * 60_000_000_000)), vec!["1d", "1w"]);
     }
 
     /// A daily value first appears on the first bar of the next day, is held all that day, and
@@ -493,6 +599,29 @@ mod tests {
         }
         // 7-hour bars do not divide a day.
         assert!(matches!(run("at(\"1d\", close)", 7 * HOUR), Err(EvalError::Timeframe { .. })));
+    }
+
+    /// 75-minute bars do not divide 24 hours but five make an NSE session: with the schedule a
+    /// day is accepted; without it the refusal still lists what is valid.
+    #[test]
+    fn a_session_decides_whether_a_day_is_a_multiple_of_the_bars() {
+        let (ts, c) = (hourly(3, BarStamp::Close, 0), closes(3));
+        let m75 = 75 * 60_000_000_000;
+        let run = |src: &str, session: Option<SessionSchedule>| {
+            let mut ctx = ClockCtx::new(0, BarStamp::Close, session);
+            ctx.base_ns = Some(m75);
+            eval(&plan(src), &Inputs::new().field(Field::Close, &c).timestamps(&ts).clock(ctx))
+        };
+        let nse = || Some(SessionSchedule::nse_equity());
+        assert!(run("at(\"1d\", close)", nse()).is_ok());
+        let Err(EvalError::Timeframe { valid, .. }) = run("at(\"1d\", close)", None) else {
+            panic!("a day is not a multiple of 75 minutes without a session");
+        };
+        assert_eq!(valid, vec!["150m", "225m", "5h", "375m"]);
+        let Err(EvalError::Timeframe { valid, .. }) = run("at(\"1h\", close)", nse()) else {
+            panic!("1h is finer than 75 minutes");
+        };
+        assert_eq!(valid, vec!["1d", "1w"]);
     }
 
     #[test]

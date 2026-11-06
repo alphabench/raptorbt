@@ -235,7 +235,7 @@ fn what_a_spec_says_about_its_program() {
 #[test]
 fn a_private_core_reads_the_volume_it_is_fed() {
     let id = intern("sma(volume, 3)");
-    let mut core = CellCore::for_spec(IndSpec::expr(id, 0).unwrap());
+    let mut core = CellCore::for_spec(IndSpec::expr(id, 0).unwrap()).unwrap();
     let bar = |v| Ohlc { open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: v, ts: 0 };
     assert!(!core.update(bar(30.0)).initialized);
     assert!(!core.update(bar(60.0)).initialized);

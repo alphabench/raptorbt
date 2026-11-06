@@ -36,6 +36,7 @@ use crate::data::{AggregationUnit, BarSpec, BarStamp};
 use crate::portfolio::book::PortfolioBook;
 use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
 use crate::portfolio::session::ScheduleData;
+use crate::quant::eval::ClockCtx;
 use crate::runtime::commands::{
     CmdError, Command, CommandState, ErrVal, Intent, Order, OrderSpec, Queue, Target, TwapSpec,
     MAX_TAGS, MAX_TAG_KEY, MAX_TAG_VALUE,
@@ -2868,6 +2869,72 @@ impl PyRuntime {
         // (plan, indicator) -> reader slot, for the ones that get linked.
         let mut linked: HashMap<(usize, usize), SlotId> = HashMap::new();
 
+        // An expression reads one instrument's bars on one stream: a cell shared across
+        // strategies, a private one, a batch run and a live node all keep that. Registered
+        // without an instrument, or one object on several, a private cell would take the bars
+        // of different instruments into one stream, and the shared bank refuses it.
+        let mut clocks: HashMap<(usize, usize), ClockCtx> = HashMap::new();
+        // A stamped-at-open run knows its bar width: the offset that moved stamps to the close.
+        for g in 0..self.shared.symbols.get().len() {
+            let width = self.shared.offset_of(g);
+            if width > 0 {
+                builder.set_bar_width(InstrumentId::new(g as u32), width);
+            }
+        }
+        for (pi, plan) in plans.iter().enumerate() {
+            for (ii, ind) in plan.inds.iter().enumerate() {
+                let Ok(obj) = ind.obj.bind(py).cast::<PyIndicator>() else { continue };
+                let spec = obj.borrow().spec();
+                let Some(program) = spec.program() else { continue };
+                if ind.local.is_none() {
+                    return Err(Fail::new(
+                        "expr_unsupported_here",
+                        "an expression reads one instrument's bars: register it with an \
+                         instrument (ctx.indicators.expr(..., instrument=...), or \
+                         register_indicator(indicator, symbol=...)), one indicator per instrument",
+                    )
+                    .op("register_indicator")
+                    .param("symbol")
+                    .valid(["symbol=<one symbol of the run>"])
+                    .into());
+                }
+                if counts[&(ind.obj.as_ptr() as usize)] != 1 {
+                    return Err(Fail::new(
+                        "expr_unsupported_here",
+                        "an expression indicator serves one instrument on one stream: make one \
+                         indicator for each instrument, strategy and timeframe",
+                    )
+                    .op("register_indicator")
+                    .param("indicator")
+                    .valid(["one Indicator per registration"])
+                    .into());
+                }
+                if !spec.needs_clock() {
+                    continue;
+                }
+                let input = match (ind.stream_id, ind.local) {
+                    (None, Some(local)) => builder
+                        .instrument_of(plan.sid, local)
+                        .map(crate::runtime::IndInput::Primary)
+                        .ok_or_else(finished)?,
+                    (Some(sub), Some(local)) if sub < plan.subs => {
+                        crate::runtime::IndInput::Composite(
+                            plan.streams[plan.stream_of[local][sub] as usize].agg,
+                        )
+                    }
+                    // A handle that names no subscription is never fed.
+                    _ => continue,
+                };
+                match builder.expr_clock(input, program) {
+                    Ok(Some(clock)) => {
+                        clocks.insert((pi, ii), clock);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(super::expr_bindings::eval_fail("register_indicator", e)),
+                }
+            }
+        }
+
         if self.shared.share {
             for (pi, plan) in plans.iter().enumerate() {
                 for (ii, ind) in plan.inds.iter().enumerate() {
@@ -3056,6 +3123,11 @@ impl PyRuntime {
                     ind.obj.bind(py).cast::<PyIndicator>().ok().map(|o| o.clone().unbind());
                 if let Some(native) = &native {
                     let mut o = native.bind(py).borrow_mut();
+                    // The clock of the stream it runs on: an expression using `at(...)` is cut
+                    // by it, exactly as a shared cell on the same stream is.
+                    if let Some(clock) = clocks.remove(&(pi, ii)) {
+                        o.set_clock(clock)?;
+                    }
                     o.attach(bank.clone());
                     // Fed by every instrument's stream: no event's stream is its own.
                     if ind.local.is_none() {
@@ -5300,12 +5372,12 @@ fn feed_owned(
         for &(stream, ref b) in &scratch.deliveries {
             let bar = Ohlc::from(b);
             for ind in &t.streams[stream as usize].native {
-                ind.bind(py).borrow_mut().feed(bar);
+                ind.bind(py).borrow_mut().feed(bar)?;
             }
         }
         if let Some(bar) = primary {
             for ind in &t.primary_native[local] {
-                ind.bind(py).borrow_mut().feed(bar);
+                ind.bind(py).borrow_mut().feed(bar)?;
             }
             // A strategy's own objects (anything with `update_bar`) are current like an
             // `Indicator`, whatever its symbol is called: every instrument's of a timestamp is

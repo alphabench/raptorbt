@@ -35,6 +35,9 @@ class Dataset:
     #: "bars" (1-D columns of one instrument) or "panel" (2-D columns, dates by names).
     kind: str = "bars"
     names: tuple[str, ...] = ()
+    #: The trading calendar `at(...)` windows are cut by by default (a preset name or
+    #: ``custom:<digest>``); none: clock hours and days of the zone.
+    session: str | None = None
 
     @property
     def rows(self) -> int:
@@ -52,6 +55,7 @@ class Dataset:
     def facts(self) -> dict[str, Any]:
         ts = self.arrays["timestamps"]
         panel = {"kind": "panel", "instruments": len(self.names)} if self.kind == "panel" else {}
+        session = {"session": self.session} if self.session is not None else {}
         return {
             "data": self.name,
             **panel,
@@ -63,6 +67,7 @@ class Dataset:
             "first_timestamp": int(ts[0]),
             "last_timestamp": int(ts[-1]),
             "sha256": self.sha256,
+            **session,
         }
 
 

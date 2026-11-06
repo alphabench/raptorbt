@@ -858,19 +858,45 @@ def test_the_factor_summary_is_factor_report_in_numbers():
     for hz in (1, 5, 10):
         row, got = rep["horizons"][hz], f["horizons"][str(hz)]
         assert got == {
-            "n_scored": row["n_scored"], "ic_mean": r(row["ic_mean"]), "t_hac": r(row["t_hac"]),
-            "hac_lags": row["hac_lags"], "t_naive": r(row["t_naive"]), "hit_rate": r(row["hit_rate"]),
-            "long_short_mean": r(row["long_short_mean"]), "long_short_t_hac": r(row["long_short_t_hac"]),
+            "n_scored": row["n_scored"], "ic_mean": r(row["ic_mean"]),
+            "t_nonoverlap": r(row["t_nonoverlap"]), "p_nonoverlap": r(row["p_nonoverlap"]),
+            "n_independent": row["n_independent"], "names_left_share": r(row["names_left_share"]),
+            "t_hac": r(row["t_hac"]), "hac_lags": row["hac_lags"], "t_naive": r(row["t_naive"]),
+            "hit_rate": r(row["hit_rate"]), "long_short_mean": r(row["long_short_mean"]),
+            "long_short_t_nonoverlap": r(row["long_short_t_nonoverlap"]),
+            "long_short_t_hac": r(row["long_short_t_hac"]),
         }
         assert got["hac_lags"] == hz - 1  # the overlap correction that was used
         assert same(s.series(f"{f['handle']}_ic_{hz}"), row["ic"])
         assert same(s.series(f["handle"])[f"long_short_{hz}"], row["long_short"])
         assert same(s.series(f["handle"])[f"quantile_returns_by_date_{hz}"], row["quantile_returns_by_date"])
+    assert f["headline"] == "t_nonoverlap" and "over-reject" in f["t_hac_note"]
+    assert f["flags"] == [x if len(x) <= 160 else x[:157] + "..." for x in rep["flags"][:3]]
+    assert f["assumptions"] == rep["assumptions"][:2]
     assert f["turnover"] == {"top": r(rep["turnover"][-1]), "bottom": r(rep["turnover"][0])}
     assert f["names"] == {"min": 40, "median": 40.0, "max": 40} and f["dates"] == 200
     assert same(s.series(f"{f['handle']}_coverage"), rep["coverage"])
     assert size(f) <= asum.OUTPUT_BYTES
     assert f["horizons"]["5"]["ic_mean"] > 0  # the planted drift persists, so momentum scores
+
+
+def test_the_factor_summary_with_many_horizons_and_full_flags_fits_the_cap():
+    # Measured: 8 horizons, a split and two leavers (three flags): 1,898 bytes with horizons 1 and
+    # 2 kept and the rest named in truncated_horizons; one horizon with the same flags is 1,378.
+    n, m = 300, 40
+    data = panel_data(n, m)
+    close = data["close"]
+    close[150:, 3] /= 10.0
+    close[200:, 5] = np.nan
+    close[220:, 6] = 0.0
+    s = Session()
+    s.load_panel(data, bar_stamp="close", instruments=names_of(m))
+    h = s.eval("zscore_xs(roc(close, 20))")["handle"]
+    f = s.factor(h, horizons=(1, 2, 3, 5, 10, 20, 40, 60), quantiles=5)
+    assert size(f) <= asum.OUTPUT_BYTES
+    assert len(f["flags"]) == 3 and f["assumptions"]
+    assert f["horizons"] and f["truncated_horizons"]
+    assert set(f["horizons"]) | set(f["truncated_horizons"]) == {"1", "2", "3", "5", "10", "20", "40", "60"}
 
 
 def test_a_factor_can_be_an_expression_and_a_repeat_is_not_recomputed(monkeypatch):

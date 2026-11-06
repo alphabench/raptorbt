@@ -42,6 +42,7 @@ import itertools
 import json
 import math
 import numbers
+import re
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from typing import Any
@@ -261,6 +262,29 @@ def _refuse(code: str, message: str, *, operation: str, **detail: Any) -> errors
 # ------------------------------------------------------------------ rendering
 
 
+# Text, not the compiled program (a $name may be unbound). A false positive, such as an
+# identifier ending in `at(`, only runs the coverage check once more.
+_AT_CALL = re.compile(r"\bat\s*\(")
+
+
+def _covered(session: Any, uses_at: bool, timestamps: Any, operation: str):
+    """Refuse bars on dates a session schedule does not cover (``session_not_covered``).
+
+    A schedule answers only for the dates it was given (the MCX preset from 2024-11-04, a
+    schedule built from calendar documents); a window cut on a date it does not know would be a
+    guess, and a run refuses such a bar the same way. Only an expression using ``at(...)`` reads
+    the schedule. Returns the checker for a stream to call per bar, or None.
+    """
+    if session is None or not uses_at or not getattr(session, "coverage", None):
+        return None
+    from raptorbt.strategy._validate import SessionCoverage  # lazy: it imports the strategy package
+
+    coverage = SessionCoverage("data", session, operation)
+    if timestamps is not None:
+        coverage.check_all(np.asarray(timestamps, dtype=np.int64))
+    return coverage
+
+
 class _NotANumber(Exception):
     """An operand is not a number: caught where it is built, never seen by a caller."""
 
@@ -425,6 +449,14 @@ class Expr:
         each to :meth:`eval_panel` as a label per name."""
         return self._groups
 
+    def state_bytes(self, rows: int = 0) -> int:
+        """Heap one evaluation over ``rows`` bars holds, in bytes: the windows of the functions
+        (allocated whole, whatever the data holds: ``sma(close, 5_000_000)`` costs 40 MB on 400
+        bars) plus the buffers of a batch run. Budget with this before evaluating. A program
+        over the engine's limit on one evaluation (512 MiB) raises ``expr_unsupported_here``
+        stating the bytes, here and in :meth:`eval`; a cross-sectional program has none to give."""
+        return self._prog.state_bytes(rows)
+
     @property
     def uses_at(self) -> bool:
         """True when the expression uses ``at(...)``: evaluating it needs timestamps."""
@@ -504,6 +536,8 @@ class Expr:
         """
         if isinstance(data, Mapping) and not isinstance(data, dict):
             data = dict(data)
+        if isinstance(data, dict):
+            _covered(session, bool(_AT_CALL.search(self._src)), data.get("timestamps"), "Expr.eval")
         cols = self._prog.evaluate(data, bar_stamp, tz_offset_ns, session, bar_ns)
         return cols[0] if len(cols) == 1 else dict(zip(self._prog.outputs, cols))
 
@@ -562,7 +596,8 @@ class Expr:
         bit for bit. An expression that uses ``at(...)`` needs ``bar_stamp`` here (and the
         optional ``tz_offset_ns``, ``session``, ``bar_ns`` of :meth:`eval`) and takes each
         bar's ``timestamp=`` in :meth:`ExprStream.update`."""
-        return ExprStream(self._prog, self._prog.stream(bar_stamp, tz_offset_ns, session, bar_ns))
+        cover = _covered(session, bool(_AT_CALL.search(self._src)), None, "Expr.stream")
+        return ExprStream(self._prog, self._prog.stream(bar_stamp, tz_offset_ns, session, bar_ns), cover)
 
     def sweep(
         self,
@@ -635,6 +670,8 @@ class Expr:
             )
             steps = (None, None)
         else:
+            # Text, not the compiled program: a $name may still be unbound here.
+            _covered(session, bool(_AT_CALL.search(self._src)), data.get("timestamps") if isinstance(data, dict) else None, op)
             got = _raptorbt.expr_sweep(
                 self._src, self._params or None, self._series or None, data, axes_list, point_list,
                 bar_stamp, tz_offset_ns, session, bar_ns, max_combinations, max_bytes,
@@ -1415,9 +1452,10 @@ def factor_report(
 class ExprStream:
     """Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`."""
 
-    __slots__ = ("_native", "_names", "_need", "_at")
+    __slots__ = ("_native", "_names", "_need", "_at", "_cover")
 
-    def __init__(self, program: Any, native: Any = None):
+    def __init__(self, program: Any, native: Any = None, cover: Any = None):
+        self._cover = cover
         self._native = program.stream() if native is None else native
         self._names = tuple(program.outputs)
         self._need = frozenset(program.fields)
@@ -1452,6 +1490,8 @@ class ExprStream:
                     )
                 v = _NAN
             vals.append(v)
+        if self._cover is not None:
+            self._cover.check(int(timestamp))
         out = self._native.update_at(int(timestamp), *vals) if self._at else self._native.update(*vals)
         return out[0] if len(out) == 1 else dict(zip(self._names, out))
 

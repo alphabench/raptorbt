@@ -40,7 +40,7 @@ fn compile_fail(source: &str, e: ExprError) -> PyErr {
         .into()
 }
 
-fn eval_fail(operation: &str, e: EvalError) -> PyErr {
+pub(crate) fn eval_fail(operation: &str, e: EvalError) -> PyErr {
     let text = e.to_string();
     let fail = match e {
         EvalError::Unsupported(_) => Fail::new("expr_unsupported_here", text).param("expression"),
@@ -51,6 +51,7 @@ fn eval_fail(operation: &str, e: EvalError) -> PyErr {
             Fail::new("length_mismatch", text).param(name)
         }
         EvalError::HandleCount { .. } | EvalError::Node(_) => Fail::new("invalid_input", text),
+        EvalError::State { .. } => Fail::new("expr_unsupported_here", text).param("expression"),
         EvalError::NoTimestamps => Fail::new("missing_field", text).param("timestamps"),
         EvalError::NoClock => Fail::new("missing_bar_stamp", text).param("bar_stamp"),
         EvalError::Timeframe { valid, .. } => {
@@ -142,10 +143,15 @@ pub struct PyExprProgram {
 impl PyExprProgram {
     /// This program's id in the bank's interner: equal canonical text, equal id. A panel program
     /// is interned as such: its cells run on a universe.
-    pub(crate) fn intern(&self) -> crate::core::Result<crate::runtime::exprs::ProgramId> {
+    pub(crate) fn intern(
+        &self,
+    ) -> crate::core::Result<(
+        crate::runtime::exprs::ProgramId,
+        std::sync::Arc<crate::runtime::exprs::ProgramInfo>,
+    )> {
         match (&self.plan, &self.panel) {
-            (Some(plan), _) => crate::runtime::exprs::intern(&self.program, plan),
-            (None, Ok(panel)) => crate::runtime::exprs::intern_panel(&self.program, panel),
+            (Some(plan), _) => crate::runtime::exprs::intern_leased(&self.program, plan),
+            (None, Ok(panel)) => crate::runtime::exprs::intern_panel_leased(&self.program, panel),
             (None, Err(e)) => Err(crate::core::RaptorError::invalid_parameter(e.to_string())),
         }
     }
@@ -264,6 +270,17 @@ impl PyExprProgram {
     #[pyo3(signature = (bar_ns=None))]
     fn warmup_bars(&self, bar_ns: Option<i64>) -> Option<usize> {
         self.program.warmup_bars(bar_ns)
+    }
+
+    /// Heap one evaluation over `rows` bars holds: the kernels' windows, which are allocated
+    /// whole whatever `rows` is, and the buffers of the batch run. The windows are built to be
+    /// measured, so a program past the limit on one evaluation (512 MiB) is refused here with the
+    /// bytes it reached, as an evaluation would refuse it.
+    #[pyo3(signature = (rows=0))]
+    fn state_bytes(&self, rows: usize) -> PyResult<usize> {
+        let plan = self.series("Expr.state_bytes")?;
+        let kernels = plan.state_bytes().map_err(|e| eval_fail("Expr.state_bytes", e))?;
+        Ok(kernels.saturating_add(plan.batch_bytes(rows)))
     }
 
     /// Whether the program uses `at(...)`, so evaluating it needs timestamps and a bar stamp.

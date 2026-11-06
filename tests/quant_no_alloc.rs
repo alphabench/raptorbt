@@ -342,7 +342,7 @@ fn every_registered_function_reports_the_heap_it_holds() {
         };
         let id = exprs::intern(&program, &plan).unwrap();
         let before = live();
-        let core = Box::new(ExprCore::new(id, 0));
+        let core = Box::new(ExprCore::new(id, 0).unwrap());
         let measured = (live() - before) as usize;
         let claimed = std::mem::size_of::<ExprCore>() + exprs::info(id).state_bytes;
         if core.state_bytes() != exprs::info(id).state_bytes {
@@ -376,7 +376,7 @@ fn a_composite_cell_reports_the_heap_it_holds() {
         let plan = Plan::new(&program).unwrap();
         let id = exprs::intern(&program, &plan).unwrap();
         let before = live();
-        let core = Box::new(ExprCore::new(id, 0));
+        let core = Box::new(ExprCore::new(id, 0).unwrap());
         let measured = (live() - before) as usize;
         let claimed = std::mem::size_of::<ExprCore>() + exprs::info(id).state_bytes;
         if measured != claimed {

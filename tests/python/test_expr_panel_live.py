@@ -443,3 +443,134 @@ def test_the_seal_of_500_instruments_is_inside_the_frame_budget():
         f"added at p99 {added * 1e3:.2f} ms"
     )
     assert added < FRAME_BUDGET_S, f"the seal added {added * 1e3:.1f} ms at p99 over 500 instruments"
+
+
+# -- late listings, a thin open, warm-up and restart, and the trades a rank makes -----------------
+
+NESTED = "ema(rank(roc(close, 3)), 4) - zscore_xs(sma(close, 5))"
+LATE_ABSENT = (
+    {("S5", i) for i in range(15)}  # listed at date 15
+    | {("S4", i) for i in range(31, 60)}  # gone after date 30
+    | {("S2", 20), ("S2", 21)}  # halted for two dates
+)
+
+
+@pytest.mark.parametrize("mode", ["batch", "node"])
+@pytest.mark.parametrize("text", [TEXT, NESTED, "zscore(rank(close), 6)"])
+def test_late_listing_delisting_and_halt_equal_eval_panel(mode, text):
+    data = universe(n=60, absent=LATE_ABSENT)
+    s = Rank(text)
+    run(s, data, mode)
+    check_against_panel(s.rows, data, text)
+
+
+def test_a_late_listings_warm_up_counts_from_its_own_first_bar_by_hand():
+    """rank(roc(close, 5)): S5 has its first bar at date 15, so its roc is known at date 20.
+    Dates 15-19 rank the other names only and S5 reads unknown; at date 20 S2 is halted, so five
+    names are ranked and the rank lies on the grid i / 4. S4 is gone after date 30."""
+    data = universe(n=60, absent=LATE_ABSENT)
+    s = Rank(TEXT)
+    run(s, data)
+    by_date = {}
+    for t, _, v in s.rows:
+        by_date[int((t - T0) // MIN) - 1] = v
+    for d in range(15, 20):
+        assert by_date[d]["S5"][1] is None, d
+    r = by_date[20]["S5"][1]
+    assert r is not None and abs(r * 4 - round(r * 4)) < 1e-12, r
+    assert by_date[32]["S4"][1] is None
+
+
+def test_a_thin_open_by_hand():
+    """Date 0: only S0 (10) and S1 (20) print, so rank is 0 and 1 and the others are unknown.
+    Date 1: all six print 10, 20, .., 60 and rank is i / 5."""
+    t1, t2 = T0 + MIN, T0 + 2 * MIN
+    data = {s: {"timestamps": [], **{c: [] for c in OHLCV}} for s in SYMS}
+    for s, v in (("S0", 10.0), ("S1", 20.0)):
+        data[s]["timestamps"].append(t1)
+        for c in OHLCV:
+            data[s][c].append(1.0 if c == "volume" else v)
+    for j, s in enumerate(SYMS):
+        data[s]["timestamps"].append(t2)
+        for c in OHLCV:
+            data[s][c].append(1.0 if c == "volume" else 10.0 * (j + 1))
+    data = {
+        s: {k: np.array(v, dtype=np.int64 if k == "timestamps" else np.float64) for k, v in d.items()}
+        for s, d in data.items()
+    }
+    for mode in ("batch", "node"):
+        s = Rank("rank(close)")
+        run(s, data, mode)
+        first = next(v for t, _, v in s.rows if t == t1)
+        assert {k: x[1] for k, x in first.items()} == {
+            "S0": 0.0, "S1": 1.0, "S2": None, "S3": None, "S4": None, "S5": None,
+        }, mode
+        last = next(v for t, _, v in s.rows if t == t2)
+        assert [last[x][1] for x in SYMS] == [j / 5 for j in range(6)], mode
+
+
+def test_warm_up_bars_then_live_and_a_restart_equal_a_backtest_of_all_the_bars():
+    data = universe(n=60, absent=LATE_ABSENT)
+    cut_ts = T0 + 25 * MIN
+    head = {s: {k: v[d["timestamps"] <= cut_ts] for k, v in d.items()} for s, d in data.items()}
+    tail = {s: {k: v[d["timestamps"] > cut_ts] for k, v in d.items()} for s, d in data.items()}
+    whole = Rank(NESTED)
+    run(whole, data)
+    journal = rj.Journal({"run": "panel"}, memory=True)
+    live = Rank(NESTED)
+    node = node_for([live], data, journal=journal, warmup_bars=head)
+    gs = list(groups(tail))
+    for t, g in gs[:10]:
+        node.push_group(t, g)
+    records = [r.canonical() for r in journal.since(0)]
+    after = Rank(NESTED)
+    restored = LiveNode.restore(
+        None, [after], list(data), config(), journal=rj.Journal({"run": "panel"}, memory=True),
+        records=records, bar_stamp="close", warmup_bars=head,
+    )
+    assert after.rows == live.rows
+    for t, g in gs[10:]:
+        node.push_group(t, g)
+        restored.push_group(t, g)
+    assert after.rows == live.rows
+    assert live.rows == whole.rows
+
+
+class RankTrader(Strategy):
+    """Buys one unit of a name whose rank is at least 0.8 and sells when it falls to 0.2."""
+
+    def on_start(self, ctx):
+        self.h = ctx.indicators.expr_all(TEXT)
+        self.held, self.n = {}, 0
+
+    def on_bar(self, ctx):
+        s = ctx.symbol
+        r = self.h[s].value
+        if r is None:
+            return
+        self.n += 1
+        if not self.held.get(s) and r >= 0.8:
+            self.held[s] = True
+            self.submit_order(O.Market(side="buy", units=1.0), client_id=f"b{self.n}", symbol=s)
+        elif self.held.get(s) and r <= 0.2:
+            self.held[s] = False
+            self.submit_order(O.Market(side="sell", units=1.0), client_id=f"s{self.n}", symbol=s)
+
+
+@pytest.mark.parametrize("timing", ["same_bar_close", "next_bar_open"])
+def test_the_trades_a_rank_makes_are_the_same_in_a_backtest_and_on_a_node(timing):
+    data = universe(n=200, absent={("S2", 80), ("S2", 81), ("S3", 120)})
+
+    def trades(res):
+        return sorted(
+            (
+                (t.symbol, str(t.direction), t.entry_time, t.entry_price, t.exit_time, t.exit_price, t.size, t.pnl)
+                for t in res.result.trades()
+            ),
+            key=repr,
+        )
+
+    a = run(RankTrader(), data, "batch", fill_timing=timing)
+    b = run(RankTrader(), data, "node", fill_timing=timing)
+    assert len(trades(a)) > 10
+    assert trades(a) == trades(b)

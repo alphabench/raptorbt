@@ -32,6 +32,12 @@ use crate::data::{BarSpec, BarStamp};
 /// Output columns, one per program output, each as long as the input.
 pub type Columns = Vec<Vec<f64>>;
 
+/// Most heap one evaluation's kernels may hold. A window of `p` bars is allocated whole when its
+/// kernel is built, whatever the data holds, so `sma(close, 16777216)` costs the same on 400
+/// bars as on 400 million; the sum of the kernels' state is counted as they are built and the
+/// plan is refused past this, with the bytes. The peak is this plus the last kernel built.
+pub const STATE_LIMIT_BYTES: usize = 512 << 20;
+
 /// The one definition of every stateless operator. Batch loops and the streaming step both
 /// call these.
 pub mod ops {
@@ -195,6 +201,12 @@ pub enum EvalError {
     NoTimestamps,
     /// The program uses `at(...)` and no bar stamp (and zone) was bound to it.
     NoClock,
+    /// The kernels' state would exceed [`STATE_LIMIT_BYTES`]: a period that is long for the
+    /// data. `bytes` is what the kernels built so far held when the limit was crossed.
+    State {
+        bytes: usize,
+        limit: usize,
+    },
     /// An `at(...)` timeframe that is not a coarser exact multiple of the base bars.
     Timeframe {
         tf: String,
@@ -230,6 +242,11 @@ impl fmt::Display for EvalError {
                 "the program uses at(...), which needs the bar stamp (open or close) its \
                  timestamps mean"
             ),
+            EvalError::State { bytes, limit } => write!(
+                f,
+                "the expression's windows hold {bytes} bytes, over the {limit}-byte limit on one \
+                 evaluation: use shorter periods"
+            ),
             EvalError::Timeframe { tf, base_ns, valid } => write!(
                 f,
                 "at(\"{tf}\") must be a coarser exact multiple of the {base_ns} ns base bars; \
@@ -256,11 +273,14 @@ pub struct ClockCtx {
     pub session: Option<Arc<SessionSchedule>>,
     /// The base bar width, when known; only used to refuse a timeframe that is not coarser.
     pub base_ns: Option<i64>,
+    /// With no `base_ns`: work the base width out of the first two bars and refuse a timeframe
+    /// that is not coarser than it (see `fns::at`). A live cell that was told no width.
+    pub infer_width: bool,
 }
 
 impl ClockCtx {
     pub fn new(tz_offset_ns: i64, stamp: BarStamp, session: Option<SessionSchedule>) -> Self {
-        Self { tz_offset_ns, stamp, session: session.map(Arc::new), base_ns: None }
+        Self { tz_offset_ns, stamp, session: session.map(Arc::new), base_ns: None, infer_width: false }
     }
 
     /// Only for measuring a stream's size: UTC, close-stamped, no session.
@@ -536,15 +556,19 @@ impl PlanData {
 
     /// Fresh kernel nodes, one per call step, in call order.
     pub fn instantiate(&self) -> Result<Vec<Box<dyn KernelNode>>, EvalError> {
-        self.steps
-            .iter()
-            .filter_map(|s| match s {
-                Step::Call { def, params, ins, outs, .. } => {
-                    Some((def.make)(params, ins, outs).map_err(EvalError::Node))
+        let mut nodes = Vec::with_capacity(self.n_calls);
+        let mut bytes = 0usize;
+        for step in &self.steps {
+            if let Step::Call { def, params, ins, outs, .. } = step {
+                let node = (def.make)(params, ins, outs).map_err(EvalError::Node)?;
+                bytes = bytes.saturating_add(node.state_bytes());
+                if bytes > STATE_LIMIT_BYTES {
+                    return Err(EvalError::State { bytes, limit: STATE_LIMIT_BYTES });
                 }
-                _ => None,
-            })
-            .collect()
+                nodes.push(node);
+            }
+        }
+        Ok(nodes)
     }
 }
 
@@ -665,6 +689,11 @@ impl Plan {
     /// stream.
     pub fn state_bytes(&self) -> Result<usize, EvalError> {
         Ok(Stream::bound(self, ClockCtx::probe())?.state_bytes())
+    }
+
+    /// Heap a batch run over `rows` bars holds besides the kernels' state: the buffer pool.
+    pub fn batch_bytes(&self, rows: usize) -> usize {
+        self.d.n_slots.saturating_mul(rows).saturating_mul(std::mem::size_of::<f64>())
     }
 
     /// Whether the plan runs an `at(...)`, so it needs timestamps and a [`ClockCtx`].

@@ -37,6 +37,7 @@
 //! subset sees the ordinals, and the tie-break order at equal timestamps
 //! (stream = instrument id), its standalone session would.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::accounts::AccountMode;
@@ -51,10 +52,11 @@ use crate::portfolio::kernel::Adoption;
 use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{ScheduleData, ScheduleEntry, SessionOutcome};
-use crate::quant::eval::ClockCtx;
+use crate::quant::eval::{ClockCtx, EvalError};
 use crate::runtime::aggregators::{AggKey, AggregatorHub, AggregatorHubBuilder};
 use crate::runtime::atr_cache::AtrCache;
 use crate::runtime::cursor::{EventKind, EventRef, MergeCursor};
+use crate::runtime::exprs::ProgramId;
 use crate::runtime::groups::{AccountGroup, GroupOutcome, GroupSpec};
 use crate::runtime::ids::{AggId, InstrumentId, StrategyId};
 use crate::runtime::indicators::{
@@ -116,6 +118,8 @@ pub struct RuntimeBuilder {
     /// The zone and what the primary bars' timestamps mean, for an expression that uses
     /// `at(...)`. Unset: such an expression is refused at [`RuntimeBuilder::build`].
     clock: Option<(i64, BarStamp)>,
+    /// Primary bar widths the caller knows (a live node told `bar_ns`), ahead of the stored bars.
+    widths: HashMap<InstrumentId, i64>,
 }
 
 impl RuntimeBuilder {
@@ -164,56 +168,97 @@ impl RuntimeBuilder {
             group_of: Vec::new(),
             adopted: Vec::new(),
             clock: None,
+            widths: HashMap::new(),
         })
     }
 
     /// Say how the primary bars' timestamps are read: `tz_offset_ns` is the zone daily windows
     /// are cut in (an instrument's own session replaces it), `stamp` whether a timestamp opens
     /// or closes its bar. An expression cell using `at(...)` takes both from here.
+    /// Tell the builder the width of `inst`'s primary bars, in nanoseconds.
+    pub fn set_bar_width(&mut self, inst: InstrumentId, width_ns: i64) {
+        if width_ns > 0 {
+            self.widths.insert(inst, width_ns);
+        }
+    }
+
     pub fn set_clock(&mut self, tz_offset_ns: i64, stamp: BarStamp) {
         self.clock = Some((tz_offset_ns, stamp));
     }
 
-    /// The clock the cell of `key` runs on, for an expression that uses `at(...)`. A primary
-    /// cell reads the run's zone and stamp; a composite cell reads bars its aggregation emitted,
-    /// which are stamped at the window's end, in the aggregation's own zone.
+    /// The clock the cell of `key` runs on, for an expression that uses `at(...)`.
     fn cell_clock(&self, key: &IndKey) -> Result<Option<ClockCtx>> {
-        let needs = matches!(key.kind, IndKind::Expr)
-            && crate::runtime::exprs::info(crate::runtime::exprs::ProgramId::from_param(
-                key.params[0],
-            ))
-            .needs_clock;
-        if !needs {
+        if key.kind != IndKind::Expr {
+            return Ok(None);
+        }
+        self.expr_clock(key.input, ProgramId::from_param(key.params[0]))
+            .map_err(|e| RaptorError::invalid_parameter(e.to_string()))
+    }
+
+    /// The width of an instrument's primary bars, read from its stored bars: the most common gap
+    /// between two stamps (a weekend or a holiday is a longer gap, a missing bar too). None when
+    /// there are fewer than two bars, as in a live run that has seen none.
+    fn primary_width_ns(&self, inst: InstrumentId) -> Option<i64> {
+        if let Some(&w) = self.widths.get(&inst) {
+            return Some(w);
+        }
+        let ts = &self.store.bars(inst)?.ts;
+        let mut gaps: HashMap<i64, usize> = HashMap::new();
+        for w in ts.windows(2).take(1 << 16) {
+            let gap = w[1].saturating_sub(w[0]);
+            if gap > 0 {
+                *gaps.entry(gap).or_default() += 1;
+            }
+        }
+        // Ties go to the shorter gap, so the answer does not depend on the hash order.
+        gaps.into_iter().max_by_key(|&(gap, n)| (n, std::cmp::Reverse(gap))).map(|(gap, _)| gap)
+    }
+
+    /// The clock an expression using `at(...)` runs on when fed by `input`: a primary stream
+    /// reads the run's zone and stamp and the instrument's session, and its bar width from the
+    /// stored bars; a composite stream reads bars its aggregation emitted, which are stamped at
+    /// the window's end, in the aggregation's own zone. None for a program with no `at(...)`.
+    /// A timeframe the bars cannot be cut into is refused here, with what is valid.
+    pub fn expr_clock(
+        &self,
+        input: IndInput,
+        program: ProgramId,
+    ) -> std::result::Result<Option<ClockCtx>, EvalError> {
+        if !crate::runtime::exprs::info(program).needs_clock {
             return Ok(None);
         }
         let session_of = |inst: InstrumentId| {
             self.params.get(inst.index()).and_then(|p| p.spec.as_ref()?.session.clone())
         };
-        match key.input {
+        let clock = match input {
             IndInput::Primary(inst) => {
-                let (tz, stamp) = self.clock.ok_or_else(|| {
-                    RaptorError::invalid_parameter(
-                        "an expression with at(...) needs the run's bar stamp, and none was set",
-                    )
-                })?;
-                let session = session_of(inst);
-                Ok(Some(ClockCtx::new(tz, stamp, session)))
+                let (tz, stamp) = self.clock.ok_or(EvalError::NoClock)?;
+                let mut clock = ClockCtx::new(tz, stamp, session_of(inst));
+                clock.base_ns = self.primary_width_ns(inst);
+                // Unknown (a live node with no bars and no width): the cell works it out from
+                // its first two bars and refuses before any hook reads a value.
+                clock.infer_width = clock.base_ns.is_none();
+                clock
             }
             IndInput::Composite(agg) => {
                 let k = self.hub.key(agg).ok_or_else(|| {
-                    RaptorError::invalid_parameter("an indicator reads an unknown aggregation")
+                    EvalError::Unsupported("an indicator reads an unknown aggregation".into())
                 })?;
                 let mut clock =
                     ClockCtx::new(k.tz_offset_ns(), BarStamp::Close, session_of(k.instrument()));
                 clock.base_ns = crate::quant::fns::at::width_ns(k.spec());
-                Ok(Some(clock))
+                clock
             }
-            IndInput::AllPrimary(_) => Err(RaptorError::invalid_parameter(
-                "an expression reads one instrument's bars; name the instrument",
-            )),
+            IndInput::AllPrimary(_) => {
+                return Err(EvalError::Unsupported(
+                    "an expression reads one instrument's bars; name the instrument".into(),
+                ));
+            }
             // `at(...)` is refused when a cross-sectional program is interned.
-            IndInput::Universe(_) => Ok(None),
-        }
+            IndInput::Universe(_) => return Ok(None),
+        };
+        crate::runtime::exprs::check_clock(program, &clock)?;
+        Ok(Some(clock))
     }
 
     /// Add an account for `members` strategies to share; returns its id.
@@ -506,7 +551,7 @@ impl RuntimeBuilder {
             .map(|key| self.cell_clock(key))
             .collect::<Result<Vec<_>>>()?;
         let hub = self.hub.build()?;
-        let bank = IndicatorBank::with_clocks(&self.registry, &clocks);
+        let bank = IndicatorBank::with_clocks(&self.registry, &clocks)?;
         let index = self.index.build()?;
         let mut atr_cache = AtrCache::new();
         let mut strat_atr = Vec::with_capacity(self.strat_insts.len());

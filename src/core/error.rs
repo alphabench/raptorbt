@@ -81,7 +81,22 @@ impl From<RaptorError> for pyo3::PyErr {
             | RaptorError::IndexOutOfBounds { .. }
             | RaptorError::PythonError { .. } => "invalid_data",
         };
-        let fail = Fail::new(code, err.to_string());
+        let mut text = err.to_string();
+        let mut code = code;
+        let mut valid: Vec<String> = Vec::new();
+        // A refusal from deep in the runtime that the structured error knows by name: the message
+        // starts `expr_type: ` and ends `valid: a, b`.
+        if let Some(rest) = text.strip_prefix("Invalid parameter: expr_type: ") {
+            if let Some((_, list)) = rest.rsplit_once("valid: ") {
+                valid = list.split(", ").map(str::to_string).collect();
+            }
+            code = "expr_type";
+            text = rest.to_string();
+        }
+        let mut fail = Fail::new(code, text);
+        if !valid.is_empty() {
+            fail = fail.valid(valid);
+        }
         match err {
             RaptorError::LengthMismatch { actual, .. } => fail.value(actual),
             RaptorError::NonFinitePrice { column, index, .. } => fail.param(column).value(index),

@@ -138,14 +138,15 @@ def save(session: Session, path: Path) -> None:
             n: {
                 "bar_stamp": d.bar_stamp, "bar_ns": d.bar_ns, "sha256": d.sha256, "rows": d.rows,
                 "fields": list(d.fields), "ignored": list(d.ignored), "kind": d.kind,
-                "names": list(d.names), "present": "present" in d.arrays,
+                "names": list(d.names), "present": "present" in d.arrays, "session": d.session,
             }
             for n, d in session._data.items()
         },
         "handles": [  # least recently used first
             {
                 "id": h.id, "expression": h.expression, "data": h.data, "data_sha": h.data_sha,
-                "tz_offset_ns": h.tz_offset_ns, "outputs": list(h.outputs), "kinds": list(h.kinds),
+                "tz_offset_ns": h.tz_offset_ns, "session": h.session, "outputs": list(h.outputs),
+                "kinds": list(h.kinds),
                 "deps": list(h.deps), "functions": list(h.functions), "causal": h.causal,
                 "result": h.result, "nbytes": h.nbytes, "leading": h.leading,
                 "shapes": {o: list(sh) for o, sh in h.shapes.items()},
@@ -183,7 +184,8 @@ def open_session(path: Path, max_bytes: int | None = None, max_handles: int | No
         if m.get("present"):
             arrays["present"] = _read_npy(path / "data" / name / "present.npy", shape, "|b1")
         ds = _data.Dataset(
-            name, arrays, m["bar_stamp"], m["bar_ns"], m["sha256"], tuple(m["ignored"]), path, kind, names
+            name, arrays, m["bar_stamp"], m["bar_ns"], m["sha256"], tuple(m["ignored"]), path, kind, names,
+            session=m.get("session"),
         )
         s._data[name] = ds
         s._used += ds.nbytes
@@ -199,6 +201,7 @@ def open_session(path: Path, max_bytes: int | None = None, max_handles: int | No
             deps=tuple(m["deps"]), functions=tuple(m["functions"]), causal=m["causal"],
             result=m["result"], nbytes=m["nbytes"], leading=m["leading"],
             shapes={o: tuple(sh) for o, sh in m["shapes"].items()}, path=path,
+            session=m.get("session"),
         )
         h.loader = _loader(path, h)
         s._handles[hid] = h

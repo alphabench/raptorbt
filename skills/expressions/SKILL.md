@@ -421,12 +421,19 @@ the base clock.
   `close > at("1d", sma(close, 200))`. One level only: `at` inside `at` is `expr_unsupported_here`.
   The timeframe is a string such as `"15m"`, `"1h"`, `"1d"`, `"1w"`; anything else is `expr_type`
   with the valid ones in `valid`. Give `bar_ns=` (the base bar width) to have a timeframe that is
-  not a coarser exact multiple refused.
+  not a coarser exact multiple refused (`expr_type`, `valid` never empty). With a `session` a day
+  or a week is the session, so 75-minute bars make an NSE day though they do not divide 24 hours.
+  Inside `ctx.indicators.expr` a primary cell's width is `bar_ns` of an open-stamped run, else
+  read from the stored bars, else (a `LiveNode` with neither) worked out from its first two bars,
+  where the refusal is raised before any hook reads a value, and `at("1h", ...)` on 1h bars, primary or composite, is refused the same way.
 - *What it needs.* `eval` needs `data["timestamps"]` (int64 nanoseconds) and `bar_stamp="open"`
   or `"close"` (`missing_field`, `missing_bar_stamp`); `stream` needs `bar_stamp=` and each
   `update` a `timestamp=`. `tz_offset_ns` is the zone daily windows are cut in (default UTC, 0;
   IST is `19_800 * 10**9`) and `session=` a `raptorbt.SessionSchedule`, whose own zone replaces
-  it and whose closed days are skipped. Inside `ctx.indicators.expr` the run's zone and bar
+  it and whose closed days are skipped; bars on a date the schedule does not cover raise
+  `session_not_covered` (the MCX preset covers 2024-11-04 on), as a run does. `analysis.Session`
+  takes the same `session=` on `load`, `eval` and `sweep`, so research cuts the windows the
+  strategy's cell does. Inside `ctx.indicators.expr` the run's zone and bar
   stamp and the instrument's session are used. Hash, canonical text and cell sharing of a
   program without `at` are unchanged; `bound_hash(...)` folds the zone, stamp and session into
   the hash of one with `at`.
