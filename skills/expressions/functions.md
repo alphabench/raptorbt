@@ -2,7 +2,7 @@
 
 # Expression functions
 
-175 functions in 8 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+206 functions in 9 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
 
 ## candles
 
@@ -854,7 +854,7 @@ The in-phase and quadrature components of the detrended, smoothed series: a rota
 
 ### `ht_sine([x]) -> (sine, leadsine)`
 
-Ehlers' sine wave: the sine of the dominant cycle phase and of the phase plus 45 degrees (the lead). Crossings of the two are the classic cycle-turn signal; in a trend the two stay close together and the signal is meaningless. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+Ehlers' sine wave: the sine of the dominant cycle phase and of the phase plus 45 degrees (the lead). Crossings of the two are the classic cycle-turn signal; in a trend the two stay close together and the signal is meaningless. Differs from TA-Lib 0.6.4 by rounding only: up to about 6e-13 absolute (9e-10 relative where the sine crosses zero), from the order of floating-point operations in the phase sum, which cancels heavily; the difference is pinned. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
 
 - inputs: `x` (default `close`)
 - parameters: none
@@ -1429,6 +1429,440 @@ Population variance of the last `period` values (divisor `period`). A flat windo
 - TA-Lib: `WCLPRICE`
 - invariance: scale_equivariant, shift_equivariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+## momentum
+
+### `adx([high], [low], [close], period, compat='native')`
+
+Average directional index: the mean of the first `period` DX values on bar 2 * period - 1, then (adx * (period - 1) + dx) / period. compat="native" (default) is the array function in indicators::strength (its DM seed is the plain sum of the first `period` movements); compat="talib" is TA-Lib's (sum of period - 1 movements, then smoothing). The seeds differ and the difference decays as (1 - 1 / period) per bar (measured against TA-Lib 0.6.4: up to 0.72 on 14). A flat series gives 0 in both.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::strength::adx` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `ADX`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `adxr([high], [low], [close], period)`
+
+Average directional index rating: (adx + adx `period - 1` bars earlier) / 2, TA-Lib's seeding. First value on bar 3 * period - 2. A flat series gives 0.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `ADXR`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `apo([x], fastperiod=12, slowperiod=26, matype=0)`
+
+Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7 is refused). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.
+
+- inputs: `x` (default `close`)
+- parameters: `fastperiod`: int in [2, 16777216], default 12; `slowperiod`: int in [2, 16777216], default 26; `matype`: int in [0, 8], default 0
+- outputs: `value` (numeric)
+- warm-up: 25 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `APO`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `aroon([high], [low], period) -> (aroondown, aroonup)`
+
+Aroon over the last `period + 1` bars: up = 100 * (period - bars since the highest high) / period, down likewise for the lowest low. A tie keeps the latest bar, so a flat series gives up = down = 100.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `aroondown`, `aroonup` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `AROON`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Chande, A New Concept in Technical Trend Analysis, 1995
+
+### `aroonosc([high], [low], period)`
+
+Aroon oscillator, aroon up - aroon down, in [-100, 100]. A flat series gives 0.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `AROONOSC`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Chande, A New Concept in Technical Trend Analysis, 1995
+
+### `bop([open], [high], [low], [close])`
+
+Balance of power, (close - open) / (high - low). A bar with no range (flat, or high not above low) gives 0, TA-Lib's value; any positive range is divided (TA-Lib 0.6.4 does so down to 1e-9, measured).
+
+- inputs: `open` (default `open`), `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `BOP`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Livshin, Balance of Power, Stocks & Commodities, 2001
+
+### `cci([high], [low], [close], period)`
+
+Commodity channel index: (typical price - its mean over `period` bars) / (0.015 * mean absolute deviation), typical price (high + low + close) / 3. A window with no deviation (flat) gives 0. Period at most 100000 (the window is walked on every bar).
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 100000], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `CCI`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Lambert, Commodity Channel Index, Commodities, 1980
+
+### `cmo([x], period)`
+
+Chande momentum oscillator: 100 * (gain - loss) / (gain + loss) on the Wilder-smoothed average gain and loss (TA-Lib's smoothing, the same as rsi). A flat series gives 0.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `CMO`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Chande, Kroll, The New Technical Trader, 1994
+
+### `dx([high], [low], [close], period)`
+
+Directional movement index, 100 * |+DI - -DI| / (+DI + -DI), TA-Lib's seeding (see plus_di compat="talib"). A flat series, or equal DI lines of 0, gives 0.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `DX`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `macd([x], fastperiod=12, slowperiod=26, signalperiod=9, compat='native') -> (macd, macdsignal, macdhist)`
+
+MACD line (fast EMA - slow EMA), signal (EMA of the line) and histogram. All three are NaN until the signal is ready, bar slow + signal - 2 (33 at 12, 26, 9). compat="native" (default) seeds each EMA on its own first `period` values, like the streaming core. compat="talib" starts the fast EMA on the first bar of the slow one (its seed is the mean of the `fast` values ending there) and, like TA-Lib, takes the shorter of fast and slow as the fast one. The two differ by the fast seed, which decays as (1 - 2 / (fast + 1)) per bar. At signalperiod 1 TA-Lib prints a spurious 0 on the bar before the first real value; this is NaN until the signal is ready.
+
+- inputs: `x` (default `close`)
+- parameters: `fastperiod`: int in [2, 16777216], default 12; `slowperiod`: int in [2, 16777216], default 26; `signalperiod`: int in [1, 16777216], default 9; `compat`: "native" | "talib", default 'native'
+- outputs: `macd`, `macdsignal`, `macdhist` (numeric)
+- warm-up: 33 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::streaming::StreamingMacd` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `MACD`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Appel, Technical Analysis: Power Tools for Active Investors, 1999
+
+### `macdext([x], fastperiod=12, fastmatype=0, slowperiod=26, slowmatype=0, signalperiod=9, signalmatype=0) -> (macd, macdsignal, macdhist)`
+
+MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7, MAMA, is refused until the Hilbert slice lands) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.
+
+- inputs: `x` (default `close`)
+- parameters: `fastperiod`: int in [2, 16777216], default 12; `fastmatype`: int in [0, 8], default 0; `slowperiod`: int in [2, 16777216], default 26; `slowmatype`: int in [0, 8], default 0; `signalperiod`: int in [1, 16777216], default 9; `signalmatype`: int in [0, 8], default 0
+- outputs: `macd`, `macdsignal`, `macdhist` (numeric)
+- warm-up: 33 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MACDEXT`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `macdfix([x], signalperiod=9) -> (macd, macdsignal, macdhist)`
+
+MACD fixed at 12 and 26 with TA-Lib's smoothing constants 0.15 and 0.075 (not 2/13 and 2/27), signal EMA of `signalperiod`. The fast EMA starts on the first bar of the slow one.
+
+- inputs: `x` (default `close`)
+- parameters: `signalperiod`: int in [1, 16777216], default 9
+- outputs: `macd`, `macdsignal`, `macdhist` (numeric)
+- warm-up: 33 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MACDFIX`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `mfi([high], [low], [close], [volume], period, compat='native')`
+
+Money flow index: typical price (high + low + close) / 3 times volume, summed over the last `period` bars as positive flow when the typical price rose and negative when it fell; first value on bar `period`. compat="native" (default): 100 when there is no negative flow, so a flat series, or zero volume, reads 100, else 100 - 100 / (1 + positive / negative). compat="talib": 100 * positive / (positive + negative), and 0 when the two sum to less than 1 (a flat series, zero volume, or a very thin market in price * volume units reads 0). The two agree to rounding wherever the total flow is at least 1 and some flow is negative. Period at most 100000 (the window is summed afresh on every bar).
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`)
+- parameters: `period`: int in [2, 100000], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::volume::mfi` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `MFI`
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Quong, Soudack, Volume-Weighted RSI: Money Flow, Technical Analysis of Stocks & Commodities, 1989
+
+### `minus_di([high], [low], [close], period, compat='native')`
+
+Minus directional indicator; as plus_di for the minus movement, with the same two compat modes and the same flat-series and period-1 behaviour.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::strength::directional_movement` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `MINUS_DI`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `minus_dm([high], [low], period)`
+
+Smoothed minus directional movement; as plus_dm for the move of the low. At period 1 it is the raw movement from bar 1. A flat series gives 0.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MINUS_DM`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `mom([x], period)`
+
+Momentum: x - x[period bars ago]. NaN if either value is NaN.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `MOM`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `plus_di([high], [low], [close], period, compat='native')`
+
+Plus directional indicator, 100 * smoothed plus DM / smoothed true range; first value on bar `period`. compat="native" (default) seeds the smoothing with the plain sum of the first `period` movements, as the array function in indicators::strength does (that function is all NaN for a series shorter than 2 * period; the expression is not), and is NaN while the smoothed true range is 0 (a flat series). compat="talib" sums the first period - 1 movements and then smooths from bar `period`, and gives 0 on a flat series; at period 1 TA-Lib's value is the raw movement over the true range without the factor 100, which talib keeps. The seeds differ and the difference decays as (1 - 1 / period) per bar.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::strength::directional_movement` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `PLUS_DI`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `plus_dm([high], [low], period)`
+
+Smoothed plus directional movement. The raw movement of a bar is high - previous high when that exceeds previous low - low and is positive, else 0. TA-Lib's smoothing: the sum of the first period - 1 movements on bar period - 1, then s - s / period + movement. At period 1 it is the raw movement from bar 1. A flat series gives 0.
+
+- inputs: `high` (default `high`), `low` (default `low`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `PLUS_DM`
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `ppo([x], fastperiod=12, slowperiod=26, matype=0)`
+
+Percentage price oscillator: (fast average - slow average) / slow average * 100, `matype` as in apo. 0 when the slow average is 0 (TA-Lib's value).
+
+- inputs: `x` (default `close`)
+- parameters: `fastperiod`: int in [2, 16777216], default 12; `slowperiod`: int in [2, 16777216], default 26; `matype`: int in [0, 8], default 0
+- outputs: `value` (numeric)
+- warm-up: 25 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `PPO`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `roc([x], period)`
+
+Rate of change in percent, (x - base) / base * 100 with base the value `period` bars back. Same arithmetic as the streaming core, which agrees with TA-Lib's ((x / base) - 1) * 100 to rounding. On a base of exactly 0 it keeps the last value (the streaming core's behaviour); TA-Lib, rocp, rocr and rocr100 give 0 there.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::streaming::StreamingRoc` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- TA-Lib: `ROC`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rocp([x], period)`
+
+Rate of change as a fraction, (x - base) / base. 0 when base is 0 (TA-Lib's value).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ROCP`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rocr([x], period)`
+
+Rate of change ratio, x / base. 0 when base is 0 (TA-Lib's value).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ROCR`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rocr100([x], period)`
+
+Rate of change ratio on a 100 scale, x / base * 100. 0 when base is 0 (TA-Lib's value).
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ROCR100`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rsi([x], period, compat='native')`
+
+Relative strength index, Wilder smoothing, seeded with the mean of the first `period` gains and losses; first value on bar `period`. The two compat modes agree to rounding (about 1e-14) wherever the average loss is above 0; they differ only where it is exactly 0. compat="native" (default) gives 100 whenever the average loss is 0, so on a flat series (a name that has not traded) the RSI is 100 and a rule like `rsi > 70` is TRUE. compat="talib" gives 100 * gain / (gain + loss), and 0 when both are 0, so a flat series reads 0 and `rsi < 30` is TRUE instead. This is a decided product behaviour. A series that only rises is 100 in both; one that only falls is 0 in both.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [1, 16777216], required; `compat`: "native" | "talib", default 'native'
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- legacy: pinned to `indicators::streaming::StreamingRsi` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
+- TA-Lib: `RSI`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Wilder, J. W. (1978), New Concepts in Technical Trading Systems
+
+### `stoch([high], [low], [close], fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0) -> (slowk, slowd)`
+
+TA-Lib's SLOW stochastic: the fast %K over `fastk_period` bars, smoothed by `slowk_matype` over `slowk_period` is slowk, smoothed again by `slowd_matype` over `slowd_period` is slowd. A range of 0 gives 0 (TA-Lib's value). Both outputs are NaN until slowd is ready. Note `stochastic` is a different thing: raptorbt's fast stochastic (use `stochf` for TA-Lib's fast one).
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `fastk_period`: int in [1, 16777216], default 5; `slowk_period`: int in [1, 16777216], default 3; `slowk_matype`: int in [0, 8], default 0; `slowd_period`: int in [1, 16777216], default 3; `slowd_matype`: int in [0, 8], default 0
+- outputs: `slowk`, `slowd` (numeric)
+- warm-up: 8 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `STOCH`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Lane, Lane's Stochastics, 1984
+
+### `stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`
+
+raptorbt's FAST stochastic: k = 100 * (close - lowest low) / (highest high - lowest low) over `k_period` bars, d = the simple mean of the last `d_period` values of k. It is not TA-Lib's STOCH, which is the SLOW stochastic (its %K is already smoothed): for TA-Lib's use `stoch` (slow) or `stochf` (fast, whose fastd at matype 0 is this d). A range of 0 gives k = 50 (stoch and stochf give 0). Both outputs are NaN until d is ready (bar k_period + d_period - 2); the array function reports k from bar k_period - 1.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `k_period`: int in [1, 16777216], default 14; `d_period`: int in [1, 16777216], default 3
+- outputs: `k`, `d` (numeric)
+- warm-up: 15 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- legacy: pinned to `indicators::momentum::stochastic` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Lane, Lane's Stochastics, 1984
+
+### `stochf([high], [low], [close], fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`
+
+TA-Lib's fast stochastic: fastk = 100 * (close - lowest low) / (highest high - lowest low) over `fastk_period` bars, fastd = its `fastd_matype` average over `fastd_period`. A range of 0 gives 0 (TA-Lib's value; the older `stochastic` says 50). Both outputs are NaN until fastd is ready, as in TA-Lib. `stochastic` is raptorbt's own fast stochastic, with a simple-mean d.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `fastk_period`: int in [1, 16777216], default 5; `fastd_period`: int in [1, 16777216], default 3; `fastd_matype`: int in [0, 8], default 0
+- outputs: `fastk`, `fastd` (numeric)
+- warm-up: 6 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `STOCHF`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Lane, Lane's Stochastics, 1984
+
+### `stochrsi([x], period, fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`
+
+Stochastic RSI: the fast stochastic over `fastk_period` bars of the RSI of `period` (TA-Lib's RSI, so a flat series reads RSI 0), and its `fastd_matype` average. A flat RSI window gives 0. Both outputs are NaN until fastd is ready.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required; `fastk_period`: int in [1, 16777216], default 5; `fastd_period`: int in [1, 16777216], default 3; `fastd_matype`: int in [0, 8], default 0
+- outputs: `fastk`, `fastd` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `STOCHRSI`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Chande, Kroll, The New Technical Trader, 1994
+
+### `trix([x], period)`
+
+TRIX: the one-bar rate of change in percent of an EMA of an EMA of an EMA (each seeded with the mean of the previous stage's first `period` values). 0 when the previous triple EMA is 0. Period at least 2: TA-Lib's period 1 returns values unrelated to the definition.
+
+- inputs: `x` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `TRIX`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Hutson, Good Trix, Technical Analysis of Stocks & Commodities, 1983
+
+### `ultosc([high], [low], [close], timeperiod1=7, timeperiod2=14, timeperiod3=28)`
+
+Ultimate oscillator: 100 * (4 * A1 + 2 * A2 + A3) / 7, Ai = sum of buying pressure (close - min(low, previous close)) over sum of true range (max(high, previous close) - min(low, previous close)) for the periods in ascending order (they are sorted, as TA-Lib does). First value on bar max(period). A window with no range contributes 0, so a flat series gives 0. When all three periods are 1 TA-Lib prints a spurious value on bar 0; this is NaN there.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `timeperiod1`: int in [1, 16777216], default 7; `timeperiod2`: int in [1, 16777216], default 14; `timeperiod3`: int in [1, 16777216], default 28
+- outputs: `value` (numeric)
+- warm-up: 28 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `ULTOSC`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Williams, The Ultimate Oscillator, Technical Analysis of Stocks & Commodities, 1985
+
+### `willr([high], [low], [close], period)`
+
+Williams %R: -100 * (highest high - close) / (highest high - lowest low) over `period` bars, in [-100, 0]. A range of 0 gives 0 (TA-Lib's value).
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
+- parameters: `period`: int in [2, 16777216], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- TA-Lib: `WILLR`
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Williams, How I Made One Million Dollars Last Year Trading Commodities, 1973
 
 ## overlap
 
