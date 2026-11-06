@@ -1,0 +1,13 @@
+raptorbt
+Copyright (c) Alphabench
+
+This product's test suite checks its indicator and statistics functions against reference
+implementations. The committed fixtures hold numbers those libraries produced; no source
+code of them is included or linked into raptorbt.
+
+- TA-Lib (https://ta-lib.org), BSD 3-Clause. Reference output for the technical-analysis
+  functions in tests/python/oracle/fixtures/talib_*.json.gz, produced with TA-Lib 0.6.4.
+- statsmodels (https://www.statsmodels.org), BSD 3-Clause, and SciPy (https://scipy.org),
+  BSD 3-Clause. Reference output for the statistical tests and regressions.
+- arch (https://github.com/bashtage/arch), University of Illinois/NCSA Open Source
+  License. Reference output for volatility models.

@@ -3,8 +3,8 @@
 
 use crate::quant::kernel::{Adapter, Hist, Kernel, Node};
 use crate::quant::registry::{
-    int_param, regs, Family, FnDef, InputDef, Legacy, Memory, NanPolicy, OutKind, ParamDef,
-    ParamKind, ParamVal,
+    int_param, regs, Domain, Family, FnDef, InputDef, Invariance, Legacy, Memory, NanPolicy,
+    NanRule, OutKind, ParamDef, ParamKind, ParamVal, Reference, Relation,
 };
 
 const MAX_PERIOD: i64 = 1 << 24;
@@ -145,8 +145,14 @@ pub const DEFS: &[FnDef] = &[
         doc: "Simple moving average of the last `period` values.",
         refs: &[],
         rev: 1,
-        invariance: "scale and shift equivariant",
+        invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
+        nan_rule: NanRule::Windowed,
+        domain: Domain::Any,
+        reference: Reference::Fixture,
+        // Measured against TA-Lib 0.6.4 (legacy_vs_talib.txt): same first valid bar, largest
+        // difference 1.4e-13 on prices near 100, i.e. ~1e-15 relative.
+        relation: Relation::Exact,
         make: make_sma,
     },
     FnDef {
@@ -167,8 +173,14 @@ pub const DEFS: &[FnDef] = &[
         doc: "Exponential moving average, alpha = 2/(period+1), seeded with the mean of the first `period` values.",
         refs: &[],
         rev: 1,
-        invariance: "scale and shift equivariant",
+        invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
+        nan_rule: NanRule::Recursive,
+        domain: Domain::Any,
+        reference: Reference::Fixture,
+        // SMA-seeded like TA-Lib's classic EMA: same first valid bar and, measured, largest
+        // difference 5.3e-13 on prices near 100 at periods 14 to 200, so no seed gap to decay.
+        relation: Relation::Exact,
         make: make_ema,
     },
 ];

@@ -1,0 +1,2188 @@
+{
+ "source": "TA-Lib 0.6.4 (Jan 11 2025 04:46:00)",
+ "generated_by": "tests/oracle/generate.py",
+ "functions": {
+  "HT_DCPERIOD": {
+   "group": "Cycle Indicators",
+   "display_name": "Hilbert Transform - Dominant Cycle Period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "HT_DCPHASE": {
+   "group": "Cycle Indicators",
+   "display_name": "Hilbert Transform - Dominant Cycle Phase",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "HT_PHASOR": {
+   "group": "Cycle Indicators",
+   "display_name": "Hilbert Transform - Phasor Components",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "inphase",
+    "quadrature"
+   ]
+  },
+  "HT_SINE": {
+   "group": "Cycle Indicators",
+   "display_name": "Hilbert Transform - SineWave",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "sine",
+    "leadsine"
+   ]
+  },
+  "HT_TRENDMODE": {
+   "group": "Cycle Indicators",
+   "display_name": "Hilbert Transform - Trend vs Cycle Mode",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "ADD": {
+   "group": "Math Operators",
+   "display_name": "Vector Arithmetic Add",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "DIV": {
+   "group": "Math Operators",
+   "display_name": "Vector Arithmetic Div",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "MAX": {
+   "group": "Math Operators",
+   "display_name": "Highest value over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MAXINDEX": {
+   "group": "Math Operators",
+   "display_name": "Index of highest value over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "MIN": {
+   "group": "Math Operators",
+   "display_name": "Lowest value over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MININDEX": {
+   "group": "Math Operators",
+   "display_name": "Index of lowest value over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "MINMAX": {
+   "group": "Math Operators",
+   "display_name": "Lowest and highest values over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "min",
+    "max"
+   ]
+  },
+  "MINMAXINDEX": {
+   "group": "Math Operators",
+   "display_name": "Indexes of lowest and highest values over a specified period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "minidx",
+    "maxidx"
+   ]
+  },
+  "MULT": {
+   "group": "Math Operators",
+   "display_name": "Vector Arithmetic Mult",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "SUB": {
+   "group": "Math Operators",
+   "display_name": "Vector Arithmetic Subtraction",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "SUM": {
+   "group": "Math Operators",
+   "display_name": "Summation",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ACOS": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric ACos",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "ASIN": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric ASin",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "ATAN": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric ATan",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "CEIL": {
+   "group": "Math Transform",
+   "display_name": "Vector Ceil",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "COS": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Cos",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "COSH": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Cosh",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "EXP": {
+   "group": "Math Transform",
+   "display_name": "Vector Arithmetic Exp",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "FLOOR": {
+   "group": "Math Transform",
+   "display_name": "Vector Floor",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "LN": {
+   "group": "Math Transform",
+   "display_name": "Vector Log Natural",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "LOG10": {
+   "group": "Math Transform",
+   "display_name": "Vector Log10",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "SIN": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Sin",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "SINH": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Sinh",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "SQRT": {
+   "group": "Math Transform",
+   "display_name": "Vector Square Root",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "TAN": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Tan",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "TANH": {
+   "group": "Math Transform",
+   "display_name": "Vector Trigonometric Tanh",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "ADX": {
+   "group": "Momentum Indicators",
+   "display_name": "Average Directional Movement Index",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ADXR": {
+   "group": "Momentum Indicators",
+   "display_name": "Average Directional Movement Index Rating",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "APO": {
+   "group": "Momentum Indicators",
+   "display_name": "Absolute Price Oscillator",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "fastperiod": 12,
+    "slowperiod": 26,
+    "matype": 0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "AROON": {
+   "group": "Momentum Indicators",
+   "display_name": "Aroon",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "aroondown",
+    "aroonup"
+   ]
+  },
+  "AROONOSC": {
+   "group": "Momentum Indicators",
+   "display_name": "Aroon Oscillator",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "BOP": {
+   "group": "Momentum Indicators",
+   "display_name": "Balance Of Power",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "CCI": {
+   "group": "Momentum Indicators",
+   "display_name": "Commodity Channel Index",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "CMO": {
+   "group": "Momentum Indicators",
+   "display_name": "Chande Momentum Oscillator",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "DX": {
+   "group": "Momentum Indicators",
+   "display_name": "Directional Movement Index",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MACD": {
+   "group": "Momentum Indicators",
+   "display_name": "Moving Average Convergence/Divergence",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "fastperiod": 12,
+    "slowperiod": 26,
+    "signalperiod": 9
+   },
+   "outputs": [
+    "macd",
+    "macdsignal",
+    "macdhist"
+   ]
+  },
+  "MACDEXT": {
+   "group": "Momentum Indicators",
+   "display_name": "MACD with controllable MA type",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "fastperiod": 12,
+    "fastmatype": 0,
+    "slowperiod": 26,
+    "slowmatype": 0,
+    "signalperiod": 9,
+    "signalmatype": 0
+   },
+   "outputs": [
+    "macd",
+    "macdsignal",
+    "macdhist"
+   ]
+  },
+  "MACDFIX": {
+   "group": "Momentum Indicators",
+   "display_name": "Moving Average Convergence/Divergence Fix 12/26",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "signalperiod": 9
+   },
+   "outputs": [
+    "macd",
+    "macdsignal",
+    "macdhist"
+   ]
+  },
+  "MFI": {
+   "group": "Momentum Indicators",
+   "display_name": "Money Flow Index",
+   "inputs": [
+    "high",
+    "low",
+    "close",
+    "volume"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MINUS_DI": {
+   "group": "Momentum Indicators",
+   "display_name": "Minus Directional Indicator",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MINUS_DM": {
+   "group": "Momentum Indicators",
+   "display_name": "Minus Directional Movement",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MOM": {
+   "group": "Momentum Indicators",
+   "display_name": "Momentum",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "PLUS_DI": {
+   "group": "Momentum Indicators",
+   "display_name": "Plus Directional Indicator",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "PLUS_DM": {
+   "group": "Momentum Indicators",
+   "display_name": "Plus Directional Movement",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "PPO": {
+   "group": "Momentum Indicators",
+   "display_name": "Percentage Price Oscillator",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "fastperiod": 12,
+    "slowperiod": 26,
+    "matype": 0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ROC": {
+   "group": "Momentum Indicators",
+   "display_name": "Rate of change : ((price/prevPrice)-1)*100",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ROCP": {
+   "group": "Momentum Indicators",
+   "display_name": "Rate of change Percentage: (price-prevPrice)/prevPrice",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ROCR": {
+   "group": "Momentum Indicators",
+   "display_name": "Rate of change ratio: (price/prevPrice)",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ROCR100": {
+   "group": "Momentum Indicators",
+   "display_name": "Rate of change ratio 100 scale: (price/prevPrice)*100",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "RSI": {
+   "group": "Momentum Indicators",
+   "display_name": "Relative Strength Index",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "STOCH": {
+   "group": "Momentum Indicators",
+   "display_name": "Stochastic",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "fastk_period": 5,
+    "slowk_period": 3,
+    "slowk_matype": 0,
+    "slowd_period": 3,
+    "slowd_matype": 0
+   },
+   "outputs": [
+    "slowk",
+    "slowd"
+   ]
+  },
+  "STOCHF": {
+   "group": "Momentum Indicators",
+   "display_name": "Stochastic Fast",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "fastk_period": 5,
+    "fastd_period": 3,
+    "fastd_matype": 0
+   },
+   "outputs": [
+    "fastk",
+    "fastd"
+   ]
+  },
+  "STOCHRSI": {
+   "group": "Momentum Indicators",
+   "display_name": "Stochastic Relative Strength Index",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14,
+    "fastk_period": 5,
+    "fastd_period": 3,
+    "fastd_matype": 0
+   },
+   "outputs": [
+    "fastk",
+    "fastd"
+   ]
+  },
+  "TRIX": {
+   "group": "Momentum Indicators",
+   "display_name": "1-day Rate-Of-Change (ROC) of a Triple Smooth EMA",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ULTOSC": {
+   "group": "Momentum Indicators",
+   "display_name": "Ultimate Oscillator",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod1": 7,
+    "timeperiod2": 14,
+    "timeperiod3": 28
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "WILLR": {
+   "group": "Momentum Indicators",
+   "display_name": "Williams' %R",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "BBANDS": {
+   "group": "Overlap Studies",
+   "display_name": "Bollinger Bands",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 5,
+    "nbdevup": 2.0,
+    "nbdevdn": 2.0,
+    "matype": 0
+   },
+   "outputs": [
+    "upperband",
+    "middleband",
+    "lowerband"
+   ]
+  },
+  "DEMA": {
+   "group": "Overlap Studies",
+   "display_name": "Double Exponential Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "EMA": {
+   "group": "Overlap Studies",
+   "display_name": "Exponential Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "HT_TRENDLINE": {
+   "group": "Overlap Studies",
+   "display_name": "Hilbert Transform - Instantaneous Trendline",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "KAMA": {
+   "group": "Overlap Studies",
+   "display_name": "Kaufman Adaptive Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MA": {
+   "group": "Overlap Studies",
+   "display_name": "Moving average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30,
+    "matype": 0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MAMA": {
+   "group": "Overlap Studies",
+   "display_name": "MESA Adaptive Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "fastlimit": 0.5,
+    "slowlimit": 0.05
+   },
+   "outputs": [
+    "mama",
+    "fama"
+   ]
+  },
+  "MAVP": {
+   "group": "Overlap Studies",
+   "display_name": "Moving average with variable period",
+   "inputs": [
+    "close",
+    "periods"
+   ],
+   "parameters": {
+    "minperiod": 2,
+    "maxperiod": 30,
+    "matype": 0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MIDPOINT": {
+   "group": "Overlap Studies",
+   "display_name": "MidPoint over period",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "MIDPRICE": {
+   "group": "Overlap Studies",
+   "display_name": "Midpoint Price over period",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "SAR": {
+   "group": "Overlap Studies",
+   "display_name": "Parabolic SAR",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "acceleration": 0.02,
+    "maximum": 0.2
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "SAREXT": {
+   "group": "Overlap Studies",
+   "display_name": "Parabolic SAR - Extended",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "startvalue": 0.0,
+    "offsetonreverse": 0.0,
+    "accelerationinitlong": 0.02,
+    "accelerationlong": 0.02,
+    "accelerationmaxlong": 0.2,
+    "accelerationinitshort": 0.02,
+    "accelerationshort": 0.02,
+    "accelerationmaxshort": 0.2
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "SMA": {
+   "group": "Overlap Studies",
+   "display_name": "Simple Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "T3": {
+   "group": "Overlap Studies",
+   "display_name": "Triple Exponential Moving Average (T3)",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 5,
+    "vfactor": 0.7
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "TEMA": {
+   "group": "Overlap Studies",
+   "display_name": "Triple Exponential Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "TRIMA": {
+   "group": "Overlap Studies",
+   "display_name": "Triangular Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "WMA": {
+   "group": "Overlap Studies",
+   "display_name": "Weighted Moving Average",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "CDL2CROWS": {
+   "group": "Pattern Recognition",
+   "display_name": "Two Crows",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3BLACKCROWS": {
+   "group": "Pattern Recognition",
+   "display_name": "Three Black Crows",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3INSIDE": {
+   "group": "Pattern Recognition",
+   "display_name": "Three Inside Up/Down",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3LINESTRIKE": {
+   "group": "Pattern Recognition",
+   "display_name": "Three-Line Strike ",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3OUTSIDE": {
+   "group": "Pattern Recognition",
+   "display_name": "Three Outside Up/Down",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3STARSINSOUTH": {
+   "group": "Pattern Recognition",
+   "display_name": "Three Stars In The South",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDL3WHITESOLDIERS": {
+   "group": "Pattern Recognition",
+   "display_name": "Three Advancing White Soldiers",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLABANDONEDBABY": {
+   "group": "Pattern Recognition",
+   "display_name": "Abandoned Baby",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.3
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLADVANCEBLOCK": {
+   "group": "Pattern Recognition",
+   "display_name": "Advance Block",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLBELTHOLD": {
+   "group": "Pattern Recognition",
+   "display_name": "Belt-hold",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLBREAKAWAY": {
+   "group": "Pattern Recognition",
+   "display_name": "Breakaway",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLCLOSINGMARUBOZU": {
+   "group": "Pattern Recognition",
+   "display_name": "Closing Marubozu",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLCONCEALBABYSWALL": {
+   "group": "Pattern Recognition",
+   "display_name": "Concealing Baby Swallow",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLCOUNTERATTACK": {
+   "group": "Pattern Recognition",
+   "display_name": "Counterattack",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLDARKCLOUDCOVER": {
+   "group": "Pattern Recognition",
+   "display_name": "Dark Cloud Cover",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.5
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLDOJI": {
+   "group": "Pattern Recognition",
+   "display_name": "Doji",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLDOJISTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Doji Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLDRAGONFLYDOJI": {
+   "group": "Pattern Recognition",
+   "display_name": "Dragonfly Doji",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLENGULFING": {
+   "group": "Pattern Recognition",
+   "display_name": "Engulfing Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLEVENINGDOJISTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Evening Doji Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.3
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLEVENINGSTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Evening Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.3
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLGAPSIDESIDEWHITE": {
+   "group": "Pattern Recognition",
+   "display_name": "Up/Down-gap side-by-side white lines",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLGRAVESTONEDOJI": {
+   "group": "Pattern Recognition",
+   "display_name": "Gravestone Doji",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHAMMER": {
+   "group": "Pattern Recognition",
+   "display_name": "Hammer",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHANGINGMAN": {
+   "group": "Pattern Recognition",
+   "display_name": "Hanging Man",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHARAMI": {
+   "group": "Pattern Recognition",
+   "display_name": "Harami Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHARAMICROSS": {
+   "group": "Pattern Recognition",
+   "display_name": "Harami Cross Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHIGHWAVE": {
+   "group": "Pattern Recognition",
+   "display_name": "High-Wave Candle",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHIKKAKE": {
+   "group": "Pattern Recognition",
+   "display_name": "Hikkake Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHIKKAKEMOD": {
+   "group": "Pattern Recognition",
+   "display_name": "Modified Hikkake Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLHOMINGPIGEON": {
+   "group": "Pattern Recognition",
+   "display_name": "Homing Pigeon",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLIDENTICAL3CROWS": {
+   "group": "Pattern Recognition",
+   "display_name": "Identical Three Crows",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLINNECK": {
+   "group": "Pattern Recognition",
+   "display_name": "In-Neck Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLINVERTEDHAMMER": {
+   "group": "Pattern Recognition",
+   "display_name": "Inverted Hammer",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLKICKING": {
+   "group": "Pattern Recognition",
+   "display_name": "Kicking",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLKICKINGBYLENGTH": {
+   "group": "Pattern Recognition",
+   "display_name": "Kicking - bull/bear determined by the longer marubozu",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLLADDERBOTTOM": {
+   "group": "Pattern Recognition",
+   "display_name": "Ladder Bottom",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLLONGLEGGEDDOJI": {
+   "group": "Pattern Recognition",
+   "display_name": "Long Legged Doji",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLLONGLINE": {
+   "group": "Pattern Recognition",
+   "display_name": "Long Line Candle",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLMARUBOZU": {
+   "group": "Pattern Recognition",
+   "display_name": "Marubozu",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLMATCHINGLOW": {
+   "group": "Pattern Recognition",
+   "display_name": "Matching Low",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLMATHOLD": {
+   "group": "Pattern Recognition",
+   "display_name": "Mat Hold",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.5
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLMORNINGDOJISTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Morning Doji Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.3
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLMORNINGSTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Morning Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "penetration": 0.3
+   },
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLONNECK": {
+   "group": "Pattern Recognition",
+   "display_name": "On-Neck Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLPIERCING": {
+   "group": "Pattern Recognition",
+   "display_name": "Piercing Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLRICKSHAWMAN": {
+   "group": "Pattern Recognition",
+   "display_name": "Rickshaw Man",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLRISEFALL3METHODS": {
+   "group": "Pattern Recognition",
+   "display_name": "Rising/Falling Three Methods",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSEPARATINGLINES": {
+   "group": "Pattern Recognition",
+   "display_name": "Separating Lines",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSHOOTINGSTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Shooting Star",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSHORTLINE": {
+   "group": "Pattern Recognition",
+   "display_name": "Short Line Candle",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSPINNINGTOP": {
+   "group": "Pattern Recognition",
+   "display_name": "Spinning Top",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSTALLEDPATTERN": {
+   "group": "Pattern Recognition",
+   "display_name": "Stalled Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLSTICKSANDWICH": {
+   "group": "Pattern Recognition",
+   "display_name": "Stick Sandwich",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLTAKURI": {
+   "group": "Pattern Recognition",
+   "display_name": "Takuri (Dragonfly Doji with very long lower shadow)",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLTASUKIGAP": {
+   "group": "Pattern Recognition",
+   "display_name": "Tasuki Gap",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLTHRUSTING": {
+   "group": "Pattern Recognition",
+   "display_name": "Thrusting Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLTRISTAR": {
+   "group": "Pattern Recognition",
+   "display_name": "Tristar Pattern",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLUNIQUE3RIVER": {
+   "group": "Pattern Recognition",
+   "display_name": "Unique 3 River",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLUPSIDEGAP2CROWS": {
+   "group": "Pattern Recognition",
+   "display_name": "Upside Gap Two Crows",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "CDLXSIDEGAP3METHODS": {
+   "group": "Pattern Recognition",
+   "display_name": "Upside/Downside Gap Three Methods",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "integer"
+   ]
+  },
+  "AVGPRICE": {
+   "group": "Price Transform",
+   "display_name": "Average Price",
+   "inputs": [
+    "open",
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "MEDPRICE": {
+   "group": "Price Transform",
+   "display_name": "Median Price",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "TYPPRICE": {
+   "group": "Price Transform",
+   "display_name": "Typical Price",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "WCLPRICE": {
+   "group": "Price Transform",
+   "display_name": "Weighted Close Price",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "BETA": {
+   "group": "Statistic Functions",
+   "display_name": "Beta",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 5
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "CORREL": {
+   "group": "Statistic Functions",
+   "display_name": "Pearson's Correlation Coefficient (r)",
+   "inputs": [
+    "high",
+    "low"
+   ],
+   "parameters": {
+    "timeperiod": 30
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "LINEARREG": {
+   "group": "Statistic Functions",
+   "display_name": "Linear Regression",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "LINEARREG_ANGLE": {
+   "group": "Statistic Functions",
+   "display_name": "Linear Regression Angle",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "LINEARREG_INTERCEPT": {
+   "group": "Statistic Functions",
+   "display_name": "Linear Regression Intercept",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "LINEARREG_SLOPE": {
+   "group": "Statistic Functions",
+   "display_name": "Linear Regression Slope",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "STDDEV": {
+   "group": "Statistic Functions",
+   "display_name": "Standard Deviation",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 5,
+    "nbdev": 1.0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "TSF": {
+   "group": "Statistic Functions",
+   "display_name": "Time Series Forecast",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "VAR": {
+   "group": "Statistic Functions",
+   "display_name": "Variance",
+   "inputs": [
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 5,
+    "nbdev": 1.0
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "ATR": {
+   "group": "Volatility Indicators",
+   "display_name": "Average True Range",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "NATR": {
+   "group": "Volatility Indicators",
+   "display_name": "Normalized Average True Range",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {
+    "timeperiod": 14
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "TRANGE": {
+   "group": "Volatility Indicators",
+   "display_name": "True Range",
+   "inputs": [
+    "high",
+    "low",
+    "close"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "AD": {
+   "group": "Volume Indicators",
+   "display_name": "Chaikin A/D Line",
+   "inputs": [
+    "high",
+    "low",
+    "close",
+    "volume"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  },
+  "ADOSC": {
+   "group": "Volume Indicators",
+   "display_name": "Chaikin A/D Oscillator",
+   "inputs": [
+    "high",
+    "low",
+    "close",
+    "volume"
+   ],
+   "parameters": {
+    "fastperiod": 3,
+    "slowperiod": 10
+   },
+   "outputs": [
+    "real"
+   ]
+  },
+  "OBV": {
+   "group": "Volume Indicators",
+   "display_name": "On Balance Volume",
+   "inputs": [
+    "close",
+    "volume"
+   ],
+   "parameters": {},
+   "outputs": [
+    "real"
+   ]
+  }
+ }
+}

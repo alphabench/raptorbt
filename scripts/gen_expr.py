@@ -88,7 +88,7 @@ def render(rows: list[dict]) -> str:
                 out.append(f"- legacy: {legacy}")
             if row["talib_name"]:
                 out.append(f"- TA-Lib: `{row['talib_name']}`")
-            out.append(f"- invariance: {row['invariance']}")
+            out.append(f"- invariance: {', '.join(row['invariance']) or 'none'}")
             out.append(f"- revision: {row['rev']} (a change to the numbers raises it, and the program hash with it)")
             for ref in row["refs"]:
                 out.append(f"- reference: {ref}")

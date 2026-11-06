@@ -56,6 +56,93 @@ impl NanPolicy {
     }
 }
 
+/// How a function treats a NaN on its input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NanRule {
+    /// The output at a bar depends on that bar only (plus fixed lags): a NaN spoils its own bar.
+    Elementwise,
+    /// NaN while a NaN is inside the window, then recovers.
+    Windowed,
+    /// NaN on a NaN input without advancing state: the bar behaves as absent.
+    Recursive,
+}
+
+impl NanRule {
+    fn name(self) -> &'static str {
+        match self {
+            NanRule::Elementwise => "elementwise",
+            NanRule::Windowed => "windowed",
+            NanRule::Recursive => "recursive",
+        }
+    }
+}
+
+/// How fast a seed difference dies out, for a `Relation::Converges` function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Decay {
+    /// 1 - 2/(period + 1)
+    Ema,
+    /// 1 - 1/period
+    Wilder,
+    /// A fixed per-bar factor in (0, 1).
+    Factor(f64),
+}
+
+/// How the function's numbers relate to its outside reference.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Relation {
+    /// Relative error 1e-10 with an identical NaN mask.
+    Exact,
+    /// Within 1e-8 after K bars derived from the decay; earlier bars are pinned.
+    Converges(Decay),
+    /// Defined differently; the per-input difference is pinned in a committed record.
+    DefinedDifference,
+    /// Candlestick integers, exactly equal.
+    Candle,
+    /// No outside library counterpart; the reference is a hand-derived test.
+    NoLibrary,
+}
+
+/// Where the function's reference numbers come from. `Hand` names the test holding the
+/// derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reference {
+    Fixture,
+    Hand(&'static str),
+}
+
+/// The values a function accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Domain {
+    Any,
+    /// Strictly positive (logs, powers); non-positive input gives NaN.
+    Positive,
+}
+
+/// An identity the function satisfies, checked for every function that declares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invariance {
+    /// f(c * x) = c * f(x) for the price inputs.
+    ScaleEquivariant,
+    /// f(c * x) = f(x)
+    ScaleInvariant,
+    /// f(x + c) = f(x) + c
+    ShiftEquivariant,
+    /// f(x + c) = f(x)
+    ShiftInvariant,
+}
+
+impl Invariance {
+    fn name(self) -> &'static str {
+        match self {
+            Invariance::ScaleEquivariant => "scale_equivariant",
+            Invariance::ScaleInvariant => "scale_invariant",
+            Invariance::ShiftEquivariant => "shift_equivariant",
+            Invariance::ShiftInvariant => "shift_invariant",
+        }
+    }
+}
+
 /// The existing indicator an expression kernel is pinned to.
 #[derive(Debug, Clone, Copy)]
 pub struct Legacy {
@@ -128,8 +215,16 @@ pub struct FnDef {
     pub refs: &'static [&'static str],
     /// Bumped when the numbers change; part of the program hash.
     pub rev: u32,
-    pub invariance: &'static str,
+    /// Every identity the function satisfies; an empty slice says it satisfies none.
+    pub invariance: &'static [Invariance],
     pub causal: bool,
+    /// How a NaN input is treated.
+    pub nan_rule: NanRule,
+    pub domain: Domain,
+    /// Where the oracle numbers come from. No default: every function states one.
+    pub reference: Reference,
+    /// How the numbers relate to that reference. No default.
+    pub relation: Relation,
     /// Builds the node on the given input and output registers.
     pub make: MakeFn,
 }
@@ -204,8 +299,27 @@ fn def_json(d: &FnDef) -> Value {
         "doc": d.doc,
         "refs": d.refs,
         "rev": d.rev,
-        "invariance": d.invariance,
+        "invariance": d.invariance.iter().map(|i| i.name()).collect::<Vec<_>>(),
         "causal": d.causal,
+        "nan_policy": d.nan_rule.name(),
+        "domain": match d.domain { Domain::Any => "any", Domain::Positive => "positive" },
+        "reference": match d.reference {
+            Reference::Fixture => "fixture".to_string(),
+            Reference::Hand(t) => format!("hand:{t}"),
+        },
+        "relation": match d.relation {
+            Relation::Exact => "exact",
+            Relation::Converges(_) => "converges",
+            Relation::DefinedDifference => "defined_difference",
+            Relation::Candle => "candle",
+            Relation::NoLibrary => "no_library",
+        },
+        "decay": match d.relation {
+            Relation::Converges(Decay::Ema) => json!("ema"),
+            Relation::Converges(Decay::Wilder) => json!("wilder"),
+            Relation::Converges(Decay::Factor(f)) => json!(f),
+            _ => Value::Null,
+        },
     })
 }
 

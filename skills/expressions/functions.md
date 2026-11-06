@@ -17,7 +17,7 @@ Exponential moving average, alpha = 2/(period+1), seeded with the mean of the fi
 - memory: infinite: the seed fades; see `settle(eps)`
 - legacy: pinned to `indicators::streaming::StreamingEma` (bitwise on finite input); a NaN input is handled as `poison` by the legacy indicator
 - TA-Lib: `EMA`
-- invariance: scale and shift equivariant
+- invariance: scale_equivariant, shift_equivariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
 
 ### `sma([x], period)`
@@ -31,5 +31,5 @@ Simple moving average of the last `period` values.
 - memory: finite: it forgets any bar after its window
 - legacy: pinned to `indicators::streaming::StreamingSma` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `SMA`
-- invariance: scale and shift equivariant
+- invariance: scale_equivariant, shift_equivariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
