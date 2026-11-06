@@ -2,7 +2,7 @@
 
 # Expression functions
 
-168 functions in 7 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+175 functions in 8 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
 
 ## candles
 
@@ -799,6 +799,127 @@ Upside/Downside Gap Three Methods (TA-Lib CDLXSIDEGAP3METHODS): +100 for a bulli
 - invariance: scale_invariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
 
+## hilbert
+
+### `ht_dcperiod([x])`
+
+Ehlers' dominant cycle period in bars, estimated with a Hilbert-transform homodyne discriminator on a 4-bar weighted mean of the series; clamped to 6..50 bars and smoothed. It says how long the current oscillation seems to be, not that one exists. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `real` (numeric)
+- warm-up: 32 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_DCPERIOD`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `ht_dcphase([x])`
+
+Dominant cycle phase in degrees (about -45 to 315): where in its cycle the smoothed price is, from a Fourier sum over one estimated cycle length of the smoothed series. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `real` (numeric)
+- warm-up: 63 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_DCPHASE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `ht_phasor([x]) -> (inphase, quadrature)`
+
+The in-phase and quadrature components of the detrended, smoothed series: a rotating vector whose angle is the cycle phase and whose length is the cycle amplitude, in the units of the input. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `inphase`, `quadrature` (numeric)
+- warm-up: 32 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_PHASOR`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `ht_sine([x]) -> (sine, leadsine)`
+
+Ehlers' sine wave: the sine of the dominant cycle phase and of the phase plus 45 degrees (the lead). Crossings of the two are the classic cycle-turn signal; in a trend the two stay close together and the signal is meaningless. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `sine`, `leadsine` (numeric)
+- warm-up: 63 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_SINE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `ht_trendline([x])`
+
+Ehlers' instantaneous trendline: the mean of the price over one estimated dominant cycle, then a 4-3-2-1 weighted smoothing. It lags by about a quarter cycle and its length changes as the cycle estimate moves. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `real` (numeric)
+- warm-up: 63 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_TRENDLINE`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `ht_trendmode([x])`
+
+1 when the series is judged to be trending and 0 when it is in a cycle (TA-Lib's integer output, stored as a boolean). Cycle mode holds for half a cycle after a sine/leadsine crossing and while the phase advances at about the cycle rate; a price more than 1.5% from the instantaneous trendline always counts as a trend. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `trend` (boolean)
+- warm-up: 63 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `HT_TRENDMODE`
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
+### `mama([x], fastlimit=0.5, slowlimit=0.05) -> (mama, fama)`
+
+MESA adaptive moving average and its follower (FAMA). The smoothing constant is the fast limit divided by the rate of change of the cycle phase, floored at the slow limit, so the average hugs price when the phase moves fast and slows when it does not. `ma(x, p, 7)` is this with limits 0.5 and 0.05. Empirical support for cycle indicators is weak: they fit the recent past well, move with noise on short samples, and rarely add edge once costs are charged; test them out of sample before trusting one. The state never fully forgets its start, so values depend on where the series began (see settle).
+
+- inputs: `x` (default `close`)
+- parameters: `fastlimit`: float in [0.01, 0.99], default 0.5; `slowlimit`: float in [0.01, 0.99], default 0.05
+- outputs: `mama`, `fama` (numeric)
+- warm-up: 32 bars at the defaults; the first known value is at that index on clean data
+- memory: infinite: the seed fades; see `settle(eps)`
+- TA-Lib: `MAMA`
+- invariance: scale_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- reference: Ehlers, J. F. (2001). Rocket Science for Traders. Wiley. Chapters on the Hilbert transform and the homodyne discriminator.
+- reference: Ehlers, J. F. (2013). Cycle Analytics for Traders. Wiley.
+- reference: Ehlers, J. F. (2001). MESA Adaptive Moving Averages (MAMA and FAMA). Technical Analysis of Stocks & Commodities.
+- reference: TA-Lib (BSD 3-Clause), HT_* and MAMA, which this follows value for value.
+
 ## math
 
 ### `acos([x])`
@@ -1370,7 +1491,7 @@ Kaufman adaptive moving average: smoothing between a 2-bar and a 30-bar EMA by t
 
 ### `ma([x], period, matype=0)`
 
-Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3 (7, MAMA, is not available yet). Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.
+Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA (limits 0.5 and 0.05, whatever the period; see `mama`), 8 T3. Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.
 
 - inputs: `x` (default `close`)
 - parameters: `period`: int in [1, 16777216], required; `matype`: int in [0, 8], default 0
