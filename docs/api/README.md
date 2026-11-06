@@ -15,7 +15,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.crash_report`](raptorbt.crash_report.md) | 2 |
 | [`raptorbt.errors`](raptorbt.errors.md) | 18 |
 | [`raptorbt.execution`](raptorbt.execution.md) | 9 |
-| [`raptorbt.expressions`](raptorbt.expressions.md) | 7 |
+| [`raptorbt.expressions`](raptorbt.expressions.md) | 9 |
 | [`raptorbt.journal`](raptorbt.journal.md) | 10 |
 | [`raptorbt.margin`](raptorbt.margin.md) | 2 |
 | [`raptorbt.pricing`](raptorbt.pricing.md) | 12 |
@@ -30,4 +30,4 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |
 | [`raptorbt.version_check`](raptorbt.version_check.md) | 3 |
 
-Public names and members still without a docstring: 746.
+Public names and members still without a docstring: 755.

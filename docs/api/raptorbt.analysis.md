@@ -58,3 +58,4 @@ numpy arrays, read-only.
 | `load_panel(self, bars: 'Any', bar_stamp: 'str | None' = None, bar_ns: 'int | None' = None, instruments: 'Any' = None, name: 'str | None' = None) -> 'dict[str, Any]'` | Hold a copy of a panel (many instruments over many dates) and return its facts. |
 | `series(self, handle: 'str', tail: 'int | None' = None, instruments: 'Any' = None) -> 'Any'` | The stored series of ``handle`` as a read-only float64 array, full precision. |
 | `stats(self, name: 'str', *handles: 'str', data: 'str | None' = None, **kwargs: 'Any') -> 'dict[str, Any]'` | Run a :mod:`raptorbt.stats` function on handles. |
+| `sweep(self, expr: 'Any', *, data: 'str | None' = None, tz_offset_ns: 'int' = 0, score: 'str | None' = None, grid: 'Mapping[str, Any] | None' = None, points: 'Any' = None, **axes: 'Any') -> 'dict[str, Any]'` | Evaluate ``expr`` under many values of its ``$name`` constants and keep each result. |

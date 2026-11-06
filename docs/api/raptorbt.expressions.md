@@ -41,6 +41,8 @@ True
 | --- | --- | --- |
 | [`Expr`](#expr) | class | A checked expression: a formula over ``open``, ``high``, ``low``, ``close`` and ``volume``. |
 | [`ExprStream`](#exprstream) | class | Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`. |
+| [`ExprSweep`](#exprsweep) | class | The result of :meth:`Expr.sweep`: one :class:`ExprSweepPoint` per binding, in input order. |
+| [`ExprSweepPoint`](#exprsweeppoint) | class | One binding of a sweep: its ``params`` (every ``$name`` the text reads) and the result, an array for one output or a dict of arrays keyed by output name. |
 | [`col`](#col) | constant | `col` |
 | [`describe`](#describe) | function | Everything the registry says about one function: inputs, parameters, outputs, how it treats NaN, the legacy indicator it is pinned to, its references, and |
 | [`expr`](#expr) | function | Compile an expression from text. |
@@ -233,6 +235,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `natr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``natr([high], [low], [close], period)`` with this expression as the first input. |
 | `obv(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``obv([close], [volume])`` with this expression as the first input. |
 | `outputs` | Names of the output columns (``("value",)`` for a single series). |
+| `parameters` | The ``$name`` constants the text reads, sorted: the ones :meth:`sweep` can vary. |
 | `pct_change(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``pct_change([x], k=1)`` with this expression as the first input. |
 | `plus_di(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``plus_di([high], [low], [close], period, compat='native')`` with this expression as the first input. |
 | `plus_dm(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``plus_dm([high], [low], period)`` with this expression as the first input. |
@@ -275,6 +278,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `sub(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sub([a], [b])`` with this expression as the first input. |
 | `sum(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sum([x], period=30)`` with this expression as the first input. |
 | `supertrend(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``supertrend([high], [low], [close], period, multiplier=3.0) -> (line, direction)`` with this expression as the first input. |
+| `sweep(self, data: 'Mapping[str, Any]', /, *, grid: 'Mapping[str, Any] | None' = None, points: 'Sequence[Mapping[str, float]] | None' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, max_combinations: 'int | None' = None, max_bytes: 'int | None' = None, **axes: 'Any') -> 'ExprSweep'` | Evaluate the expression under many values of its ``$name`` constants at once. |
 | `t3(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``t3([x], period, vfactor=0.7)`` with this expression as the first input. |
 | `tan(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tan([x])`` with this expression as the first input. |
 | `tanh(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tanh([x])`` with this expression as the first input. |
@@ -323,6 +327,53 @@ Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`.
 | `ready` | True once more bars have been fed than the expression's warm-up. |
 | `reset(self) -> 'None'` | Forget every bar. |
 | `update(self, bar: 'Mapping[str, float] | None' = None, /, timestamp: 'int | None' = None, **fields: 'float')` | Feed one bar, as a mapping or keywords (``open``, ``high``, ``low``, ``close``, ``volume``). Returns the value for the bar, or a dict by output name for several outputs. A field the expression reads must be given; others may be left out. An expression that uses ``at(...)`` also needs ``timestamp=`` (int nanoseconds, read as the stream's ``bar_stamp`` says). |
+
+### `ExprSweep`
+
+*class*
+
+```python
+class ExprSweep(Sequence)
+ExprSweep(source: 'str', points: 'list[ExprSweepPoint]', outputs: 'tuple[str, ...]', n_kernel_steps: 'int | None', independent_kernel_steps: 'int | None')
+```
+
+The result of :meth:`Expr.sweep`: one :class:`ExprSweepPoint` per binding, in input
+order.
+
+``n_trials`` is the number of bindings tried (the count a selection among them must be
+corrected for). ``n_kernel_steps`` is how many kernel nodes the joint plan ran, and
+``independent_kernel_steps`` how many evaluating each binding alone would have run
+(``None`` for a panel sweep, which shares nothing between bindings).
+
+| Member | What it is |
+| --- | --- |
+| `count(self, value)` | S.count(value) -> integer -- return number of occurrences of value |
+| `independent_kernel_steps` | *No docstring.* |
+| `index(self, value, start=0, stop=None)` | S.index(value, [start, [stop]]) -> integer -- return first index of value. Raises ValueError if the value is not present. |
+| `n_kernel_steps` | *No docstring.* |
+| `n_trials` | Bindings tried. |
+| `outputs` | *No docstring.* |
+| `params` | *No docstring.* |
+| `points` | *No docstring.* |
+| `source` | *No docstring.* |
+| `values` | *No docstring.* |
+
+### `ExprSweepPoint`
+
+*class*
+
+```python
+class ExprSweepPoint
+ExprSweepPoint(params: 'dict[str, float]', value: 'Any')
+```
+
+One binding of a sweep: its ``params`` (every ``$name`` the text reads) and the result,
+an array for one output or a dict of arrays keyed by output name.
+
+| Member | What it is |
+| --- | --- |
+| `params` | *No docstring.* |
+| `value` | *No docstring.* |
 
 ### `col`
 

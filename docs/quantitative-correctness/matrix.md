@@ -173,7 +173,9 @@ Registered functions with no TA-Lib counterpart (checked on their own reference)
 - bars_since_min
 - body_pct
 - clip
+- count_xs
 - cov
+- demean_xs
 - diff
 - donchian
 - downside_dev
@@ -181,6 +183,9 @@ Registered functions with no TA-Lib counterpart (checked on their own reference)
 - ewm_var
 - fracdiff
 - gap
+- group_demean
+- group_rank
+- group_zscore
 - half_life
 - hurst_rs
 - if_else
@@ -190,7 +195,9 @@ Registered functions with no TA-Lib counterpart (checked on their own reference)
 - max_drawdown
 - pct_change
 - quantile
+- quantile_xs
 - range_pos
+- rank
 - rank_ts
 - rolling_alpha
 - rolling_beta
@@ -214,4 +221,6 @@ Registered functions with no TA-Lib counterpart (checked on their own reference)
 - volume_roc
 - vwap
 - wilder
+- winsorize_xs
 - zscore
+- zscore_xs
