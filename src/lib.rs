@@ -26,6 +26,7 @@ pub mod quant;
 pub mod research;
 pub mod runtime;
 pub mod signals;
+pub mod stats;
 pub mod strategies;
 
 /// The source file and line of the most recent raptorbt engine panic in this process, from any

@@ -15,3 +15,14 @@ code of them is included or linked into raptorbt.
   ht_dcphase, ht_phasor, ht_sine, ht_trendmode, ht_trendline) and mama in
   src/quant/fns/hilbert.rs port TA-Lib's algorithm (itself after John Ehlers' work),
   re-expressed as one-step kernels; no TA-Lib source text is included.
+- statsmodels (https://www.statsmodels.org), BSD 3-Clause. The critical-value and p-value
+  tables in src/stats/tables.rs (MacKinnon 1994 and 2010 response surfaces, Johansen trace and
+  maximum-eigenvalue values, KPSS critical values) are numbers read from statsmodels 0.15.0
+  (tsa/adfvalues.py, tsa/coint_tables.py, tsa/stattools) by scripts/gen_stat_tables.py. The
+  numbers are J. G. MacKinnon's (Journal of Business & Economic Statistics 12, 1994; Queen's
+  Economics Department Working Paper 1227, 2010) and MacKinnon, Haug and Michelis (Journal of
+  Applied Econometrics 14, 1999); the Johansen tables entered statsmodels from the Matlab
+  code of J. P. LeSage's Econometrics Toolbox. Copyright
+  (c) 2009-2018 statsmodels Developers; (c) 2006 Jonathan E. Taylor; (c) 2006-2008 Scipy
+  Developers. Redistribution of these data follows the BSD 3-Clause conditions: the notice
+  above, no use of the contributors' names to endorse this product.
