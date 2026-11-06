@@ -53,7 +53,7 @@ silently drop an operand, so an ``Expr`` refuses a truth test with ``expr_type``
 
 Functions are methods: ``col.close.sma(20)`` is ``sma(close, 20)``. The methods are generated
 from the function registry. A call with several outputs is selected by attribute:
-``x.macd().signal``.
+``x.macd().macdsignal``.
 
 | Member | What it is |
 | --- | --- |

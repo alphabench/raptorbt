@@ -1463,7 +1463,7 @@ Average directional index rating: (adx + adx `period - 1` bars earlier) / 2, TA-
 
 ### `apo([x], fastperiod=12, slowperiod=26, matype=0)`
 
-Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7 is refused). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.
+Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.
 
 - inputs: `x` (default `close`)
 - parameters: `fastperiod`: int in [2, 16777216], default 12; `slowperiod`: int in [2, 16777216], default 26; `matype`: int in [0, 8], default 0
@@ -1575,7 +1575,7 @@ MACD line (fast EMA - slow EMA), signal (EMA of the line) and histogram. All thr
 
 ### `macdext([x], fastperiod=12, fastmatype=0, slowperiod=26, slowmatype=0, signalperiod=9, signalmatype=0) -> (macd, macdsignal, macdhist)`
 
-MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 8 T3; 7, MAMA, is refused until the Hilbert slice lands) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.
+MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.
 
 - inputs: `x` (default `close`)
 - parameters: `fastperiod`: int in [2, 16777216], default 12; `fastmatype`: int in [0, 8], default 0; `slowperiod`: int in [2, 16777216], default 26; `slowmatype`: int in [0, 8], default 0; `signalperiod`: int in [1, 16777216], default 9; `signalmatype`: int in [0, 8], default 0
@@ -1700,7 +1700,7 @@ Percentage price oscillator: (fast average - slow average) / slow average * 100,
 
 ### `roc([x], period)`
 
-Rate of change in percent, (x - base) / base * 100 with base the value `period` bars back. Same arithmetic as the streaming core, which agrees with TA-Lib's ((x / base) - 1) * 100 to rounding. On a base of exactly 0 it keeps the last value (the streaming core's behaviour); TA-Lib, rocp, rocr and rocr100 give 0 there.
+Rate of change in percent, (x - base) / base * 100 with base the value `period` bars back. Same arithmetic as the streaming core, which agrees with TA-Lib's ((x / base) - 1) * 100 to rounding. On a base of exactly 0 it keeps the last value (native behaviour, the streaming core's); TA-Lib, rocp, rocr and rocr100 give 0 there.
 
 - inputs: `x` (default `close`)
 - parameters: `period`: int in [1, 16777216], required
@@ -1782,7 +1782,7 @@ TA-Lib's SLOW stochastic: the fast %K over `fastk_period` bars, smoothed by `slo
 
 ### `stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`
 
-raptorbt's FAST stochastic: k = 100 * (close - lowest low) / (highest high - lowest low) over `k_period` bars, d = the simple mean of the last `d_period` values of k. It is not TA-Lib's STOCH, which is the SLOW stochastic (its %K is already smoothed): for TA-Lib's use `stoch` (slow) or `stochf` (fast, whose fastd at matype 0 is this d). A range of 0 gives k = 50 (stoch and stochf give 0). Both outputs are NaN until d is ready (bar k_period + d_period - 2); the array function reports k from bar k_period - 1.
+raptorbt's FAST stochastic: k = 100 * (close - lowest low) / (highest high - lowest low) over `k_period` bars, d = the simple mean of the last `d_period` values of k. It is not TA-Lib's STOCH, which is the SLOW stochastic (its %K is already smoothed): for TA-Lib's use `stoch` (slow) or `stochf` (fast, whose fastd at matype 0 is this d). A range of 0 gives k = 50 (stoch and stochf give 0). Both outputs are NaN until d is ready (bar k_period + d_period - 2); the array function reports k from bar k_period - 1, so k is NaN on those earlier bars here. Wherever both define a value, the expression equals the array function bitwise.
 
 - inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`)
 - parameters: `k_period`: int in [1, 16777216], default 14; `d_period`: int in [1, 16777216], default 3
