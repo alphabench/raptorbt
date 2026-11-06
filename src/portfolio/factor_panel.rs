@@ -28,9 +28,29 @@ fn check_shape(values: &[f64], n_dates: usize, n_assets: usize) -> Result<(), Po
     Ok(())
 }
 
-/// Indices of finite values in one date row.
-fn finite_cols(row: &[f64]) -> Vec<usize> {
-    row.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect()
+/// Working memory of the row functions, reused across dates so a long panel (or a live seal,
+/// once per bar) allocates nothing after the first row.
+#[derive(Debug, Default)]
+pub struct RowScratch {
+    /// (value, original position): sorted unstably but by the full pair, which is exactly the
+    /// order a stable sort of the values gives, equal values and signed zeros included.
+    pairs: Vec<(f64, usize)>,
+}
+
+impl RowScratch {
+    /// Room for rows of up to `n` names.
+    pub fn with_capacity(n: usize) -> Self {
+        Self { pairs: Vec::with_capacity(n) }
+    }
+
+    /// The finite values of `row` as (value, index), in the order a stable sort gives.
+    fn sorted_finite(&mut self, row: &[f64]) -> &[(f64, usize)] {
+        self.pairs.clear();
+        self.pairs
+            .extend(row.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, v)| (*v, i)));
+        self.pairs.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+        &self.pairs
+    }
 }
 
 /// Winsorize each date's cross-section at the `pct`/`1-pct` quantiles.
@@ -47,9 +67,10 @@ pub fn winsorize_panel(
         )));
     }
     let mut out = values.to_vec();
+    let mut scratch = RowScratch::with_capacity(n_assets);
     for d in 0..n_dates {
         let row = &values[d * n_assets..(d + 1) * n_assets];
-        winsorize_row(row, pct, &mut out[d * n_assets..(d + 1) * n_assets]);
+        winsorize_row(row, pct, &mut out[d * n_assets..(d + 1) * n_assets], &mut scratch);
     }
     Ok(out)
 }
@@ -57,21 +78,21 @@ pub fn winsorize_panel(
 /// One date of [`winsorize_panel`]: `out` holds a copy of `row` and is clipped in place. A row
 /// with fewer than two finite values is left as it is. The expression engine's `winsorize_xs`
 /// calls this, so there is one definition.
-pub(crate) fn winsorize_row(row: &[f64], pct: f64, out: &mut [f64]) {
-    let cols = finite_cols(row);
-    if cols.len() < 2 {
+pub(crate) fn winsorize_row(row: &[f64], pct: f64, out: &mut [f64], s: &mut RowScratch) {
+    let sorted = s.sorted_finite(row);
+    if sorted.len() < 2 {
         return;
     }
-    let mut sorted: Vec<f64> = cols.iter().map(|&c| row[c]).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     // Symmetric count-based winsorization: clip the k lowest and k
     // highest, k = floor(m * pct). On a cross-section too small for pct
     // to cover one name (k = 0), nothing clips -- by design.
     let k = (sorted.len() as f64 * pct).floor() as usize;
-    let lo = sorted[k];
-    let hi = sorted[sorted.len() - 1 - k];
-    for &c in &cols {
-        out[c] = row[c].clamp(lo, hi);
+    let lo = sorted[k].0;
+    let hi = sorted[sorted.len() - 1 - k].0;
+    for (o, v) in out.iter_mut().zip(row) {
+        if v.is_finite() {
+            *o = v.clamp(lo, hi);
+        }
     }
 }
 
@@ -102,19 +123,22 @@ pub fn zscore_panel(
 /// One date of [`zscore_panel`]: `out` is all NaN on entry and receives the z-scores of the
 /// finite values. Shared with the expression engine's `zscore_xs`.
 pub(crate) fn zscore_row(row: &[f64], min_names: usize, out: &mut [f64]) {
-    let cols = finite_cols(row);
-    if cols.len() < min_names {
+    let n = row.iter().filter(|v| v.is_finite()).count();
+    if n < min_names {
         return;
     }
-    let m = cols.len() as f64;
-    let mean: f64 = cols.iter().map(|&c| row[c]).sum::<f64>() / m;
-    let var: f64 = cols.iter().map(|&c| (row[c] - mean).powi(2)).sum::<f64>() / m;
+    let m = n as f64;
+    let mean: f64 = row.iter().filter(|v| v.is_finite()).sum::<f64>() / m;
+    let var: f64 =
+        row.iter().filter(|v| v.is_finite()).map(|v| (v - mean).powi(2)).sum::<f64>() / m;
     if var <= 0.0 {
         return; // degenerate cross-section stays NaN
     }
     let std = var.sqrt();
-    for &c in &cols {
-        out[c] = (row[c] - mean) / std;
+    for (o, v) in out.iter_mut().zip(row) {
+        if v.is_finite() {
+            *o = (v - mean) / std;
+        }
     }
 }
 
@@ -132,33 +156,32 @@ pub fn rank_panel(
         )));
     }
     let mut out = vec![f64::NAN; n_dates * n_assets];
+    let mut scratch = RowScratch::with_capacity(n_assets);
     for d in 0..n_dates {
         let row = &values[d * n_assets..(d + 1) * n_assets];
-        rank_row(row, min_names, &mut out[d * n_assets..(d + 1) * n_assets]);
+        rank_row(row, min_names, &mut out[d * n_assets..(d + 1) * n_assets], &mut scratch);
     }
     Ok(out)
 }
 
 /// One date of [`rank_panel`]: `out` is all NaN on entry and receives the ranks of the finite
 /// values. Shared with the expression engine's `rank`.
-pub(crate) fn rank_row(row: &[f64], min_names: usize, out: &mut [f64]) {
-    let cols = finite_cols(row);
-    if cols.len() < min_names {
+pub(crate) fn rank_row(row: &[f64], min_names: usize, out: &mut [f64], s: &mut RowScratch) {
+    let order = s.sorted_finite(row);
+    let m = order.len();
+    if m < min_names {
         return;
     }
-    let mut order: Vec<usize> = cols.clone();
-    order.sort_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap());
-    let m = order.len();
     // Average-rank ties.
     let mut i = 0;
     while i < m {
         let mut j = i;
-        while j + 1 < m && row[order[j + 1]] == row[order[i]] {
+        while j + 1 < m && order[j + 1].0 == order[i].0 {
             j += 1;
         }
         let avg_rank = (i + j) as f64 / 2.0;
         let denom = (m - 1) as f64;
-        for &col in &order[i..=j] {
+        for &(_, col) in &order[i..=j] {
             out[col] = if denom > 0.0 { avg_rank / denom } else { 0.5 };
         }
         i = j + 1;
@@ -680,5 +703,113 @@ mod tests {
         assert_eq!(out.n_independent, 0.0);
         assert_eq!(out.overlap_days, 21);
         assert!(out.t_stat_deflated.is_nan());
+    }
+}
+
+#[cfg(test)]
+mod row_oracle {
+    //! The row functions against the stable-sort definitions they replaced, bit for bit.
+    use super::*;
+    use proptest::prelude::*;
+
+    fn finite_cols(row: &[f64]) -> Vec<usize> {
+        row.iter().enumerate().filter(|(_, v)| v.is_finite()).map(|(i, _)| i).collect()
+    }
+
+    fn rank_stable(row: &[f64], min_names: usize, out: &mut [f64]) {
+        let cols = finite_cols(row);
+        if cols.len() < min_names {
+            return;
+        }
+        let mut order: Vec<usize> = cols.clone();
+        order.sort_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap());
+        let m = order.len();
+        let mut i = 0;
+        while i < m {
+            let mut j = i;
+            while j + 1 < m && row[order[j + 1]] == row[order[i]] {
+                j += 1;
+            }
+            let avg_rank = (i + j) as f64 / 2.0;
+            let denom = (m - 1) as f64;
+            for &col in &order[i..=j] {
+                out[col] = if denom > 0.0 { avg_rank / denom } else { 0.5 };
+            }
+            i = j + 1;
+        }
+    }
+
+    fn zscore_old(row: &[f64], min_names: usize, out: &mut [f64]) {
+        let cols = finite_cols(row);
+        if cols.len() < min_names {
+            return;
+        }
+        let m = cols.len() as f64;
+        let mean: f64 = cols.iter().map(|&c| row[c]).sum::<f64>() / m;
+        let var: f64 = cols.iter().map(|&c| (row[c] - mean).powi(2)).sum::<f64>() / m;
+        if var <= 0.0 {
+            return;
+        }
+        let std = var.sqrt();
+        for &c in &cols {
+            out[c] = (row[c] - mean) / std;
+        }
+    }
+
+    fn winsorize_stable(row: &[f64], pct: f64, out: &mut [f64]) {
+        let cols = finite_cols(row);
+        if cols.len() < 2 {
+            return;
+        }
+        let mut sorted: Vec<f64> = cols.iter().map(|&c| row[c]).collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let k = (sorted.len() as f64 * pct).floor() as usize;
+        let lo = sorted[k];
+        let hi = sorted[sorted.len() - 1 - k];
+        for &c in &cols {
+            out[c] = row[c].clamp(lo, hi);
+        }
+    }
+
+    fn cell() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            4 => (-3i32..4).prop_map(f64::from),
+            2 => Just(0.0),
+            2 => Just(-0.0),
+            1 => Just(f64::NAN),
+            1 => -1e3f64..1e3,
+        ]
+    }
+
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| if x.is_nan() { f64::NAN.to_bits() } else { x.to_bits() }).collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 2000, failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn rank_zscore_and_winsorize_rows_are_bit_identical_to_the_stable_definitions(
+            row in prop::collection::vec(cell(), 0..40),
+            min in 2usize..6,
+            pct in 0.0f64..0.45,
+        ) {
+            let mut s = RowScratch::default();
+            let n = row.len();
+            let (mut a, mut b) = (vec![f64::NAN; n], vec![f64::NAN; n]);
+            rank_row(&row, min, &mut a, &mut s);
+            rank_stable(&row, min, &mut b);
+            prop_assert_eq!(bits(&a), bits(&b));
+
+            let (mut a, mut b) = (vec![f64::NAN; n], vec![f64::NAN; n]);
+            zscore_row(&row, min, &mut a);
+            zscore_old(&row, min, &mut b);
+            prop_assert_eq!(bits(&a), bits(&b));
+
+            let (mut a, mut b) = (row.clone(), row.clone());
+            winsorize_row(&row, pct, &mut a, &mut s);
+            winsorize_stable(&row, pct, &mut b);
+            prop_assert_eq!(bits(&a), bits(&b));
+        }
     }
 }

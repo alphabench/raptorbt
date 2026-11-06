@@ -85,9 +85,11 @@ fn clock_from(
 
 /// A float64 panel, borrowed when it is C-contiguous and copied in logical order when not.
 fn panel_cow<'a>(a: &'a PyReadonlyArray2<'_, f64>) -> Cow<'a, [f64]> {
+    // `as_slice` accepts Fortran order too, which would read its memory as rows: borrow only C
+    // order and copy anything else in logical order.
     match a.as_slice() {
-        Ok(s) => Cow::Borrowed(s),
-        Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+        Ok(s) if a.is_c_contiguous() => Cow::Borrowed(s),
+        _ => Cow::Owned(a.as_array().iter().copied().collect()),
     }
 }
 
@@ -137,21 +139,14 @@ pub struct PyExprProgram {
 }
 
 impl PyExprProgram {
-    /// This program's id in the bank's interner: equal canonical text, equal id. A panel
-    /// program has none: sealing one on the bank is a later slice.
+    /// This program's id in the bank's interner: equal canonical text, equal id. A panel program
+    /// is interned as such: its cells run on a universe.
     pub(crate) fn intern(&self) -> crate::core::Result<crate::runtime::exprs::ProgramId> {
-        match &self.plan {
-            Some(plan) => crate::runtime::exprs::intern(&self.program, plan),
-            None => Err(crate::core::RaptorError::invalid_parameter(
-                "a cross-sectional expression has a value only over a panel (Expr.eval_panel); \
-                 sealing one on the indicator bank is not supported yet",
-            )),
+        match (&self.plan, &self.panel) {
+            (Some(plan), _) => crate::runtime::exprs::intern(&self.program, plan),
+            (None, Ok(panel)) => crate::runtime::exprs::intern_panel(&self.program, panel),
+            (None, Err(e)) => Err(crate::core::RaptorError::invalid_parameter(e.to_string())),
         }
-    }
-
-    /// Whether this is a cross-sectional program (no series plan).
-    pub(crate) fn is_cross_sectional(&self) -> bool {
-        self.plan.is_none()
     }
 
     /// The series plan, or the refusal for a panel program.
@@ -544,8 +539,8 @@ impl PyExprProgram {
                     return Err(shape_fail(OP, "present", a.shape(), (n, m)));
                 }
                 Some(match a.as_slice() {
-                    Ok(s) => Cow::Borrowed(s),
-                    Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+                    Ok(s) if a.is_c_contiguous() => Cow::Borrowed(s),
+                    _ => Cow::Owned(a.as_array().iter().copied().collect()),
                 })
             }
         };
@@ -734,8 +729,7 @@ pub fn factor_report_native<'py>(
     let (f, p) = (panel_cow(&factor), panel_cow(&prices));
     let params = FactorParams { horizons, quantiles, lag, min_names };
     let r = py.detach(|| factor_report(&f, &p, n, m, &params)).map_err(|e| {
-        // `invalid_input` for every refusal: the stats codes have no Python entry yet.
-        let fail = Fail::new("invalid_input", e.to_string()).op(OP);
+        let fail = Fail::new(e.code(), e.to_string()).op(OP);
         PyErr::from(match &e {
             crate::stats::StatsError::InsufficientObservations { what, .. } => fail.param(what),
             _ => fail,

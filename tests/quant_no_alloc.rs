@@ -9,9 +9,14 @@ use std::cell::Cell;
 
 use raptorbt::data::BarStamp;
 use raptorbt::quant::eval::{Bar, ClockCtx, Plan, Stream};
+use raptorbt::quant::eval::PanelPlan;
 use raptorbt::quant::lang::{compile, Env};
 use raptorbt::quant::registry::{all, Domain, Family, FnDef, ParamKind, ParamVal};
 use raptorbt::runtime::exprs::{self, ExprCore};
+use raptorbt::runtime::ids::{InstrumentId, StrategyId};
+use raptorbt::runtime::indicators::{
+    IndInput, IndKey, IndSpec, IndicatorBank, IndicatorRegistry, Ohlc,
+};
 
 struct Counting;
 
@@ -222,15 +227,69 @@ fn rough_bars(n: usize, unit: bool) -> Vec<Bar> {
         .collect()
 }
 
+/// A cross-sectional function on the bank: eight instruments print every bar (the fourth skips
+/// every eleventh), each date is sealed, and neither the stores nor the seal allocate. The
+/// values are read after a reveal, as a strategy reads them.
+fn panel_case(def: &FnDef) -> Result<(), String> {
+    const MEMBERS: u32 = 8;
+    let mut src = call_of(def, 5);
+    if def.inputs.iter().any(|i| i.name == "group") {
+        // Labels from the bars themselves: -1, 0 or 1.
+        src = src.replacen("close, close", "close, sign(close - open)", 1);
+    }
+    let program = compile(&src, &Env::default()).map_err(|e| format!("{src}: {e}"))?;
+    let panel = PanelPlan::new(&program).map_err(|e| format!("{src}: {e}"))?;
+    let id = exprs::intern_panel(&program, &panel).map_err(|e| format!("{src}: {e}"))?;
+    let insts: Vec<InstrumentId> = (0..MEMBERS).map(InstrumentId::new).collect();
+    let mut reg = IndicatorRegistry::new();
+    let order = reg.primary_order(&insts).map_err(|e| e.to_string())?;
+    let mut slots = Vec::new();
+    for m in 0..MEMBERS {
+        let mut key = IndKey::new(IndInput::Universe(order), IndSpec::expr(id, 0).unwrap());
+        key.params[1] = u64::from(m);
+        slots.push(reg.register(StrategyId::new(0), key, None).map_err(|e| e.to_string())?.slot);
+    }
+    let bank = IndicatorBank::new(&reg);
+    let bars = rough_bars(4200, false);
+    let before = allocs();
+    let mut known = 0usize;
+    for i in 0..bars.len() {
+        bank.begin_event();
+        for (m, inst) in insts.iter().enumerate() {
+            if m == 3 && i % 11 == 0 {
+                continue;
+            }
+            let b = &bars[(i + 37 * m) % bars.len()];
+            let (open, high, low, close, volume) = (b.open, b.high, b.low, b.close, b.volume);
+            bank.emit_primary(*inst, Ohlc { open, high, low, close, volume, ts: 0 })
+                .map_err(|e| e.to_string())?;
+        }
+        bank.seal();
+        bank.reveal_primary(StrategyId::new(0), insts[0]);
+        known += slots.iter().filter(|s| !bank.read(**s).values[0].is_nan()).count();
+    }
+    let used = allocs() - before;
+    if used != 0 {
+        return Err(format!("{}: {used} allocations over {} dates ({src})", def.name, bars.len()));
+    }
+    if known == 0 {
+        return Err(format!("{}: never produced a value ({src})", def.name));
+    }
+    Ok(())
+}
+
 #[test]
 fn every_registered_function_updates_without_allocating() {
     let ordinary = rough_bars(4200, false);
     let unit = rough_bars(4200, true);
     let (mut checked, mut failures) = (0usize, Vec::new());
     for def in all() {
-        // A cross-sectional function has a value only over a panel and is not a bank cell: it
-        // is sealed on the bank in the next slice (3.4), and these checks join it there.
+        // A cross-sectional function runs on a universe: its own check, below.
         if def.family == Family::Cross {
+            match panel_case(def) {
+                Ok(()) => checked += 1,
+                Err(e) => failures.push(e),
+            }
             continue;
         }
         let (src, _, plan) = match plan_of(def) {
@@ -269,8 +328,8 @@ fn every_registered_function_updates_without_allocating() {
 fn every_registered_function_reports_the_heap_it_holds() {
     let (mut checked, mut failures) = (0usize, Vec::new());
     for def in all() {
-        // A cross-sectional function has a value only over a panel and is not a bank cell: it
-        // is sealed on the bank in the next slice (3.4), and these checks join it there.
+        // Its cells are one per member of a shared panel run, whose heap the bank adds up as a
+        // whole (`IndicatorBank::heap_bytes`); a cell here would measure a stream it lacks.
         if def.family == Family::Cross {
             continue;
         }

@@ -2882,7 +2882,25 @@ impl PyRuntime {
                     if counts[&(ind.obj.as_ptr() as usize)] != 1 {
                         continue;
                     }
+                    let mut member = None;
                     let (input, stream) = match (ind.stream_id, ind.local) {
+                        // A cross-sectional expression runs on the strategy's instruments as
+                        // they are now: the universe is frozen here, and an instrument added
+                        // to a live node later does not join it.
+                        (None, Some(local)) if spec.is_panel() => {
+                            let g = builder.instrument_of(plan.sid, local).ok_or_else(finished)?;
+                            let mut all: Vec<InstrumentId> =
+                                (0..builder_locals(&builder, plan.sid))
+                                    .filter_map(|l| builder.instrument_of(plan.sid, l))
+                                    .collect();
+                            all.sort_unstable();
+                            all.dedup();
+                            member = all.binary_search(&g).ok().map(|m| m as u64);
+                            let order = builder.primary_order(&all).map_err(runtime_err)?;
+                            (IndInput::Universe(order), None)
+                        }
+                        // On a composite stream, or on no instrument: refused below.
+                        _ if spec.is_panel() => continue,
                         (None, Some(local)) => {
                             let g = builder.instrument_of(plan.sid, local).ok_or_else(finished)?;
                             (IndInput::Primary(g), None)
@@ -2911,10 +2929,34 @@ impl PyRuntime {
                         _ => continue,
                     };
                     let mut key = IndKey::new(input, spec);
+                    if let Some(m) = member {
+                        key.params[1] = m;
+                    }
                     key.adjustment = policy;
                     let reg =
                         builder.register_indicator(plan.sid, key, stream).map_err(runtime_err)?;
                     linked.insert((pi, ii), reg.slot);
+                }
+            }
+        }
+
+        // A cross-sectional expression has a value only on the bank's universe: one that could
+        // not be linked (a stream of its own, a timeframe, no instrument, an indicator object
+        // registered twice, sharing off) has nowhere to run.
+        for (pi, plan) in plans.iter().enumerate() {
+            for (ii, ind) in plan.inds.iter().enumerate() {
+                let Ok(obj) = ind.obj.bind(py).cast::<PyIndicator>() else { continue };
+                if obj.borrow().spec().is_panel() && !linked.contains_key(&(pi, ii)) {
+                    return Err(Fail::new(
+                        "expr_unsupported_here",
+                        "a cross-sectional expression runs on the shared indicator bank over \
+                         the strategy's instruments: register it once with \
+                         ctx.indicators.expr(instrument=...), on the primary bars (no timeframe), \
+                         in run_strategies, run_portfolio_strategy or a LiveNode",
+                    )
+                    .op("register_indicator")
+                    .param("expression")
+                    .into());
                 }
             }
         }

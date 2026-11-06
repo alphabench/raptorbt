@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rayon::prelude::*;
 
-use super::{eval, ClockCtx, EvalError, Inputs, Plan};
+use super::{eval, Bar, ClockCtx, EvalError, Inputs, Plan, Stream};
 use crate::quant::fns::cross::{self, Kind, Scratch};
 use crate::quant::lang::{Clock, Dag, Field, NodeId, Op, Program, Shape, Ty};
 use crate::quant::registry::{Family, ParamVal};
@@ -51,7 +51,7 @@ fn parse_boundary(name: &str) -> Option<Key> {
     name.strip_prefix('#')?.parse().ok().map(|id| (id, 0))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TsPhase {
     plan: Plan,
     /// The panels this phase produces, in the plan's output order.
@@ -61,7 +61,7 @@ struct TsPhase {
     handles: Vec<Src>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CrossNode {
     key: Key,
     kind: Kind,
@@ -70,14 +70,14 @@ struct CrossNode {
     group: Option<Src>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Phase {
     Ts(TsPhase),
     Cross(Vec<CrossNode>),
 }
 
 /// An executable panel program. Holds no run state; cheap to share across threads.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PanelPlan {
     phases: Vec<Phase>,
     finals: Vec<Key>,
@@ -612,6 +612,218 @@ pub fn eval_panel(plan: &PanelPlan, inputs: &PanelInputs) -> Result<Vec<Vec<f64>
         .collect()
 }
 
+/// Where a live cross-section phase reads a panel from.
+#[derive(Debug, Clone, Copy)]
+enum LiveSrc {
+    Field(usize),
+    Slot(usize),
+}
+
+#[derive(Debug)]
+struct LiveCross {
+    kind: Kind,
+    params: Vec<ParamVal>,
+    x: LiveSrc,
+    group: Option<LiveSrc>,
+    slot: usize,
+}
+
+enum LivePhase {
+    Ts { streams: Vec<Stream>, exports: Vec<usize>, handles: Vec<usize> },
+    Cross(Vec<LiveCross>),
+}
+
+/// A panel program run one date at a time: the streaming form of [`eval_panel`], for the
+/// indicator bank.
+///
+/// Each name has its own stream per time-series phase, stepped only on dates the name has a bar;
+/// each date the cross-section phases run on that date's row. The numbers are those of
+/// [`eval_panel`] over the same bars, bit for bit (a stream equals a batch run, and a
+/// cross-section is the same function of the same row). Nothing allocates after construction.
+///
+/// A program with `at(...)`, with a supplied series (a group label) or with several outputs is
+/// refused: the bank feeds bars, not named series or clocks.
+pub struct PanelStream {
+    m: usize,
+    phases: Vec<LivePhase>,
+    /// One row (a value per name) per exported time-series value and per cross-section result.
+    store: Vec<Vec<f64>>,
+    fields: Vec<Vec<f64>>,
+    present: Vec<bool>,
+    handle_scratch: Vec<f64>,
+    scratch: Scratch,
+    out_slot: usize,
+}
+
+impl std::fmt::Debug for PanelStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PanelStream")
+            .field("members", &self.m)
+            .field("phases", &self.phases.len())
+            .finish()
+    }
+}
+
+impl PanelStream {
+    pub fn new(plan: &PanelPlan, members: usize) -> Result<PanelStream, EvalError> {
+        if plan.has_at {
+            return Err(EvalError::Unsupported(
+                "at(...) in a live panel: the bank feeds bars without a clock".to_string(),
+            ));
+        }
+        if !plan.handles.is_empty() {
+            return Err(EvalError::Unsupported(
+                "a panel on the bank reads bar fields only, not supplied series".to_string(),
+            ));
+        }
+        if plan.finals.len() != 1 {
+            return Err(EvalError::Unsupported("a panel on the bank has one output".to_string()));
+        }
+        let mut slots: HashMap<Key, usize> = HashMap::new();
+        let slot = |k: Key, slots: &mut HashMap<Key, usize>| {
+            let n = slots.len();
+            *slots.entry(k).or_insert(n)
+        };
+        let mut phases = Vec::with_capacity(plan.phases.len());
+        let mut max_handles = 0;
+        for ph in &plan.phases {
+            phases.push(match ph {
+                Phase::Ts(t) => {
+                    let streams = (0..members)
+                        .map(|_| Stream::new(&t.plan))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let exports = t.exports.iter().map(|k| slot(*k, &mut slots)).collect();
+                    let handles: Vec<usize> = t
+                        .handles
+                        .iter()
+                        .map(|h| match h {
+                            Src::Prior(k) => slots[k],
+                            _ => unreachable!("user series are refused above"),
+                        })
+                        .collect();
+                    max_handles = max_handles.max(handles.len());
+                    LivePhase::Ts { streams, exports, handles }
+                }
+                Phase::Cross(nodes) => {
+                    let src = |s: &Src, slots: &HashMap<Key, usize>| match s {
+                        Src::Field(f) => LiveSrc::Field(*f as usize),
+                        Src::Prior(k) => LiveSrc::Slot(slots[k]),
+                        Src::User(_) => unreachable!("user series are refused above"),
+                    };
+                    let mut live = Vec::with_capacity(nodes.len());
+                    for n in nodes {
+                        let x = src(&n.x, &slots);
+                        let group = n.group.as_ref().map(|g| src(g, &slots));
+                        live.push(LiveCross {
+                            kind: n.kind,
+                            params: n.params.clone(),
+                            x,
+                            group,
+                            slot: slot(n.key, &mut slots),
+                        });
+                    }
+                    LivePhase::Cross(live)
+                }
+            });
+        }
+        let out_slot = slots[&plan.finals[0]];
+        Ok(PanelStream {
+            m: members,
+            phases,
+            store: vec![vec![f64::NAN; members]; slots.len()],
+            fields: vec![vec![f64::NAN; members]; 5],
+            present: vec![false; members],
+            handle_scratch: Vec::with_capacity(max_handles),
+            scratch: Scratch::with_capacity(members),
+            out_slot,
+        })
+    }
+
+    /// Names in the panel.
+    pub fn members(&self) -> usize {
+        self.m
+    }
+
+    /// One date: `bars[i]` is name `i`'s bar, or none when it has no bar. Writes each name's
+    /// value into `out` (NaN for an absent name, and wherever the program is unknown).
+    pub fn step(&mut self, bars: &[Option<Bar>], out: &mut [f64]) -> Result<(), EvalError> {
+        debug_assert!(bars.len() == self.m && out.len() == self.m);
+        for (i, b) in bars.iter().enumerate() {
+            self.present[i] = b.is_some();
+            for (f, row) in Field::ALL.iter().zip(&mut self.fields) {
+                row[i] = b.as_ref().map_or(f64::NAN, |b| b.get(*f));
+            }
+        }
+        for ph in &mut self.phases {
+            match ph {
+                LivePhase::Ts { streams, exports, handles } => {
+                    for (i, b) in bars.iter().enumerate() {
+                        let Some(bar) = b else {
+                            for &e in exports.iter() {
+                                self.store[e][i] = f64::NAN;
+                            }
+                            continue;
+                        };
+                        self.handle_scratch.clear();
+                        for &h in handles.iter() {
+                            self.handle_scratch.push(self.store[h][i]);
+                        }
+                        let o = streams[i].update(bar, &self.handle_scratch)?;
+                        for (k, &e) in exports.iter().enumerate() {
+                            self.store[e][i] = o[k];
+                        }
+                    }
+                }
+                LivePhase::Cross(nodes) => {
+                    for n in nodes.iter() {
+                        let mut o = std::mem::take(&mut self.store[n.slot]);
+                        let row = |s: LiveSrc| -> &[f64] {
+                            match s {
+                                LiveSrc::Field(f) => &self.fields[f],
+                                LiveSrc::Slot(k) => &self.store[k],
+                            }
+                        };
+                        cross::apply_row(
+                            n.kind,
+                            &n.params,
+                            row(n.x),
+                            n.group.map(row),
+                            &self.present,
+                            &mut o,
+                            &mut self.scratch,
+                        );
+                        self.store[n.slot] = o;
+                    }
+                }
+            }
+        }
+        out.copy_from_slice(&self.store[self.out_slot]);
+        Ok(())
+    }
+
+    /// Heap this stream owns, counted at capacity.
+    pub fn state_bytes(&self) -> usize {
+        let f = std::mem::size_of::<f64>();
+        let streams: usize = self
+            .phases
+            .iter()
+            .map(|p| match p {
+                LivePhase::Ts { streams, .. } => {
+                    streams.capacity() * std::mem::size_of::<Stream>()
+                        + streams.iter().map(Stream::state_bytes).sum::<usize>()
+                }
+                LivePhase::Cross(_) => 0,
+            })
+            .sum();
+        streams
+            + (self.store.iter().map(Vec::capacity).sum::<usize>()
+                + self.fields.iter().map(Vec::capacity).sum::<usize>()
+                + self.handle_scratch.capacity())
+                * f
+            + self.present.capacity()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +927,36 @@ mod tests {
         assert!(matches!(r, Err(EvalError::LengthMismatch { .. })));
         let r = eval_panel(&p, &PanelInputs::new(1, 3));
         assert_eq!(r, Err(EvalError::MissingField("close")));
+    }
+
+    #[test]
+    fn a_panel_stream_equals_the_batch_panel_bit_for_bit() {
+        let (n, m) = (50, 6);
+        let mut c = close(n, m);
+        c[10 * m + 4] = NAN; // a halted name
+        for src in [
+            "rank(roc(close, 3))",
+            "ema(rank(roc(close, 3)), 4) - zscore_xs(sma(close, 5))",
+            "close > quantile_xs(close, 0.7)",
+            "winsorize_xs(close, 0.2) * count_xs(close)",
+        ] {
+            let p = plan(src);
+            let batch =
+                eval_panel(&p, &PanelInputs::new(n, m).field(Field::Close, &c)).unwrap().remove(0);
+            let mut live = PanelStream::new(&p, m).unwrap();
+            let mut out = vec![0.0; m];
+            for d in 0..n {
+                let bars: Vec<Option<Bar>> = (0..m)
+                    .map(|a| {
+                        let x = c[d * m + a];
+                        (!x.is_nan()).then_some(Bar { close: x, ..Bar::NAN })
+                    })
+                    .collect();
+                live.step(&bars, &mut out).unwrap();
+                assert_eq!(bits(&out), bits(&batch[d * m..(d + 1) * m]), "{src} date {d}");
+            }
+        }
+        let with_at = plan("rank(close)");
+        assert!(PanelStream::new(&with_at, 3).is_ok());
     }
 }

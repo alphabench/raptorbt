@@ -926,6 +926,15 @@ class IndicatorsView:
         daily value is visible from the first bar of the next day, as in
         ``raptorbt.expr(...).eval(..., bar_stamp=...)``.
 
+        A cross-sectional expression (``rank(roc(close, 20))``, ``zscore_xs(...)``) compares the
+        strategy's instruments: ``instrument`` is the member whose value the handle reads, the
+        others are the strategy's instruments when the run was built, and that universe is frozen
+        (an instrument added to a live node later does not join it). The expression steps once per
+        timestamp group, after every bar of it; a member with no bar at that timestamp reads
+        unknown, and a thin group (instruments that print at different instants) is a thin
+        cross-section, below ``min_names`` unknown. It has no ``timeframe``. ``expr_all`` returns
+        a handle per instrument.
+
         The returned handle is shared by every strategy that registers the same canonical
         expression on the same stream. Backtest and live give the numbers
         ``raptorbt.expr(...).eval`` gives on the same bars. Needs the shared runtime
@@ -957,15 +966,15 @@ class IndicatorsView:
             compiled = expression
         else:
             compiled = Expr(expression, params)
-        if compiled.is_panel:
+        if compiled.is_panel and timeframe is not None:
             raise errors.make(
                 "expr_unsupported_here",
-                "this expression is cross-sectional (rank, zscore_xs, ...): it has a value only "
-                "over a panel of names, so evaluate it with Expr.eval_panel; registering one on "
-                "the indicator bank is not supported yet",
+                "a cross-sectional expression compares the primary bars of the strategy's "
+                "instruments; it has no timeframe",
                 operation="ctx.indicators.expr",
-                parameter="expression",
-                valid=["a per-instrument expression"],
+                parameter="timeframe",
+                value=str(timeframe),
+                valid=["timeframe=None"],
             )
         names = tuple(compiled.outputs)
         if output is None and len(names) > 1:
@@ -989,6 +998,17 @@ class IndicatorsView:
         index = 0 if output is None else names.index(output)
         handle = self._make(Indicator.expr(compiled._prog, index), symbol, timeframe, "close")
         return ExprHandle(handle._indicator, compiled)
+
+    def expr_all(self, expression, *, params=None):
+        """``expr`` for every instrument of the strategy: ``{symbol: handle}``. For a
+        cross-sectional expression (``rank(roc(close, 20))``) these are the members of one
+        universe, so one run of the expression serves them all."""
+        run = self._run
+        run.open("ctx.indicators")
+        symbols = run.symbols if run.symbols is not None else (
+            (run.default,) if run.default is not None else ()
+        )
+        return {s: self.expr(expression, instrument=s, params=params) for s in symbols}
 
     def custom(self, obj, *, instrument, timeframe=None):
         """Feed your own indicator the closed bars of ``instrument``.

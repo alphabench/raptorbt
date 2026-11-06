@@ -25,7 +25,7 @@
 //!
 //! Nothing here looks at another date: the output at a date is a function of that date's inputs.
 
-use crate::portfolio::factor_panel::{rank_row, winsorize_row, zscore_row};
+use crate::portfolio::factor_panel::{rank_row, winsorize_row, zscore_row, RowScratch};
 use crate::quant::registry::{
     Domain, Family, FnDef, InputDef, Invariance, Memory, NanRule, OutKind, ParamDef, ParamKind,
     ParamVal, Reference, Relation,
@@ -72,6 +72,21 @@ pub struct Scratch {
     sub_out: Vec<f64>,
     idx: Vec<usize>,
     sorted: Vec<f64>,
+    row: RowScratch,
+}
+
+impl Scratch {
+    /// Room for cross-sections of up to `n` names: applying a row then allocates nothing.
+    pub fn with_capacity(n: usize) -> Self {
+        Self {
+            masked: Vec::with_capacity(n),
+            sub: Vec::with_capacity(n),
+            sub_out: Vec::with_capacity(n),
+            idx: Vec::with_capacity(n),
+            sorted: Vec::with_capacity(n),
+            row: RowScratch::with_capacity(n),
+        }
+    }
 }
 
 fn min_names(params: &[ParamVal], at: usize) -> usize {
@@ -147,14 +162,14 @@ pub fn apply_row(
         }
     }));
     match kind {
-        Kind::Rank => rank_row(&s.masked, min_names(params, 0), out),
+        Kind::Rank => rank_row(&s.masked, min_names(params, 0), out, &mut s.row),
         Kind::ZScore => zscore_row(&s.masked, min_names(params, 0), out),
         Kind::Demean => demean_row(&s.masked, min_names(params, 0), out),
         Kind::Winsorize => {
             let min = min_names(params, 1);
             if s.masked.iter().filter(|v| v.is_finite()).count() >= min {
                 out.copy_from_slice(&s.masked);
-                winsorize_row(&s.masked, float(params, 0, 0.05), out);
+                winsorize_row(&s.masked, float(params, 0, 0.05), out, &mut s.row);
             }
         }
         Kind::Quantile | Kind::Count => {
@@ -164,7 +179,7 @@ pub fn apply_row(
             let value = if kind == Kind::Count {
                 n as f64
             } else if n >= min_names(params, 1) && n > 0 {
-                s.sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                s.sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
                 quantile_sorted(&s.sorted, float(params, 0, 0.5))
             } else {
                 f64::NAN
@@ -180,8 +195,9 @@ pub fn apply_row(
             let min = min_names(params, 0);
             s.idx.clear();
             s.idx.extend((0..m).filter(|&i| s.masked[i].is_finite()));
-            // Stable: members of a group stay in name order, so sums run in name order.
-            s.idx.sort_by(|&a, &b| g[a].partial_cmp(&g[b]).unwrap());
+            // Ties on the label break by name index: members of a group stay in name order, so sums
+            // run in name order.
+            s.idx.sort_unstable_by(|&a, &b| g[a].partial_cmp(&g[b]).unwrap().then(a.cmp(&b)));
             let mut i = 0;
             while i < s.idx.len() {
                 let mut j = i;
@@ -193,7 +209,7 @@ pub fn apply_row(
                 s.sub_out.clear();
                 s.sub_out.resize(s.sub.len(), f64::NAN);
                 match kind {
-                    Kind::GroupRank => rank_row(&s.sub, min, &mut s.sub_out),
+                    Kind::GroupRank => rank_row(&s.sub, min, &mut s.sub_out, &mut s.row),
                     Kind::GroupZScore => zscore_row(&s.sub, min, &mut s.sub_out),
                     _ => demean_row(&s.sub, min, &mut s.sub_out),
                 }
@@ -362,7 +378,8 @@ mod tests {
         };
         same(&q(0.25, &all(5)), &[2.0; 5]);
         assert!((q(0.3, &all(5))[0] - 2.2).abs() < 1e-15);
-        same(&q(0.5, &[true, true, true, true, false]), &[2.5, 2.5, 2.5, 2.5, NAN]);
+        // The absent name is out: 1, 2, 4, 5 -> position 1.5 -> 2 + (4 - 2) * 0.5 = 3.
+        same(&q(0.5, &[true, true, true, true, false]), &[3.0, 3.0, 3.0, 3.0, NAN]);
         // count: NaN input is not counted, but the name still reads the count.
         same(&run(Kind::Count, &[], &[1.0, NAN, 3.0], None, &all(3)), &[2.0; 3]);
         // winsorize: n = 10, pct 0.1 -> k = 1: the lowest and highest clip to their neighbours.

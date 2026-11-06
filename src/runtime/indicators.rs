@@ -88,7 +88,7 @@ use crate::indicators::streaming::{
     StreamingMacd, StreamingRoc, StreamingRsi, StreamingSma, StreamingStdDev, StreamingWma,
 };
 use crate::quant::eval::ClockCtx;
-use crate::runtime::exprs::{self, ExprCore, ProgramId};
+use crate::runtime::exprs::{self, ExprCore, PanelCore, ProgramId};
 use crate::runtime::ids::{AggId, IndId, InstrumentId, StrategyId};
 use crate::runtime::memory::HeapSize;
 
@@ -140,6 +140,10 @@ pub enum IndInput {
     AllPrimary(PrimaryOrder),
     /// The bars a composite aggregation emits.
     Composite(AggId),
+    /// The universe a cross-sectional expression runs on: the instruments of an order, frozen
+    /// when the bank is built. A cell is one member's value (`params = [program, member, 0]`);
+    /// the members' cells share one panel run that steps at [`IndicatorBank::seal`].
+    Universe(PrimaryOrder),
 }
 
 /// The streaming cores a key can name.
@@ -263,6 +267,11 @@ impl IndSpec {
     /// timestamps, which a hand-fed `update_bar` does not have.
     pub fn needs_clock(self) -> bool {
         matches!(self, IndSpec::Expr { program, .. } if exprs::info(program).needs_clock)
+    }
+
+    /// Whether the indicator is a cross-sectional expression: it has a value only on a universe.
+    pub fn is_panel(self) -> bool {
+        matches!(self, IndSpec::Expr { program, .. } if exprs::info(program).is_panel())
     }
 
     /// Whether the indicator reads the bar's volume, so a bar without one must be refused.
@@ -441,7 +450,42 @@ impl IndicatorRegistry {
                 key.kind
             )));
         }
+        if key.kind == IndKind::Expr {
+            let panel = exprs::info(ProgramId::from_param(key.params[0])).is_panel();
+            match (key.input, panel) {
+                (IndInput::Universe(_), false) => {
+                    return Err(RaptorError::invalid_parameter(
+                        "a universe cell runs a cross-sectional expression",
+                    ));
+                }
+                (IndInput::Universe(_), true) => {}
+                (_, true) => {
+                    return Err(RaptorError::invalid_parameter(
+                        "a cross-sectional expression runs on a universe of instruments, not on \
+                         one stream",
+                    ));
+                }
+                _ => {}
+            }
+        }
         match (key.input, stream) {
+            (IndInput::Universe(_), Some(_)) => {
+                return Err(RaptorError::invalid_parameter(
+                    "only composite indicators take a local stream",
+                ));
+            }
+            (IndInput::Universe(order), None) => {
+                let Some(members) = self.orders.get(order.index()) else {
+                    return Err(RaptorError::invalid_parameter("unknown primary order"));
+                };
+                if key.params[1] as usize >= members.len() {
+                    return Err(RaptorError::invalid_parameter(format!(
+                        "member {} of a universe of {}",
+                        key.params[1],
+                        members.len()
+                    )));
+                }
+            }
             (IndInput::Composite(_), None) => {
                 return Err(RaptorError::invalid_parameter(
                     "a composite indicator needs its local stream",
@@ -640,6 +684,8 @@ enum Core {
     Bollinger(StreamingBollinger),
     Macd(StreamingMacd),
     Expr(Box<ExprCore>),
+    /// A universe cell: its value is written by the panel run at the seal, never fed a bar.
+    Panel,
 }
 
 /// A core with the field it reads.
@@ -673,6 +719,7 @@ impl CellCore {
                 Core::Bollinger(StreamingBollinger::new(p(0), f64::from_bits(key.params[1])))
             }
             IndKind::Macd => Core::Macd(StreamingMacd::new(p(0), p(1), p(2))),
+            IndKind::Expr if matches!(key.input, IndInput::Universe(_)) => Core::Panel,
             IndKind::Expr => Core::Expr(Box::new(ExprCore::with_clock(
                 ProgramId::from_param(key.params[0]),
                 p(1) as u8,
@@ -704,6 +751,7 @@ impl CellCore {
             Core::Bollinger(c) => Reading::triple(c.update(x)),
             Core::Macd(c) => Reading::triple(c.update(x)),
             Core::Expr(c) => c.update(bar),
+            Core::Panel => Reading::UNINIT,
         }
     }
 }
@@ -724,6 +772,7 @@ fn core_heap_bytes(key: &IndKey) -> usize {
         IndKind::Donchian => 2 * (p + 1) * f,
         IndKind::Bollinger => (p + 1) * f,
         IndKind::Macd => key.params.iter().map(|&q| (q as usize + 1) * f).sum(),
+        IndKind::Expr if matches!(key.input, IndInput::Universe(_)) => 0,
         IndKind::Expr => exprs::cell_heap_bytes(ProgramId::from_param(key.params[0])),
     }
 }
@@ -758,6 +807,15 @@ impl CellVals {
 struct Writer {
     cores: Vec<CellCore>,
     hist: Vec<Vec<Reading>>,
+    /// The runs of cross-sectional programs, one per (universe, program).
+    panels: Vec<PanelRun>,
+}
+
+/// One cross-sectional program over one universe, and the cell of each member that reads it.
+#[derive(Debug)]
+struct PanelRun {
+    core: PanelCore,
+    member_cells: Vec<Option<u32>>,
 }
 
 /// A slot's reveal state packs `event << STATE_BITS | emissions revealed`.
@@ -841,6 +899,11 @@ pub struct IndicatorBank {
     primary_cells: Box<[u32]>,
     agg_off: Box<[u32]>,
     agg_cells: Box<[u32]>,
+    /// Per instrument, the (panel run, member) pairs it feeds, flattened. Empty without a
+    /// cross-sectional expression: then no bar is stored and [`IndicatorBank::seal`] does nothing.
+    universe_off: Box<[u32]>,
+    universe_items: Box<[u32]>,
+    panel_count: usize,
 }
 
 impl IndicatorBank {
@@ -860,6 +923,10 @@ impl IndicatorBank {
 
         let mut by_primary: Vec<Vec<u32>> = Vec::new();
         let mut by_agg: Vec<Vec<u32>> = Vec::new();
+        let mut by_universe: Vec<Vec<u32>> = Vec::new();
+        let mut panel_of: HashMap<(PrimaryOrder, u64), usize> = HashMap::new();
+        let mut panel_defs: Vec<(PrimaryOrder, ProgramId)> = Vec::new();
+        let mut member_cells: Vec<Vec<Option<u32>>> = Vec::new();
         let push = |lists: &mut Vec<Vec<u32>>, at: usize, cell: u32| {
             if lists.len() <= at {
                 lists.resize_with(at + 1, Vec::new);
@@ -876,8 +943,24 @@ impl IndicatorBank {
                     }
                 }
                 IndInput::Composite(agg) => push(&mut by_agg, agg.index(), cell),
+                IndInput::Universe(order) => {
+                    let n = registry.orders()[order.index()].len();
+                    let pi = *panel_of.entry((order, key.params[0])).or_insert_with(|| {
+                        panel_defs.push((order, ProgramId::from_param(key.params[0])));
+                        member_cells.push(vec![None; n]);
+                        panel_defs.len() - 1
+                    });
+                    member_cells[pi][key.params[1] as usize] = Some(cell);
+                }
             }
         }
+        for (pi, (order, _)) in panel_defs.iter().enumerate() {
+            for (m, inst) in registry.orders()[order.index()].iter().enumerate() {
+                push(&mut by_universe, inst.index(), pi as u32);
+                push(&mut by_universe, inst.index(), m as u32);
+            }
+        }
+        let (universe_off, universe_items) = csr(by_universe);
         let (primary_off, primary_cells) = csr(by_primary);
         let (agg_off, agg_cells) = csr(by_agg);
 
@@ -887,7 +970,10 @@ impl IndicatorBank {
             .map(|s| SlotCell {
                 state: AtomicU64::new(0),
                 cell: s.ind.raw(),
-                fleet: matches!(keys[s.ind.index()].input, IndInput::AllPrimary(_)),
+                fleet: matches!(
+                    keys[s.ind.index()].input,
+                    IndInput::AllPrimary(_) | IndInput::Universe(_)
+                ),
             })
             .collect();
         // A slot is revealed by one route per primary bar that feeds it, or by
@@ -897,7 +983,7 @@ impl IndicatorBank {
             let mut add = |key: u64| grouped.push((s.strategy.raw(), key, i as u32));
             match (keys[s.ind.index()].input, s.stream) {
                 (IndInput::Primary(inst), _) => add(KEY_PRIMARY | u64::from(inst.raw())),
-                (IndInput::AllPrimary(order), _) => {
+                (IndInput::AllPrimary(order) | IndInput::Universe(order), _) => {
                     for inst in &registry.orders()[order.index()] {
                         add(KEY_PRIMARY | u64::from(inst.raw()));
                     }
@@ -938,7 +1024,16 @@ impl IndicatorBank {
             .map(|(i, key)| CellCore::new(key, clocks.get(i).cloned().flatten()))
             .collect();
         let hist = vec![Vec::new(); keys.len()];
-        std::sync::Arc::new(Self {
+        let panels: Vec<PanelRun> = panel_defs
+            .iter()
+            .zip(member_cells)
+            .map(|((order, program), member_cells)| PanelRun {
+                core: PanelCore::new(*program, registry.orders()[order.index()].len()),
+                member_cells,
+            })
+            .collect();
+        let panel_count = panels.len();
+        let bank = std::sync::Arc::new(Self {
             event: AtomicU64::new(0),
             floor: AtomicU64::new(1),
             opening: AtomicBool::new(false),
@@ -946,7 +1041,7 @@ impl IndicatorBank {
             updates: AtomicU64::new(0),
             cells: keys.iter().map(|_| CellVals::new()).collect(),
             keys,
-            writer: Mutex::new(Writer { cores, hist }),
+            writer: Mutex::new(Writer { cores, hist, panels }),
             slots: slot_cells,
             strategy_routes: strategy_routes.into(),
             routes: routes.into(),
@@ -955,7 +1050,14 @@ impl IndicatorBank {
             primary_cells,
             agg_off,
             agg_cells,
-        })
+            universe_off,
+            universe_items,
+            panel_count,
+        });
+        // Some platforms box a mutex on its first lock: take it now, so the first bar allocates
+        // no more than the others.
+        drop(bank.writer.lock());
+        bank
     }
 
     /// Distinct cells.
@@ -1040,7 +1142,52 @@ impl IndicatorBank {
     /// Feed `instrument`'s primary bar to every cell that reads it: its own
     /// `Primary` cells and the `AllPrimary` cells whose set contains it.
     pub fn emit_primary(&self, instrument: InstrumentId, bar: Ohlc) -> Result<()> {
-        self.emit(csr_row(&self.primary_off, &self.primary_cells, instrument.index()), bar)
+        self.emit(csr_row(&self.primary_off, &self.primary_cells, instrument.index()), bar)?;
+        let runs = csr_row(&self.universe_off, &self.universe_items, instrument.index());
+        if !runs.is_empty() {
+            // A cross-sectional expression waits for the whole date: the bar is only kept.
+            let mut w = self.writer.lock().expect("indicator writer poisoned");
+            for pair in runs.chunks_exact(2) {
+                w.panels[pair[0] as usize].core.store(pair[1] as usize, bar);
+            }
+        }
+        Ok(())
+    }
+
+    /// End the ingest of a date: the bars every `emit_primary` of the event (or of the whole
+    /// timestamp group) kept are stepped through the cross-sectional expressions, once. Call
+    /// after the last emission and before the first reveal; it does nothing, and costs one
+    /// comparison, when no cross-sectional expression is registered.
+    ///
+    /// A member's cell then follows the same protocol as an instrument-set cell: `prev` is the
+    /// value before the date, `cur` the value after it, and a reader sees `prev` until its
+    /// strategy reveals a bar of the universe and `cur` after. A member with no bar on the date
+    /// reads NaN. A universe is the instruments of the strategy when the run was built, and
+    /// timestamp groups are as thin as the data: a name that prints at another instant is
+    /// absent from this date's cross-section.
+    pub fn seal(&self) {
+        if self.panel_count == 0 {
+            return;
+        }
+        let event = self.event.load(Ordering::Relaxed);
+        let mut w = self.writer.lock().expect("indicator writer poisoned");
+        let Writer { hist, panels, .. } = &mut *w;
+        for run in panels.iter_mut() {
+            if !run.core.seal() {
+                continue;
+            }
+            for (member, cell) in run.member_cells.iter().enumerate() {
+                let Some(i) = *cell else { continue };
+                let i = i as usize;
+                let c = &self.cells[i];
+                c.prev.store(c.cur.load());
+                c.cur.store(run.core.reading(member));
+                c.touched.store(event, Ordering::Relaxed);
+                c.emissions.store(1, Ordering::Relaxed);
+                c.total.fetch_add(1, Ordering::Relaxed);
+                hist[i].clear();
+            }
+        }
     }
 
     /// Feed one bar emitted by a composite aggregation. Call once per bar, in
@@ -1233,6 +1380,15 @@ impl HeapSize for IndicatorBank {
             + self.keys.iter().map(core_heap_bytes).sum::<usize>()
             + w.hist.capacity() * size_of::<Vec<Reading>>()
             + w.hist.iter().map(|h| h.capacity() * size_of::<Reading>()).sum::<usize>()
+            + w.panels
+                .iter()
+                .map(|r| {
+                    size_of::<PanelRun>()
+                        + r.core.state_bytes()
+                        + r.member_cells.capacity() * size_of::<Option<u32>>()
+                })
+                .sum::<usize>()
+            + (self.universe_off.len() + self.universe_items.len()) * size_of::<u32>()
             + self.slots.len() * size_of::<SlotCell>()
             + self.strategy_routes.len() * size_of::<u32>()
             + self.routes.len() * size_of::<Route>()

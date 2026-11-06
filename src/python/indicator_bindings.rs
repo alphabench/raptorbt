@@ -365,16 +365,6 @@ impl PyIndicator {
     #[staticmethod]
     #[pyo3(signature = (program, output=0))]
     fn expr(program: &PyExprProgram, output: usize) -> PyResult<Self> {
-        if program.is_cross_sectional() {
-            return Err(Fail::new(
-                "expr_unsupported_here",
-                "this expression is cross-sectional: it has a value only over a panel \
-                 (Expr.eval_panel), and sealing one on the indicator bank is not supported yet",
-            )
-            .op("Indicator.expr")
-            .param("expression")
-            .into());
-        }
         let id = program.intern().map_err(PyErr::from)?;
         let spec = IndSpec::expr(id, output).map_err(|e| {
             PyErr::from(
@@ -403,6 +393,16 @@ impl PyIndicator {
         let State::Private(p) = &mut self.state else {
             return Err(linked_error("update_bar"));
         };
+        if self.spec.is_panel() {
+            return Err(Fail::new(
+                "expr_unsupported_here",
+                "this expression is cross-sectional: it runs on a universe of instruments, and \
+                 update_bar feeds one. Register it with ctx.indicators.expr in a runtime",
+            )
+            .op("Indicator.update_bar")
+            .param("expression")
+            .into());
+        }
         if self.spec.needs_clock() {
             return Err(Fail::new(
                 "expr_unsupported_here",

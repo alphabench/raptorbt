@@ -827,8 +827,9 @@ def factor_report(
     ``coverage`` and ``names`` per date, ``autocorr`` (rank autocorrelation of the factor with
     its previous date) and ``turnover`` per quantile (``turnover_by_date`` per date).
 
-    Refused with ``invalid_input``: fewer than ``max(min_names, quantiles)`` names, fewer than
-    ``lag + max(horizons) + 30`` dates, an infinite value, shapes that differ.
+    Refused with ``insufficient_observations``: fewer than ``max(min_names, quantiles)`` names or
+    fewer than ``lag + max(horizons) + 30`` dates; ``invalid_input``: an infinite value;
+    ``length_mismatch``: factor and prices of different shapes.
     """
     op = "factor_report"
     hs = [horizons] if isinstance(horizons, numbers.Integral) else list(horizons)

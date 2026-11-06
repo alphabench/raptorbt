@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::core::error::RaptorError;
 use crate::core::Result;
-use crate::quant::eval::{Bar, ClockCtx, Plan, Stream};
+use crate::quant::eval::{Bar, ClockCtx, PanelPlan, PanelStream, Plan, Stream};
 use crate::quant::lang::{Elem, Field, Program};
 
 use super::indicators::{Ohlc, Reading};
@@ -45,7 +45,10 @@ impl ProgramId {
 #[derive(Debug)]
 pub struct ProgramInfo {
     pub canonical: String,
-    plan: Plan,
+    /// The series plan; none for a cross-sectional program, which has `panel` instead.
+    plan: Option<Plan>,
+    /// A cross-sectional program's panel plan: its cells share one [`PanelCore`] per universe.
+    panel: Option<PanelPlan>,
     /// Output columns: more than one only for an unselected multi-output call.
     pub outputs: usize,
     /// Leading bars that are unknown on clean data.
@@ -97,13 +100,49 @@ pub fn intern(program: &Program, plan: &Plan) -> Result<ProgramId> {
     let id = ProgramId(table.programs.len() as u32);
     table.programs.push(Arc::new(ProgramInfo {
         canonical: program.canonical.clone(),
-        plan: plan.clone(),
+        plan: Some(plan.clone()),
+        panel: None,
         outputs: plan.n_outputs(),
         warmup: program.warmup(),
         boolean,
         reads_volume: plan.fields().contains(&Field::Volume),
         needs_clock: plan.has_at(),
         state_bytes,
+    }));
+    table.by_canonical.insert(program.canonical.as_str().into(), id);
+    Ok(id)
+}
+
+/// Intern a cross-sectional `program` (run by `panel`). Its cells are one per member of a universe
+/// (`IndInput::Universe`) and share one [`PanelCore`], which steps once per bar of the universe.
+///
+/// Fails for what the bank cannot feed: `at(...)`, a supplied series (a group label) or several
+/// outputs.
+pub fn intern_panel(program: &Program, panel: &PanelPlan) -> Result<ProgramId> {
+    let mut table = interner().lock().expect("program interner poisoned");
+    if let Some(&id) = table.by_canonical.get(program.canonical.as_str()) {
+        return Ok(id);
+    }
+    if table.programs.len() >= MAX_PROGRAMS {
+        return Err(RaptorError::invalid_parameter(format!(
+            "expression table is full: {MAX_PROGRAMS} distinct expressions in one process"
+        )));
+    }
+    let probe = PanelStream::new(panel, 1).map_err(|e| {
+        RaptorError::invalid_parameter(format!("a cross-sectional expression on the bank: {e}"))
+    })?;
+    let boolean = program.dag.node(program.root).ty.elem == Elem::Bool;
+    let id = ProgramId(table.programs.len() as u32);
+    table.programs.push(Arc::new(ProgramInfo {
+        canonical: program.canonical.clone(),
+        plan: None,
+        panel: Some(panel.clone()),
+        outputs: 1,
+        warmup: program.warmup(),
+        boolean,
+        reads_volume: panel.fields().contains(&Field::Volume),
+        needs_clock: false,
+        state_bytes: probe.state_bytes(),
     }));
     table.by_canonical.insert(program.canonical.as_str().into(), id);
     Ok(id)
@@ -143,15 +182,16 @@ impl ExprCore {
     /// with `at(...)` reads it, any other ignores it.
     pub fn with_clock(program: ProgramId, output: u8, clock: Option<ClockCtx>) -> Self {
         let info = info(program);
-        let stream = match (info.needs_clock, clock) {
-            (false, _) => Some(
-                Stream::new(&info.plan).expect("a program is probed as a stream when interned"),
+        // A cross-sectional program has no series stream: its cells are not fed bar by bar.
+        let stream = match (&info.plan, info.needs_clock, clock) {
+            (None, ..) => None,
+            (Some(plan), false, _) => {
+                Some(Stream::new(plan).expect("a program is probed as a stream when interned"))
+            }
+            (Some(plan), true, Some(clock)) => Some(
+                Stream::bound(plan, clock).expect("a program is probed as a stream when interned"),
             ),
-            (true, Some(clock)) => Some(
-                Stream::bound(&info.plan, clock)
-                    .expect("a program is probed as a stream when interned"),
-            ),
-            (true, None) => None,
+            (Some(_), true, None) => None,
         };
         Self { stream, at: info.needs_clock, output: usize::from(output) }
     }
@@ -184,6 +224,94 @@ impl ExprCore {
     /// Heap this core owns beyond `size_of::<ExprCore>()` (the box it lives in).
     pub fn state_bytes(&self) -> usize {
         self.stream.as_ref().map_or(0, Stream::state_bytes)
+    }
+}
+
+impl ProgramInfo {
+    /// The program is cross-sectional: it runs on a universe, not on one instrument's bars.
+    pub fn is_panel(&self) -> bool {
+        self.panel.is_some()
+    }
+}
+
+/// The shared run of a cross-sectional program over a universe: the bars stored for the date in
+/// flight, the panel stream, and each member's bar count (for readiness).
+pub struct PanelCore {
+    stream: PanelStream,
+    pending: Vec<Option<Bar>>,
+    any: bool,
+    bars: Vec<u64>,
+    out: Vec<f64>,
+    warmup: u64,
+}
+
+impl std::fmt::Debug for PanelCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PanelCore").field("members", &self.bars.len()).finish()
+    }
+}
+
+impl PanelCore {
+    /// A fresh run of `program` (a cross-sectional one) over `members` names.
+    pub fn new(program: ProgramId, members: usize) -> Self {
+        let info = info(program);
+        let panel = info.panel.as_ref().expect("a panel core is built for a panel program");
+        Self {
+            stream: PanelStream::new(panel, members)
+                .expect("a program is probed as a panel stream when interned"),
+            pending: vec![None; members],
+            any: false,
+            bars: vec![0; members],
+            out: vec![f64::NAN; members],
+            warmup: info.warmup as u64,
+        }
+    }
+
+    /// Keep `bar` as member `member`'s bar of the date in flight. Nothing runs until [`seal`].
+    ///
+    /// [`seal`]: PanelCore::seal
+    pub fn store(&mut self, member: usize, bar: Ohlc) {
+        self.pending[member] = Some(Bar {
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            volume: bar.volume,
+        });
+        self.any = true;
+    }
+
+    /// Step the panel on the stored bars: present members step their time-series functions, the
+    /// cross-sections run on the date's row. False (and nothing happens) if no member has a bar.
+    pub fn seal(&mut self) -> bool {
+        if !self.any {
+            return false;
+        }
+        for (n, b) in self.bars.iter_mut().zip(&self.pending) {
+            *n += u64::from(b.is_some());
+        }
+        self.stream
+            .step(&self.pending, &mut self.out)
+            .expect("a program with no named series takes no handle values");
+        self.pending.fill(None);
+        self.any = false;
+        true
+    }
+
+    /// Member `member`'s value after the last seal. Ready once it has seen more bars than the
+    /// program's warm-up; NaN when it had no bar at the seal or the cross-section was too thin.
+    pub fn reading(&self, member: usize) -> Reading {
+        Reading {
+            initialized: self.bars[member] > self.warmup,
+            values: [self.out[member], 0.0, 0.0],
+        }
+    }
+
+    /// Heap this run owns beyond its own size.
+    pub fn state_bytes(&self) -> usize {
+        self.stream.state_bytes()
+            + self.pending.capacity() * size_of::<Option<Bar>>()
+            + (self.bars.capacity() + self.out.capacity()) * size_of::<f64>()
     }
 }
 

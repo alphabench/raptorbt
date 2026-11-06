@@ -33,7 +33,7 @@
 //! No costs of any kind are charged: `no_costs` is true in the report, and a spread here is a
 //! gross figure.
 
-use crate::portfolio::factor_panel::{rank_ic, rank_row};
+use crate::portfolio::factor_panel::{rank_ic, rank_row, RowScratch};
 use crate::stats::error::StatsError;
 use crate::stats::hac::{hac_tstat, MIN_HAC_OBS};
 
@@ -197,6 +197,7 @@ pub fn factor_report(
     let mut coverage = vec![0.0; n];
     let mut u_all = vec![f64::NAN; n * m];
     let mut masked = vec![f64::NAN; m];
+    let mut scratch = RowScratch::with_capacity(m);
     for d in 0..n {
         let (f, p) = (&factor[d * m..(d + 1) * m], &prices[d * m..(d + 1) * m]);
         let mut count = 0usize;
@@ -207,7 +208,7 @@ pub fn factor_report(
         }
         names[d] = count as f64;
         coverage[d] = count as f64 / m as f64;
-        rank_row(&masked, need_names, &mut u_all[d * m..(d + 1) * m]);
+        rank_row(&masked, need_names, &mut u_all[d * m..(d + 1) * m], &mut scratch);
     }
 
     let mut autocorr = vec![f64::NAN; n];
@@ -273,7 +274,7 @@ pub fn factor_report(
                 row[a] = if ok { f } else { f64::NAN };
             }
             u.fill(f64::NAN);
-            rank_row(&row, need_names, &mut u);
+            rank_row(&row, need_names, &mut u, &mut scratch);
             let (mut sum, mut cnt) = (vec![0.0; quantiles], vec![0usize; quantiles]);
             for a in 0..m {
                 if u[a].is_finite() {

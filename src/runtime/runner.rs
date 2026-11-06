@@ -211,6 +211,8 @@ impl RuntimeBuilder {
             IndInput::AllPrimary(_) => Err(RaptorError::invalid_parameter(
                 "an expression reads one instrument's bars; name the instrument",
             )),
+            // `at(...)` is refused when a cross-sectional program is interned.
+            IndInput::Universe(_) => Ok(None),
         }
     }
 
@@ -811,6 +813,8 @@ impl RuntimeCore {
 
     fn ingest(&mut self, event: EventRef, payload: Pushed) -> Result<()> {
         let cur = self.ingest_event(event, payload)?;
+        // A lone event is a date of its own: cross-sectional expressions step on it now.
+        self.bank.seal();
         self.current = Some(cur);
         Ok(())
     }
@@ -960,6 +964,9 @@ impl RuntimeCore {
             }
             self.group.push(slot);
         }
+        // The whole group is one date: cross-sectional expressions step once, on every bar of
+        // it, before any strategy reveals anything.
+        self.bank.seal();
         for i in 0..self.group.len() {
             self.select(i);
             let instrument = self.group[i].current.event.instrument;

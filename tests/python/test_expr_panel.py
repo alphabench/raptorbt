@@ -376,8 +376,9 @@ def test_the_shape_is_a_panel_and_a_non_panel_input_is_refused_typed():
     assert code_of(e.eval, {"close": np.arange(30.0)}) == "expr_unsupported_here"
     assert code_of(e.stream) == "expr_unsupported_here"
     assert code_of(rb.expr("1 + 2").eval_panel, {"close": np.ones((3, 3))}) == "expr_unsupported_here"
-    # Not for the bank yet (the next slice seals a panel): refused, not misrun.
-    assert code_of(rb.Indicator.expr, e._prog, 0) == "expr_unsupported_here"
+    # On the bank it runs on a universe (test_expr_panel_live); fed one bar by hand it is refused.
+    hand = rb.Indicator.expr(e._prog, 0)
+    assert code_of(hand.update_bar, 1.0, 1.0, 1.0, 1.0, 10.0) == "expr_unsupported_here"
 
 
 def test_eval_panel_checks_its_input():
@@ -537,7 +538,7 @@ def test_the_report_is_pinned_to_rank_ic():
         for hz in (1, 5):
             direct = rb.rank_ic(factor[: len(close) - lag], close[lag:], hz, 10)
             ic = rep["horizons"][hz]["ic"]
-            same_bits(ic[: len(close) - lag], direct.daily_ic)
+            same_bits(ic[: len(close) - lag], direct.daily_ic())
             assert np.isnan(ic[len(close) - lag :]).all()
             assert rep["horizons"][hz]["ic_mean"] == direct.mean_ic
             assert rep["horizons"][hz]["t_naive"] == direct.t_stat
@@ -625,10 +626,10 @@ def test_factor_report_refuses_what_it_cannot_support():
     ret, close = ic_data(n=60, m=30)
     f = -ret
     report = rb.expressions.factor_report
-    assert code_of(report, f[:25], close[:25]) == "invalid_input"  # too few dates
-    assert code_of(report, f[:, :6], close[:, :6]) == "invalid_input"  # fewer names than min_names
-    assert code_of(report, f[:, :4], close[:, :4], min_names=2, quantiles=5) == "invalid_input"
-    assert code_of(report, f[:50], close) == "invalid_input"  # shapes differ
+    assert code_of(report, f[:25], close[:25]) == "insufficient_observations"  # too few dates
+    assert code_of(report, f[:, :6], close[:, :6]) == "insufficient_observations"  # fewer names than min_names
+    assert code_of(report, f[:, :4], close[:, :4], min_names=2, quantiles=5) == "insufficient_observations"
+    assert code_of(report, f[:50], close) == "length_mismatch"  # shapes differ
     inf = f.copy()
     inf[3, 3] = np.inf
     assert code_of(report, inf, close) == "invalid_input"
@@ -641,14 +642,20 @@ def test_factor_report_refuses_what_it_cannot_support():
 
 
 def test_forward_returns_do_not_exist_outside_the_report():
-    # The factor is computed from its inputs; only the report reads later prices. Changing
-    # prices after the last signal date moves the report's returns, never the factor.
+    # The factor is computed from its inputs; only the report reads later prices.
     ret, close = ic_data(n=100, m=24, seed=12)
     e = rb.expr("rank(roc(close, 5))")
-    a = e.eval_panel({"close": close})
     later = close.copy()
-    later[90:] *= 1.5
-    same_bits(e.eval_panel({"close": later})[:90], a[:90])
-    assert rb.expressions.factor_report(e, close, horizons=[5])["horizons"][5]["ic"][80] != (
-        rb.expressions.factor_report(e, later, horizons=[5])["horizons"][5]["ic"][80]
-    )
+    # From row 90 on, even names soar and odd names collapse: every forward return that reaches
+    # row 90 is ranked by parity, which reorders the ranks any window ending there sees.
+    later[90:, ::2] *= 100.0
+    later[90:, 1::2] *= 0.01
+    a = e.eval_panel({"close": close})
+    same_bits(e.eval_panel({"close": later})[:90], a[:90])  # the factor never reads ahead
+    h = 5  # lag 1: date d earns close[d + 6] / close[d + 1]
+    ic = lambda c: rb.expressions.factor_report(e, c, horizons=[h])["horizons"][h]["ic"]
+    before, after = ic(close), ic(later)
+    last_unmoved = 90 - 1 - h - 1  # its exit row, d + 6, is 89
+    same_bits(before[: last_unmoved + 1], after[: last_unmoved + 1])
+    # Dates whose window reaches row 90 and whose own factor is unchanged do move.
+    assert (before[last_unmoved + 1 : 90] != after[last_unmoved + 1 : 90]).any()

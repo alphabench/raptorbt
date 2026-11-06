@@ -378,8 +378,7 @@ the base clock.
 - *Shape.* Any cross-sectional call makes the expression a panel; time-series functions lift to
   every name; a constant lifts. A cross-sectional function needs a series or panel input (a
   constant has no names): `expr_type`. Evaluating a panel expression with `eval` or `stream`, or
-  registering it with `ctx.indicators.expr` (sealing a panel on the bank is a later slice), is
-  `expr_unsupported_here`. So is a cross-sectional function inside `at(...)`, which evaluates one
+  is `expr_unsupported_here`. So is a cross-sectional function inside `at(...)`, which evaluates one
   instrument's bars. `at(...)` elsewhere in a panel expression works per name and reads
   `data["timestamps"]` (one int64 per date).
 - *Which names count.* A name takes part in a date's comparison when it has a bar and its input
@@ -399,6 +398,18 @@ the base clock.
   2-D arrays `present=` does. Without it a cell is absent when every field the expression reads
   is NaN there, so a NaN close counts as no bar. Either way a name listed late counts its warm-up
   from its own first bar, and is NaN at the dates it is absent.
+- *On the bank.* `ctx.indicators.expr("rank(roc(close, 20))", instrument="X")` (and
+  `ctx.indicators.expr_all(text)` for every instrument: `{symbol: handle}`) runs the panel over the
+  strategy's instruments, in `run_strategies`, `run_portfolio_strategy` and a `LiveNode`; the
+  other runners and `timeframe=` or `at(...)` raise `expr_unsupported_here`. The universe is the
+  strategy's instruments when the run is built and is frozen: an instrument added to a live node
+  later does not join it. The panel steps once per timestamp group, after every bar of the group is
+  in; a handle shows the value before the group until the strategy reveals a bar, and the value
+  after the whole group once it has, like an instrument-set indicator. A member with no bar at that
+  timestamp reads unknown, and instruments that print at different instants make thin groups and
+  so thin cross-sections (below `min_names`, unknown): nothing is aligned for you. The values equal
+  `eval_panel` over the same bars. Group labels (`col.group`) are not supported on the bank. A run
+  with no cross-sectional expression does no seal work.
 - *Evaluation.* Time-series phases run per name in parallel, cross-section phases per date in
   parallel, alternating in the order the expression nests; the GIL is released, and the numbers
   are the same for any thread count. Each name equals a stream fed its own present bars, and each
@@ -407,7 +418,7 @@ the base clock.
   it can feed an expression. It reports `no_costs: True`: every spread is gross. The t-statistic
   of the IC and of the spread is Newey-West with `h - 1` lags (the daily ICs of an `h`-bar return
   overlap; the naive t is about `sqrt(h)` too large and is reported beside it as `t_naive`), and
-  is NaN with fewer than 30 scored dates. It refuses (`invalid_input`) fewer than
+  is NaN with fewer than 30 scored dates. It refuses (`insufficient_observations`) fewer than
   `max(min_names, quantiles)` names or fewer than `lag + max(horizons) + 30` dates.
 - *Limits.* Group labels are read as numbers, equal labels are one group, a NaN label leaves the
   name out. Panels are held in memory as dates times names floats per intermediate; the group

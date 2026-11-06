@@ -467,6 +467,7 @@ fn run(sc: &Scenario, order: Order, cov: &Coverage) -> Result<(), String> {
                     reg.order_instruments(o).unwrap().iter().any(|i| i.raw() == step.inst),
                 ),
                 IndInput::Composite(a) => step.emissions[a.index()].len() as u64,
+                IndInput::Universe(_) => 0,
             };
         }
     }

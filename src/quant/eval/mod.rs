@@ -14,7 +14,7 @@ pub mod panel;
 mod stream;
 
 pub use batch::{eval, eval_many};
-pub use panel::{eval_panel, PanelInputs, PanelPlan};
+pub use panel::{eval_panel, PanelInputs, PanelPlan, PanelStream};
 pub use stream::Stream;
 
 use std::collections::BTreeMap;
