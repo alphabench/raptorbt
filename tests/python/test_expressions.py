@@ -255,7 +255,7 @@ def test_a_nan_input_is_unknown_in_a_window_and_then_recovers():
         ("close and open", None, "expr_type", None, None),
         ("sma(close, $m)", {"n": 5}, "expr_unbound_parameter", 11, ["n"]),
         ("sma(close, $n)", None, "expr_unbound_parameter", 11, None),
-        ('at("1d", close)', None, "expr_unsupported_here", 0, None),
+        ('at("1d", at("1d", close))', None, "expr_unsupported_here", 9, None),
     ],
 )
 def test_refusals_carry_code_position_snippet_and_valid(text, params, code, position, valid):

@@ -7,7 +7,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use raptorbt::quant::eval::{Bar, Plan, Stream};
+use raptorbt::data::BarStamp;
+use raptorbt::quant::eval::{Bar, ClockCtx, Plan, Stream};
 use raptorbt::quant::lang::{compile, Env};
 use raptorbt::quant::registry::{all, Domain, FnDef, ParamKind, ParamVal};
 use raptorbt::runtime::exprs::{self, ExprCore};
@@ -104,6 +105,43 @@ fn update_allocates_nothing_after_construction() {
         assert_eq!(used, 0, "{src}: {used} allocations over {} bars", bars.len());
         assert!(stream.ready() && known > 0, "{src}: the stream never produced a value");
     }
+}
+
+/// An `at(...)` steps its window builder and its body's stream without allocating, on emission
+/// bars too (the plain time builder emits by value, so the emission bar counts zero as well),
+/// when no session is bound (a bound session's builder allocates per bar, as the runtime hub's
+/// does). `at` is not in the registry, so the registry-driven tests do not cover it.
+#[test]
+fn an_at_expression_allocates_nothing_after_construction() {
+    const HOUR: i64 = 3_600_000_000_000;
+    let program =
+        compile("close > at(\"1d\", sma(close, 3)) and at(\"1h\", high) > 0", &Env::default())
+            .unwrap();
+    let plan = Plan::new(&program).unwrap();
+    let before = live();
+    let mut stream = Stream::bound(&plan, ClockCtx::new(0, BarStamp::Close, None)).unwrap();
+    let built = (live() - before) as usize;
+    // The report covers the heap the stream owns; the struct itself sits where the caller put it.
+    assert!(stream.state_bytes() > 0, "an at stream reports no heap");
+    assert!(
+        built <= stream.state_bytes() + std::mem::size_of::<Stream>(),
+        "the stream holds {built} bytes, the report says {}",
+        stream.state_bytes()
+    );
+    let start = allocs();
+    let mut known = 0usize;
+    for i in 0..2000i64 {
+        let x = i as f64;
+        let c = 100.0 + (x * 0.37).sin() * 5.0;
+        let bar = Bar { open: c - 0.5, high: c + 1.0, low: c - 1.0, close: c, volume: 10.0 };
+        // Close-stamped half-hourly bars: 48 a day.
+        if !stream.update_at((i + 1) * HOUR / 2, &bar, &[]).unwrap()[0].is_nan() {
+            known += 1;
+        }
+    }
+    let used = allocs() - start;
+    assert_eq!(used, 0, "{used} allocations over 2000 bars");
+    assert!(stream.ready() && known > 0, "the stream never produced a value");
 }
 
 /// A call of `def` with its inputs on the default fields and every parameter given: a default

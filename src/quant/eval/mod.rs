@@ -19,9 +19,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use super::fns::at::AtState;
 use super::kernel::Node as KernelNode;
 use super::lang::{BinOp, Clock, Field, Op, Program, Shape, UnOp};
 use super::registry::{FnDef, ParamVal};
+use crate::core::session_schedule::SessionSchedule;
+use crate::data::{BarSpec, BarStamp};
 
 /// Output columns, one per program output, each as long as the input.
 pub type Columns = Vec<Vec<f64>>;
@@ -185,6 +188,16 @@ pub enum EvalError {
     },
     /// A kernel refused its parameters or registers.
     Node(String),
+    /// The program uses `at(...)`, which cuts the bars by their timestamps, and none were given.
+    NoTimestamps,
+    /// The program uses `at(...)` and no bar stamp (and zone) was bound to it.
+    NoClock,
+    /// An `at(...)` timeframe that is not a coarser exact multiple of the base bars.
+    Timeframe {
+        tf: String,
+        base_ns: i64,
+        valid: Vec<String>,
+    },
 }
 
 impl fmt::Display for EvalError {
@@ -205,11 +218,69 @@ impl fmt::Display for EvalError {
                 write!(f, "expected {expected} handle values per bar, got {got}")
             }
             EvalError::Node(m) => write!(f, "kernel construction failed: {m}"),
+            EvalError::NoTimestamps => write!(
+                f,
+                "the program uses at(...), which cuts bars by their timestamps; none were supplied"
+            ),
+            EvalError::NoClock => write!(
+                f,
+                "the program uses at(...), which needs the bar stamp (open or close) its \
+                 timestamps mean"
+            ),
+            EvalError::Timeframe { tf, base_ns, valid } => write!(
+                f,
+                "at(\"{tf}\") must be a coarser exact multiple of the {base_ns} ns base bars; \
+                 valid: {}",
+                valid.join(", ")
+            ),
         }
     }
 }
 
 impl std::error::Error for EvalError {}
+
+/// What an `at(...)` needs to cut the base bars into windows, bound to a run: the zone, what
+/// the timestamps mean and the instrument's session. It is the hub's own cut (`AggKey`): a
+/// daily window is one date in the session's zone, and the schedule's zone replaces
+/// `tz_offset_ns` where there is a schedule.
+#[derive(Debug, Clone)]
+pub struct ClockCtx {
+    /// Seconds-east-of-UTC of the civil day, in nanoseconds (IST is 19 800 000 000 000).
+    pub tz_offset_ns: i64,
+    /// Whether a timestamp is the start or the end of its bar.
+    pub stamp: BarStamp,
+    /// The instrument's trading calendar, if it has one.
+    pub session: Option<Arc<SessionSchedule>>,
+    /// The base bar width, when known; only used to refuse a timeframe that is not coarser.
+    pub base_ns: Option<i64>,
+}
+
+impl ClockCtx {
+    pub fn new(tz_offset_ns: i64, stamp: BarStamp, session: Option<SessionSchedule>) -> Self {
+        Self { tz_offset_ns, stamp, session: session.map(Arc::new), base_ns: None }
+    }
+
+    /// Only for measuring a stream's size: UTC, close-stamped, no session.
+    pub(crate) fn probe() -> Self {
+        Self::new(0, BarStamp::Close, None)
+    }
+
+    /// The text of what decides the numbers, for the bound hash: the zone, the stamp and the
+    /// schedule's content. The base width is not part of it: it can only refuse, never change.
+    pub fn text(&self) -> String {
+        let stamp = match self.stamp {
+            BarStamp::Open => "open",
+            BarStamp::Close => "close",
+        };
+        let session = match &self.session {
+            None => "none".to_string(),
+            Some(s) => crate::journal::sha256_hex(
+                serde_json::to_string(&**s).unwrap_or_default().as_bytes(),
+            ),
+        };
+        format!("tz={};stamp={stamp};session={session}", self.tz_offset_ns)
+    }
+}
 
 /// Named input columns for batch evaluation. Every column supplied must be the same length,
 /// whether or not the program reads it.
@@ -217,6 +288,8 @@ impl std::error::Error for EvalError {}
 pub struct Inputs<'a> {
     fields: [Option<&'a [f64]>; 5],
     handles: BTreeMap<String, &'a [f64]>,
+    timestamps: Option<&'a [i64]>,
+    clock: Option<ClockCtx>,
 }
 
 impl<'a> Inputs<'a> {
@@ -232,6 +305,42 @@ impl<'a> Inputs<'a> {
     pub fn handle(mut self, name: &str, col: &'a [f64]) -> Self {
         self.handles.insert(name.to_string(), col);
         self
+    }
+
+    /// The bars' timestamps in nanoseconds. Read only by a program that uses `at(...)`; any other
+    /// program ignores them.
+    pub fn timestamps(mut self, ts: &'a [i64]) -> Self {
+        self.timestamps = Some(ts);
+        self
+    }
+
+    /// What the timestamps mean and how to cut windows from them. Read only by a program that
+    /// uses `at(...)`.
+    pub fn clock(mut self, clock: ClockCtx) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// The timestamps and clock an `at(...)` needs, checked against the `n` bars; none for a
+    /// plan without one.
+    fn at_inputs(
+        &self,
+        plan: &Plan,
+        n: usize,
+    ) -> Result<Option<(&'a [i64], &ClockCtx)>, EvalError> {
+        if plan.d.ats.is_empty() {
+            return Ok(None);
+        }
+        let ts = self.timestamps.ok_or(EvalError::NoTimestamps)?;
+        if ts.len() != n {
+            return Err(EvalError::LengthMismatch {
+                name: "timestamps".to_string(),
+                expected: n,
+                got: ts.len(),
+            });
+        }
+        let clock = self.clock.as_ref().ok_or(EvalError::NoClock)?;
+        Ok(Some((ts, clock)))
     }
 
     /// The length and the plan's input columns in the plan's order.
@@ -285,6 +394,21 @@ pub struct Bar {
 }
 
 impl Bar {
+    /// A bar with every field unknown.
+    pub const NAN: Bar =
+        Bar { open: f64::NAN, high: f64::NAN, low: f64::NAN, close: f64::NAN, volume: f64::NAN };
+
+    #[inline(always)]
+    pub fn set(&mut self, f: Field, v: f64) {
+        match f {
+            Field::Open => self.open = v,
+            Field::High => self.high = v,
+            Field::Low => self.low = v,
+            Field::Close => self.close = v,
+            Field::Volume => self.volume = v,
+        }
+    }
+
     #[inline(always)]
     pub fn get(&self, f: Field) -> f64 {
         match f {
@@ -329,6 +453,14 @@ pub(crate) enum Step {
         a: usize,
         b: usize,
     },
+    /// An `at(...)`: `ins` are the registers of the body's `fields`; `at` indexes the plan's
+    /// bodies and the states built for a run.
+    At {
+        dst: usize,
+        ins: Vec<usize>,
+        fields: Vec<Field>,
+        at: usize,
+    },
     /// `node` indexes the kernel nodes built for a run.
     Call {
         def: &'static FnDef,
@@ -345,7 +477,7 @@ impl Step {
             Step::Const { .. } | Step::Load { .. } => vec![],
             Step::Neg { a, .. } | Step::Not { a, .. } => vec![*a],
             Step::Bin { a, b, .. } => vec![*a, *b],
-            Step::Call { ins, .. } => ins.clone(),
+            Step::Call { ins, .. } | Step::At { ins, .. } => ins.clone(),
         }
     }
 
@@ -355,7 +487,8 @@ impl Step {
             | Step::Load { dst, .. }
             | Step::Neg { dst, .. }
             | Step::Not { dst, .. }
-            | Step::Bin { dst, .. } => vec![*dst],
+            | Step::Bin { dst, .. }
+            | Step::At { dst, .. } => vec![*dst],
             Step::Call { outs, .. } => outs.clone(),
         }
     }
@@ -381,9 +514,23 @@ pub(crate) struct PlanData {
     pub out_regs: Vec<usize>,
     pub warm: usize,
     pub n_calls: usize,
+    /// The `at(...)` bodies, by `Step::At::at`.
+    pub ats: Vec<AtSpec>,
+}
+
+/// One `at(...)` of a plan: its timeframe and the plan of its body.
+#[derive(Debug)]
+pub(crate) struct AtSpec {
+    pub spec: BarSpec,
+    pub body: Plan,
 }
 
 impl PlanData {
+    /// Fresh `at(...)` states cut as `clock` says, in `ats` order.
+    pub fn instantiate_ats(&self, clock: &ClockCtx) -> Result<Vec<AtState>, EvalError> {
+        self.ats.iter().map(|a| AtState::new(a.spec, &a.body, clock)).collect()
+    }
+
     /// Fresh kernel nodes, one per call step, in call order.
     pub fn instantiate(&self) -> Result<Vec<Box<dyn KernelNode>>, EvalError> {
         self.steps
@@ -413,6 +560,7 @@ impl Plan {
         let mut handle_names: Vec<String> = Vec::new();
         let mut steps: Vec<Step> = Vec::new();
         let mut n_calls = 0;
+        let mut ats: Vec<AtSpec> = Vec::new();
 
         for (id, node) in nodes.iter().enumerate() {
             if node.ty.shape == Shape::Panel || node.ty.clock != Clock::Base {
@@ -427,6 +575,24 @@ impl Plan {
             let dst = n_regs;
             reg_of[id] = dst;
             n_regs += node.n_outputs();
+            if let Op::At { spec, body } = &node.op {
+                // The body reads the base bars' fields; they are loaded beside this node's own
+                // register and cut into windows by the step.
+                let body = Plan::new(body)?;
+                let mut fields = body.fields();
+                fields.sort_by_key(|f| *f as usize);
+                fields.dedup();
+                let mut ins = Vec::with_capacity(fields.len());
+                for f in &fields {
+                    inputs.push(Source::Field(*f));
+                    steps.push(Step::Load { dst: n_regs, input: inputs.len() - 1 });
+                    ins.push(n_regs);
+                    n_regs += 1;
+                }
+                ats.push(AtSpec { spec: *spec, body });
+                steps.push(Step::At { dst, ins, fields, at: ats.len() - 1 });
+                continue;
+            }
             steps.push(match &node.op {
                 Op::Const(v) => Step::Const { dst, v: *v },
                 Op::Field(f) => {
@@ -454,7 +620,7 @@ impl Plan {
                         node: n_calls - 1,
                     }
                 }
-                Op::Out { .. } => continue,
+                Op::Out { .. } | Op::At { .. } => continue,
             });
         }
 
@@ -472,6 +638,7 @@ impl Plan {
                 out_regs,
                 warm: program.warmup(),
                 n_calls,
+                ats,
             }),
         })
     }
@@ -485,7 +652,12 @@ impl Plan {
     /// Heap one stream over this plan owns (see [`Stream::state_bytes`]), measured on a fresh
     /// stream.
     pub fn state_bytes(&self) -> Result<usize, EvalError> {
-        Ok(Stream::new(self)?.state_bytes())
+        Ok(Stream::bound(self, ClockCtx::probe())?.state_bytes())
+    }
+
+    /// Whether the plan runs an `at(...)`, so it needs timestamps and a [`ClockCtx`].
+    pub fn has_at(&self) -> bool {
+        !self.d.ats.is_empty()
     }
 
     /// Number of output columns.

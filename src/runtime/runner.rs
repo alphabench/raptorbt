@@ -44,20 +44,22 @@ use crate::core::error::RaptorError;
 use crate::core::types::{BacktestConfig, Direction, InstrumentConfig, OhlcvBar};
 use crate::core::Result;
 use crate::data::events::DepthRef;
-use crate::data::BarSpec;
+use crate::data::{BarSpec, BarStamp};
 use crate::instruments::InstrumentSpec;
 use crate::portfolio::book::PortfolioBook;
 use crate::portfolio::kernel::Adoption;
 use crate::portfolio::kernel::{EngineEvent, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
 use crate::portfolio::session::{ScheduleData, ScheduleEntry, SessionOutcome};
+use crate::quant::eval::ClockCtx;
 use crate::runtime::aggregators::{AggKey, AggregatorHub, AggregatorHubBuilder};
 use crate::runtime::atr_cache::AtrCache;
 use crate::runtime::cursor::{EventKind, EventRef, MergeCursor};
 use crate::runtime::groups::{AccountGroup, GroupOutcome, GroupSpec};
 use crate::runtime::ids::{AggId, InstrumentId, StrategyId};
 use crate::runtime::indicators::{
-    IndKey, IndicatorBank, IndicatorRegistry, LocalStreamId, Ohlc, PrimaryOrder, Registration,
+    IndInput, IndKey, IndKind, IndicatorBank, IndicatorRegistry, LocalStreamId, Ohlc, PrimaryOrder,
+    Registration,
 };
 use crate::runtime::memory::HeapSize;
 use crate::runtime::router::{SubscriptionIndex, SubscriptionIndexBuilder};
@@ -111,6 +113,9 @@ pub struct RuntimeBuilder {
     /// Positions adopted so far, `(strategy, instrument, timestamp, price,
     /// size)`, so a shadow book can be seeded with the same ones.
     adopted: Vec<(StrategyId, usize, crate::core::types::Timestamp, f64, f64, Adoption)>,
+    /// The zone and what the primary bars' timestamps mean, for an expression that uses
+    /// `at(...)`. Unset: such an expression is refused at [`RuntimeBuilder::build`].
+    clock: Option<(i64, BarStamp)>,
 }
 
 impl RuntimeBuilder {
@@ -158,7 +163,55 @@ impl RuntimeBuilder {
             declared: Vec::new(),
             group_of: Vec::new(),
             adopted: Vec::new(),
+            clock: None,
         })
+    }
+
+    /// Say how the primary bars' timestamps are read: `tz_offset_ns` is the zone daily windows
+    /// are cut in (an instrument's own session replaces it), `stamp` whether a timestamp opens
+    /// or closes its bar. An expression cell using `at(...)` takes both from here.
+    pub fn set_clock(&mut self, tz_offset_ns: i64, stamp: BarStamp) {
+        self.clock = Some((tz_offset_ns, stamp));
+    }
+
+    /// The clock the cell of `key` runs on, for an expression that uses `at(...)`. A primary
+    /// cell reads the run's zone and stamp; a composite cell reads bars its aggregation emitted,
+    /// which are stamped at the window's end, in the aggregation's own zone.
+    fn cell_clock(&self, key: &IndKey) -> Result<Option<ClockCtx>> {
+        let needs = matches!(key.kind, IndKind::Expr)
+            && crate::runtime::exprs::info(crate::runtime::exprs::ProgramId::from_param(
+                key.params[0],
+            ))
+            .needs_clock;
+        if !needs {
+            return Ok(None);
+        }
+        let session_of = |inst: InstrumentId| {
+            self.params.get(inst.index()).and_then(|p| p.spec.as_ref()?.session.clone())
+        };
+        match key.input {
+            IndInput::Primary(inst) => {
+                let (tz, stamp) = self.clock.ok_or_else(|| {
+                    RaptorError::invalid_parameter(
+                        "an expression with at(...) needs the run's bar stamp, and none was set",
+                    )
+                })?;
+                let session = session_of(inst);
+                Ok(Some(ClockCtx::new(tz, stamp, session)))
+            }
+            IndInput::Composite(agg) => {
+                let k = self.hub.key(agg).ok_or_else(|| {
+                    RaptorError::invalid_parameter("an indicator reads an unknown aggregation")
+                })?;
+                let mut clock =
+                    ClockCtx::new(k.tz_offset_ns(), BarStamp::Close, session_of(k.instrument()));
+                clock.base_ns = crate::quant::fns::at::width_ns(k.spec());
+                Ok(Some(clock))
+            }
+            IndInput::AllPrimary(_) => Err(RaptorError::invalid_parameter(
+                "an expression reads one instrument's bars; name the instrument",
+            )),
+        }
     }
 
     /// Add an account for `members` strategies to share; returns its id.
@@ -444,8 +497,14 @@ impl RuntimeBuilder {
 
     /// Freeze the registrations and build the core.
     pub fn build(self) -> Result<RuntimeCore> {
+        let clocks = self
+            .registry
+            .keys()
+            .iter()
+            .map(|key| self.cell_clock(key))
+            .collect::<Result<Vec<_>>>()?;
         let hub = self.hub.build()?;
-        let bank = IndicatorBank::new(&self.registry);
+        let bank = IndicatorBank::with_clocks(&self.registry, &clocks);
         let index = self.index.build()?;
         let mut atr_cache = AtrCache::new();
         let mut strat_atr = Vec::with_capacity(self.strat_insts.len());

@@ -845,7 +845,7 @@ def _():
 
 @case("expr_unsupported_here", "expression")
 def _():
-    raptorbt.expr('at("1d", close)')
+    raptorbt.expr('at("1d", at("1d", close))')
 
 
 @case("below_one_lot", "lots")

@@ -7,7 +7,7 @@ use std::mem;
 
 use rayon::prelude::*;
 
-use super::{ops, Columns, EvalError, Inputs, Loc, Plan, Step};
+use super::{ops, Bar, Columns, EvalError, Inputs, Loc, Plan, Step};
 use crate::quant::lang::BinOp;
 
 /// An operand of an elementwise step: another buffer, or the destination itself (the step
@@ -99,8 +99,13 @@ fn slot_of(plan: &Plan, reg: usize) -> usize {
 /// or columns of different lengths are typed errors.
 pub fn eval(plan: &Plan, inputs: &Inputs) -> Result<Columns, EvalError> {
     let (n, cols) = inputs.resolve(plan)?;
+    let at_inputs = inputs.at_inputs(plan, n)?;
     let d = &*plan.d;
     let mut nodes = d.instantiate()?;
+    let mut ats = match at_inputs {
+        Some((_, clock)) => d.instantiate_ats(clock)?,
+        None => Vec::new(),
+    };
     let mut pool: Vec<Vec<f64>> = vec![vec![0.0; n]; d.n_slots];
 
     for step in &d.steps {
@@ -124,6 +129,33 @@ pub fn eval(plan: &Plan, inputs: &Inputs) -> Result<Columns, EvalError> {
                 let (oa, ob) =
                     (operand(d.locs[*a], ds, &pool, &cols), operand(d.locs[*b], ds, &pool, &cols));
                 zip_bin(*op, &mut buf, oa, ob);
+                pool[ds] = buf;
+            }
+            Step::At { dst, ins, fields, at } => {
+                // The same state machine a stream steps, bar by bar in order: a value at bar i
+                // is made of windows that closed before it, so there is nothing to look ahead
+                // to. `ats` is non-empty exactly when `at_inputs` returned the timestamps.
+                let ds = slot_of(plan, *dst);
+                let mut buf = mem::take(&mut pool[ds]);
+                if let Some((ts, _)) = at_inputs {
+                    let columns: Vec<&[f64]> = ins
+                        .iter()
+                        .map(|r| match d.locs[*r] {
+                            Loc::Input(k) => cols[k],
+                            Loc::Slot(_) => {
+                                unreachable!("an at(...) field is loaded, not computed")
+                            }
+                        })
+                        .collect();
+                    let state = &mut ats[*at];
+                    for (i, out) in buf.iter_mut().enumerate() {
+                        let mut bar = Bar::NAN;
+                        for (c, f) in columns.iter().zip(fields) {
+                            bar.set(*f, c[i]);
+                        }
+                        *out = state.step(ts[i], &bar);
+                    }
+                }
                 pool[ds] = buf;
             }
             Step::Call { ins, outs, node, .. } => {

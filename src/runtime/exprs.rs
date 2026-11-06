@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::core::error::RaptorError;
 use crate::core::Result;
-use crate::quant::eval::{Bar, Plan, Stream};
+use crate::quant::eval::{Bar, ClockCtx, Plan, Stream};
 use crate::quant::lang::{Elem, Field, Program};
 
 use super::indicators::{Ohlc, Reading};
@@ -53,6 +53,9 @@ pub struct ProgramInfo {
     /// The value is a Kleene boolean (1, 0, unknown), not a number.
     pub boolean: bool,
     pub reads_volume: bool,
+    /// The program uses `at(...)`: a cell needs the clock of the stream it runs on, and the bar's
+    /// timestamp.
+    pub needs_clock: bool,
     /// Heap one cell's stream owns, measured on a probe stream at interning.
     pub state_bytes: usize,
 }
@@ -99,6 +102,7 @@ pub fn intern(program: &Program, plan: &Plan) -> Result<ProgramId> {
         warmup: program.warmup(),
         boolean,
         reads_volume: plan.fields().contains(&Field::Volume),
+        needs_clock: plan.has_at(),
         state_bytes,
     }));
     table.by_canonical.insert(program.canonical.as_str().into(), id);
@@ -112,14 +116,17 @@ pub fn info(id: ProgramId) -> Arc<ProgramInfo> {
 
 /// A cell's core: the program's stream and the output it reads.
 pub struct ExprCore {
-    stream: Stream,
+    /// None only for a program with `at(...)` built without a clock (a hand-fed indicator,
+    /// which `update_bar` refuses before it feeds one).
+    stream: Option<Stream>,
+    at: bool,
     output: usize,
 }
 
 impl std::fmt::Debug for ExprCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExprCore")
-            .field("bars", &self.stream.bars())
+            .field("bars", &self.stream.as_ref().map(Stream::bars))
             .field("output", &self.output)
             .finish()
     }
@@ -129,14 +136,29 @@ impl ExprCore {
     /// A fresh core for output `output` of `program`. The output index is checked where the
     /// spec is made (`IndSpec::expr`).
     pub fn new(program: ProgramId, output: u8) -> Self {
+        Self::with_clock(program, output, None)
+    }
+
+    /// [`ExprCore::new`] on a stream whose zone, bar stamp and session are `clock`; a program
+    /// with `at(...)` reads it, any other ignores it.
+    pub fn with_clock(program: ProgramId, output: u8, clock: Option<ClockCtx>) -> Self {
         let info = info(program);
-        let stream =
-            Stream::new(&info.plan).expect("a program is probed as a stream when interned");
-        Self { stream, output: usize::from(output) }
+        let stream = match (info.needs_clock, clock) {
+            (false, _) => Some(
+                Stream::new(&info.plan).expect("a program is probed as a stream when interned"),
+            ),
+            (true, Some(clock)) => Some(
+                Stream::bound(&info.plan, clock)
+                    .expect("a program is probed as a stream when interned"),
+            ),
+            (true, None) => None,
+        };
+        Self { stream, at: info.needs_clock, output: usize::from(output) }
     }
 
     /// Feed one bar; the value after it. Unknown until the program's warm-up has passed.
     pub fn update(&mut self, bar: Ohlc) -> Reading {
+        let ts = bar.ts;
         let bar = Bar {
             open: bar.open,
             high: bar.high,
@@ -144,11 +166,15 @@ impl ExprCore {
             close: bar.close,
             volume: bar.volume,
         };
-        let value = self
-            .stream
-            .update(&bar, &[])
-            .expect("a program with no named series takes no handle values")[self.output];
-        if self.stream.ready() {
+        let Some(stream) = self.stream.as_mut() else {
+            // Unreachable: the runtime refuses to build a cell without its clock, and
+            // `Indicator.update_bar` refuses a program that needs one.
+            return Reading::UNINIT;
+        };
+        let out = if self.at { stream.update_at(ts, &bar, &[]) } else { stream.update(&bar, &[]) };
+        let value =
+            out.expect("a program with no named series takes no handle values")[self.output];
+        if stream.ready() {
             Reading { initialized: true, values: [value, 0.0, 0.0] }
         } else {
             Reading::UNINIT
@@ -157,7 +183,7 @@ impl ExprCore {
 
     /// Heap this core owns beyond `size_of::<ExprCore>()` (the box it lives in).
     pub fn state_bytes(&self) -> usize {
-        self.stream.state_bytes()
+        self.stream.as_ref().map_or(0, Stream::state_bytes)
     }
 }
 

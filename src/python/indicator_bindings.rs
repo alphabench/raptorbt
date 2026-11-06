@@ -393,6 +393,17 @@ impl PyIndicator {
         let State::Private(p) = &mut self.state else {
             return Err(linked_error("update_bar"));
         };
+        if self.spec.needs_clock() {
+            return Err(Fail::new(
+                "expr_unsupported_here",
+                "this expression uses at(...), which cuts bars by their timestamps, and \
+                 update_bar carries none: register it with ctx.indicators.expr in a runtime, \
+                 or stream it with Expr.stream(bar_stamp=...).update_at(...)",
+            )
+            .op("Indicator.update_bar")
+            .param("expression")
+            .into());
+        }
         if volume.is_none() && self.spec.reads_volume() {
             return Err(Fail::new(
                 "missing_field",

@@ -14,6 +14,12 @@ The function list, the ``col`` methods and the reference page ``skills/expressio
 are all generated from the engine's function registry: a function added there appears here
 with no change to this module.
 
+A formula can look at a coarser clock with ``at("1d", ...)``: the inner expression is computed on
+daily bars cut from the base bars and held on the base clock, so ``close > at("1d", sma(close,
+200))`` compares each bar with the daily average. A daily value first appears on the first base
+bar of the next day. Such an expression needs the bars' timestamps and what they mean:
+``expr.eval({"timestamps": ts, ...}, bar_stamp="close")``.
+
 >>> from raptorbt import col, expr
 >>> a = (col.close.sma(3) < col.close) & (col.close > 1)
 >>> b = expr("sma(close, 3) < close and close > 1")
@@ -219,9 +225,40 @@ class Expr:
         return self._prog.hash
 
     @property
-    def warmup(self) -> int:
-        """Leading bars that are unknown (NaN) on clean data."""
+    def warmup(self) -> int | None:
+        """Leading bars that are unknown (NaN) on clean data; ``None`` when the expression uses
+        ``at(...)``, because the base bars a coarser clock costs depend on how many bars a window
+        holds. Then see :attr:`warmup_by_clock` and :meth:`warmup_bars`."""
         return self._prog.warmup
+
+    @property
+    def warmup_by_clock(self) -> dict[str, int]:
+        """Warm-up per clock: ``"base"`` in base bars, and each ``at`` timeframe in bars of that
+        timeframe (``{"base": 0, "1d": 199}`` for ``at("1d", sma(close, 200))``)."""
+        return dict(self._prog.warmup_by_clock)
+
+    def warmup_bars(self, bar_ns: int | None = None) -> int | None:
+        """The most leading unknown base bars, given the base bar width in nanoseconds; ``None``
+        when that cannot be known (no width, or an ``at`` over a month or a year). A window of
+        width ``w`` holds at most ``ceil(w / bar_ns)`` bars, so ``at("1d", sma(close, 200))``
+        on 5-minute bars is at most ``200 * 288`` bars, a bound that ignores the session. Without
+        ``at`` it is :attr:`warmup`."""
+        return self._prog.warmup_bars(bar_ns)
+
+    @property
+    def uses_at(self) -> bool:
+        """True when the expression uses ``at(...)``: evaluating it needs timestamps."""
+        return self._prog.uses_at
+
+    def bound_hash(self, bar_stamp: str | None = None, tz_offset_ns: int = 0, session: Any = None) -> str:
+        """The hash with the clock folded in when the expression uses ``at(...)``: the zone, the
+        bar stamp and the session decide its numbers. Equal to :attr:`hash` without ``at``."""
+        return self._prog.bound_hash(bar_stamp, tz_offset_ns, session)
+
+    def at(self, timeframe: str) -> Expr:
+        """This expression evaluated on ``timeframe`` bars and held on the base clock:
+        ``col.close.sma(200).at("1d")`` is ``at("1d", sma(close, 200))``."""
+        return Expr(f"at({_quote(str(timeframe))}, {self._src})", self._params)
 
     @property
     def outputs(self) -> tuple[str, ...]:
@@ -243,23 +280,48 @@ class Expr:
 
     # -- evaluation
 
-    def eval(self, data: Mapping[str, Any]):
+    def eval(
+        self,
+        data: Mapping[str, Any],
+        *,
+        bar_stamp: str | None = None,
+        tz_offset_ns: int = 0,
+        session: Any = None,
+        bar_ns: int | None = None,
+    ):
         """Evaluate over whole columns.
 
         ``data`` maps field names (``open``, ``high``, ``low``, ``close``, ``volume``) to 1-D
         float64 numpy arrays of one length; keys that are not fields are ignored, arrays of
         another dtype are refused. Returns an array for one output, or a dict of arrays keyed by
         output name. Unknown (warm-up, or a NaN input) is NaN. No input is modified.
+
+        An expression that uses ``at(...)`` also needs ``data["timestamps"]`` (int64
+        nanoseconds) and ``bar_stamp`` (``"open"`` or ``"close"``: whether a timestamp starts or
+        ends its bar); it is refused without them, never given a default. ``tz_offset_ns`` is the
+        zone daily windows are cut in (UTC, ``0``, unless given; ``session``, a
+        ``raptorbt.SessionSchedule``, brings its own and skips non-trading days), and ``bar_ns``,
+        the base bar width, lets a timeframe that is not a coarser exact multiple be refused.
+        Without ``at`` all four are ignored.
         """
         if isinstance(data, Mapping) and not isinstance(data, dict):
             data = dict(data)
-        cols = self._prog.evaluate(data)
+        cols = self._prog.evaluate(data, bar_stamp, tz_offset_ns, session, bar_ns)
         return cols[0] if len(cols) == 1 else dict(zip(self._prog.outputs, cols))
 
-    def stream(self) -> ExprStream:
+    def stream(
+        self,
+        *,
+        bar_stamp: str | None = None,
+        tz_offset_ns: int = 0,
+        session: Any = None,
+        bar_ns: int | None = None,
+    ) -> ExprStream:
         """A bar-by-bar evaluator. Fed the same bars, it returns the numbers :meth:`eval` does,
-        bit for bit."""
-        return ExprStream(self._prog)
+        bit for bit. An expression that uses ``at(...)`` needs ``bar_stamp`` here (and the
+        optional ``tz_offset_ns``, ``session``, ``bar_ns`` of :meth:`eval`) and takes each
+        bar's ``timestamp=`` in :meth:`ExprStream.update`."""
+        return ExprStream(self._prog, self._prog.stream(bar_stamp, tz_offset_ns, session, bar_ns))
 
     # -- truth is not defined
 
@@ -504,17 +566,28 @@ def expr(source: str, params: Mapping[str, float] | None = None) -> Expr:
 class ExprStream:
     """Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`."""
 
-    __slots__ = ("_native", "_names", "_need")
+    __slots__ = ("_native", "_names", "_need", "_at")
 
-    def __init__(self, program: Any):
-        self._native = program.stream()
+    def __init__(self, program: Any, native: Any = None):
+        self._native = program.stream() if native is None else native
         self._names = tuple(program.outputs)
         self._need = frozenset(program.fields)
+        self._at = program.uses_at
 
-    def update(self, bar: Mapping[str, float] | None = None, /, **fields: float):
+    def update(self, bar: Mapping[str, float] | None = None, /, timestamp: int | None = None, **fields: float):
         """Feed one bar, as a mapping or keywords (``open``, ``high``, ``low``, ``close``,
         ``volume``). Returns the value for the bar, or a dict by output name for several
-        outputs. A field the expression reads must be given; others may be left out."""
+        outputs. A field the expression reads must be given; others may be left out. An
+        expression that uses ``at(...)`` also needs ``timestamp=`` (int nanoseconds, read as the
+        stream's ``bar_stamp`` says)."""
+        if self._at and timestamp is None:
+            raise _refuse(
+                "missing_field",
+                "the expression uses at(...) and reads each bar's timestamp; pass timestamp=",
+                operation="ExprStream.update",
+                parameter="timestamp",
+                valid=["timestamp=<int nanoseconds>"],
+            )
         given = {**(bar or {}), **fields}
         vals = []
         for f in _FIELDS:
@@ -530,7 +603,7 @@ class ExprStream:
                     )
                 v = _NAN
             vals.append(v)
-        out = self._native.update(*vals)
+        out = self._native.update_at(int(timestamp), *vals) if self._at else self._native.update(*vals)
         return out[0] if len(out) == 1 else dict(zip(self._names, out))
 
     @property

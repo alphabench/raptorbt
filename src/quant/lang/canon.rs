@@ -28,9 +28,12 @@ pub fn float(v: f64) -> String {
 fn shape(dag: &Dag, id: NodeId) -> (u8, u8, u8) {
     match &dag.node(id).op {
         Op::Const(v) if v.is_sign_negative() => (UNARY, 0, 0),
-        Op::Const(_) | Op::Field(_) | Op::Handle(_) | Op::Call { .. } | Op::Out { .. } => {
-            (ATOM, 0, 0)
-        }
+        Op::Const(_)
+        | Op::Field(_)
+        | Op::Handle(_)
+        | Op::Call { .. }
+        | Op::Out { .. }
+        | Op::At { .. } => (ATOM, 0, 0),
         Op::Unary(UnOp::Neg, _) => (UNARY, UNARY, 0),
         Op::Unary(UnOp::Not, _) => (NOT, NOT, 0),
         Op::Binary(op, _, _) => match op {
@@ -97,6 +100,13 @@ fn print(dag: &Dag, id: NodeId, min: u8, out: &mut String) {
                     }
                 }
             }
+            out.push(')');
+        }
+        Op::At { spec, body } => {
+            out.push_str("at(\"");
+            out.push_str(&crate::quant::fns::at::timeframe_text(*spec));
+            out.push_str("\", ");
+            out.push_str(&body.canonical);
             out.push(')');
         }
         Op::Out { call, index } => {

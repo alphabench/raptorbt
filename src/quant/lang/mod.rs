@@ -154,9 +154,59 @@ pub struct Program {
 }
 
 impl Program {
-    /// Leading NaN bars of the root on clean data.
+    /// Leading NaN bars of the root on clean data, on the base clock. An `at(...)` counts as
+    /// zero here: its cost in base bars depends on how many bars a window holds. See
+    /// [`Program::clock_warmups`] and [`Program::warmup_bars`].
     pub fn warmup(&self) -> usize {
         self.dag.node(self.root).warm
+    }
+
+    /// Whether the program calls `at`, so it needs timestamps, a bar stamp and a zone to run.
+    pub fn has_at(&self) -> bool {
+        self.dag.nodes().iter().any(|n| matches!(n.op, Op::At { .. }))
+    }
+
+    /// The warm-up of each clock: `("base", n)` first, then one entry per `at` timeframe with
+    /// the most bars of that timeframe any body of it needs before it is known.
+    pub fn clock_warmups(&self) -> Vec<(String, usize)> {
+        let mut by_tf = std::collections::BTreeMap::new();
+        for n in self.dag.nodes() {
+            if let Op::At { spec, body } = &n.op {
+                let w = by_tf.entry(crate::quant::fns::at::timeframe_text(*spec)).or_insert(0);
+                *w = (*w).max(body.warmup());
+            }
+        }
+        std::iter::once(("base".to_string(), self.warmup())).chain(by_tf).collect()
+    }
+
+    /// The identity of this program run under a clock (`ClockCtx::text`): the zone, the bar stamp
+    /// and the session decide what an `at(...)` computes, so they belong to its hash. A program
+    /// without `at` runs the same under every clock, so its hash is returned unchanged.
+    pub fn bound_hash(&self, clock_text: &str) -> String {
+        if !self.has_at() {
+            return self.hash.clone();
+        }
+        crate::journal::sha256_hex(
+            format!("raptorbt-expr-bound-v1\n{}\n{clock_text}\n", self.hash).as_bytes(),
+        )
+    }
+
+    /// The most leading unknown base bars the root can have, when that can be known. Without
+    /// `at` it is [`Program::warmup`]. With `at` it needs the base bar width `base_ns`: a window
+    /// of width `w` holds at most `ceil(w / base_ns)` bars, the body's first value comes with
+    /// emission number `warmup + 1`, which is the first bar of window `warmup + 1`, so an `at`
+    /// costs at most `(warmup + 1) * ceil(w / base_ns)` bars. A month or a year has no fixed
+    /// width, and without `base_ns` there is nothing to divide by: none then.
+    pub fn warmup_bars(&self, base_ns: Option<i64>) -> Option<usize> {
+        if !self.has_at() {
+            return Some(self.warmup());
+        }
+        let base = base_ns.filter(|b| *b > 0)?;
+        self.dag.warm_with(self.root, &|spec, body_warmup| {
+            let w = crate::quant::fns::at::width_ns(spec)?;
+            let per_window = usize::try_from((w + base - 1) / base).ok()?.max(1);
+            body_warmup.checked_add(1)?.checked_mul(per_window)
+        })
     }
 
     /// Bars until infinite-memory kernels have forgotten their seed to within `eps`.
@@ -309,7 +359,7 @@ mod tests {
         assert_eq!(e.valid, vec!["n".to_string()]);
 
         assert_eq!(err("sma").code, ErrorCode::Type);
-        assert_eq!(err("at(\"1d\", close)").code, ErrorCode::UnsupportedHere);
+        assert_eq!(err("at(\"1d\", at(\"1d\", close))").code, ErrorCode::UnsupportedHere);
     }
 
     #[test]
@@ -416,6 +466,126 @@ mod tests {
             prog("sma(5)").hash,
             sha256_hex(format!("raptorbt-expr-v1\nsma(close, 5)\nsma@{rev}\n").as_bytes())
         );
+    }
+
+    /// Hashes of programs without `at`, computed from the hash definition before `at` existed
+    /// (sha256 of `raptorbt-expr-v1`, the canonical text and one `name@rev` line per function).
+    /// They must not move: a stored hash and a shared cell key stay valid.
+    #[test]
+    fn programs_without_at_keep_their_hashes() {
+        for (src, hash) in [
+            ("close", "63a14bbe53bfdf48e2086a4f41586de9d16b13d54f8f5998d4acd3d5eae5cb6a"),
+            ("sma(5)", "b2d173d37680ccf900eede9e5c7f1a23f94fa1c067e51e25a3efb35a86ad0ce3"),
+            ("close > sma(20)", "2abfa0c16f9965d7f2dd3a0653be7f772b8f0da32bbae53281c5ff5d9ca84c3e"),
+            ("rsi(14) < 30", "379356a448b24963589402b063034317b7f2db927289be453afd3faaeead4328"),
+        ] {
+            assert_eq!(prog(src).hash, hash, "{src}");
+        }
+    }
+
+    #[test]
+    fn at_is_one_node_on_the_base_clock_with_its_own_body() {
+        let p = prog("close > at(\"1d\", sma(close, 5))");
+        assert_eq!(p.canonical, "close > at(\"1d\", sma(close, 5))");
+        assert!(p.has_at());
+        let ty = &p.dag.node(p.root).ty;
+        assert_eq!((ty.shape, ty.elem, ty.clock.clone()), (Shape::Series, Elem::Bool, Clock::Base));
+        // Outer: close, at, >. The body's `close` and `sma` live in the body's own DAG.
+        assert_eq!(p.dag.len(), 3);
+        let at = p.dag.nodes().iter().find_map(|n| match &n.op {
+            Op::At { body, .. } => Some(body.clone()),
+            _ => None,
+        });
+        assert_eq!(at.unwrap().dag.len(), 2);
+        // The same `at` spelled twice is one node; a different timeframe or body is another.
+        assert_eq!(prog("at(\"1d\", close) + at(\"1d\", close)").dag.len(), 2);
+        assert_eq!(prog("at(\"1d\", close) + at(\"1w\", close)").dag.len(), 3);
+        same("at(\"1d\", sma(5))", "at(\"1d\", sma(close, 5.0))");
+        differ("at(\"1d\", sma(5))", "at(\"1w\", sma(5))");
+        differ("at(\"1d\", sma(5))", "at(\"1d\", sma(6))");
+        differ("at(\"1d\", sma(5))", "sma(5)");
+        differ("at(\"1d\", close)", "close");
+    }
+
+    #[test]
+    fn at_hash_names_at_and_the_functions_of_its_body() {
+        let p = prog("at(\"1d\", sma(5))");
+        let want = sha256_hex(
+            format!(
+                "raptorbt-expr-v1\nat(\"1d\", sma(close, 5))\nat@{}\nsma@{}\n",
+                crate::quant::fns::at::REV,
+                lookup("sma").unwrap().rev
+            )
+            .as_bytes(),
+        );
+        assert_eq!(p.hash, want);
+        // Folding a clock in moves the hash of an `at` program and no other.
+        assert_ne!(p.bound_hash("tz=0;stamp=close;session=none"), p.hash);
+        assert_ne!(
+            p.bound_hash("tz=0;stamp=close;session=none"),
+            p.bound_hash("tz=0;stamp=open;session=none")
+        );
+        let plain = prog("sma(5)");
+        assert_eq!(plain.bound_hash("tz=0;stamp=close;session=none"), plain.hash);
+    }
+
+    #[test]
+    fn at_round_trips_and_mixes_clocks() {
+        for src in [
+            "at(\"1d\", close)",
+            "at(\"15m\", sma(close, 5) > open)",
+            "close > at(\"1d\", sma(close, 200)) and at(\"1h\", rsi(14)) < 30",
+            "-at(\"1w\", macd(close).macdsignal)",
+            "at(\"1d\", close) ** 2",
+            "sma(at(\"1d\", close), 3)",
+        ] {
+            let p = prog(src);
+            let q = prog(&p.canonical);
+            assert_eq!((&q.canonical, &q.hash), (&p.canonical, &p.hash), "{src}");
+        }
+    }
+
+    #[test]
+    fn at_refusals_are_typed_and_positioned() {
+        let e = err("at(\"1d\", at(\"1w\", close))");
+        assert_eq!((e.code, e.pos), (ErrorCode::UnsupportedHere, 9));
+        for (src, pos) in [
+            ("at(\"2x\", close)", 3),
+            ("at(\"d\", close)", 3),
+            ("at(\"0m\", close)", 3),
+            ("at(\"100tick\", close)", 3),
+            ("at(close, close)", 3),
+            ("at(\"1d\")", 0),
+            ("at(\"1d\", close, close)", 0),
+            ("at(\"1d\", 5)", 9),
+            ("at(\"1d\", macd(close))", 9),
+            ("at(\"1d\", h_ab12)", 9),
+        ] {
+            let e = err(src);
+            assert_eq!((e.code, e.pos), (ErrorCode::Type, pos), "{src}: {e}");
+        }
+        assert!(err("at(\"2x\", close)").valid.contains(&"1d".to_string()));
+        assert!(err("at(\"1d\", h_ab12)").message.contains("base clock"));
+    }
+
+    #[test]
+    fn warmup_is_reported_per_clock() {
+        let p = prog("close > at(\"1d\", sma(close, 200)) and sma(close, 3) > 0");
+        assert_eq!(p.warmup(), 2);
+        assert_eq!(p.clock_warmups(), vec![("base".to_string(), 2), ("1d".to_string(), 199)]);
+        // Unknowable without the base width; with it, (199 + 1) windows of at most 288 5-minute
+        // bars.
+        let five_min = 300_000_000_000;
+        assert_eq!(p.warmup_bars(None), None);
+        assert_eq!(p.warmup_bars(Some(five_min)), Some(200 * 288));
+        // The deeper of the two clocks decides: (2 + 1) * 288 against the base sma(10)'s 9.
+        assert_eq!(
+            prog("at(\"1d\", sma(close, 3)) + sma(close, 10)").warmup_bars(Some(five_min)),
+            Some(3 * 288)
+        );
+        assert_eq!(prog("sma(5)").warmup_bars(None), Some(4));
+        assert_eq!(prog("at(\"1month\", close)").warmup_bars(Some(five_min)), None);
+        assert_eq!(prog("at(\"1d\", close)").clock_warmups()[1], ("1d".to_string(), 0));
     }
 
     #[test]

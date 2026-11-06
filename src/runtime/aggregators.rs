@@ -110,6 +110,46 @@ impl AggKey {
     fn params(&self) -> BuilderParams {
         BuilderParams { brick_size: f64::from_bits(self.brick_bits) }
     }
+
+    /// The key as an instrument's calendar changes it: of a unit that depends on the calendar,
+    /// the schedule's own `tz_offset_ns` replaces the key's, so two subscriptions still share
+    /// an aggregator exactly when their output is identical. Returns the schedule that
+    /// applies (none for a unit the calendar does not touch).
+    ///
+    /// This, [`AggKey::builder`] and [`AggKey::bucketed`] are the whole definition of how bars
+    /// are cut: the hub and the expression `at(...)` node (`quant::fns::at`) both call them,
+    /// so there is one aggregation.
+    pub fn with_session(
+        self,
+        session: Option<&SessionSchedule>,
+    ) -> (AggKey, Option<&SessionSchedule>) {
+        let session = session.filter(|_| uses_calendar(self.spec.unit));
+        let key = match session {
+            Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..self },
+            None => self,
+        };
+        (key, session)
+    }
+
+    /// The builder this key names. `session` is filtered as in [`AggKey::with_session`], so a
+    /// key already resolved by it builds the same bars.
+    pub fn builder(
+        &self,
+        session: Option<&SessionSchedule>,
+    ) -> Result<Box<dyn BarBuilder + Send + Sync>> {
+        let session = session.filter(|_| uses_calendar(self.spec.unit));
+        builder_for_session(self.spec, self.tz_offset_ns, self.params(), session)
+            .map_err(|e| RaptorError::invalid_parameter(e.to_string()))
+    }
+
+    /// `rec` as this aggregation buckets a primary bar: its timestamp moved by the key's
+    /// [`BarStamp`], so a close-stamped bar on a window boundary lands in the window it ends.
+    #[inline]
+    pub fn bucketed(&self, rec: &SourceRecord) -> SourceRecord {
+        let mut r = *rec;
+        r.timestamp = self.stamp.bucket_ts(self.spec.unit, rec.timestamp);
+        r
+    }
 }
 
 /// Registration phase: dedups keys and records each strategy's subscriptions.
@@ -135,6 +175,11 @@ impl AggregatorHubBuilder {
             strategies: Vec::new(),
             primary: (0..instruments).map(|_| None).collect(),
         }
+    }
+
+    /// The registered key of `agg`.
+    pub fn key(&self, agg: AggId) -> Option<&AggKey> {
+        self.keys.get(agg.index())
     }
 
     /// Build `instrument`'s primary bars from trade prints: `spec` bars cut
@@ -180,11 +225,7 @@ impl AggregatorHubBuilder {
         key: AggKey,
         session: Option<&SessionSchedule>,
     ) -> Result<(AggId, u16)> {
-        let session = session.filter(|_| uses_calendar(key.spec.unit));
-        let key = match session {
-            Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..key },
-            None => key,
-        };
+        let (key, session) = key.with_session(session);
         if key.instrument.index() >= self.instruments {
             return Err(RaptorError::invalid_parameter(format!(
                 "instrument id {} is outside the {} registered instruments",
@@ -195,9 +236,7 @@ impl AggregatorHubBuilder {
         let agg = match self.by_key.get(&key) {
             Some(&agg) => agg,
             None => {
-                let builder =
-                    builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
-                        .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;
+                let builder = key.builder(session)?;
                 let raw = u32::try_from(self.keys.len())
                     .map_err(|_| RaptorError::invalid_parameter("too many aggregations"))?;
                 let agg = AggId::new(raw);
@@ -339,11 +378,7 @@ impl AggregatorHub {
         key: AggKey,
         session: Option<&SessionSchedule>,
     ) -> Result<(AggId, u16)> {
-        let session = session.filter(|_| uses_calendar(key.spec.unit));
-        let key = match session {
-            Some(schedule) => AggKey { tz_offset_ns: schedule.tz_offset_ns(), ..key },
-            None => key,
-        };
+        let (key, session) = key.with_session(session);
         let instruments = self.inst_offsets.len().saturating_sub(1);
         if key.instrument.index() + 1 != instruments {
             return Err(RaptorError::invalid_parameter(
@@ -353,9 +388,7 @@ impl AggregatorHub {
         let agg = match self.by_key.get(&key) {
             Some(&agg) => agg,
             None => {
-                let builder =
-                    builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
-                        .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;
+                let builder = key.builder(session)?;
                 let agg = AggId::new(
                     u32::try_from(self.keys.len())
                         .map_err(|_| RaptorError::invalid_parameter("too many aggregations"))?,
@@ -443,10 +476,7 @@ impl AggregatorHub {
             (0..self.keys.len()).filter(|&a| self.keys[a].instrument == instrument).collect();
         for &a in &mine {
             let key = self.keys[a];
-            let session = session.filter(|_| uses_calendar(key.spec.unit));
-            self.builders[a] =
-                builder_for_session(key.spec, key.tz_offset_ns, key.params(), session)
-                    .map_err(|e| RaptorError::invalid_parameter(e.to_string()))?;
+            self.builders[a] = key.builder(session)?;
             self.spans[a] = (0, 0);
         }
         let ids: Vec<AggId> = mine.iter().map(|&a| AggId::new(a as u32)).collect();
@@ -541,10 +571,7 @@ impl AggregatorHub {
             for &agg in &self.inst_aggs[lo as usize..hi as usize] {
                 let a = agg.index();
                 let key = &self.keys[a];
-                let mut r = *rec;
-                if stamped {
-                    r.timestamp = key.stamp.bucket_ts(key.spec.unit, rec.timestamp);
-                }
+                let r = if stamped { key.bucketed(rec) } else { *rec };
                 let start = self.emissions.len();
                 let builder = &mut self.builders[a];
                 self.push_calls += 1;

@@ -2408,7 +2408,7 @@ impl PyRuntime {
                 .iter()
                 .find_map(|p| p.spec.as_ref()?.session.as_ref().map(|s| s.trading_minutes()));
         }
-        let builder = RuntimeBuilder::new(
+        let mut builder = RuntimeBuilder::new(
             market.store.clone(),
             params,
             rust_config.clone(),
@@ -2416,6 +2416,8 @@ impl PyRuntime {
             policy.unwrap_or(crate::portfolio::ledger::PositionPolicy::Net),
         )
         .map_err(runtime_err)?;
+        // The zone and stamp an expression with at(...) cuts its windows by: the run's own.
+        builder.set_clock(tz_offset_ns, stamp);
 
         let shared = Shared {
             inner: RefCell::new(Inner::Building(Box::new(builder))),

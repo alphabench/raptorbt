@@ -87,6 +87,7 @@ use crate::indicators::streaming::{
     StreamingAtr, StreamingBollinger, StreamingDonchian, StreamingEma, StreamingIndicator,
     StreamingMacd, StreamingRoc, StreamingRsi, StreamingSma, StreamingStdDev, StreamingWma,
 };
+use crate::quant::eval::ClockCtx;
 use crate::runtime::exprs::{self, ExprCore, ProgramId};
 use crate::runtime::ids::{AggId, IndId, InstrumentId, StrategyId};
 use crate::runtime::memory::HeapSize;
@@ -256,6 +257,12 @@ impl IndSpec {
                 "output {output} of an expression with {outputs}"
             ))),
         }
+    }
+
+    /// Whether the indicator uses `at(...)`, so it needs its stream's clock and the bars'
+    /// timestamps, which a hand-fed `update_bar` does not have.
+    pub fn needs_clock(self) -> bool {
+        matches!(self, IndSpec::Expr { program, .. } if exprs::info(program).needs_clock)
     }
 
     /// Whether the indicator reads the bar's volume, so a bar without one must be refused.
@@ -646,10 +653,11 @@ impl CellCore {
     /// The core of an indicator a strategy owns, reading the close (or the
     /// whole bar), as a bank cell of the same spec would.
     pub fn for_spec(spec: IndSpec) -> Self {
-        Self::new(&IndKey::new(IndInput::Primary(InstrumentId::new(0)), spec))
+        Self::new(&IndKey::new(IndInput::Primary(InstrumentId::new(0)), spec), None)
     }
 
-    fn new(key: &IndKey) -> Self {
+    /// `clock` is the zone, bar stamp and session of the stream an expression cell runs on.
+    fn new(key: &IndKey, clock: Option<ClockCtx>) -> Self {
         let p = |i: usize| key.params[i] as usize;
         let core = match key.kind {
             IndKind::Sma => Core::Sma(StreamingSma::new(p(0))),
@@ -665,9 +673,10 @@ impl CellCore {
                 Core::Bollinger(StreamingBollinger::new(p(0), f64::from_bits(key.params[1])))
             }
             IndKind::Macd => Core::Macd(StreamingMacd::new(p(0), p(1), p(2))),
-            IndKind::Expr => Core::Expr(Box::new(ExprCore::new(
+            IndKind::Expr => Core::Expr(Box::new(ExprCore::with_clock(
                 ProgramId::from_param(key.params[0]),
                 p(1) as u8,
+                clock,
             ))),
         };
         Self { core, field: key.field }
@@ -838,6 +847,15 @@ impl IndicatorBank {
     /// Freeze `registry`'s registrations into a bank. The registry is no
     /// longer needed afterwards.
     pub fn new(registry: &IndicatorRegistry) -> std::sync::Arc<Self> {
+        Self::with_clocks(registry, &[])
+    }
+
+    /// [`IndicatorBank::new`] with the clock of each cell's stream (`clocks[i]` for cell `i`; a
+    /// missing entry is none), which an expression using `at(...)` is cut by.
+    pub fn with_clocks(
+        registry: &IndicatorRegistry,
+        clocks: &[Option<ClockCtx>],
+    ) -> std::sync::Arc<Self> {
         let keys: Box<[IndKey]> = registry.keys().into();
 
         let mut by_primary: Vec<Vec<u32>> = Vec::new();
@@ -914,7 +932,11 @@ impl IndicatorBank {
             strategy_routes[s + 1] += strategy_routes[s];
         }
 
-        let cores: Vec<CellCore> = keys.iter().map(CellCore::new).collect();
+        let cores: Vec<CellCore> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| CellCore::new(key, clocks.get(i).cloned().flatten()))
+            .collect();
         let hist = vec![Vec::new(); keys.len()];
         std::sync::Arc::new(Self {
             event: AtomicU64::new(0),

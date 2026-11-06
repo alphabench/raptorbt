@@ -823,11 +823,23 @@ class ExprHandle(IndicatorHandle):
         return self._program.canonical
 
     @property
-    def warmup(self) -> int:
+    def warmup(self) -> int | None:
         """Leading bars on which the value is unknown (a manifest's ``Bars(n)`` wants ``n >
         warmup``). A recursive function such as ``ema`` keeps converging after this; see
-        :meth:`settle`."""
+        :meth:`settle`. ``None`` for an expression that uses ``at(...)``: the base bars a coarser
+        clock costs depend on how many bars a window holds (``.warmup_bars(bar_ns)`` bounds it,
+        ``.warmup_by_clock`` reports each clock). ``.ready`` is true only once every clock is
+        past its warm-up."""
         return self._program.warmup
+
+    @property
+    def warmup_by_clock(self) -> dict:
+        """Warm-up per clock: ``"base"`` in base bars, each ``at`` timeframe in its own bars."""
+        return self._program.warmup_by_clock
+
+    def warmup_bars(self, bar_ns=None):
+        """The most leading unknown base bars given the base bar width in ns, or ``None``."""
+        return self._program.warmup_bars(bar_ns)
 
     def settle(self, eps: float) -> int:
         """Bars until recursive functions have forgotten their seed to within ``eps``."""
@@ -908,6 +920,11 @@ class IndicatorsView:
         constants. It reads open, high, low, close and volume of the primary bars, or of
         ``timeframe``'s composite bars. An expression with several outputs (``macd(close)``)
         needs ``output=`` to pick one (or select in the text: ``macd(close).macdsignal``).
+
+        An expression may look at a coarser clock with ``at("1d", ...)``: the cell takes the
+        zone, the bar stamp and the instrument's session from the stream it runs on, and the
+        daily value is visible from the first bar of the next day, as in
+        ``raptorbt.expr(...).eval(..., bar_stamp=...)``.
 
         The returned handle is shared by every strategy that registers the same canonical
         expression on the same stream. Backtest and live give the numbers

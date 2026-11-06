@@ -8,10 +8,13 @@
 //! `-c`, which is exact.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
 use super::types::Ty;
+use super::Program;
+use crate::data::BarSpec;
 use crate::quant::registry::{FnDef, Memory, ParamVal};
 
 pub type NodeId = usize;
@@ -110,6 +113,13 @@ pub enum Op {
         call: NodeId,
         index: u8,
     },
+    /// `at(tf, body)`: the program `body` evaluated on `tf` bars of the base clock and held on
+    /// the base clock. The body is a program of its own with its own DAG: nothing in it is
+    /// shared with this one.
+    At {
+        spec: BarSpec,
+        body: Arc<Program>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +201,12 @@ fn digest_of(op: &Op, nodes: &[Node]) -> [u8; 32] {
             h.update([7, *index]);
             h.update(nodes[*call].digest);
         }
+        Op::At { spec, body } => {
+            h.update([8]);
+            h.update(crate::quant::fns::at::timeframe_text(*spec));
+            h.update([0]);
+            h.update(body.dag.node(body.root).digest);
+        }
     }
     h.finalize().into()
 }
@@ -269,6 +285,13 @@ impl Dag {
         self.intern(Op::Call { def, params, inputs }, ty, warm)
     }
 
+    /// An `at` node over `body`. It sits on the base clock and carries no warm-up of its own:
+    /// how many base bars the body needs depends on how many bars a window holds, which the
+    /// DAG does not know (see [`Program::clock_warmups`](super::Program::clock_warmups)).
+    pub fn at(&mut self, spec: BarSpec, body: Arc<Program>, ty: Ty) -> NodeId {
+        self.intern(Op::At { spec, body }, ty, 0)
+    }
+
     pub fn out(&mut self, call: NodeId, index: u8) -> NodeId {
         let (ty, warm) = (self.nodes[call].ty.clone(), self.nodes[call].warm);
         self.intern(Op::Out { call, index }, ty, warm)
@@ -285,6 +308,7 @@ impl Dag {
                 Op::Unary(_, x) => s[*x],
                 Op::Binary(_, a, b) => s[*a].max(s[*b]),
                 Op::Out { call, .. } => s[*call],
+                Op::At { .. } => 0,
                 Op::Call { def, params, inputs } => {
                     let extra = match def.memory {
                         Memory::Finite => 0,
@@ -298,13 +322,51 @@ impl Dag {
     }
 
     /// Every function the DAG calls, with its revision, sorted by name.
+    ///
+    /// A program that calls `at` also lists `at` and every function its bodies call; one that
+    /// does not is unchanged.
     pub fn function_revs(&self) -> Vec<(&'static str, u32)> {
         let mut m = BTreeMap::new();
+        self.collect_revs(&mut m);
+        m.into_iter().collect()
+    }
+
+    fn collect_revs(&self, m: &mut BTreeMap<&'static str, u32>) {
         for n in &self.nodes {
-            if let Op::Call { def, .. } = &n.op {
-                m.insert(def.name, def.rev);
+            match &n.op {
+                Op::Call { def, .. } => {
+                    m.insert(def.name, def.rev);
+                }
+                Op::At { body, .. } => {
+                    m.insert("at", crate::quant::fns::at::REV);
+                    body.dag.collect_revs(m);
+                }
+                _ => {}
             }
         }
-        m.into_iter().collect()
+    }
+
+    /// The warm-up of `id` in base bars when every `at` costs `at_bars(spec, body_warmup)`
+    /// base bars; none when `at_bars` cannot say. Mirrors how `warm` is built node by node.
+    pub fn warm_with(
+        &self,
+        id: NodeId,
+        at_bars: &dyn Fn(BarSpec, usize) -> Option<usize>,
+    ) -> Option<usize> {
+        let mut w = vec![0usize; id + 1];
+        for (i, n) in self.nodes.iter().enumerate().take(id + 1) {
+            w[i] = match &n.op {
+                Op::Const(_) | Op::Field(_) => 0,
+                Op::Handle(_) => n.warm,
+                Op::Unary(_, x) => w[*x],
+                Op::Binary(_, a, b) => w[*a].max(w[*b]),
+                Op::Out { call, .. } => w[*call],
+                Op::Call { def, params, inputs } => {
+                    inputs.iter().map(|i| w[*i]).max().unwrap_or(0) + (def.warmup)(params)
+                }
+                Op::At { spec, body } => at_bars(*spec, body.warmup())?,
+            };
+        }
+        Some(w[id])
     }
 }

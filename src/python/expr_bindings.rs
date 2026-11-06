@@ -15,7 +15,9 @@ use pyo3::types::PyDict;
 
 use super::errors::Fail;
 use super::numpy_bridge::numpy_cow_f64;
-use crate::quant::eval::{eval, Bar, EvalError, Inputs, Plan, Stream};
+use super::schedule_bindings::PySessionSchedule;
+use crate::data::BarStamp;
+use crate::quant::eval::{eval, Bar, ClockCtx, EvalError, Inputs, Plan, Stream};
 use crate::quant::lang::{compile, Env, ExprError, Field, Op, Program};
 use crate::quant::registry::expr_registry_json as registry_json;
 
@@ -42,8 +44,37 @@ fn eval_fail(operation: &str, e: EvalError) -> PyErr {
             Fail::new("length_mismatch", text).param(name)
         }
         EvalError::HandleCount { .. } | EvalError::Node(_) => Fail::new("invalid_input", text),
+        EvalError::NoTimestamps => Fail::new("missing_field", text).param("timestamps"),
+        EvalError::NoClock => Fail::new("missing_bar_stamp", text).param("bar_stamp"),
+        EvalError::Timeframe { valid, .. } => {
+            Fail::new("expr_type", text).param("expression").valid(valid)
+        }
     };
     fail.op(operation).into()
+}
+
+/// The clock an `at(...)` is cut by, from the arguments of `evaluate`, `stream` and `bound_hash`.
+/// None when no `bar_stamp` was given: a program with `at(...)` then refuses to run.
+fn clock_from(
+    operation: &str,
+    bar_stamp: Option<&str>,
+    tz_offset_ns: i64,
+    session: Option<&PySessionSchedule>,
+    bar_ns: Option<i64>,
+) -> PyResult<Option<ClockCtx>> {
+    let Some(text) = bar_stamp else { return Ok(None) };
+    let stamp = BarStamp::parse(text).map_err(|e| {
+        PyErr::from(
+            Fail::new("invalid_bar_stamp", e.to_string())
+                .op(operation)
+                .param("bar_stamp")
+                .value(text)
+                .valid(["open", "close"]),
+        )
+    })?;
+    let mut clock = ClockCtx::new(tz_offset_ns, stamp, session.map(|s| s.inner.clone()));
+    clock.base_ns = bar_ns;
+    Ok(Some(clock))
 }
 
 /// A checked expression and the plan that runs it. Immutable: evaluation and streams take
@@ -104,10 +135,53 @@ impl PyExprProgram {
         &self.program.hash
     }
 
-    /// Leading bars that are unknown (NaN) on clean data.
+    /// Leading bars that are unknown (NaN) on clean data. None when the program uses `at(...)`:
+    /// the base bars a coarser clock costs depend on how many bars a window holds. See
+    /// `warmup_by_clock` and `warmup_bars`.
     #[getter]
-    fn warmup(&self) -> usize {
-        self.program.warmup()
+    fn warmup(&self) -> Option<usize> {
+        (!self.program.has_at()).then(|| self.program.warmup())
+    }
+
+    /// Warm-up per clock: the base clock's, then each `at(...)` timeframe's in bars of that
+    /// timeframe.
+    #[getter]
+    fn warmup_by_clock(&self) -> Vec<(String, usize)> {
+        self.program.clock_warmups()
+    }
+
+    /// The most leading unknown base bars, given the base bar width in nanoseconds; None when
+    /// that cannot be known (no width, or a month or a year window).
+    #[pyo3(signature = (bar_ns=None))]
+    fn warmup_bars(&self, bar_ns: Option<i64>) -> Option<usize> {
+        self.program.warmup_bars(bar_ns)
+    }
+
+    /// Whether the program uses `at(...)`, so evaluating it needs timestamps and a bar stamp.
+    #[getter]
+    fn uses_at(&self) -> bool {
+        self.program.has_at()
+    }
+
+    /// The program hash with the clock folded in when the program uses `at(...)`: the zone, the
+    /// bar stamp and the session decide its numbers, so they are part of its identity. Equal to
+    /// `hash` for a program without `at`.
+    #[pyo3(signature = (bar_stamp=None, tz_offset_ns=0, session=None))]
+    fn bound_hash(
+        &self,
+        bar_stamp: Option<&str>,
+        tz_offset_ns: i64,
+        session: Option<&PySessionSchedule>,
+    ) -> PyResult<String> {
+        if !self.program.has_at() {
+            return Ok(self.program.hash.clone());
+        }
+        let Some(clock) =
+            clock_from("ExprProgram.bound_hash", bar_stamp, tz_offset_ns, session, None)?
+        else {
+            return Err(eval_fail("ExprProgram.bound_hash", EvalError::NoClock));
+        };
+        Ok(self.program.bound_hash(&clock.text()))
     }
 
     /// Bars until infinite-memory functions have forgotten their seed to within `eps`.
@@ -152,10 +226,21 @@ impl PyExprProgram {
 
     /// Evaluate over whole columns. `data` is a dict of float64 numpy arrays of one length keyed
     /// by field name; keys that are not fields are ignored. Returns one array per output.
+    ///
+    /// A program that uses `at(...)` also reads `data["timestamps"]` (an int64 array of
+    /// nanoseconds) and needs `bar_stamp` ("open" or "close": what a timestamp means); the zone
+    /// daily windows are cut in is `tz_offset_ns` (an instrument's `session` replaces it), and
+    /// `bar_ns`, the base bar width, lets a timeframe that is not coarser be refused. A program
+    /// without `at` ignores all four.
+    #[pyo3(signature = (data, bar_stamp=None, tz_offset_ns=0, session=None, bar_ns=None))]
     fn evaluate<'py>(
         &self,
         py: Python<'py>,
         data: &Bound<'py, PyAny>,
+        bar_stamp: Option<&str>,
+        tz_offset_ns: i64,
+        session: Option<&PySessionSchedule>,
+        bar_ns: Option<i64>,
     ) -> PyResult<Vec<Bound<'py, PyArray1<f64>>>> {
         const OP: &str = "ExprProgram.evaluate";
         let dict = data.cast::<PyDict>().map_err(|_| {
@@ -193,10 +278,45 @@ impl PyExprProgram {
         }
         let cols: Vec<(Field, Cow<'_, [f64]>)> =
             held.iter().map(|(f, a)| (*f, numpy_cow_f64(a))).collect();
+        let stamps: Option<PyReadonlyArray1<'py, i64>> = if self.plan.has_at() {
+            match dict.get_item("timestamps")? {
+                None => None,
+                Some(v) => Some(v.extract::<PyReadonlyArray1<'py, i64>>().map_err(|_| {
+                    PyErr::from(
+                        Fail::new(
+                            "invalid_array",
+                            "'timestamps' must be a 1-D numpy int64 array of nanoseconds",
+                        )
+                        .op(OP)
+                        .param("timestamps"),
+                    )
+                })?),
+            }
+        } else {
+            None
+        };
+        let stamps: Option<Cow<'_, [i64]>> = match &stamps {
+            Some(a) => Some(match a.as_slice() {
+                Ok(s) => Cow::Borrowed(s),
+                Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+            }),
+            None => None,
+        };
+        let clock = if self.plan.has_at() {
+            clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)?
+        } else {
+            None
+        };
         let result = py.detach(|| {
             let mut inputs = Inputs::new();
             for (f, c) in &cols {
                 inputs = inputs.field(*f, c);
+            }
+            if let Some(ts) = &stamps {
+                inputs = inputs.timestamps(ts);
+            }
+            if let Some(clock) = clock {
+                inputs = inputs.clock(clock);
             }
             eval(&self.plan, &inputs)
         });
@@ -204,9 +324,27 @@ impl PyExprProgram {
         Ok(columns.into_iter().map(|v| PyArray1::from_vec(py, v)).collect())
     }
 
-    /// A streaming evaluator over this program: one bar in, the outputs for that bar out.
-    fn stream(&self) -> PyResult<PyExprStream> {
-        let inner = Stream::new(&self.plan).map_err(|e| eval_fail("ExprProgram.stream", e))?;
+    /// A streaming evaluator over this program: one bar in, the outputs for that bar out. A
+    /// program that uses `at(...)` needs `bar_stamp` (and optionally `tz_offset_ns`, `session`,
+    /// `bar_ns` as for `evaluate`) and is fed with `update_at`.
+    #[pyo3(signature = (bar_stamp=None, tz_offset_ns=0, session=None, bar_ns=None))]
+    fn stream(
+        &self,
+        bar_stamp: Option<&str>,
+        tz_offset_ns: i64,
+        session: Option<&PySessionSchedule>,
+        bar_ns: Option<i64>,
+    ) -> PyResult<PyExprStream> {
+        const OP: &str = "ExprProgram.stream";
+        let inner = if self.plan.has_at() {
+            match clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)? {
+                Some(clock) => Stream::bound(&self.plan, clock),
+                None => Err(EvalError::NoClock),
+            }
+        } else {
+            Stream::new(&self.plan)
+        }
+        .map_err(|e| eval_fail(OP, e))?;
         Ok(PyExprStream { inner: Mutex::new(inner) })
     }
 }
@@ -238,6 +376,24 @@ impl PyExprStream {
         let out = s
             .update(&Bar { open, high, low, close, volume }, &[])
             .map_err(|e| eval_fail("ExprStream.update", e))?;
+        Ok(out.to_vec())
+    }
+
+    /// Feed one bar stamped `timestamp` (nanoseconds, as the stream's `bar_stamp` reads them);
+    /// returns one value per output. The only way to feed a program that uses `at(...)`.
+    fn update_at(
+        &self,
+        timestamp: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> PyResult<Vec<f64>> {
+        let mut s = self.locked()?;
+        let out = s
+            .update_at(timestamp, &Bar { open, high, low, close, volume }, &[])
+            .map_err(|e| eval_fail("ExprStream.update_at", e))?;
         Ok(out.to_vec())
     }
 

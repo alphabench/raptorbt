@@ -3,13 +3,20 @@
 //! `Ty` carries shape, element and clock from the start so the cross-sectional (`Panel`) and
 //! multi-timeframe (`Clock::Tf`) slices add rules, not fields. Today only `Scalar`/`Series`,
 //! `F64`/`Bool` and `Base` are produced; a `Panel` input is accepted from an environment
-//! handle and propagates; `at(...)` is refused as unsupported.
+//! handle and propagates.
+//!
+//! `at(tf, body)` checks `body` in a checker of its own with its own DAG, so the body's `close`
+//! is the window's close and shares no node with the outside; the `at` node itself is a series
+//! on the base clock, which is why a mix such as `close > at("1d", sma(close, 200))` joins
+//! without a clock conflict. One level only: `at` inside `at` is refused.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::dag::{BinOp, Dag, Field, NodeId, UnOp};
 use super::parser::{Expr, ExprKind};
-use super::{suggest, ErrorCode, ExprError, MAX_PERIOD};
+use super::{canon, suggest, ErrorCode, ExprError, Program, MAX_PERIOD};
+use crate::quant::fns::at as at_fn;
 use crate::quant::registry::{self, FnDef, OutKind, ParamDef, ParamKind, ParamVal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,6 +95,8 @@ struct Checker<'a> {
     src: &'a str,
     env: &'a Env,
     dag: Dag,
+    /// Checking the body of an `at(...)`: no nested `at`, no named series of the outer clock.
+    in_at: bool,
 }
 
 /// The constant a parameter argument denotes: a number, `$n`, or a negated one.
@@ -98,7 +107,7 @@ enum Arg<'e> {
 }
 
 pub fn check(ast: &Expr, src: &str, env: &Env) -> Result<(Dag, NodeId), ExprError> {
-    let mut c = Checker { src, env, dag: Dag::new() };
+    let mut c = Checker { src, env, dag: Dag::new(), in_at: false };
     let root = c.expr(ast)?;
     Ok((c.dag, root.id))
 }
@@ -212,6 +221,17 @@ impl Checker<'_> {
             return Ok(self.dag.field(f));
         }
         if let Some(h) = self.env.series.get(name) {
+            if self.in_at {
+                return Err(self
+                    .err(
+                        ErrorCode::Type,
+                        pos,
+                        format!(
+                            "`{name}` is a series of the base clock; it cannot be read inside `at(...)`"
+                        ),
+                    )
+                    .with_valid(Field::ALL.iter().map(|f| f.name().to_string()).collect()));
+            }
             return Ok(self.dag.handle(name, h.ty.clone(), h.warm));
         }
         if registry::lookup(name).is_some() {
@@ -271,14 +291,10 @@ impl Checker<'_> {
     }
 
     fn call(&mut self, e: &Expr, name: &str, args: &[Expr]) -> Result<Checked, ExprError> {
+        if name == "at" {
+            return self.at_call(e, args).and_then(plain);
+        }
         let Some(def) = registry::lookup(name) else {
-            if name == "at" {
-                return Err(self.err(
-                    ErrorCode::UnsupportedHere,
-                    e.start,
-                    "`at(...)` (multi-timeframe) is not available yet",
-                ));
-            }
             return Err(self
                 .err(ErrorCode::UnknownFunction, e.start, format!("unknown function `{name}`"))
                 .with_valid(suggest(name, registry::all().map(|d| d.name))));
@@ -354,6 +370,66 @@ impl Checker<'_> {
         ty.elem = if def.out_kind == OutKind::Bool { Elem::Bool } else { Elem::F64 };
         let id = self.dag.call(def, params, inputs, ty);
         Ok(Checked { id, call: Some(def) })
+    }
+
+    /// `at("1d", body)`: see the module doc.
+    fn at_call(&mut self, e: &Expr, args: &[Expr]) -> Result<NodeId, ExprError> {
+        const SIG: &str = "at(\"1d\", expression)";
+        if self.in_at {
+            return Err(self.err(
+                ErrorCode::UnsupportedHere,
+                e.start,
+                "`at(...)` cannot be nested: one timeframe change per expression",
+            ));
+        }
+        let [tf, body] = args else {
+            return Err(
+                self.type_err(e.start, format!("wrong number of arguments; expected {SIG}"))
+            );
+        };
+        let ExprKind::Str(tf_text) = &tf.kind else {
+            return Err(self
+                .type_err(
+                    tf.start,
+                    format!("the first argument of `at` is a timeframe in quotes; expected {SIG}"),
+                )
+                .with_valid(at_fn::EXAMPLES.iter().map(|t| t.to_string()).collect()));
+        };
+        let spec = at_fn::parse_timeframe(tf_text).map_err(|why| {
+            self.type_err(tf.start, format!("unknown timeframe: {why}"))
+                .with_valid(at_fn::EXAMPLES.iter().map(|t| t.to_string()).collect())
+        })?;
+
+        // The body is checked on its own clock: a fresh DAG, so no node is shared with the
+        // outside, and `in_at` so it cannot nest or reach a base-clock series.
+        let mut inner = Checker { src: self.src, env: self.env, dag: Dag::new(), in_at: true };
+        let root = inner.expr(body)?;
+        if let Some(def) = root.call.filter(|d| d.outputs.len() > 1) {
+            return Err(self
+                .type_err(
+                    body.start,
+                    format!(
+                        "`{}` has several outputs; pick one with `.name` inside `at(...)`",
+                        def.name
+                    ),
+                )
+                .with_valid(def.outputs.iter().map(|s| s.to_string()).collect()));
+        }
+        let ty = inner.dag.node(root.id).ty.clone();
+        if ty.shape != Shape::Series {
+            return Err(self.type_err(
+                body.start,
+                format!(
+                    "`at` needs a series to evaluate on the coarser clock, found {}",
+                    ty.describe()
+                ),
+            ));
+        }
+        let dag = inner.dag;
+        let canonical = canon::canonical(&dag, root.id);
+        let hash = canon::program_hash(&dag, root.id, &canonical);
+        let body = Arc::new(Program { dag, root: root.id, canonical, hash });
+        Ok(self.dag.at(spec, body, Ty { shape: Shape::Series, elem: ty.elem, clock: Clock::Base }))
     }
 
     fn param(&self, def: &FnDef, p: &ParamDef, a: &Arg, at: &Expr) -> Result<ParamVal, ExprError> {

@@ -209,6 +209,29 @@ for i, (ready, got) in enumerate(s.seen):
     assert got is None if np.isnan(want[i]) else got is bool(want[i])
 ```
 
+A coarser clock with `at`. `at("1d", expression)` computes `expression` on daily bars cut from
+the bars you give and holds the result on the base clock, so `close > at("1d", sma(close, 200))`
+compares every bar with the daily average. The daily value first shows on the first bar of the
+next day and stays all that day. The expression needs the bars' timestamps and to be told what
+they mean:
+
+```python
+import numpy as np
+import raptorbt as rb
+
+DAY = 86_400 * 10**9
+# Three days of four 6-hour bars, each stamped at its close; the fourth of a day is stamped at
+# midnight and still belongs to the day it ends.
+ts = 19_000 * DAY + (np.arange(12, dtype=np.int64) + 1) * 6 * 3600 * 10**9
+close = np.arange(1.0, 13.0)
+
+e = rb.expr('at("1d", close)')
+held = e.eval({"timestamps": ts, "close": close}, bar_stamp="close")
+assert np.isnan(held[:4]).all()                  # nothing is complete on the first day
+assert list(held[4:]) == [4.0] * 4 + [8.0] * 4   # each day shows the previous day's close
+assert e.warmup is None and e.warmup_by_clock == {"base": 0, "1d": 0}
+```
+
 ## 6. Composition
 
 - [Indicators](../indicators/SKILL.md): `sma` and `ema` here are pinned bitwise, on finite input,
@@ -244,6 +267,44 @@ warm-up.
 bar from the prefix up to it, streaming sees only bars already fed, and both run the same code
 in the same order, which is why they are equal to the last bit. A result for the first `n`
 bars does not change when more bars are appended.
+
+**Another timeframe (`at`).** `at("1d", expression)` runs `expression` on windows cut from the
+base bars by the same code the runtime uses for `timeframe="1d"` streams, and holds the value on
+the base clock.
+
+- *When a value shows.* A window's bar is complete when the first bar of a later window arrives,
+  and only then does the value change: the first bar of the next day (the next trading day when
+  a `session` is given: its closed days are dropped), in `eval`, `stream`, `run_strategies` and
+  a live node alike. Nothing emits at a session close, so the value that closes a day is not
+  visible on that day. The window in progress is never read, and the last, partial window of a
+  run never appears. Before the first window completes, and until the expression's own warm-up
+  has passed, the value is NaN.
+- *Inner fields.* `close`, `high`, `low`, `open` and `volume` inside `at` are the window's:
+  its last close, highest high, lowest low, first open and total volume. Inside `at` the
+  expression is its own program: `close > at("1d", close)` compares the base `close` with the
+  daily one, and nothing inside is shared with the outside, except an identical `at(...)`, which
+  is one node.
+- *Mixing.* The result of `at` is on the base clock, so it combines with base-clock values:
+  `close > at("1d", sma(close, 200))`. One level only: `at` inside `at` is `expr_unsupported_here`.
+  The timeframe is a string such as `"15m"`, `"1h"`, `"1d"`, `"1w"`; anything else is `expr_type`
+  with the valid ones in `valid`. Give `bar_ns=` (the base bar width) to have a timeframe that is
+  not a coarser exact multiple refused.
+- *What it needs.* `eval` needs `data["timestamps"]` (int64 nanoseconds) and `bar_stamp="open"`
+  or `"close"` (`missing_field`, `missing_bar_stamp`); `stream` needs `bar_stamp=` and each
+  `update` a `timestamp=`. `tz_offset_ns` is the zone daily windows are cut in (default UTC, 0;
+  IST is `19_800 * 10**9`) and `session=` a `raptorbt.SessionSchedule`, whose own zone replaces
+  it and whose closed days are skipped. Inside `ctx.indicators.expr` the run's zone and bar
+  stamp and the instrument's session are used. Hash, canonical text and cell sharing of a
+  program without `at` are unchanged; `bound_hash(...)` folds the zone, stamp and session into
+  the hash of one with `at`.
+- *Warm-up.* It is reported per clock: `warmup_by_clock` is `{"base": n, "1d": m}`. `warmup` is
+  `None` for a program with `at`, because the base bars a daily warm-up costs depend on how many
+  bars a day holds; `warmup_bars(bar_ns)` gives the most it can be (`(m + 1)` windows of at
+  most `ceil(window / bar_ns)` bars each, ignoring the session) and is `None` for a month or a
+  year. `ready` is true once every clock is past its warm-up.
+- *Cost.* A step is one window push and, once a window completes, one step of the inner stream,
+  with no allocation of its own. With a session the window builder allocates per bar, as the
+  runtime's does.
 
 **Periods and parameters.** A period is a constant integer between 1 and 16,777,216 (or a
 `$name` bound in `params`); a series cannot be a period. Depth and size are limited (64 levels,
@@ -284,6 +345,14 @@ same expression values as one that never stopped.
 - Hashing an `Expr`: it defines `==` as an expression, so it is not hashable. Use `.hash`.
 - `ctx.indicators.expr("macd(close)", ...)` with no `output=`: pick one output.
 - Registering an expression in `run_strategy_backtest`: `expr_unsupported_here`.
+- Expecting a daily value on the day it is made: `at("1d", close)` shows yesterday's close all
+  day. To act on today's close, read the base bar.
+- Evaluating `at(...)` without timestamps or `bar_stamp`: `missing_field` / `missing_bar_stamp`.
+  Nothing is assumed; open- and close-stamped bars cut different windows near a boundary.
+- Cutting IST days in UTC: pass `tz_offset_ns=19_800 * 10**9` (or a `session`), or a bar at
+  01:00 IST lands on the previous date.
+- A hand-fed `Indicator.expr(...)` whose expression uses `at`: `update_bar` has no timestamp,
+  so it is `expr_unsupported_here`. Use `ctx.indicators.expr` or `Expr.stream(...).update(..., timestamp=)`.
 - A hand-fed `Indicator.expr(...)` whose expression reads `volume`, given a bar with four
   prices: `missing_field`. Feed `update_bar(open, high, low, close, volume)`.
 
