@@ -779,8 +779,14 @@ mod tests {
                     let w = &data[i + 1 - p..=i];
                     let want = exact_var(w, 0);
                     prop_assert!((got - want).abs() <= 1e-11 * want, "i={i} got={got} want={want}");
-                    let mean = fsum(w.iter().copied()) / p as f64;
-                    prop_assert!((sw.mean() - mean).abs() <= 1e-11, "mean i={i}");
+                    // The reference mean is the first value plus the exact mean of the (exact)
+                    // differences from it: correctly rounded to within half an ulp of the level.
+                    // `fsum(w) / p` is not: it rounds a sum five times the level first, which is
+                    // up to 0.8 ulp of the mean. Ours is within half an ulp as well, so the two
+                    // differ by at most one ulp; `EPSILON * level` is between one and two ulps.
+                    let mean = w[0] + fsum(w.iter().map(|v| v - w[0])) / p as f64;
+                    let ulps = f64::EPSILON * mean.abs();
+                    prop_assert!((sw.mean() - mean).abs() <= ulps, "mean i={i}");
                     let n = p as f64;
                     let xbar = (n - 1.0) / 2.0;
                     let num =
@@ -795,7 +801,7 @@ mod tests {
                     let wmean =
                         fsum(w.iter().enumerate().map(|(k, v)| (k + 1) as f64 * (v - mean))) / wsum
                             + mean;
-                    prop_assert!((sw.weighted_mean() - wmean).abs() <= 1e-11, "wmean i={i}");
+                    prop_assert!((sw.weighted_mean() - wmean).abs() <= ulps, "wmean i={i}");
                 } else {
                     prop_assert!(got.is_nan() && !ok);
                 }

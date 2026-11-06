@@ -1711,17 +1711,17 @@ MACD fixed at 12 and 26 with TA-Lib's smoothing constants 0.15 and 0.075 (not 2/
 
 ### `mfi([high], [low], [close], [volume], period, compat='native')`
 
-Money flow index: typical price (high + low + close) / 3 times volume, summed over the last `period` bars as positive flow when the typical price rose and negative when it fell; first value on bar `period`. compat="native" (default): 100 when there is no negative flow, so a flat series, or zero volume, reads 100, else 100 - 100 / (1 + positive / negative). compat="talib": 100 * positive / (positive + negative), and 0 when the two sum to less than 1 (a flat series, zero volume, or a very thin market in price * volume units reads 0). The two agree to rounding wherever the total flow is at least 1 and some flow is negative. Period at most 100000 (the window is summed afresh on every bar).
+Money flow index: typical price (high + low + close) / 3 times volume, summed over the last `period` bars as positive flow when the typical price rose and negative when it fell; first value on bar `period`. compat="native" (default): 100 when there is no negative flow, so a flat series, or zero volume, reads 100, else 100 - 100 / (1 + positive / negative). compat="talib": 100 * positive / (positive + negative), and 0 when the two sum to less than 1 (a flat series, zero volume, or a very thin market in price * volume units reads 0). The two agree to rounding wherever the total flow is at least 1 and some flow is negative. Period at most 100000. Native mode is a running window sum, equal to the array function `mfi` to 1e-12 relative, not bit for bit.
 
 - inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`)
 - parameters: `period`: int in [2, 100000], required; `compat`: "native" | "talib", default 'native'
 - outputs: `value` (numeric)
 - warm-up: set by the parameters; the first known value is at that index on clean data
 - memory: finite: it forgets any bar after its window
-- legacy: pinned to `indicators::volume::mfi` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- legacy: pinned to `indicators::volume::mfi` (within 1e-12 on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `MFI`
 - invariance: none
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 - reference: Quong, Soudack, Volume-Weighted RSI: Money Flow, Technical Analysis of Stocks & Commodities, 1989
 
 ### `minus_di([high], [low], [close], period, compat='native')`

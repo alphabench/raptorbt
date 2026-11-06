@@ -18,6 +18,15 @@ pub trait Kernel<const I: usize, const O: usize>: Send + Sync {
     /// Heap the kernel owns beyond its own size, counted at capacity (windows, rings, deques).
     /// Required, so a new kernel cannot forget it: the bank's memory report reads it.
     fn heap_bytes(&self) -> usize;
+
+    /// Set when [`run_clean`](Self::run_clean) is implemented, so the columns are scanned for
+    /// non-finite values only for kernels that can use the answer.
+    const CLEAN: bool = false;
+
+    /// A whole column on a fresh kernel when every input value is finite, as plain loops over
+    /// slices without the per-bar checks for a gap. It must write exactly the bits `step` gives
+    /// bar by bar (the registry-driven batch-against-stream test runs clean data through both).
+    fn run_clean(&mut self, _cols: &[&[f64]; I], _outs: &mut [&mut [f64]; O]) {}
 }
 
 /// The flat register file of a streaming program: one `f64` per node output.
@@ -159,6 +168,11 @@ impl<K: Kernel<I, O>, const I: usize, const O: usize> Node for Adapter<K, I, O> 
         // memory round trip on the critical path of every accumulator (a rolling sum took 24 ns
         // a bar through `self` and 5 from a local).
         let mut kernel = self.kernel.take().expect("kernel present between calls");
+        if K::CLEAN && cols.iter().all(|c| c.iter().fold(true, |a, v| a & v.is_finite())) {
+            kernel.run_clean(&cols, &mut out);
+            self.kernel = Some(kernel);
+            return;
+        }
         for i in 0..n {
             // `i < n` and every column has `n` values.
             let h = SliceHist { cols, i };

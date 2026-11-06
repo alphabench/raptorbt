@@ -203,6 +203,19 @@ impl Kernel<3, 1> for Trange {
         0
     }
 
+    const CLEAN: bool = true;
+
+    fn run_clean(&mut self, cols: &[&[f64]; 3], outs: &mut [&mut [f64]; 1]) {
+        let [h, l, c] = *cols;
+        let out = &mut *outs[0];
+        if let Some(first) = out.first_mut() {
+            *first = f64::NAN;
+        }
+        for i in 1..out.len() {
+            out[i] = finite_or_nan(true_range(h[i], l[i], c[i - 1]));
+        }
+    }
+
     fn lookback(&self) -> usize {
         1
     }

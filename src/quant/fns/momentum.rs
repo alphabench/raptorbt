@@ -510,6 +510,51 @@ impl Kernel<1, 1> for Change {
         0
     }
 
+    const CLEAN: bool = true;
+
+    /// The same arithmetic as `step` on slices: the first `period` bars have no base and are
+    /// NaN, the rest are one expression over `x[i]` and `x[i - period]` (a straight loop the
+    /// compiler vectorises, except `roc`, whose zero-base case carries the last value).
+    fn run_clean(&mut self, cols: &[&[f64]; 1], outs: &mut [&mut [f64]; 1]) {
+        let (x, out) = (cols[0], &mut *outs[0]);
+        let p = self.p.min(x.len());
+        out[..p].fill(f64::NAN);
+        let (now, base) = (&x[p..], &x[..x.len() - p]);
+        let dst = &mut out[p..];
+        match self.kind {
+            ChangeKind::Mom => {
+                for ((o, &a), &b) in dst.iter_mut().zip(now).zip(base) {
+                    *o = finite_or_nan(a - b);
+                }
+            }
+            ChangeKind::Roc => {
+                let mut last = self.last;
+                for ((o, &a), &b) in dst.iter_mut().zip(now).zip(base) {
+                    if b != 0.0 {
+                        last = (a - b) / b * 100.0;
+                    }
+                    *o = finite_or_nan(last);
+                }
+                self.last = last;
+            }
+            ChangeKind::Rocp => {
+                for ((o, &a), &b) in dst.iter_mut().zip(now).zip(base) {
+                    *o = finite_or_nan(if b != 0.0 { (a - b) / b } else { 0.0 });
+                }
+            }
+            ChangeKind::Rocr => {
+                for ((o, &a), &b) in dst.iter_mut().zip(now).zip(base) {
+                    *o = finite_or_nan(if b != 0.0 { a / b } else { 0.0 });
+                }
+            }
+            ChangeKind::Rocr100 => {
+                for ((o, &a), &b) in dst.iter_mut().zip(now).zip(base) {
+                    *o = finite_or_nan(if b != 0.0 { a / b * 100.0 } else { 0.0 });
+                }
+            }
+        }
+    }
+
     fn lookback(&self) -> usize {
         self.p
     }
@@ -561,6 +606,16 @@ pub struct Bop;
 impl Kernel<4, 1> for Bop {
     fn heap_bytes(&self) -> usize {
         0
+    }
+
+    const CLEAN: bool = true;
+
+    fn run_clean(&mut self, cols: &[&[f64]; 4], outs: &mut [&mut [f64]; 1]) {
+        let [o, h, l, c] = *cols;
+        for (i, d) in outs[0].iter_mut().enumerate() {
+            let range = h[i] - l[i];
+            *d = if range > 0.0 { finite_or_nan((c[i] - o[i]) / range) } else { 0.0 };
+        }
     }
 
     fn lookback(&self) -> usize {
@@ -1460,11 +1515,37 @@ impl Kernel<3, 1> for Cci {
     }
 }
 
+/// A compensated running total: `add` keeps the rounding error of each addition (the two-sum
+/// form, no branch), so removing a value that left restores the total to a few ulps of what is
+/// in it, not of the largest value it ever held.
+#[derive(Clone, Copy, Default)]
+struct Comp {
+    s: f64,
+    c: f64,
+}
+
+impl Comp {
+    #[inline(always)]
+    fn add(&mut self, v: f64) {
+        let t = self.s + v;
+        let bb = t - self.s;
+        self.c += (self.s - (t - bb)) + (v - bb);
+        self.s = t;
+    }
+
+    #[inline(always)]
+    fn value(self) -> f64 {
+        self.s + self.c
+    }
+}
+
 /// Money flow index, native: 100 when there is no negative flow (flat included), else
-/// `100 - 100 / (1 + pos / neg)`. The flows of the last `period` bars are summed afresh, oldest
-/// first, on every bar, as `indicators::volume::mfi` does (so the sums carry no rounding from
-/// bars that have left, and are bit for bit the legacy's); each bar's flow is worked out once,
-/// when the bar arrives, and kept in a ring.
+/// `100 - 100 / (1 + pos / neg)`. Each bar's flow is worked out once and kept in a ring; the
+/// positive and negative sums roll in O(1) (compensated, add the new flow and remove the one
+/// leaving) and are rebuilt from the ring, oldest first, every `max(period, 1024)` bars on a step
+/// counter. A count of the non-zero flows in the window makes a sum with none exactly 0, so a flat
+/// window or zero volume still reads 100. Pinned to `indicators::volume::mfi` to 1e-12 relative,
+/// not bitwise: the legacy function sums the whole window afresh every bar.
 pub struct Mfi {
     p: usize,
     /// (positive flow, negative flow) of the last `p` bars, NaN for a bar whose flow could not
@@ -1474,6 +1555,12 @@ pub struct Mfi {
     n: u64,
     prev_tp: f64,
     bad: usize,
+    pos: Comp,
+    neg: Comp,
+    /// Non-zero flows in the window, positive and negative.
+    npos: usize,
+    nneg: usize,
+    next_resum: u64,
 }
 
 impl Mfi {
@@ -1485,7 +1572,29 @@ impl Mfi {
             n: 0,
             prev_tp: f64::NAN,
             bad: 0,
+            pos: Comp::default(),
+            neg: Comp::default(),
+            npos: 0,
+            nneg: 0,
+            next_resum: p.max(1024) as u64,
         }
+    }
+
+    /// Rebuild the sums and counts from the ring, oldest flow first.
+    fn resum(&mut self) {
+        let (newer, older) = self.ring.split_at(self.head);
+        let (mut pos, mut neg) = (Comp::default(), Comp::default());
+        let (mut npos, mut nneg) = (0, 0);
+        for &(up, down) in older.iter().chain(newer) {
+            if up.is_nan() {
+                continue;
+            }
+            pos.add(up);
+            neg.add(down);
+            npos += usize::from(up != 0.0);
+            nneg += usize::from(down != 0.0);
+        }
+        (self.pos, self.neg, self.npos, self.nneg) = (pos, neg, npos, nneg);
     }
 }
 
@@ -1501,38 +1610,56 @@ impl Kernel<4, 1> for Mfi {
     #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         let tp = (x[0] + x[1] + x[2]) / 3.0;
-        let flows = if tp.is_finite() && x[3].is_finite() && self.prev_tp.is_finite() {
-            let flow = tp * x[3];
-            if tp > self.prev_tp {
-                (flow, 0.0)
-            } else if tp < self.prev_tp {
-                (0.0, flow)
-            } else {
-                (0.0, 0.0)
-            }
-        } else {
+        let flow = tp * x[3];
+        let valid =
+            tp.is_finite() && x[3].is_finite() && self.prev_tp.is_finite() && flow.is_finite();
+        let flows = if !valid {
             (f64::NAN, f64::NAN)
+        } else if tp > self.prev_tp {
+            (flow, 0.0)
+        } else if tp < self.prev_tp {
+            (0.0, flow)
+        } else {
+            (0.0, 0.0)
         };
         self.prev_tp = tp;
-        // The flow of a non-finite product is as unusable as a missing one.
-        let flows =
-            if flows.0.is_finite() && flows.1.is_finite() { flows } else { (f64::NAN, f64::NAN) };
         let leaving = std::mem::replace(&mut self.ring[self.head], flows);
         self.head = if self.head + 1 == self.p { 0 } else { self.head + 1 };
-        if self.n >= self.p as u64 && leaving.0.is_nan() {
-            self.bad -= 1;
+        // Invalid flows are counted and add nothing, so the sums always cover the valid ones.
+        if self.n >= self.p as u64 {
+            if leaving.0.is_nan() {
+                self.bad -= 1;
+            } else {
+                self.pos.add(-leaving.0);
+                self.neg.add(-leaving.1);
+                self.npos -= usize::from(leaving.0 != 0.0);
+                self.nneg -= usize::from(leaving.1 != 0.0);
+            }
         }
-        self.bad += usize::from(flows.0.is_nan());
+        if valid {
+            self.pos.add(flows.0);
+            self.neg.add(flows.1);
+            self.npos += usize::from(flows.0 != 0.0);
+            self.nneg += usize::from(flows.1 != 0.0);
+        } else {
+            self.bad += 1;
+        }
         self.n += 1;
         if self.n <= self.p as u64 || self.bad > 0 {
             return [f64::NAN];
         }
-        let (mut pos, mut neg) = (0.0, 0.0);
-        let (newer, older) = self.ring.split_at(self.head);
-        for &(up, down) in older.iter().chain(newer) {
-            pos += up;
-            neg += down;
+        if self.n >= self.next_resum {
+            self.next_resum += self.p.max(1024) as u64;
+            self.resum();
         }
+        let mut sums = (self.pos.value(), self.neg.value());
+        // A window with flows must not read an empty sum (rounding left it at 0): rebuild.
+        if (self.nneg > 0 && sums.1 == 0.0) || (self.npos > 0 && sums.0 == 0.0) {
+            self.resum();
+            sums = (self.pos.value(), self.neg.value());
+        }
+        let pos = if self.npos == 0 { 0.0 } else { sums.0 };
+        let neg = if self.nneg == 0 { 0.0 } else { sums.1 };
         let out = if neg == 0.0 { 100.0 } else { 100.0 - (100.0 / (1.0 + pos / neg)) };
         [finite_or_nan(out)]
     }
@@ -2905,12 +3032,12 @@ pub const DEFS: &[FnDef] = &[
         legacy: Some(Legacy {
             nan: NanPolicy::Recover,
             pinned_to: "indicators::volume::mfi",
-            tolerance: 0.0,
+            tolerance: 1e-12,
         }),
         talib_name: Some("MFI"),
-        doc: "Money flow index: typical price (high + low + close) / 3 times volume, summed over the last `period` bars as positive flow when the typical price rose and negative when it fell; first value on bar `period`. compat=\"native\" (default): 100 when there is no negative flow, so a flat series, or zero volume, reads 100, else 100 - 100 / (1 + positive / negative). compat=\"talib\": 100 * positive / (positive + negative), and 0 when the two sum to less than 1 (a flat series, zero volume, or a very thin market in price * volume units reads 0). The two agree to rounding wherever the total flow is at least 1 and some flow is negative. Period at most 100000 (the window is summed afresh on every bar).",
+        doc: "Money flow index: typical price (high + low + close) / 3 times volume, summed over the last `period` bars as positive flow when the typical price rose and negative when it fell; first value on bar `period`. compat=\"native\" (default): 100 when there is no negative flow, so a flat series, or zero volume, reads 100, else 100 - 100 / (1 + positive / negative). compat=\"talib\": 100 * positive / (positive + negative), and 0 when the two sum to less than 1 (a flat series, zero volume, or a very thin market in price * volume units reads 0). The two agree to rounding wherever the total flow is at least 1 and some flow is negative. Period at most 100000. Native mode is a running window sum, equal to the array function `mfi` to 1e-12 relative, not bit for bit.",
         refs: &["Quong, Soudack, Volume-Weighted RSI: Money Flow, Technical Analysis of Stocks & Commodities, 1989"],
-        rev: 1,
+        rev: 2,
         // The talib mode zeroes a total flow under 1, which is not scale-free.
         invariance: &[],
         causal: true,
@@ -3667,6 +3794,38 @@ mod tests {
         }
     }
 
+    /// A column with no gap takes the clean batch path; it must give the streaming step's bits,
+    /// zero bases (the `roc` carry, the zero guards) and ties included.
+    #[test]
+    fn clean_batch_equals_the_streaming_step_bit_for_bit() {
+        let value = prop_oneof![1 => Just(0.0), 1 => Just(2.5), 6 => -50.0f64..50.0];
+        let strategy = (1i64..12, prop::collection::vec((value.clone(), value.clone()), 1..120));
+        runner(91)
+            .run(&strategy, |(p, rows)| {
+                let a: Vec<f64> = rows.iter().map(|r| r.0).collect();
+                let b: Vec<f64> = rows.iter().map(|r| r.1).collect();
+                let hi: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x.max(*y)).collect();
+                let lo: Vec<f64> = a.iter().zip(&b).map(|(x, y)| x.min(*y)).collect();
+                for name in ["mom", "roc", "rocp", "rocr", "rocr100"] {
+                    let want = stream(name, &[i(p)], &[&a], 1);
+                    prop_assert_eq!(
+                        bits(&batch(name, &[i(p)], &[&a], 1)[0]),
+                        bits(&want[0]),
+                        "{}",
+                        name
+                    );
+                }
+                let cols: [&[f64]; 4] = [&a, &hi, &lo, &b];
+                let want = stream("bop", &[], &cols, 1);
+                prop_assert_eq!(bits(&batch("bop", &[], &cols, 1)[0]), bits(&want[0]), "bop");
+                let cols: [&[f64]; 3] = [&hi, &lo, &b];
+                let want = stream("trange", &[], &cols, 1);
+                prop_assert_eq!(bits(&batch("trange", &[], &cols, 1)[0]), bits(&want[0]), "trange");
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn mfi_hand_values_and_flat() {
         // Period 2. Typical prices 10, 11, 10.5, 12 (high = low = close); volumes 100, 200, 300,
@@ -3698,12 +3857,17 @@ mod tests {
     }
 
     #[test]
-    fn mfi_native_equals_the_array_function_bitwise_on_finite_data() {
+    fn mfi_native_equals_the_array_function_to_1e_12_on_finite_data() {
         let (_, h, l, c, v) = bars(200);
         for p in [2usize, 5, 14] {
             let legacy = volume::mfi(&h, &l, &c, &v, p).unwrap();
             let got = one("mfi", &[i(p as i64), native()], &[&h, &l, &c, &v]);
-            assert_eq!(bits(&got), bits(&legacy), "p={p}");
+            for (j, (g, l)) in got.iter().zip(&legacy).enumerate() {
+                assert!(
+                    (g.is_nan() && l.is_nan()) || (g - l).abs() <= 1e-12 * l.abs().max(1.0),
+                    "p={p} bar {j}: {g} against {l}"
+                );
+            }
         }
     }
 
