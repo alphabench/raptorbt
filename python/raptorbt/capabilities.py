@@ -7,7 +7,9 @@ which includes the expression ``functions`` from the function registry),
 the hooks from the strategy hook tables, the indicators from the functions the
 extension registered as indicators and the streaming constructors of
 ``Indicator``, the adapters from ``raptorbt.execution``, the error codes from
-``raptorbt.errors.CODES`` and the statistics from ``raptorbt.stats.__all__``. A test fails
+``raptorbt.errors.CODES`` and the statistics from ``raptorbt.stats.__all__``. The agent
+surface (``analysis``) is the one list typed out here, by name, because the module it names
+touches files and cannot be imported from this one; a test checks every name. A test fails
 when something public exists that the manifest does not list.
 """
 
@@ -87,6 +89,31 @@ def _adapters() -> list[dict[str, Any]]:
     return [{**r, "custom_adapter_methods": protocol} for r in rows]
 
 
+#: The agent surface, by name. Names only: ``raptorbt.analysis`` reads and writes files, so this
+#: module cannot import it; a test checks that every name exists.
+_ANALYSIS = (
+    "raptorbt.analysis.Session.load",
+    "raptorbt.analysis.Session.load_panel",
+    "raptorbt.analysis.Session.eval",
+    "raptorbt.analysis.Session.factor",
+    "raptorbt.analysis.Session.series",
+    "raptorbt.analysis.Session.describe_handle",
+    "raptorbt.analysis.Session.drop",
+    "raptorbt.analysis.Session.stats",
+    "raptorbt.expressions.functions",
+    "raptorbt.expressions.describe",
+    "raptorbt.skills.for_task",
+    "python -m raptorbt eval",
+    "python -m raptorbt factor",
+    "python -m raptorbt functions",
+    "python -m raptorbt describe",
+    "python -m raptorbt show",
+    "python -m raptorbt export",
+    "python -m raptorbt stats",
+    "python -m raptorbt skills",
+)
+
+
 def capabilities() -> dict[str, Any]:
     """The engine's capability manifest (see the module docs)."""
     out: dict[str, Any] = json.loads(_raptorbt.capabilities_json())
@@ -97,4 +124,5 @@ def capabilities() -> dict[str, Any]:
     out["adapters"] = _adapters()
     out["error_codes"] = sorted(_errors.CODES)
     out["statistics"] = {"functions": sorted(_stats.__all__)}
+    out["analysis"] = list(_ANALYSIS)
     return out

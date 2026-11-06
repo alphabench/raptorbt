@@ -868,6 +868,35 @@ def _():
     raptorbt.stats.markov_regimes(np.tile([1e170, -1e170, 2e170, -3e170], 100))
 
 
+# -- analysis sessions ----------------------------------------------------------------------------
+
+
+def _session(**kw):
+    from raptorbt.analysis import Session
+
+    s = Session(**kw)
+    s.load({"timestamps": bars()["timestamps"], "close": bars()["close"]}, bar_stamp="close")
+    return s
+
+
+@case("unknown_handle", "handle")
+def _():
+    _session().eval("sma(h_0000000000, 3)")
+
+
+@case("handle_expired", "handle")
+def _():
+    s = _session(max_handles=1)
+    first = s.eval("sma(close, 3)")["handle"]
+    s.eval("sma(close, 4)")
+    s.series(first)
+
+
+@case("session_memory_exceeded", "max_bytes")
+def _():
+    _session(max_bytes=400).eval("sma(close, 3)")
+
+
 @case("below_one_lot", "lots")
 def _():
     from raptorbt import sizing

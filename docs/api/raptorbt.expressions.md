@@ -24,6 +24,13 @@ daily bars cut from the base bars and held on the base clock, so ``close > at("1
 bar of the next day. Such an expression needs the bars' timestamps and what they mean:
 ``expr.eval({"timestamps": ts, ...}, bar_stamp="close")``.
 
+Over many names at once, ``rank(roc(close, 20))`` is a cross-sectional expression: it has a
+value only over a panel (2-D arrays, dates by names), evaluated with :meth:`Expr.eval_panel`.
+Time-series functions run per name; ``rank``, ``zscore_xs``, ``demean_xs``, ``winsorize_xs``,
+``quantile_xs``, ``count_xs`` and the ``group_*`` forms compare the names of each date. A
+name with no bar at a date is *absent*: it does not step a function, takes no rank and gets NaN.
+:func:`factor_report` scores a factor against the returns that follow it.
+
 >>> from raptorbt import col, expr
 >>> a = (col.close.sma(3) < col.close) & (col.close > 1)
 >>> b = expr("sma(close, 3) < close and close > 1")
@@ -35,8 +42,9 @@ True
 | [`Expr`](#expr) | class | A checked expression: a formula over ``open``, ``high``, ``low``, ``close`` and ``volume``. |
 | [`ExprStream`](#exprstream) | class | Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`. |
 | [`col`](#col) | constant | `col` |
-| [`describe`](#describe) | function | Everything the registry says about one function: inputs, parameters, outputs, warm-up at the defaults, how it treats NaN, the legacy indicator it is pinned to, and its references. |
+| [`describe`](#describe) | function | Everything the registry says about one function: inputs, parameters, outputs, how it treats NaN, the legacy indicator it is pinned to, its references, and |
 | [`expr`](#expr) | function | Compile an expression from text. |
+| [`factor_report`](#factor_report) | function | Score a factor against the returns that follow it. |
 | [`functions`](#functions) | function | The functions an expression can call, from the engine's registry. |
 
 ### `Expr`
@@ -45,7 +53,7 @@ True
 
 ```python
 class Expr
-Expr(source: 'str', params: 'Mapping[str, float] | None' = None, *, _atom: 'bool' = False)
+Expr(source: 'str', params: 'Mapping[str, float] | None' = None, *, groups: 'tuple[str, ...]' = (), _atom: 'bool' = False, series: 'Mapping[str, int] | None' = None)
 ```
 
 A checked expression: a formula over ``open``, ``high``, ``low``, ``close`` and ``volume``.
@@ -155,8 +163,10 @@ from the function registry. A call with several outputs is selected by attribute
 | `correl(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``correl([high], [low], period=30)`` with this expression as the first input. |
 | `cos(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cos([x])`` with this expression as the first input. |
 | `cosh(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cosh([x])`` with this expression as the first input. |
+| `count_xs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``count_xs([x])`` with this expression as the first input. |
 | `cov(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cov([a], [b], period)`` with this expression as the first input. |
 | `dema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``dema([x], period)`` with this expression as the first input. |
+| `demean_xs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``demean_xs([x], min_names=2)`` with this expression as the first input. |
 | `diff(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``diff([x], k=1)`` with this expression as the first input. |
 | `div(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``div([a], [b])`` with this expression as the first input. |
 | `donchian(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``donchian([high], [low], period) -> (upper, middle, lower)`` with this expression as the first input. |
@@ -164,6 +174,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `dx(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``dx([high], [low], [close], period)`` with this expression as the first input. |
 | `ema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ema([x], period)`` with this expression as the first input. |
 | `eval(self, data: 'Mapping[str, Any]', *, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None)` | Evaluate over whole columns. |
+| `eval_panel(self, data: 'Mapping[str, Any]', *, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None)` | Evaluate over many names at once. Returns a 2-D float64 array ``(n_dates, n_assets)`` for one output, or a dict of them. |
 | `ewm_mean(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_mean([x], alpha=0.1)`` with this expression as the first input. |
 | `ewm_var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_var([x], alpha=0.1)`` with this expression as the first input. |
 | `exp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``exp([x])`` with this expression as the first input. |
@@ -171,7 +182,12 @@ from the function registry. A call with several outputs is selected by attribute
 | `floor(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``floor([x])`` with this expression as the first input. |
 | `fracdiff(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``fracdiff([x], d, threshold)`` with this expression as the first input. |
 | `gap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``gap([open], [close])`` with this expression as the first input. |
+| `group_demean(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``group_demean([x], group, min_names=2)`` with this expression as the first input. |
+| `group_rank(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``group_rank([x], group, min_names=2)`` with this expression as the first input. |
+| `group_zscore(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``group_zscore([x], group, min_names=2)`` with this expression as the first input. |
+| `groups` | The names of the group series the expression reads (``col.group("sector")``); give each to :meth:`eval_panel` as a label per name. |
 | `half_life(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``half_life([x], period)`` with this expression as the first input. |
+| `handles` | The named series the expression reads (see ``series`` in :func:`expr`). |
 | `hash` | Hex sha256 of the canonical text and the revisions of the functions it calls. |
 | `ht_dcperiod(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_dcperiod([x])`` with this expression as the first input. |
 | `ht_dcphase(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_dcphase([x])`` with this expression as the first input. |
@@ -181,8 +197,10 @@ from the function registry. A call with several outputs is selected by attribute
 | `ht_trendmode(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_trendmode([x])`` with this expression as the first input. |
 | `hurst_rs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``hurst_rs([x], period)`` with this expression as the first input. |
 | `if_else(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``if_else(cond, a, b)`` with this expression as the first input. |
+| `is_panel` | True when the expression has a cross-sectional call (``rank``, ``zscore_xs``, ...): it has a value only over a panel, through :meth:`eval_panel`. |
 | `kama(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``kama([x], period)`` with this expression as the first input. |
 | `keltner(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``keltner([high], [low], [close], ema_period, atr_period, multiplier=2.0) -> (middle, upper, lower)`` with this expression as the first input. |
+| `kinds` | What each output is, in the order of :attr:`outputs`: ``"bool"`` (1.0, 0.0 or NaN) or ``"number"``. |
 | `kurt(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``kurt([x], period)`` with this expression as the first input. |
 | `linearreg(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg([x], period=14)`` with this expression as the first input. |
 | `linearreg_angle(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg_angle([x], period=14)`` with this expression as the first input. |
@@ -220,7 +238,9 @@ from the function registry. A call with several outputs is selected by attribute
 | `plus_dm(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``plus_dm([high], [low], period)`` with this expression as the first input. |
 | `ppo(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ppo([x], fastperiod=12, slowperiod=26, matype=0)`` with this expression as the first input. |
 | `quantile(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``quantile([x], period, q=0.5)`` with this expression as the first input. |
+| `quantile_xs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``quantile_xs([x], q=0.5, min_names=2)`` with this expression as the first input. |
 | `range_pos(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``range_pos([high], [low], [close], period)`` with this expression as the first input. |
+| `rank(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rank([x], min_names=2)`` with this expression as the first input. |
 | `rank_ts(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rank_ts([x], period)`` with this expression as the first input. |
 | `roc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``roc([x], period)`` with this expression as the first input. |
 | `rocp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rocp([x], period)`` with this expression as the first input. |
@@ -281,8 +301,10 @@ from the function registry. A call with several outputs is selected by attribute
 | `wclprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wclprice([high], [low], [close])`` with this expression as the first input. |
 | `wilder(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wilder([x], period)`` with this expression as the first input. |
 | `willr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``willr([high], [low], [close], period)`` with this expression as the first input. |
+| `winsorize_xs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``winsorize_xs([x], pct=0.05, min_names=2)`` with this expression as the first input. |
 | `wma(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wma([x], period)`` with this expression as the first input. |
 | `zscore(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``zscore([x], period)`` with this expression as the first input. |
+| `zscore_xs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``zscore_xs([x], min_names=2)`` with this expression as the first input. |
 
 ### `ExprStream`
 
@@ -318,22 +340,68 @@ col = col
 describe(name: 'str') -> 'dict[str, Any]'
 ```
 
-Everything the registry says about one function: inputs, parameters, outputs, warm-up at
-the defaults, how it treats NaN, the legacy indicator it is pinned to, and its references.
+Everything the registry says about one function: inputs, parameters, outputs, how it
+treats NaN, the legacy indicator it is pinned to, its references, and
+
+- ``signature``, ``example`` (an expression that compiles and runs on bars, generated from
+  the registry) and ``warmup`` (leading unknown bars of the example);
+- ``reference`` (what its numbers were checked against) and ``relation`` (to TA-Lib:
+  ``exact``, ``defined_difference``, ``candle``, or ``no_library``);
+- ``conventions``: plain sentences on NaN handling, memory, causality and input domain.
 
 ### `expr`
 
 *function*
 
 ```python
-expr(source: 'str', params: 'Mapping[str, float] | None' = None) -> 'Expr'
+expr(source: 'str', params: 'Mapping[str, float] | None' = None, series: 'Mapping[str, int] | None' = None, *, groups: 'Sequence[str]' = ()) -> 'Expr'
 ```
 
 Compile an expression from text.
 
 ``params`` binds the ``$name`` constants the text uses (``sma(close, $n)`` with
-``params={"n": 20}``). A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
+``params={"n": 20}``). ``series`` names numeric series the text may read besides the five
+columns, each with its leading unknown bars (``zscore(h_ab12, 20)`` with
+``series={"h_ab12": 13}``); ``eval`` then takes each as a key of ``data``. Such a name is
+only available in text, not in operators built from :data:`col`. A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
 character offset), ``snippet`` (the line with a caret) and ``valid`` (the closest names).
+
+``groups`` names the group series the text reads (``group_demean(x, sector)`` with
+``groups=["sector"]``), supplied per name to :meth:`Expr.eval_panel`.
+
+### `factor_report`
+
+*function*
+
+```python
+factor_report(factor: 'Any', prices: 'Any', horizons: 'Sequence[int]' = (1, 5, 20), quantiles: 'int' = 5, *, lag: 'int' = 1, min_names: 'int' = 10, instruments: 'Sequence[str] | None' = None, present: 'Any' = None, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'dict[str, Any]'
+```
+
+Score a factor against the returns that follow it.
+
+``factor`` is a 2-D float64 panel ``(n_dates, n_assets)`` or an :class:`Expr` evaluated with
+:meth:`Expr.eval_panel` (then ``prices`` may be a dict of panels, or a mapping of instrument
+to columns, and the expression reads from it; ``close`` is the price). ``prices`` is the
+price panel, or such a dict holding ``"close"``.
+
+The forward return of a signal date starts ``lag`` bars later (default 1: a signal computed
+at a close cannot trade that close) and runs ``h`` bars: ``price[d + lag + h] / price[d +
+lag] - 1``. Forward returns exist only here and never feed an expression. **No costs are
+charged**: the result says ``no_costs: True``, and every spread is gross.
+
+Returns a dict. Per horizon (``result["horizons"][h]``): ``ic`` (rank IC per date, NaN
+where not scored), ``ic_mean``, ``ic_std``, ``hit_rate`` (share of scored dates with IC > 0),
+``t_naive`` and ``t_hac`` (Newey-West, Bartlett weights, ``h - 1`` lags: the daily ICs of an
+``h``-bar return overlap, so the naive t is about ``sqrt(h)`` too large; NaN under 30
+scored dates), ``quantile_returns`` (mean forward return per factor bucket, bucket
+``quantiles - 1`` the highest), ``quantile_returns_by_date``, ``long_short`` (top minus
+bottom per date) with ``long_short_mean`` and ``long_short_t_hac``. Beside them:
+``coverage`` and ``names`` per date, ``autocorr`` (rank autocorrelation of the factor with
+its previous date) and ``turnover`` per quantile (``turnover_by_date`` per date).
+
+Refused with ``insufficient_observations``: fewer than ``max(min_names, quantiles)`` names or
+fewer than ``lag + max(horizons) + 30`` dates; ``invalid_input``: an infinite value;
+``length_mismatch``: factor and prices of different shapes.
 
 ### `functions`
 
@@ -345,6 +413,10 @@ functions(query: 'str | None' = None) -> 'list[dict[str, Any]]'
 
 The functions an expression can call, from the engine's registry.
 
-``query`` keeps the functions whose name, family or description contains it (case
-ignored). Each row has ``name``, ``family``, ``signature``, ``outputs`` and ``doc``;
-:func:`describe` gives the rest.
+``query`` is one or more words, all of which must appear (case ignored) in a function's
+name, family, TA-Lib name or description: ``"moving average"``, ``"doji"``, ``"rsi"``. With
+a query the best match is first (the exact name, then the TA-Lib name, then a name that
+starts with a word, then a word inside a name, then the family, then the description);
+without one the rows are sorted by name. Each row has ``name``, ``family``, ``signature``,
+``outputs``, ``talib`` (the TA-Lib name, or ``None``) and ``doc``; :func:`describe` gives
+the rest.

@@ -55,8 +55,8 @@ the engine appears with no other change.
 | `Expr.eval_panel(data, instruments=None, present=None, ...)` | Evaluate over many names: 2-D arrays (dates by names), or a mapping of instrument to its own bars. Returns 2-D arrays. See "Panels". |
 | `raptorbt.col.group(name)` / `raptorbt.expr(text, groups=[...])` | A group series (a numeric label per name) read by `group_rank`, `group_zscore`, `group_demean`. |
 | `raptorbt.expressions.factor_report(factor, prices, horizons=(1, 5, 20), quantiles=5, lag=1, ...)` | Rank IC, quantile returns, long-short spread, turnover and coverage of a factor. See "Panels". |
-| `raptorbt.expressions.functions(query=None)` | The functions, optionally filtered by a word in the name, family or description. |
-| `raptorbt.expressions.describe(name)` | One function in full: inputs, parameters, outputs, warm-up, NaN handling, legacy pin. |
+| `raptorbt.expressions.functions(query=None)` | The functions. A query is words that must all appear in the name, TA-Lib name, family or description; the best match is first (`"moving average"`, `"doji"`). |
+| `raptorbt.expressions.describe(name)` | One function in full: inputs, parameters, outputs, warm-up, NaN handling, legacy pin, plus a working `example`, its `warmup`, `reference`, `relation` to TA-Lib and `conventions`. |
 | `ctx.indicators.expr(expression, instrument=, params=None, output=None, timeframe=None)` | Register an expression (text or `Expr`) on one instrument's bars, or on a `timeframe`'s composite bars, in `on_init` or `on_start`. Returns a handle: `.ready`, `.value`, `.warmup`, `.settle(eps)`, `.canonical`. |
 
 `Expr` members:
@@ -311,6 +311,11 @@ assert h["long_short_mean"] > 0
   `timeframe=` stream alike.
 - [Core](../core/SKILL.md): errors are `raptorbt.errors.RaptorBTError`; an expression refusal
   is an `ExpressionError`, also a `ValueError`.
+- [Analysis](../analysis/SKILL.md): to explore a formula over bars, `raptorbt.analysis.Session`
+  evaluates it, summarises the result (warm-up, distribution, flags) and keeps it under a handle
+  that a later formula reads as a series (`expr(text, series={"h_...": warm_up})` is how a handle
+  is a name in the language). `python -m raptorbt functions` and `describe` search this
+  registry from a shell.
 
 ## 7. Constraints and correctness
 
@@ -494,4 +499,5 @@ same expression values as one that never stopped.
 
 - [Core](../core/SKILL.md)
 - [Indicators](../indicators/SKILL.md)
+- [Analysis](../analysis/SKILL.md)
 - [Troubleshooting](../troubleshooting/SKILL.md)

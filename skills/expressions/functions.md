@@ -2,7 +2,7 @@
 
 # Expression functions
 
-206 functions in 9 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+215 functions in 10 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
 
 ## candles
 
@@ -797,6 +797,116 @@ Upside/Downside Gap Three Methods (TA-Lib CDLXSIDEGAP3METHODS): +100 for a bulli
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `CDLXSIDEGAP3METHODS`
 - invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+## cross
+
+### `count_xs([x])`
+
+How many names take part at each date (present with a finite x), given to every present name. Use it to ask for breadth: `count_xs(x) >= 30`. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `demean_xs([x], min_names=2)`
+
+x minus the mean of the participating names at the same date. NaN below `min_names` participants. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `group_demean([x], group, min_names=2)`
+
+`demean_xs` within each group at each date (group neutralisation); `min_names` applies to each group. Needs a panel and a group series.
+
+- inputs: `x` (default `close`), `group`
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `group_rank([x], group, min_names=2)`
+
+`rank` within each group at each date. `group` is a numeric label per name (a name with a NaN label is excluded); `min_names` applies to each group. Needs a panel and a group series, e.g. `col.group("sector")`.
+
+- inputs: `x` (default `close`), `group`
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `group_zscore([x], group, min_names=2)`
+
+`zscore_xs` within each group at each date; `min_names` applies to each group. Needs a panel and a group series.
+
+- inputs: `x` (default `close`), `group`
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `quantile_xs([x], q=0.5, min_names=2)`
+
+The cross-sectional quantile `q` of the participating names at each date, linear interpolation at position q * (n - 1), given to every present name (so `x > quantile_xs(x, 0.8)` selects the top fifth). NaN below `min_names` participants. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: `q`: float in [0.0, 1.0], default 0.5; `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `rank([x], min_names=2)`
+
+Cross-sectional rank at each date, in [0, 1]: the lowest name 0, the highest 1, ties sharing the mean rank ((rank - 1) / (n - 1)). Names whose input is NaN or that are absent at the date take no rank and give NaN; below `min_names` participants the whole date is NaN. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `winsorize_xs([x], pct=0.05, min_names=2)`
+
+Clip each date's cross-section to its k lowest and k highest values, k = floor(n * pct) for n participants (nothing clips while k is 0). `pct` in [0, 0.499]. NaN below `min_names` participants. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: `pct`: float in [0.0, 0.499], default 0.05; `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `zscore_xs([x], min_names=2)`
+
+Cross-sectional z-score at each date: (x - mean) / stdev over the participating names, population stdev. NaN for a date with fewer than `min_names` participants or no spread. Needs a panel.
+
+- inputs: `x` (default `close`)
+- parameters: `min_names`: int in [2, 16777216], default 2
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant, shift_invariant
 - revision: 1 (a change to the numbers raises it, and the program hash with it)
 
 ## hilbert

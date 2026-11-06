@@ -9,12 +9,13 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | --- | --- |
 | [`raptorbt`](raptorbt.md) | 117 |
 | [`raptorbt.adapters`](raptorbt.adapters.md) | 26 |
+| [`raptorbt.analysis`](raptorbt.analysis.md) | 1 |
 | [`raptorbt.capabilities`](raptorbt.capabilities.md) | 1 |
 | [`raptorbt.costs`](raptorbt.costs.md) | 2 |
 | [`raptorbt.crash_report`](raptorbt.crash_report.md) | 2 |
 | [`raptorbt.errors`](raptorbt.errors.md) | 18 |
 | [`raptorbt.execution`](raptorbt.execution.md) | 9 |
-| [`raptorbt.expressions`](raptorbt.expressions.md) | 6 |
+| [`raptorbt.expressions`](raptorbt.expressions.md) | 7 |
 | [`raptorbt.journal`](raptorbt.journal.md) | 10 |
 | [`raptorbt.margin`](raptorbt.margin.md) | 2 |
 | [`raptorbt.pricing`](raptorbt.pricing.md) | 12 |

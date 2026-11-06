@@ -4,18 +4,31 @@ Each public API domain has one `SKILL.md` that teaches an agent that domain
 and nothing else. Load only what the task needs: read the entry below, load the
 skills it names, and follow their `depends_on` first.
 
-From Python, with the package installed (no repository needed):
+**Start with `raptorbt-analysis` to explore a series, an indicator or a signal before
+building anything**: one call returns a small summary (shape, warm-up, distribution, flags) and
+a handle the next expression reads as a series. The loop, from a shell or from Python:
+
+```bash
+python -m raptorbt skills for "is this indicator defined on a name that does not trade"
+python -m raptorbt functions rsi                      # find the function
+python -m raptorbt describe rsi                       # warm-up, reference, a working example
+python -m raptorbt eval "rsi(close, 14)" --data bars.csv --bar-stamp close   # -> handle h_...
+python -m raptorbt eval "zscore(h_..., 20)"           # chain the handle
+python -m raptorbt show h_... --tail 5                # full-precision values
+```
 
 ```python
 import raptorbt.skills as skills
+from raptorbt.analysis import Session
 
-skills.for_task("multi-timeframe options strategy with ATR stops")  # skill names, best first
-print(skills.load("raptorbt-core"))                                   # a skill's text
-skills.manifest()                                                      # the machine registry
+skills.for_task("multi-timeframe options strategy with ATR stops")  # skill names, best first, then their dependencies
+print(skills.load("raptorbt-analysis"))                              # a skill's text
+session = Session()                                                  # load(bars, bar_stamp=...), eval(text), series(handle)
 ```
 
-`manifest.json` is the machine-readable form of this file. Start with
-`raptorbt-core`; it teaches the lifecycle every other skill assumes.
+To build a strategy start with `raptorbt-core`; it teaches the lifecycle every other skill
+assumes. `manifest.json` is the machine-readable form of this file. `skills export DIR` copies
+the skills for any agent (`python -m raptorbt skills export DIR`).
 
 `status: draft` means the skill is a skeleton and its examples are not yet
 verified. Treat a draft as a pointer to the domain, not as documentation.
@@ -39,6 +52,26 @@ Load when:
 - Starting a RaptorBT project or choosing which API to use.
 - Learning the engine lifecycle: data in, config, run, result.
 - Setting capital, fees, slippage, fill timing or session length.
+
+## Analysis
+
+Exploring a price series before building a strategy: load bars once, evaluate expressions and statistics, and get a small true summary with a short handle that the next expression reads as a series. In Python (a Session) or from a shell (python -m raptorbt). The loop an agent follows from a task to evidence, what each flag means, and how a tested expression moves into a strategy unchanged.
+
+Name: `raptorbt-analysis`  
+Path: [analysis/SKILL.md](analysis/SKILL.md)  
+Status: stable  
+API version: 1.x  
+Depends on: raptorbt-core, raptorbt-expressions, raptorbt-statistics
+
+Load when:
+
+- Exploring a price series, an indicator or a signal before writing a strategy: what it looks like, where it is defined, whether it is flat.
+- Loading bars from a CSV, npz or npy file and evaluating an expression over them.
+- Researching a factor over many instruments: a panel, a cross-sectional rank or z-score, and its information coefficient, overlap-corrected t-statistic and gross long-short spread.
+- Evaluating an expression or a statistic and getting a small summary, then chaining its handle into the next expression.
+- Working from a shell with python -m raptorbt: eval, functions, describe, show, export, stats, skills.
+- Choosing which skills a task needs, or exporting the skills for another agent.
+- Moving an expression that was explored into a strategy with ctx.indicators.expr.
 
 ## Strategy
 
@@ -387,6 +420,9 @@ the skills it names, then copy the script.
 
 | Task | Example |
 | --- | --- |
+| A panel of instruments: rank, chain a handle, score it against forward returns (IC, overlap-corrected t, gross spread) | `examples/analysis/factor_research.py` |
+| Stationarity, then half-life, then a signal window chosen from it | `examples/analysis/stationarity_to_signal.py` |
+| The same expression explored in a session and run in a strategy, asserted byte-identical | `examples/analysis/expression_to_strategy.py` |
 | A single-instrument strategy with indicators, fees, a stop and a target, and its results | `examples/single-instrument/sma_cross.py` |
 | Two instruments read together in one decision (the equal-timestamp group rule) | `examples/multi-instrument/relative_value.py` |
 | 1-minute entries confirmed by a 15-minute trend (composite bars) | `examples/multi-timeframe/trend_confirmation.py` |

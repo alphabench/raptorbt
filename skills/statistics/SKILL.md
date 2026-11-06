@@ -393,6 +393,10 @@ parameter sweep gives the cells of `sensitivity_surface`. Run `pbo_cscv` and `sp
 variant you tried, not on the winner alone. `audit_bars` first: every other statistic assumes the
 bars are right.
 
+An indicator or a derived series can feed them without leaving expressions:
+[Analysis](../analysis/SKILL.md) evaluates the formula, keeps it under a handle and runs
+`Session.stats("stationarity", handle)` on it, cutting the warm-up for you.
+
 `raptorbt.capabilities()["statistics"]["functions"]` lists the function names. Refusals are
 registered in `raptorbt.errors.CODES`.
 
@@ -506,6 +510,8 @@ Before you rely on a number from your own data:
 ## 10. Related skills
 
 - [Core](../core/SKILL.md): the engine concepts and the settings every run shares.
+- [Analysis](../analysis/SKILL.md): run these tests on an expression's result by handle, and
+  chain the result into the next formula.
 - [Results](../results/SKILL.md): the returns and metrics of a backtest, which the inference
   functions here take as input.
 - [Optimization](../optimization/SKILL.md): parameter sweeps, whose grids `sensitivity_surface`

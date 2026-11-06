@@ -170,17 +170,35 @@ impl PyExprProgram {
     /// Compile `source`. `params` binds the `$name` constants the source uses.
     ///
     /// `groups` names series the caller supplies per name and date to `eval_panel` (a sector
-    /// code for `group_demean`); they read as numbers.
+    /// code for `group_demean`); they read as numbers. `series` names numeric series the source
+    /// may read besides the five fields (a handle from an earlier evaluation), each with the
+    /// leading bars of it that are unknown; `evaluate` and `eval_panel` then take each by name.
     #[new]
-    #[pyo3(signature = (source, params=None, groups=None))]
+    #[pyo3(signature = (source, params=None, groups=None, series=None))]
     fn new(
         source: &str,
         params: Option<&Bound<'_, PyDict>>,
         groups: Option<Vec<String>>,
+        series: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let mut env = Env::default();
         for g in groups.unwrap_or_default() {
             env.series.insert(g, Handle { ty: Ty::series(), warm: 0 });
+        }
+        if let Some(series) = series {
+            let named: BTreeMap<String, usize> = series.extract().map_err(|e| {
+                PyErr::from(
+                    Fail::new(
+                        "invalid_parameter",
+                        format!("series must map names to warm-up bar counts: {e}"),
+                    )
+                    .op("expr")
+                    .param("series"),
+                )
+            })?;
+            for (name, warm) in named {
+                env.series.insert(name, Handle { ty: Ty::series(), warm });
+            }
         }
         if let Some(params) = params {
             let bound: BTreeMap<String, f64> = params.extract().map_err(|e| {
@@ -311,6 +329,32 @@ impl PyExprProgram {
             .collect()
     }
 
+    /// What each output is, in the order of `outputs`: "bool" (1.0, 0.0 or NaN) or "number".
+    #[getter]
+    fn output_kinds(&self) -> Vec<&'static str> {
+        use crate::quant::lang::Elem;
+        let dag = &self.program.dag;
+        self.program
+            .outputs()
+            .into_iter()
+            .map(|(id, _)| match dag.node(id).ty.elem {
+                Elem::Bool => "bool",
+                Elem::F64 => "number",
+            })
+            .collect()
+    }
+
+    /// The named series the program reads (see `series` in the constructor), in the order the
+    /// plan holds them.
+    #[getter]
+    fn handles(&self) -> Vec<String> {
+        match (&self.plan, &self.panel) {
+            (Some(plan), _) => plan.handles().to_vec(),
+            (None, Ok(panel)) => panel.handles().to_vec(),
+            (None, Err(_)) => Vec::new(),
+        }
+    }
+
     /// The columns the program reads, sorted.
     #[getter]
     fn fields(&self) -> Vec<&'static str> {
@@ -380,6 +424,27 @@ impl PyExprProgram {
         }
         let cols: Vec<(Field, Cow<'_, [f64]>)> =
             held.iter().map(|(f, a)| (*f, numpy_cow_f64(a))).collect();
+        let mut held_series: Vec<(&str, PyReadonlyArray1<'py, f64>)> = Vec::new();
+        for name in plan.handles() {
+            let Some(v) = dict.get_item(name.as_str())? else { continue };
+            let arr = v.extract::<PyReadonlyArray1<'py, f64>>().map_err(|_| {
+                PyErr::from(
+                    Fail::new(
+                        "invalid_array",
+                        format!(
+                            "'{name}' must be a 1-D numpy float64 array, got {}; convert with \
+                             np.asarray(x, dtype=np.float64)",
+                            v.get_type().name().map(|n| n.to_string()).unwrap_or_default()
+                        ),
+                    )
+                    .op(OP)
+                    .param(name.as_str()),
+                )
+            })?;
+            held_series.push((name.as_str(), arr));
+        }
+        let series_cols: Vec<(&str, Cow<'_, [f64]>)> =
+            held_series.iter().map(|(n, a)| (*n, numpy_cow_f64(a))).collect();
         let stamps: Option<PyReadonlyArray1<'py, i64>> = if plan.has_at() {
             match dict.get_item("timestamps")? {
                 None => None,
@@ -413,6 +478,9 @@ impl PyExprProgram {
             let mut inputs = Inputs::new();
             for (f, c) in &cols {
                 inputs = inputs.field(*f, c);
+            }
+            for (name, c) in &series_cols {
+                inputs = inputs.handle(name, c);
             }
             if let Some(ts) = &stamps {
                 inputs = inputs.timestamps(ts);

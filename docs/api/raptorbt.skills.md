@@ -6,7 +6,7 @@ Skills: domain guides an AI agent loads to learn only the API it needs.
 
 Each public API domain has one ``SKILL.md``. ``manifest()`` is the machine
 registry, ``index()`` lists the skills, ``for_task(text)`` picks the ones a
-task needs, and ``load(name)`` returns a skill's text. The files ship in the
+task needs (and what they depend on), and ``load(name)`` returns a skill's text. The files ship in the
 wheel, so this works from an installed package without the repository.
 
 >>> import raptorbt.skills as skills
@@ -20,7 +20,7 @@ True
 | Name | Kind | Summary |
 | --- | --- | --- |
 | [`SkillInfo`](#skillinfo) | class | One manifest entry. ``name`` is ``raptorbt-<domain>``. |
-| [`for_task`](#for_task) | function | Skill names whose domain, description or ``load_when`` match the task. |
+| [`for_task`](#for_task) | function | Skill names that fit the task, best first, then what they depend on. |
 | [`index`](#index) | function | Every skill in the manifest, in registry order. |
 | [`load`](#load) | function | The text of one skill. ``name`` is ``"raptorbt-core"`` or ``"core"``. |
 | [`manifest`](#manifest) | function | The parsed ``manifest.json``. |
@@ -44,12 +44,15 @@ One manifest entry. ``name`` is ``raptorbt-<domain>``.
 for_task(text: 'str') -> 'list[str]'
 ```
 
-Skill names whose domain, description or ``load_when`` match the task.
+Skill names that fit the task, best first, then what they depend on.
 
-Plain keyword matching, best match first (ties keep registry order). A
-match on the domain name counts three times. It does not add
-dependencies: read ``SkillInfo.depends_on`` for those. Returns ``[]`` when
-nothing matches.
+Words are stemmed and weighted by how rare they are across skills (a word only one skill
+uses counts for more than one every skill uses). A match on the domain name counts three
+times, and a match on a function or module name (``doji``, ``garch``, ``sizing``) counts
+three quarters. The skills that match come first, in score order (ties keep registry order); the
+skills they depend on, transitively and not already listed, follow in dependency order, so
+reading the list from the top gives the answer and reading it to the end gives everything
+needed. Returns ``[]`` when nothing matches.
 
 ### `index`
 

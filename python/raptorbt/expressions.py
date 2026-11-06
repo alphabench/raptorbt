@@ -77,32 +77,75 @@ def _signature(row: dict[str, Any]) -> str:
 def functions(query: str | None = None) -> list[dict[str, Any]]:
     """The functions an expression can call, from the engine's registry.
 
-    ``query`` keeps the functions whose name, family or description contains it (case
-    ignored). Each row has ``name``, ``family``, ``signature``, ``outputs`` and ``doc``;
-    :func:`describe` gives the rest.
+    ``query`` is one or more words, all of which must appear (case ignored) in a function's
+    name, family, TA-Lib name or description: ``"moving average"``, ``"doji"``, ``"rsi"``. With
+    a query the best match is first (the exact name, then the TA-Lib name, then a name that
+    starts with a word, then a word inside a name, then the family, then the description);
+    without one the rows are sorted by name. Each row has ``name``, ``family``, ``signature``,
+    ``outputs``, ``talib`` (the TA-Lib name, or ``None``) and ``doc``; :func:`describe` gives
+    the rest.
     """
-    needle = None if query is None else query.lower()
-    rows = []
+    words = [] if query is None else str(query).lower().replace(",", " ").split()
+    ranked = []
     for row in _registry().values():
-        if needle is not None and not any(
-            needle in str(row[k]).lower() for k in ("name", "family", "doc")
-        ):
+        score = _match(row, words)
+        if words and score is None:
             continue
-        rows.append(
-            {
-                "name": row["name"],
-                "family": row["family"],
-                "signature": _signature(row),
-                "outputs": list(row["outputs"]),
-                "doc": row["doc"],
-            }
+        ranked.append(
+            (
+                -(score or 0),
+                row["name"],
+                {
+                    "name": row["name"],
+                    "family": row["family"],
+                    "signature": _signature(row),
+                    "outputs": list(row["outputs"]),
+                    "talib": row["talib_name"],
+                    "doc": row["doc"],
+                },
+            )
         )
-    return rows
+    # best match first, the shorter (more basic) name before a longer one; sorted by name alone
+    # without a query
+    ranked.sort(key=lambda t: (t[0], len(t[1]) if words else 0, t[1]))
+    return [r for _, _, r in ranked]
+
+
+def _match(row: dict[str, Any], words: list[str]) -> int | None:
+    """How well ``row`` answers every word, or ``None`` when one word is nowhere in it."""
+    name, family = row["name"].lower(), row["family"].lower()
+    talib = (row["talib_name"] or "").lower()
+    doc = str(row["doc"]).lower()
+    total = 0
+    for w in words:
+        if w == name:
+            total += 100
+        elif w == talib:
+            total += 60
+        elif name.startswith(w):
+            total += 40
+        elif w in name:
+            total += 30
+        elif w == family:
+            total += 20
+        elif talib and w in talib:
+            total += 10
+        elif w in doc:
+            total += 5
+        else:
+            return None
+    return total
 
 
 def describe(name: str) -> dict[str, Any]:
-    """Everything the registry says about one function: inputs, parameters, outputs, warm-up at
-    the defaults, how it treats NaN, the legacy indicator it is pinned to, and its references.
+    """Everything the registry says about one function: inputs, parameters, outputs, how it
+    treats NaN, the legacy indicator it is pinned to, its references, and
+
+    - ``signature``, ``example`` (an expression that compiles and runs on bars, generated from
+      the registry) and ``warmup`` (leading unknown bars of the example);
+    - ``reference`` (what its numbers were checked against) and ``relation`` (to TA-Lib:
+      ``exact``, ``defined_difference``, ``candle``, or ``no_library``);
+    - ``conventions``: plain sentences on NaN handling, memory, causality and input domain.
     """
     row = _registry().get(name)
     if row is None:
@@ -114,7 +157,83 @@ def describe(name: str) -> dict[str, Any]:
             value=name,
             valid=_close(name),
         )
-    return {**copy.deepcopy(row), "signature": _signature(row)}
+    text = _example(row)
+    return {
+        **copy.deepcopy(row),
+        "signature": _signature(row),
+        "example": text,
+        "warmup": _compile_example(text).warmup,
+        "conventions": _conventions(row),
+    }
+
+
+def _compile_example(text: str) -> Expr:
+    return Expr(text)
+
+
+_NAN_POLICY = {
+    "windowed": "a NaN in the window makes the value NaN; it recovers once the NaN leaves the window",
+    "recursive": "a NaN input gives NaN and does not advance the state, so later bars are not poisoned",
+    "elementwise": "a NaN input gives NaN for that bar only",
+    "lagged": "reads earlier bars; a NaN there gives NaN",
+    "delayed": "reads an earlier bar; a NaN there gives NaN",
+}
+_DOMAIN = {
+    "positive": "inputs must be positive; a non-positive value gives NaN",
+    "unit": "inputs must lie in [-1, 1]; a value outside gives NaN",
+}
+
+
+def _conventions(row: dict[str, Any]) -> list[str]:
+    out = [
+        _NAN_POLICY.get(row["nan_policy"], f"NaN policy: {row['nan_policy']}"),
+        "values are finite or NaN; a division by zero, an overflow or a logarithm of a "
+        "non-positive number gives NaN, never an infinity",
+        "the first values are NaN until the warm-up has passed"
+        if row["memory"] == "finite"
+        else "the first values are NaN until the warm-up has passed; the seed keeps fading "
+        "after that (see Expr.settle)",
+        "causal: a value depends only on bars up to its own" if row["causal"] else "NOT causal: a value uses later bars",
+    ]
+    if row["domain"] in _DOMAIN:
+        out.append(_DOMAIN[row["domain"]])
+    if row["talib_name"]:
+        out.append(f"TA-Lib name {row['talib_name']}; new functions follow TA-Lib's conventions")
+    return out
+
+
+#: Fields offered, in order, to inputs that have no default field of their own.
+_SPARE_FIELDS = ("open", "volume", "high", "low")
+
+
+def _example(row: dict[str, Any]) -> str:
+    """A call of ``row`` that compiles and runs on ordinary bars.
+
+    Every input is named, parameters without a default get a value from the registry's own
+    range (14 for a period, else 5; 0.5 for a fraction), and a boolean input gets
+    ``close > open``. A function whose inputs must lie in [-1, 1] reads ``rsi(close, 5) / 100``.
+    """
+    spare = iter(_SPARE_FIELDS)
+    parts = []
+    for i in row["inputs"]:
+        if i["elem"] == "bool":
+            parts.append("(close > open)")
+        elif row["domain"] == "unit":
+            parts.append("(rsi(close, 5) / 100)")
+        else:
+            parts.append(i["default_field"] or next(spare))
+    for p in row["params"]:
+        if p["default"] is not None:
+            continue
+        lo, hi = p["range"].get("min"), p["range"].get("max")
+        if p["kind"] == "int":
+            want = 14 if "period" in p["name"] else 5
+            parts.append(str(min(max(want, lo), hi)))
+        elif p["kind"] == "float":
+            parts.append("0.5" if (lo is None or lo <= 0.5) and (hi is None or hi >= 0.5) else repr(float(lo)))
+        else:
+            parts.append(_quote(p["range"]["values"][0]))
+    return f"{row['name']}({', '.join(parts)})"
 
 
 def _close(name: str) -> list[str]:
@@ -206,6 +325,7 @@ class Expr:
         *,
         groups: tuple[str, ...] = (),
         _atom: bool = False,
+        series: Mapping[str, int] | None = None,
     ):
         if not isinstance(source, str):
             raise _refuse(
@@ -220,7 +340,9 @@ class Expr:
         self._params = bound
         self._atom = _atom
         self._groups = tuple(dict.fromkeys(groups))
-        self._prog = _raptorbt.ExprProgram(source, bound or None, list(self._groups) or None)
+        self._prog = _raptorbt.ExprProgram(
+            source, bound or None, list(self._groups) or None, dict(series) if series else None
+        )
         names = self._prog.outputs
         self._outputs = tuple(names) if len(names) > 1 else ()
 
@@ -295,9 +417,20 @@ class Expr:
         return tuple(self._prog.outputs)
 
     @property
+    def kinds(self) -> tuple[str, ...]:
+        """What each output is, in the order of :attr:`outputs`: ``"bool"`` (1.0, 0.0 or NaN) or
+        ``"number"``."""
+        return tuple(self._prog.output_kinds)
+
+    @property
     def fields(self) -> tuple[str, ...]:
         """The columns the expression reads, sorted."""
         return tuple(self._prog.fields)
+
+    @property
+    def handles(self) -> tuple[str, ...]:
+        """The named series the expression reads (see ``series`` in :func:`expr`)."""
+        return tuple(h for h in self._prog.handles if h not in self._groups)
 
     def settle(self, eps: float) -> int:
         """Bars until functions with infinite memory (``ema``) have forgotten their seed to
@@ -646,18 +779,25 @@ col = _Col()
 
 
 def expr(
-    source: str, params: Mapping[str, float] | None = None, *, groups: Sequence[str] = ()
+    source: str,
+    params: Mapping[str, float] | None = None,
+    series: Mapping[str, int] | None = None,
+    *,
+    groups: Sequence[str] = (),
 ) -> Expr:
     """Compile an expression from text.
 
     ``params`` binds the ``$name`` constants the text uses (``sma(close, $n)`` with
-    ``params={"n": 20}``). A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
+    ``params={"n": 20}``). ``series`` names numeric series the text may read besides the five
+    columns, each with its leading unknown bars (``zscore(h_ab12, 20)`` with
+    ``series={"h_ab12": 13}``); ``eval`` then takes each as a key of ``data``. Such a name is
+    only available in text, not in operators built from :data:`col`. A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
     character offset), ``snippet`` (the line with a caret) and ``valid`` (the closest names).
 
     ``groups`` names the group series the text reads (``group_demean(x, sector)`` with
     ``groups=["sector"]``), supplied per name to :meth:`Expr.eval_panel`.
     """
-    return Expr(source, params, groups=tuple(groups))
+    return Expr(source, params, groups=tuple(groups), series=series)
 
 
 # ------------------------------------------------------------------ panels

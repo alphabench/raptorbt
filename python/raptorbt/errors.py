@@ -49,6 +49,7 @@ SKILLS = (
     "troubleshooting",
     "expressions",
     "statistics",
+    "analysis",
 )
 
 _UNSET: Any = object()
@@ -708,6 +709,19 @@ CODES: dict[str, Code] = {
     "did_not_converge": _c(
         InvalidData, "statistics", "A fitted model (GARCH, Markov-switching regimes) did not settle; no number is returned.",
         ["a longer or cleaner sample", "fewer regimes (k=2)"],
+    ),
+    # Analysis sessions
+    "unknown_handle": _c(
+        InvalidParameter, "analysis", "A handle names no result of this session; the error lists the nearest handles it does hold.",
+        ["a handle returned by Session.eval in this session"],
+    ),
+    "handle_expired": _c(
+        StateError, "analysis", "A handle named a result the session has dropped or evicted to stay inside max_bytes or max_handles; the error carries the call that recomputes it.",
+        ["the recipe in the error: Session.eval(...) with the same expression and data"],
+    ),
+    "session_memory_exceeded": _c(
+        InvalidParameter, "analysis", "One result (or the data) is larger than the session's max_bytes, so evicting handles cannot make room.",
+        ["fewer bars", "fewer outputs", "a Session with a larger max_bytes"],
     ),
     # Option structures and sizing
     "invalid_structure": _c(

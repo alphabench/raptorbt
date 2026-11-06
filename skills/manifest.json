@@ -28,6 +28,32 @@
       ]
     },
     {
+      "name": "raptorbt-analysis",
+      "domain": "analysis",
+      "title": "Analysis",
+      "path": "analysis/SKILL.md",
+      "description": "Exploring a price series before building a strategy: load bars once, evaluate expressions and statistics, and get a small true summary with a short handle that the next expression reads as a series. In Python (a Session) or from a shell (python -m raptorbt). The loop an agent follows from a task to evidence, what each flag means, and how a tested expression moves into a strategy unchanged.",
+      "load_when": [
+        "Exploring a price series, an indicator or a signal before writing a strategy: what it looks like, where it is defined, whether it is flat.",
+        "Loading bars from a CSV, npz or npy file and evaluating an expression over them.",
+        "Researching a factor over many instruments: a panel, a cross-sectional rank or z-score, and its information coefficient, overlap-corrected t-statistic and gross long-short spread.",
+        "Evaluating an expression or a statistic and getting a small summary, then chaining its handle into the next expression.",
+        "Working from a shell with python -m raptorbt: eval, functions, describe, show, export, stats, skills.",
+        "Choosing which skills a task needs, or exporting the skills for another agent.",
+        "Moving an expression that was explored into a strategy with ctx.indicators.expr."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-expressions",
+        "raptorbt-statistics"
+      ],
+      "api_version": "1.x",
+      "status": "stable",
+      "modules": [
+        "raptorbt.analysis"
+      ]
+    },
+    {
       "name": "raptorbt-strategy",
       "domain": "strategy",
       "title": "Strategy",

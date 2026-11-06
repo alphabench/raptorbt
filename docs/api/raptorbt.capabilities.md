@@ -11,7 +11,9 @@ which includes the expression ``functions`` from the function registry),
 the hooks from the strategy hook tables, the indicators from the functions the
 extension registered as indicators and the streaming constructors of
 ``Indicator``, the adapters from ``raptorbt.execution``, the error codes from
-``raptorbt.errors.CODES`` and the statistics from ``raptorbt.stats.__all__``. A test fails
+``raptorbt.errors.CODES`` and the statistics from ``raptorbt.stats.__all__``. The agent
+surface (``analysis``) is the one list typed out here, by name, because the module it names
+touches files and cannot be imported from this one; a test checks every name. A test fails
 when something public exists that the manifest does not list.
 
 | Name | Kind | Summary |

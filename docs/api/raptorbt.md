@@ -2157,14 +2157,20 @@ Estimate a Ledoit-Wolf constant-correlation shrunk covariance.
 *function*
 
 ```python
-expr(source: 'str', params: 'Mapping[str, float] | None' = None) -> 'Expr'
+expr(source: 'str', params: 'Mapping[str, float] | None' = None, series: 'Mapping[str, int] | None' = None, *, groups: 'Sequence[str]' = ()) -> 'Expr'
 ```
 
 Compile an expression from text.
 
 ``params`` binds the ``$name`` constants the text uses (``sma(close, $n)`` with
-``params={"n": 20}``). A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
+``params={"n": 20}``). ``series`` names numeric series the text may read besides the five
+columns, each with its leading unknown bars (``zscore(h_ab12, 20)`` with
+``series={"h_ab12": 13}``); ``eval`` then takes each as a key of ``data``. Such a name is
+only available in text, not in operators built from :data:`col`. A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
 character offset), ``snippet`` (the line with a caret) and ``valid`` (the closest names).
+
+``groups`` names the group series the text reads (``group_demean(x, sector)`` with
+``groups=["sector"]``), supplied per name to :meth:`Expr.eval_panel`.
 
 ### `full_report`
 

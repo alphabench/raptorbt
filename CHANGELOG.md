@@ -5,6 +5,30 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Analysis for agents.** `raptorbt.analysis.Session` loads bars once, evaluates expressions
+  and statistics, and returns a summary of at most 2 KB (shape, warm-up, distribution, flags)
+  with a short handle that the next expression reads as a series. The same work gives the same
+  handle; the store is bounded and an evicted handle's error carries the call that remakes it.
+  `python -m raptorbt` (`eval`, `functions`, `describe`, `show`, `export`, `stats`, `skills`)
+  runs it from a shell, with JSON output and sessions kept on disk. New skill
+  `raptorbt-analysis`, three examples, and the error codes `unknown_handle`, `handle_expired`
+  and `session_memory_exceeded`. `raptorbt.analysis` is not imported by `import raptorbt`.
+- **Panels in a session.** `Session.load_panel` takes many instruments; a cross-sectional
+  expression returns a summary that names instruments (coverage per date, the names at both ends
+  of the last cross-section). `Session.factor` and `python -m raptorbt factor` give
+  `factor_report` as numbers under the 2 KB cap (rank IC, its overlap-corrected t, hit rate,
+  gross long-short spread, turnover, `no_costs: true`), with the per-date arrays behind a handle.
+  `capabilities()["analysis"]` lists the entry points.
+- `expr(text, series={...})` reads named series besides the five columns;
+  `raptorbt.expressions.functions` ranks by name, TA-Lib name, family and description, and
+  `describe` adds a working example, warm-up, reference and conventions.
+- `skills.for_task` weights rare words, indexes function and module names (`doji`, `garch`),
+  stems `analysis`/`analyses`, and lists what the matches depend on.
+
 ## [1.0.0] - 2026-11-04
 
 The first stable release. It covers everything since 0.13.4, including the
