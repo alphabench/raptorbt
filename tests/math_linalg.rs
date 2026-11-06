@@ -601,6 +601,58 @@ fn svd_on_rank_deficient_input() {
     assert_eq!(z.rank(1e-12), 0);
 }
 
+/// Near-duplicate instruments give panels of wide rank deficiency: columns that are repeated,
+/// shifted copies of one pattern, or zero. The Jacobi sweeps must settle (a column at rounding
+/// level against the largest is a null direction), and `check_svd` states the bounds: the
+/// reconstruction within 32 max(m, n) eps |A|, V orthonormal, U orthonormal on the non-null part.
+#[test]
+fn svd_settles_on_wide_rank_deficiency() {
+    // a period-29 pattern shifted 40 ways, standardised: rank 28 of 40 (the period sums to zero)
+    let cols: Vec<Vec<f64>> = (0..40)
+        .map(|j| (0..80).map(|t| (((t * 7 + j * 13) % 29) as f64 - 14.0) / 100.0).collect())
+        .collect();
+    let a = Mat::from_vec(80, 40, (0..80).flat_map(|t| cols.iter().map(move |c| c[t])).collect())
+        .unwrap();
+    let f = check_svd(&a);
+    assert_eq!(f.rank(a.rows().max(a.cols()) as f64 * EPS), 28);
+
+    // 40 columns, 5 distinct: rank 5
+    let base = random(60, 5, 71);
+    let dup = Mat::from_vec(
+        60,
+        40,
+        (0..60).flat_map(|i| (0..40).map(move |j| (i, j % 5))).map(|(i, j)| base[(i, j)]).collect(),
+    )
+    .unwrap();
+    let f = check_svd(&dup);
+    assert_eq!(f.rank(60.0 * EPS), 5);
+    // each distinct column repeated 8 times: the singular values are sqrt(8) times those of base
+    let g = svd(&base).unwrap();
+    for i in 0..5 {
+        assert!((f.s[i] - 8f64.sqrt() * g.s[i]).abs() <= 32.0 * 60.0 * EPS * f.s[0], "{i}");
+    }
+
+    // zero columns among live ones
+    let live = random(60, 40, 72);
+    let mut data = live.as_slice().to_vec();
+    for i in 0..60 {
+        for j in (0..40).filter(|j| j % 3 == 0) {
+            data[i * 40 + j] = 0.0;
+        }
+    }
+    let z = Mat::from_vec(60, 40, data).unwrap();
+    let f = check_svd(&z);
+    assert_eq!(f.rank(60.0 * EPS), 26, "40 columns, 14 of them zero");
+
+    // all columns zero but one
+    let mut one = vec![0.0; 60 * 40];
+    for i in 0..60 {
+        one[i * 40 + 7] = (i as f64 + 1.0) / 60.0;
+    }
+    let f = check_svd(&Mat::from_vec(60, 40, one).unwrap());
+    assert_eq!(f.rank(60.0 * EPS), 1);
+}
+
 #[test]
 fn svd_of_hilbert_matrices_within_the_condition_bound() {
     for n in [4, 8, 12] {

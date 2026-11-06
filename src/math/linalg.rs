@@ -754,6 +754,12 @@ pub fn svd(a: &Mat) -> Result<Svd, LinAlgError> {
     }
     let mut u = Mat { rows: m, cols: n, data: a.data.iter().map(|x| x / scale).collect() };
     let mut v = Mat::identity(n)?;
+    // a column whose norm is at rounding level against the largest starting column is a null
+    // direction (a duplicate or a combination of the others, cancelled): rotating it against
+    // another column only re-normalises noise and never settles, so such a pair counts as
+    // orthogonal. The threshold is the rank threshold below, in squared norms.
+    let widest = (0..n).map(|j| norm2(&u.col(j))).fold(0.0f64, f64::max);
+    let negligible = (m.max(n) as f64 * EPS * widest).powi(2);
     let mut converged = false;
     for _ in 0..MAX_SWEEPS {
         let mut rotated = false;
@@ -766,7 +772,10 @@ pub fn svd(a: &Mat) -> Result<Svd, LinAlgError> {
                     beta += y * y;
                     gamma += x * y;
                 }
-                if gamma == 0.0 || gamma.abs() <= EPS * (alpha * beta).sqrt() {
+                if gamma == 0.0
+                    || alpha.min(beta) <= negligible
+                    || gamma.abs() <= EPS * (alpha * beta).sqrt()
+                {
                     continue;
                 }
                 rotated = true;
