@@ -62,6 +62,8 @@ pub struct Fail {
     valid: Vec<String>,
     skill: Option<&'static str>,
     symbol: Option<String>,
+    /// Character offset and caret snippet of an expression refusal.
+    at: Option<(usize, String)>,
 }
 
 impl Fail {
@@ -75,6 +77,7 @@ impl Fail {
             valid: Vec::new(),
             skill: None,
             symbol: None,
+            at: None,
         }
     }
 
@@ -99,6 +102,13 @@ impl Fail {
     /// The instrument the refusal concerns, when it concerns one.
     pub fn symbol(mut self, symbol: &str) -> Self {
         self.symbol = Some(symbol.to_string());
+        self
+    }
+
+    /// Where in an expression's source the refusal is: a character offset and the source line
+    /// with a caret under it.
+    pub fn at(mut self, position: usize, snippet: impl Into<String>) -> Self {
+        self.at = Some((position, snippet.into()));
         self
     }
 
@@ -142,6 +152,10 @@ impl Fail {
         }
         if let Some(symbol) = &self.symbol {
             kw.set_item("symbol", symbol)?;
+        }
+        if let Some((position, snippet)) = &self.at {
+            kw.set_item("position", position)?;
+            kw.set_item("snippet", snippet)?;
         }
         let exc = make.bind(py).call((self.code, &self.message), Some(&kw))?;
         Ok(PyErr::from_value(exc))

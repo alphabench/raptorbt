@@ -2,7 +2,8 @@
 
 ``raptorbt.capabilities()`` returns a JSON-serialisable dict an embedding platform
 reads to know what to offer. Nothing in it is typed out for the manifest: the
-engine half comes from the engine's own types (``_raptorbt.capabilities_json``),
+engine half comes from the engine's own types (``_raptorbt.capabilities_json``,
+which includes the expression ``functions`` from the function registry),
 the hooks from the strategy hook tables, the indicators from the functions the
 extension registered as indicators and the streaming constructors of
 ``Indicator``, the adapters from ``raptorbt.execution`` and the error codes from

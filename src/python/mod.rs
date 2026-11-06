@@ -7,6 +7,7 @@ pub mod costs_bindings;
 pub mod data_bindings;
 pub mod errors;
 pub mod execution_bindings;
+pub mod expr_bindings;
 pub mod indicator_bindings;
 pub mod instrument_bindings;
 pub mod journal_bindings;

@@ -23,6 +23,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `StateError` | `RuntimeError` |
 | `SessionFinished` | `RuntimeError`, `ValueError` |
 | `UnknownSymbol` | `KeyError`, `LookupError`, `ValueError` |
+| `ExpressionError` | `ValueError` |
 
 ## Codes
 
@@ -51,6 +52,11 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `exit_close_failed` | `StateError` | The closes of an exit rule were refused or cancelled the allowed number of times and the position is still open. | fix what the venue refuses (the refusal reasons are on the handle), then close the position yourself | `raptorbt-live-trading` |
 | `exit_rule_not_cancellable` | `StateError` | An exit rule the venue holds cannot be taken back; it stays held. | an adapter with cancel_exit_rule(request); close the position | `raptorbt-live-trading` |
 | `exit_rule_unconfirmed` | `StateError` | The venue did not say whether it holds, changed or dropped an exit rule. | ask the venue whether it holds the rule (reconcile) | `raptorbt-live-trading` |
+| `expr_syntax` | `ExpressionError` | An expression does not parse: a stray character, an unclosed bracket, a chained comparison, a number or name where an operator belongs, or one past the depth and size limits. | numbers, columns (open, high, low, close, volume), calls name(args), ( ), + - * / **, < <= > >= == !=, and/or/not or & | ~ | `raptorbt-expressions` |
+| `expr_type` | `ExpressionError` | A value of the wrong kind: arithmetic on a boolean, and/or/not on a number, a series where a constant belongs, an unknown column or output, a wrong argument count, a parameter out of range, or a Python truth test of an expression. | the arguments raptorbt.expressions.describe(name) lists; & | ~ in place of and, or, not and chained comparisons on Python expressions | `raptorbt-expressions` |
+| `expr_unbound_parameter` | `ExpressionError` | A $name has no value. | a name given in expr(source, params={...}) | `raptorbt-expressions` |
+| `expr_unknown_function` | `ExpressionError` | A call names a function the registry does not have; the error lists the closest names. | a name from raptorbt.expressions.functions() | `raptorbt-expressions` |
+| `expr_unsupported_here` | `ExpressionError` | A construct the language names but this engine does not run yet. | a construct raptorbt-expressions lists as available | `raptorbt-expressions` |
 | `fee_schedule_gap` | `InvalidParameter` | A fee schedule has no row for an instrument's or fill's venue and segment, or the instrument has no InstrumentSpec venue to choose a row from, or a fill or settlement falls on a date before the schedule's first row (the error names the earliest date); the run is refused rather than charged nothing or charged a rate that was not in force. | give the InstrumentSpec a venue the schedule prices; set config.fee_segment; add the missing row to the schedule | `raptorbt-execution` |
 | `fence_unsupported` | `InvalidParameter` | epoch= was given with an adapter whose can_fence is not true, so the epoch would protect nothing. | an adapter with can_fence = True; `'epoch=None'` | `raptorbt-live-trading` |
 | `fenced` | `StateError` | A newer execution epoch owns the account; this node sends nothing more. | stop this process: a newer epoch owns the account | `raptorbt-live-trading` |

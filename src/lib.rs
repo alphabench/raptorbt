@@ -229,5 +229,8 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register option pricing, Greeks, implied volatility and the option chain
     python::pricing_bindings::register(m)?;
 
+    // Register the expression language
+    python::expr_bindings::register(m)?;
+
     Ok(())
 }

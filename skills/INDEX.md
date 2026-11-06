@@ -142,6 +142,22 @@ Load when:
 - Registering a streaming indicator on a strategy and waiting for warm-up.
 - Writing a custom indicator, or an indicator on a higher timeframe.
 
+## Expressions
+
+Writing a signal as one formula (close > sma(close, 200)), as text or from Python operators, and evaluating it over whole columns or one bar at a time with the same numbers. Covers unknown values (NaN and Kleene logic), warm-up, no-lookahead and the function list.
+
+Name: `raptorbt-expressions`  
+Path: [expressions/SKILL.md](expressions/SKILL.md)  
+Status: stable  
+API version: 1.x  
+Depends on: raptorbt-core, raptorbt-indicators
+
+Load when:
+
+- Writing a condition or derived series as one formula, as text or from Python operators.
+- Evaluating a formula over a stored history and bar by bar with identical numbers.
+- Looking up which expression functions exist, their warm-up and how they treat unknown values.
+
 ## Orders
 
 Order construction and lifecycle: the typed order kinds, sizing forms, time in force, brackets, OCO links, modify and cancel, option structures, and the reasons an order is refused.

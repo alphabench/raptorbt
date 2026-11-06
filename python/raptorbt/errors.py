@@ -47,6 +47,7 @@ SKILLS = (
     "results",
     "deployment",
     "troubleshooting",
+    "expressions",
 )
 
 _UNSET: Any = object()
@@ -179,6 +180,33 @@ class UnknownSymbol(RaptorBTError, KeyError, ValueError):
     """A symbol was named that the run does not know."""
 
 
+class ExpressionError(RaptorBTError, ValueError):
+    """An expression was refused: it does not parse, names something unknown, misuses a type,
+    or uses a construct this engine does not run yet.
+
+    Attributes (besides the base ones):
+        position: Character offset into the expression text where it went wrong, or ``None``
+            when the refusal is not about a place in the text (an expression built from Python
+            operators, or used as a ``bool``).
+        snippet: The source line with a caret under ``position``, or ``None``.
+    """
+
+    def __init__(self, message: str, *, position: int | None = None, snippet: str | None = None, **kw):
+        super().__init__(message, **kw)
+        self.position = position
+        self.snippet = snippet
+
+    def __str__(self) -> str:
+        text = super().__str__()
+        if not self.snippet:
+            return text
+        head, sep, rest = text.partition("\n\n")
+        return f"{head}\n{self.snippet}{sep}{rest}"
+
+    def to_dict(self) -> dict:
+        return {**super().to_dict(), "position": self.position, "snippet": self.snippet}
+
+
 def _plain(v: Any) -> Any:
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
@@ -194,6 +222,7 @@ def _rebuild(cls, data: dict):
 def from_dict(data: dict, cls: type | None = None) -> RaptorBTError:
     """Rebuild an error from :meth:`RaptorBTError.to_dict` output."""
     cls = cls or globals().get(data["type"]) or error_class(data["code"])
+    extra = {k: data[k] for k in ("position", "snippet") if k in data}
     return cls(
         data["message"],
         code=data["code"],
@@ -203,6 +232,7 @@ def from_dict(data: dict, cls: type | None = None) -> RaptorBTError:
         valid=data["valid"],
         skill=data["skill"],
         symbol=data.get("symbol"),
+        **extra,
     )
 
 
@@ -643,6 +673,28 @@ CODES: dict[str, Code] = {
         InvalidParameter, "core", "A configuration value is invalid (engine-side check).",
         ["a configuration value inside the range the message names"],
     ),
+    # Expressions
+    "expr_syntax": _c(
+        ExpressionError, "expressions", "An expression does not parse: a stray character, an unclosed bracket, a chained comparison, a number or name where an operator belongs, or one past the depth and size limits.",
+        ["numbers, columns (open, high, low, close, volume), calls name(args), ( ), + - * / **, < <= > >= == !=, and/or/not or & | ~"],
+    ),
+    "expr_unknown_function": _c(
+        ExpressionError, "expressions", "A call names a function the registry does not have; the error lists the closest names.",
+        ["a name from raptorbt.expressions.functions()"],
+    ),
+    "expr_type": _c(
+        ExpressionError, "expressions",
+        "A value of the wrong kind: arithmetic on a boolean, and/or/not on a number, a series where a constant belongs, an unknown column or output, a wrong argument count, a parameter out of range, or a Python truth test of an expression.",
+        ["the arguments raptorbt.expressions.describe(name) lists", "& | ~ in place of and, or, not and chained comparisons on Python expressions"],
+    ),
+    "expr_unbound_parameter": _c(
+        ExpressionError, "expressions", "A $name has no value.",
+        ["a name given in expr(source, params={...})"],
+    ),
+    "expr_unsupported_here": _c(
+        ExpressionError, "expressions", "A construct the language names but this engine does not run yet.",
+        ["a construct raptorbt-expressions lists as available"],
+    ),
     # Option structures and sizing
     "invalid_structure": _c(
         InvalidParameter, "instruments", "A structure, leg, selector, exit or submission argument is invalid.",
@@ -1010,7 +1062,7 @@ def markdown() -> str:
     ]
     for cls in (
         InvalidParameter, InvalidType, InvalidData, InvalidOrder, InvalidSubscription,
-        UnsupportedOperation, StateError, SessionFinished, UnknownSymbol,
+        UnsupportedOperation, StateError, SessionFinished, UnknownSymbol, ExpressionError,
     ):
         skip = (object, Exception, BaseException)
         builtins = ", ".join(
@@ -1029,6 +1081,7 @@ __all__ = [
     "CODES",
     "SKILLS",
     "Code",
+    "ExpressionError",
     "InvalidData",
     "InvalidOrder",
     "InvalidParameter",

@@ -15,6 +15,8 @@ production quantitative trading:
 | Name | Kind | Summary |
 | --- | --- | --- |
 | [`capabilities`](#capabilities) | function | The engine's capability manifest (see the module docs). |
+| [`expr`](#expr) | function | Compile an expression from text. |
+| [`col`](#col) | constant | `col` |
 | [`full_report`](#full_report) | function | ``raptorbt._raptorbt.full_report`` plus ``unverified_fee_rows``: the fee rows the costs were priced on whose rates are not matched to an official publication (a result carries them as ``result.unverified_fee_rows``, which ``result.full_report`` passes). Left out, the key is absent. The costs of a run that lists any are not exchange-accurate. |
 | [`enable_crash_reporting`](#enable_crash_reporting) | function | Turn crash reporting on for this process; return whether it can send. |
 | [`RaptorBTError`](#raptorbterror) | exception | Base class of every structured RaptorBT error. |
@@ -2048,6 +2050,14 @@ capabilities() -> 'dict[str, Any]'
 
 The engine's capability manifest (see the module docs).
 
+### `col`
+
+*constant*
+
+```python
+col = col
+```
+
 ### `composite_scores`
 
 *function*
@@ -2140,6 +2150,20 @@ Estimate a Ledoit-Wolf constant-correlation shrunk covariance.
 
 `returns` is `n_obs x n_assets` per-period simple returns.
 `periods_per_year` is required -- annualization is never inferred.
+
+### `expr`
+
+*function*
+
+```python
+expr(source: 'str', params: 'Mapping[str, float] | None' = None) -> 'Expr'
+```
+
+Compile an expression from text.
+
+``params`` binds the ``$name`` constants the text uses (``sma(close, $n)`` with
+``params={"n": 20}``). A refusal is an ``ExpressionError`` with ``code``, ``position`` (a
+character offset), ``snippet`` (the line with a caret) and ``valid`` (the closest names).
 
 ### `full_report`
 

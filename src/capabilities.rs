@@ -194,6 +194,7 @@ pub fn manifest() -> Value {
         "data_types": data_types,
         "fill_timings": named(&fill_timing_prototypes()),
         "exit_reasons": named(&exit_reason_prototypes()),
+        "functions": crate::quant::registry::expr_registry_json()["functions"].clone(),
     })
 }
 

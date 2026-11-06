@@ -115,7 +115,7 @@ def test_core_examples_are_run():
 def test_index_and_manifest_agree():
     m = skills.manifest()
     assert [s.name for s in skills.index()] == [s["name"] for s in m["skills"]]
-    assert len(m["skills"]) == 17
+    assert len(m["skills"]) == 18
 
 
 def test_load_accepts_both_spellings():

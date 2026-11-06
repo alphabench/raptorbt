@@ -815,6 +815,39 @@ def _():
     raptorbt.sma(np.ones(5), 0)
 
 
+# -- expressions ----------------------------------------------------------------------------------
+
+
+@case("expr_syntax", "expression")
+def _():
+    raptorbt.expr("close +")
+
+
+@case("expr_unknown_function", "expression")
+def _():
+    raptorbt.expr("smaa(close, 5)")
+
+
+@case("expr_type", "expression")
+def _():
+    raptorbt.expr("close and open")
+
+
+@case("expr_type", "expression", name="truth_test_of_an_expression")
+def _():
+    bool(raptorbt.col.close > 1)
+
+
+@case("expr_unbound_parameter", "expression")
+def _():
+    raptorbt.expr("sma(close, $n)")
+
+
+@case("expr_unsupported_here", "expression")
+def _():
+    raptorbt.expr('at("1d", close)')
+
+
 @case("below_one_lot", "lots")
 def _():
     from raptorbt import sizing

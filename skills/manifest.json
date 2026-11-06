@@ -241,6 +241,29 @@
       ]
     },
     {
+      "name": "raptorbt-expressions",
+      "domain": "expressions",
+      "title": "Expressions",
+      "path": "expressions/SKILL.md",
+      "description": "Writing a signal as one formula (close > sma(close, 200)), as text or from Python operators, and evaluating it over whole columns or one bar at a time with the same numbers. Covers unknown values (NaN and Kleene logic), warm-up, no-lookahead and the function list.",
+      "load_when": [
+        "Writing a condition or derived series as one formula, as text or from Python operators.",
+        "Evaluating a formula over a stored history and bar by bar with identical numbers.",
+        "Looking up which expression functions exist, their warm-up and how they treat unknown values."
+      ],
+      "depends_on": [
+        "raptorbt-core",
+        "raptorbt-indicators"
+      ],
+      "api_version": "1.x",
+      "status": "stable",
+      "modules": [
+        "raptorbt.expr",
+        "raptorbt.col",
+        "raptorbt.expressions"
+      ]
+    },
+    {
       "name": "raptorbt-orders",
       "domain": "orders",
       "title": "Orders",

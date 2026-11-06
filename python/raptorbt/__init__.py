@@ -145,6 +145,7 @@ from raptorbt import errors
 from raptorbt import report, research, sampling
 from raptorbt.report import full_report
 from raptorbt.capabilities import capabilities
+from raptorbt.expressions import col, expr
 from raptorbt.errors import (
     RaptorBTError,
     InvalidParameter,
@@ -181,6 +182,8 @@ __all__ = [
     "research",
     "report",
     "capabilities",
+    "expr",
+    "col",
     "full_report",
     "enable_crash_reporting",
     # Structured errors
