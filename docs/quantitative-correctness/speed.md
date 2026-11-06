@@ -1,5 +1,7 @@
 # Speed against TA-Lib
 
+The figures below come from one run on a busy machine (arm64), reproduced by `benches/python/talib_compare.py` (the steps are in its header). They are not a quiet-machine benchmark. x86 has not been measured; there `mul_add` without FMA target features may be slower. The single-series bar (within 1.1x of TA-Lib for 90% of functions, 1.5x for all) is not met: 30 of 158 functions are within 1.1x and 57 within 1.5x. MAVP is over 10x by design (one core per period); the rest of the slow ones are 2-7x, from branch misprediction (candlesticks, STOCH, AROON), accuracy bookkeeping at short windows (WMA, VAR, STDDEV, CORREL) and TA-Lib's rescan rule (MAXINDEX). Accuracy and zero `unsafe` were kept by decision over speed.
+
 TA-Lib 0.6.4 on macOS-26.5.2-arm64-arm-64bit, 10 cores. Each measurement is the median of several calls after a warm-up, then the fastest of 2 process run(s) of each library. Ratio is raptorbt / TA-Lib; below 1.0 is faster. Series rows come from the run with a rayon pool of 1 thread(s); a single-series evaluation does not use the pool, so they are one-thread whatever it is.
 
 ## Single series, single thread

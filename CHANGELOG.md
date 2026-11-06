@@ -68,6 +68,12 @@ flag, because the old numbers were wrong.
   (see Analysis for agents under Unreleased). `capabilities()` gains `functions`,
   `statistics` and `analysis`.
 
+- **Speed, measured.** Single-series parity with TA-Lib is not met for most functions (30 of
+  158 within 1.1x, 57 within 1.5x, MAVP over 10x by design) because accuracy and zero `unsafe`
+  were kept over speed. Shared work is faster: 20 shared expressions 0.3-0.4x of TA-Lib's time,
+  a 100-combination sweep 0.27x of independent evaluation on one thread and 0.15x on ten.
+  One busy arm64 run, x86 not measured; see `docs/quantitative-correctness/speed.md`.
+
 #### Behaviours decided
 
 - A flat series reads `rsi` 100 (zero average loss), so `rsi > 70` is true on a name that has

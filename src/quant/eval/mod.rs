@@ -281,7 +281,13 @@ pub struct ClockCtx {
 
 impl ClockCtx {
     pub fn new(tz_offset_ns: i64, stamp: BarStamp, session: Option<SessionSchedule>) -> Self {
-        Self { tz_offset_ns, stamp, session: session.map(Arc::new), base_ns: None, infer_width: false }
+        Self {
+            tz_offset_ns,
+            stamp,
+            session: session.map(Arc::new),
+            base_ns: None,
+            infer_width: false,
+        }
     }
 
     /// Only for measuring a stream's size: UTC, close-stamped, no session.

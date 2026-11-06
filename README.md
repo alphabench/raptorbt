@@ -377,6 +377,18 @@ Things to know before relying on a value:
 - `raptorbt.analysis` reads and writes files, so it cannot be imported inside a sandboxed strategy environment that forbids file access;
   `raptorbt.expressions` and `raptorbt.stats` are allowed.
 
+## Speed
+
+Measured, not claimed: [docs/quantitative-correctness/speed.md](docs/quantitative-correctness/speed.md) holds the
+tables and `benches/python/talib_compare.py` reproduces them. They come from one run on a busy arm64 machine; x86 has
+not been measured. Single-series parity with TA-Lib is not met for most functions: on one series and one thread,
+30 of 158 functions are within 1.1x of TA-Lib, 57 within 1.5x, and MAVP is over 10x (by design, one core per period);
+the other slow ones are 2-7x. Accuracy and zero `unsafe` were kept over speed on purpose.
+
+Where raptorbt is faster is shared work: 20 shared expressions take 0.3-0.4x of TA-Lib's time, and a 100-combination
+sweep takes 0.27x of independent evaluation on one thread and 0.15x on ten. `rolling_max` at period 200 is 0.15x of
+TA-Lib on 10M bars and 2.5x on 1M; both are stated in the tables.
+
 ## What you can rely on
 
 - **Deterministic.** The same inputs and configuration give identical trades, curves and journals. Nothing

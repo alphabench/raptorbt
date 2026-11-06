@@ -536,13 +536,13 @@
  "MFI|mean_reverting_gaps|periods_200|real|native": {
   "first_valid_ours": 200,
   "first_valid_ref": 200,
-  "max_abs": "0x1.4000000000000p-45",
+  "max_abs": "0x1.0000000000000p-45",
   "n_compared": 300
  },
  "MFI|random_walk|default|real|native": {
   "first_valid_ours": 14,
   "first_valid_ref": 14,
-  "max_abs": "0x1.a000000000000p-45",
+  "max_abs": "0x1.c000000000000p-45",
   "n_compared": 486
  },
  "MFI|random_walk|periods_200|real|native": {
@@ -560,7 +560,7 @@
  "MFI|tight_range|periods_200|real|native": {
   "first_valid_ours": 200,
   "first_valid_ref": 200,
-  "max_abs": "0x1.4000000000000p-45",
+  "max_abs": "0x1.0000000000000p-45",
   "n_compared": 300
  },
  "MFI|trending|default|real|native": {
@@ -572,7 +572,7 @@
  "MFI|trending|periods_200|real|native": {
   "first_valid_ours": 200,
   "first_valid_ref": 200,
-  "max_abs": "0x1.0000000000000p-44",
+  "max_abs": "0x1.c000000000000p-45",
   "n_compared": 300
  },
  "MINUS_DI|mean_reverting_gaps|default|real|native": {

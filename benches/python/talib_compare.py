@@ -351,6 +351,7 @@ def run_report(args) -> None:
            "raptorbt": [r["machine"] for r in rbs], "verdicts": {}, "cases": []}
     worst = verdicts(talib, single)
     lines = ["# Speed against TA-Lib", "",
+             PREFACE, "",
              f"TA-Lib {talib.get('version')} on {talib['machine']['platform']}, "
              f"{talib['machine']['cpu_count']} cores. Each measurement is the median of several calls after a "
              f"warm-up, then the fastest of {talib.get('runs', 1)} process run(s) of each library. "
@@ -416,6 +417,19 @@ def run_report(args) -> None:
     if args.md:
         pathlib.Path(args.md).write_text("\n".join(lines))
         print(f"wrote {args.md}")
+
+
+PREFACE = (
+    'The figures below come from one run on a busy machine (arm64), reproduced by `benches/pyth'
+    'on/talib_compare.py` (the steps are in its header). They are not a quiet-machine benchmark'
+    '. x86 has not been measured; there `mul_add` without FMA target features may be slower. Th'
+    'e single-series bar (within 1.1x of TA-Lib for 90% of functions, 1.5x for all) is not met:'
+    ' 30 of 158 functions are within 1.1x and 57 within 1.5x. MAVP is over 10x by design (one c'
+    'ore per period); the rest of the slow ones are 2-7x, from branch misprediction (candlestic'
+    'ks, STOCH, AROON), accuracy bookkeeping at short windows (WMA, VAR, STDDEV, CORREL) and TA'
+    "-Lib's rescan rule (MAXINDEX). Accuracy and zero `unsafe` were kept by decision over speed"
+    '.'
+)
 
 
 def main() -> None:
