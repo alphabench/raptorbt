@@ -18,6 +18,12 @@ The function list, the ``col`` methods and the reference page ``skills/expressio
 are all generated from the engine's function registry: a function added there appears here
 with no change to this module.
 
+A formula can look at a coarser clock with ``at("1d", ...)``: the inner expression is computed on
+daily bars cut from the base bars and held on the base clock, so ``close > at("1d", sma(close,
+200))`` compares each bar with the daily average. A daily value first appears on the first base
+bar of the next day. Such an expression needs the bars' timestamps and what they mean:
+``expr.eval({"timestamps": ts, ...}, bar_stamp="close")``.
+
 >>> from raptorbt import col, expr
 >>> a = (col.close.sma(3) < col.close) & (col.close > 1)
 >>> b = expr("sma(close, 3) < close and close > 1")
@@ -68,6 +74,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `aroon(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``aroon([high], [low], period) -> (aroondown, aroonup)`` with this expression as the first input. |
 | `aroonosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``aroonosc([high], [low], period)`` with this expression as the first input. |
 | `asin(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``asin([x])`` with this expression as the first input. |
+| `at(self, timeframe: 'str') -> 'Expr'` | This expression evaluated on ``timeframe`` bars and held on the base clock: ``col.close.sma(200).at("1d")`` is ``at("1d", sma(close, 200))``. |
 | `atan(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``atan([x])`` with this expression as the first input. |
 | `atr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``atr([high], [low], [close], period, compat='native')`` with this expression as the first input. |
 | `autocorr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``autocorr([x], period, lag=1)`` with this expression as the first input. |
@@ -78,6 +85,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `beta(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``beta([high], [low], period=5)`` with this expression as the first input. |
 | `body_pct(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``body_pct([open], [close])`` with this expression as the first input. |
 | `bop(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``bop([open], [high], [low], [close])`` with this expression as the first input. |
+| `bound_hash(self, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None) -> 'str'` | The hash with the clock folded in when the expression uses ``at(...)``: the zone, the bar stamp and the session decide its numbers. Equal to :attr:`hash` without ``at``. |
 | `canonical` | The canonical text: equal for every spelling of the same expression. |
 | `cci(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cci([high], [low], [close], period)`` with this expression as the first input. |
 | `cdl2crows(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl2crows([open], [high], [low], [close])`` with this expression as the first input. |
@@ -155,7 +163,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `downside_dev(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``downside_dev([x], period, mar=0.0)`` with this expression as the first input. |
 | `dx(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``dx([high], [low], [close], period)`` with this expression as the first input. |
 | `ema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ema([x], period)`` with this expression as the first input. |
-| `eval(self, data: 'Mapping[str, Any]')` | Evaluate over whole columns. |
+| `eval(self, data: 'Mapping[str, Any]', *, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None)` | Evaluate over whole columns. |
 | `ewm_mean(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_mean([x], alpha=0.1)`` with this expression as the first input. |
 | `ewm_var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_var([x], alpha=0.1)`` with this expression as the first input. |
 | `exp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``exp([x])`` with this expression as the first input. |
@@ -243,7 +251,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `stochastic(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`` with this expression as the first input. |
 | `stochf(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochf([high], [low], [close], fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`` with this expression as the first input. |
 | `stochrsi(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochrsi([x], period, fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`` with this expression as the first input. |
-| `stream(self) -> 'ExprStream'` | A bar-by-bar evaluator. Fed the same bars, it returns the numbers :meth:`eval` does, bit for bit. |
+| `stream(self, *, bar_stamp: 'str | None' = None, tz_offset_ns: 'int' = 0, session: 'Any' = None, bar_ns: 'int | None' = None) -> 'ExprStream'` | A bar-by-bar evaluator. Fed the same bars, it returns the numbers :meth:`eval` does, bit for bit. An expression that uses ``at(...)`` needs ``bar_stamp`` here (and the optional ``tz_offset_ns``, ``session``, ``bar_ns`` of :meth:`eval`) and takes each bar's ``timestamp=`` in :meth:`ExprStream.update`. |
 | `sub(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sub([a], [b])`` with this expression as the first input. |
 | `sum(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sum([x], period=30)`` with this expression as the first input. |
 | `supertrend(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``supertrend([high], [low], [close], period, multiplier=3.0) -> (line, direction)`` with this expression as the first input. |
@@ -258,6 +266,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `tsf(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tsf([x], period=14)`` with this expression as the first input. |
 | `typprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``typprice([high], [low], [close])`` with this expression as the first input. |
 | `ultosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ultosc([high], [low], [close], timeperiod1=7, timeperiod2=14, timeperiod3=28)`` with this expression as the first input. |
+| `uses_at` | True when the expression uses ``at(...)``: evaluating it needs timestamps. |
 | `var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``var([x], period=5)`` with this expression as the first input. |
 | `vol_close(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_close([close], period)`` with this expression as the first input. |
 | `vol_garman_klass(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_garman_klass([open], [high], [low], [close], period)`` with this expression as the first input. |
@@ -266,7 +275,9 @@ from the function registry. A call with several outputs is selected by attribute
 | `vol_yang_zhang(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_yang_zhang([open], [high], [low], [close], period)`` with this expression as the first input. |
 | `volume_roc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``volume_roc([volume], period)`` with this expression as the first input. |
 | `vwap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vwap([high], [low], [close], [volume])`` with this expression as the first input. |
-| `warmup` | Leading bars that are unknown (NaN) on clean data. |
+| `warmup` | Leading bars that are unknown (NaN) on clean data; ``None`` when the expression uses ``at(...)``, because the base bars a coarser clock costs depend on how many bars a window holds. Then see :attr:`warmup_by_clock` and :meth:`warmup_bars`. |
+| `warmup_bars(self, bar_ns: 'int | None' = None) -> 'int | None'` | The most leading unknown base bars, given the base bar width in nanoseconds; ``None`` when that cannot be known (no width, or an ``at`` over a month or a year). A window of width ``w`` holds at most ``ceil(w / bar_ns)`` bars, so ``at("1d", sma(close, 200))`` on 5-minute bars is at most ``200 * 288`` bars, a bound that ignores the session. Without ``at`` it is :attr:`warmup`. |
+| `warmup_by_clock` | Warm-up per clock: ``"base"`` in base bars, and each ``at`` timeframe in bars of that timeframe (``{"base": 0, "1d": 199}`` for ``at("1d", sma(close, 200))``). |
 | `wclprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wclprice([high], [low], [close])`` with this expression as the first input. |
 | `wilder(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wilder([x], period)`` with this expression as the first input. |
 | `willr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``willr([high], [low], [close], period)`` with this expression as the first input. |
@@ -279,7 +290,7 @@ from the function registry. A call with several outputs is selected by attribute
 
 ```python
 class ExprStream
-ExprStream(program: 'Any')
+ExprStream(program: 'Any', native: 'Any' = None)
 ```
 
 Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`.
@@ -289,7 +300,7 @@ Bar-by-bar evaluation of an expression; see :meth:`Expr.stream`.
 | `bars` | Bars fed so far. |
 | `ready` | True once more bars have been fed than the expression's warm-up. |
 | `reset(self) -> 'None'` | Forget every bar. |
-| `update(self, bar: 'Mapping[str, float] | None' = None, /, **fields: 'float')` | Feed one bar, as a mapping or keywords (``open``, ``high``, ``low``, ``close``, ``volume``). Returns the value for the bar, or a dict by output name for several outputs. A field the expression reads must be given; others may be left out. |
+| `update(self, bar: 'Mapping[str, float] | None' = None, /, timestamp: 'int | None' = None, **fields: 'float')` | Feed one bar, as a mapping or keywords (``open``, ``high``, ``low``, ``close``, ``volume``). Returns the value for the bar, or a dict by output name for several outputs. A field the expression reads must be given; others may be left out. An expression that uses ``at(...)`` also needs ``timestamp=`` (int nanoseconds, read as the stream's ``bar_stamp`` says). |
 
 ### `col`
 
