@@ -1274,12 +1274,17 @@ mod tests {
         let est = p.state_estimate();
         assert!(est >= measured && est <= 16 * measured + 16384, "{est} vs {measured}");
         let big = Plan::new(
-            &compile("sma(close, 16777216) + sma(close, 16777215)", &Env::default()).unwrap(),
+            &compile(
+                "sma(close, 16777216) + sma(close, 16777215) + sma(close, 16777214) \
+                 + sma(close, 16777213)",
+                &Env::default(),
+            )
+            .unwrap(),
         )
         .unwrap();
         match Stream::new(&big) {
             Err(EvalError::State { bytes, limit }) => assert!(bytes > limit),
-            _ => panic!("a window of 16 million bars is refused before it is built"),
+            _ => panic!("four windows of 16 million bars are refused before they are built"),
         }
     }
 }

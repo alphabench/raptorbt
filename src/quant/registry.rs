@@ -291,30 +291,88 @@ pub fn int_param(params: &[ParamVal], i: usize) -> Result<usize, String> {
     }
 }
 
-/// Heap bytes of the slots a kernel keeps per bar of its window, beyond the history ring.
-const STATE_SLOTS_PER_BAR: usize = 8;
-/// A node's own allocation and small tables.
-const NODE_OVERHEAD_BYTES: usize = 1024;
+/// A node's own allocation and slack on top of what a built node reports.
+const NODE_OVERHEAD_BYTES: usize = 256;
+/// What a `mavp` node holds besides its cores: the periods input's ring and the core vector.
+const MAVP_OWN_BYTES: usize = 4096;
+/// Window sizes the estimate builds a node at to read how its state grows (small, so cheap).
+const PROBE_LO: i64 = 64;
+const PROBE_HI: i64 = 128;
+/// Heap per bar of window assumed when a node cannot be built to measure: a deque of two slots
+/// and a ring, rounded up.
+const FALLBACK_SLOTS_PER_BAR: usize = 16;
 
 /// An upper bound on the heap the node `def` builds from `params` over `n_in` inputs holds,
-/// from the parameters alone: nothing is allocated to learn it. The window is the largest integer
-/// parameter or the warm-up, whichever is longer; the history ring is that window rounded up to
-/// a power of two per input, and the kernel keeps up to [`STATE_SLOTS_PER_BAR`] slots per bar of
-/// the window (a monotonic deque holds two, a covariance two rings). A test holds it at or above
-/// the measured `state_bytes` of every registered function, and within a factor of it.
+/// without allocating anything proportional to a long window. The node knows its own size: a
+/// node with every integer parameter at most [`PROBE_HI`] is built and measured; with longer
+/// ones, each is replaced by [`PROBE_LO`] and the growth per unit is read by building the node
+/// again at [`PROBE_HI`], then extended to the real value, doubled to cover a ring rounding up
+/// to a power of two. So a recursive kernel (`ema`) costs what it holds whatever its period,
+/// and a rolling one costs its window. A node that cannot be built at the probe sizes (its
+/// parameters constrain each other) is counted [`FALLBACK_SLOTS_PER_BAR`] slots per bar of its
+/// longest parameter. A test holds it at or above the measured `state_bytes` of every
+/// registered function and within 16 times it.
 pub fn state_estimate(def: &FnDef, params: &[ParamVal], n_in: usize) -> usize {
-    let window = params
+    // `mavp` keeps one moving-average core for every period from `minperiod` to `maxperiod`, so
+    // its size follows the span, not either bound: its cores are `ma` at the longest period.
+    if let (Some("mavp"), [ParamVal::Int(lo), ParamVal::Int(hi), kind, ..]) =
+        (Some(def.name), params)
+    {
+        // Short spans are built and measured, kernel's own heap included.
+        if *hi <= PROBE_HI {
+            let ins: Vec<usize> = (0..n_in).collect();
+            let outs: Vec<usize> = (n_in..n_in + def.outputs.len()).collect();
+            if let Ok(node) = (def.make)(params, &ins, &outs) {
+                return node.state_bytes().saturating_add(NODE_OVERHEAD_BYTES);
+            }
+        }
+        if let Some(ma) = lookup("ma") {
+            let cores = (hi - lo + 1).max(1) as usize;
+            let one = state_estimate(ma, &[ParamVal::Int(*hi), *kind], 1);
+            // The kernel's own vector and ring are small and not per core: a constant covers them.
+            return cores.saturating_mul(one).saturating_add(MAVP_OWN_BYTES);
+        }
+    }
+    let ins: Vec<usize> = (0..n_in).collect();
+    let outs: Vec<usize> = (n_in..n_in + def.outputs.len()).collect();
+    let build = |p: &[ParamVal]| (def.make)(p, &ins, &outs).ok().map(|n| n.state_bytes());
+    let big: Vec<(usize, i64)> = params
         .iter()
-        .filter_map(|p| match p {
-            ParamVal::Int(v) if *v > 0 => Some(*v as usize),
+        .enumerate()
+        .filter_map(|(i, p)| match p {
+            ParamVal::Int(v) if *v > PROBE_HI => Some((i, *v)),
             _ => None,
         })
-        .max()
-        .unwrap_or(0)
-        .max((def.warmup)(params).saturating_add(1));
-    let ring = window.checked_next_power_of_two().unwrap_or(usize::MAX).saturating_mul(n_in.max(1));
-    let slots = ring.saturating_add(window.saturating_mul(STATE_SLOTS_PER_BAR));
-    slots.saturating_mul(std::mem::size_of::<f64>()).saturating_add(NODE_OVERHEAD_BYTES)
+        .collect();
+    let fallback = || {
+        let window = params
+            .iter()
+            .filter_map(|p| match p {
+                ParamVal::Int(v) if *v > 0 => Some(*v as usize),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        window
+            .saturating_mul(FALLBACK_SLOTS_PER_BAR)
+            .saturating_mul(std::mem::size_of::<f64>())
+            .saturating_add(NODE_OVERHEAD_BYTES)
+    };
+    let mut base_params = params.to_vec();
+    for (i, _) in &big {
+        base_params[*i] = ParamVal::Int(PROBE_LO);
+    }
+    let Some(base) = build(&base_params) else { return fallback() };
+    let mut total = base;
+    for (i, v) in big {
+        let mut probe = base_params.clone();
+        probe[i] = ParamVal::Int(PROBE_HI);
+        let Some(grown) = build(&probe) else { return fallback() };
+        let per_bar = grown.saturating_sub(base) as f64 / (PROBE_HI - PROBE_LO) as f64;
+        let extra = 2.0 * per_bar * (v - PROBE_LO) as f64;
+        total = total.saturating_add(extra.min(usize::MAX as f64 / 4.0) as usize);
+    }
+    total.saturating_add(NODE_OVERHEAD_BYTES)
 }
 
 pub fn regs<const N: usize>(slice: &[usize], what: &str) -> Result<[usize; N], String> {
