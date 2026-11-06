@@ -40,11 +40,16 @@ pub struct BfgsOptions {
     pub c1: f64,
     /// Curvature constant of the strong Wolfe conditions.
     pub c2: f64,
+    /// A run whose line search fails along steepest descent, with `max |g_i| <= stall_gtol *
+    /// max(1, |f|)`, has reached the precision of the objective (no step lowers `f` by more
+    /// than its rounding noise) and is reported `Converged(Precision)`. With a larger gradient
+    /// the same failure is `LineSearchFailed`.
+    pub stall_gtol: f64,
 }
 
 impl Default for BfgsOptions {
     fn default() -> Self {
-        BfgsOptions { max_iter: 500, gtol: 1e-8, xtol: 1e-14, c1: 1e-4, c2: 0.9 }
+        BfgsOptions { max_iter: 500, gtol: 1e-8, xtol: 1e-14, c1: 1e-4, c2: 0.9, stall_gtol: 1e-6 }
     }
 }
 
@@ -55,6 +60,9 @@ pub enum Convergence {
     Gradient,
     /// The step fell below `xtol`.
     Step,
+    /// No descent step exists within the objective's rounding noise, and the gradient is
+    /// within `stall_gtol`.
+    Precision,
 }
 
 /// Why the run stopped.
@@ -225,6 +233,7 @@ where
     check_option("xtol", opts.xtol, opts.xtol >= 0.0)?;
     check_option("c1", opts.c1, opts.c1 > 0.0 && opts.c1 < opts.c2)?;
     check_option("c2", opts.c2, opts.c2 < 1.0)?;
+    check_option("stall_gtol", opts.stall_gtol, opts.stall_gtol >= 0.0)?;
     if !x0.iter().all(|v| v.is_finite()) {
         return Err(OptError::NonFinite { what: "starting point" });
     }
@@ -278,7 +287,11 @@ where
         }
         iterations += 1;
         let Some(pt) = step else {
-            status = BfgsStatus::LineSearchFailed;
+            status = if inf_norm(&g) <= opts.stall_gtol * fx.abs().max(1.0) {
+                BfgsStatus::Converged(Convergence::Precision)
+            } else {
+                BfgsStatus::LineSearchFailed
+            };
             break;
         };
         let s: Vec<f64> = p.iter().map(|v| pt.alpha * v).collect();

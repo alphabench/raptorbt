@@ -1,7 +1,9 @@
 pub mod coint;
 pub mod error;
 pub mod events;
+pub mod garch;
 pub mod hac;
+pub mod hmm;
 pub mod hurst;
 pub mod impact;
 pub mod pbo;
