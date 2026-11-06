@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use raptorbt::quant::eval::{Bar, Plan, Stream};
 use raptorbt::quant::lang::{compile, Env};
-use raptorbt::quant::registry::{all, Family, ParamKind, ParamVal};
+use raptorbt::quant::registry::{all, Domain, FnDef, ParamKind, ParamVal};
 use raptorbt::runtime::exprs::{self, ExprCore};
 
 struct Counting;
@@ -106,9 +106,9 @@ fn update_allocates_nothing_after_construction() {
     }
 }
 
-/// A call of `def` with its inputs on the default fields and every parameter given (a default
-/// where there is one, else a small legal value).
-fn call_of(def: &raptorbt::quant::registry::FnDef) -> String {
+/// A call of `def` with its inputs on the default fields and every parameter given: a default
+/// where there is one, else `pick` clamped into the parameter's range.
+fn call_of(def: &FnDef, pick: i64) -> String {
     let mut args: Vec<String> = def
         .inputs
         .iter()
@@ -125,7 +125,7 @@ fn call_of(def: &raptorbt::quant::registry::FnDef) -> String {
             Some(ParamVal::Float(v)) => format!("{v:?}"),
             Some(ParamVal::Enum(v)) => format!("\"{v}\""),
             None => match p.kind {
-                ParamKind::Int { min, max } => 5i64.clamp(min.max(1), max).to_string(),
+                ParamKind::Int { min, max } => pick.clamp(min.max(1), max).to_string(),
                 ParamKind::Float { min, max } => format!("{:?}", 0.5f64.clamp(min, max)),
                 ParamKind::Enum(v) => format!("\"{}\"", v[0]),
             },
@@ -134,64 +134,149 @@ fn call_of(def: &raptorbt::quant::registry::FnDef) -> String {
     format!("{}({})", def.name, args.join(", "))
 }
 
-#[test]
-fn a_cell_reports_the_heap_it_holds() {
-    let mut checked = 0usize;
-    let mut skipped = Vec::new();
-    for def in all() {
-        // `at` is not run by the evaluator yet.
-        if def.family == Family::At {
-            continue;
+/// The first spelling of `def` that compiles and plans, or why none did.
+fn plan_of(def: &FnDef) -> Result<(String, raptorbt::quant::lang::Program, Plan), String> {
+    let mut last = String::new();
+    for pick in [5, 10, 14, 20, 30] {
+        let src = call_of(def, pick);
+        match compile(&src, &Env::default()) {
+            Err(e) => last = format!("{src}: {e}"),
+            Ok(program) => match Plan::new(&program) {
+                Ok(plan) => return Ok((src, program, plan)),
+                Err(e) => last = format!("{src}: {e}"),
+            },
         }
-        let src = call_of(def);
-        let Ok(program) = compile(&src, &Env::default()) else {
-            skipped.push(src);
-            continue;
+    }
+    Err(last)
+}
+
+/// Bars with every kind of trouble, spaced so every window has clean bars on both sides: the
+/// bad bars come in short bursts 700 bars apart, far wider than any period tried or any
+/// warm-up (Hilbert's 63, the longest candles). `unit` keeps prices inside [-1, 1] for the
+/// functions whose domain is that range.
+fn rough_bars(n: usize, unit: bool) -> Vec<Bar> {
+    (0..n)
+        .map(|i| {
+            let x = i as f64;
+            let (mut close, half) = if unit {
+                ((x * 0.37).sin() * 0.8, 0.05)
+            } else {
+                (100.0 + (x * 0.37).sin() * 5.0 + x * 0.01, 1.0)
+            };
+            let phase = i % 700;
+            if (600..603).contains(&phase) {
+                close = f64::NAN;
+            }
+            let (mut high, mut low) = (close + half, close - half);
+            if (300..310).contains(&phase) {
+                (high, low) = (close, close);
+            }
+            if phase == 650 {
+                high = f64::NAN;
+            }
+            let volume = match phase {
+                400..=402 => f64::NAN,
+                450..=452 => 0.0,
+                _ => 50.0 + (i % 13) as f64 * 10.0,
+            };
+            Bar { open: close - half / 2.0, high, low, close, volume }
+        })
+        .collect()
+}
+
+#[test]
+fn every_registered_function_updates_without_allocating() {
+    let ordinary = rough_bars(4200, false);
+    let unit = rough_bars(4200, true);
+    let (mut checked, mut failures) = (0usize, Vec::new());
+    for def in all() {
+        let (src, _, plan) = match plan_of(def) {
+            Ok(x) => x,
+            Err(e) => {
+                failures.push(format!("{}: cannot be built: {e}", def.name));
+                continue;
+            }
         };
-        let Ok(plan) = Plan::new(&program) else {
-            skipped.push(src);
-            continue;
+        let bars = if def.domain == Domain::Unit { &unit } else { &ordinary };
+        // Every output of a multi-output function is a root output of this plan.
+        let mut stream = Stream::new(&plan).unwrap();
+        let start = allocs();
+        let mut known = 0usize;
+        for bar in bars {
+            known += stream.update(bar, &[]).unwrap().iter().filter(|v| !v.is_nan()).count();
+        }
+        let used = allocs() - start;
+        if used != 0 {
+            failures.push(format!(
+                "{}: {used} allocations over {} bars ({src})",
+                def.name,
+                bars.len()
+            ));
+        }
+        if known == 0 {
+            failures
+                .push(format!("{}: never produced a value on the rough bars ({src})", def.name));
+        }
+        checked += 1;
+    }
+    assert!(failures.is_empty(), "{checked} checked; failures:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn every_registered_function_reports_the_heap_it_holds() {
+    let (mut checked, mut failures) = (0usize, Vec::new());
+    for def in all() {
+        let (src, program, plan) = match plan_of(def) {
+            Ok(x) => x,
+            Err(e) => {
+                failures.push(format!("{}: cannot be built: {e}", def.name));
+                continue;
+            }
         };
         let id = exprs::intern(&program, &plan).unwrap();
-        let outputs = exprs::info(id).outputs;
-
         let before = live();
         let core = Box::new(ExprCore::new(id, 0));
         let measured = (live() - before) as usize;
         let claimed = std::mem::size_of::<ExprCore>() + exprs::info(id).state_bytes;
-        assert_eq!(core.state_bytes(), exprs::info(id).state_bytes, "{src}");
-        assert!(
-            measured <= claimed && claimed <= measured + measured / 20 + 64,
-            "{src}: the cell holds {measured} bytes, the report says {claimed} ({outputs} outputs)"
-        );
+        if core.state_bytes() != exprs::info(id).state_bytes {
+            failures.push(format!("{src}: a core and its program disagree"));
+        }
+        if !(measured <= claimed && claimed <= measured + 64) {
+            failures
+                .push(format!("{src}: the cell holds {measured} bytes, the report says {claimed}"));
+        }
         checked += 1;
     }
-    assert!(checked >= 150, "only {checked} functions were checked; skipped {skipped:?}");
-    eprintln!("checked {checked}; skipped {skipped:?}");
+    assert!(failures.is_empty(), "{checked} checked; failures:\n{}", failures.join("\n"));
 }
 
 #[test]
 fn a_composite_cell_reports_the_heap_it_holds() {
-    let mut compiled = 0;
+    let mut failures = Vec::new();
     for src in [
-        "macd(close).signal",
-        "bbands(close, 20, 2.0, 2.0, \"sma\").upper",
-        "ema(close, 12) - sma(close, 26) + stoch(14, 3, 3).k",
+        "macd(close).macdsignal",
+        "bbands(close, 20, 2.0, 2.0, 0).upperband",
+        "ema(close, 12) - sma(close, 26) + stoch(high, low, close, 14, 3, 0, 3, 0).slowk",
         "zscore(close, 20) < -2 and adx(14) < 25",
     ] {
-        let Ok(program) = compile(src, &Env::default()) else {
-            eprintln!("skipped {src}");
-            continue;
+        let program = match compile(src, &Env::default()) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push(format!("{src}: {e}"));
+                continue;
+            }
         };
-        compiled += 1;
         let plan = Plan::new(&program).unwrap();
         let id = exprs::intern(&program, &plan).unwrap();
         let before = live();
         let core = Box::new(ExprCore::new(id, 0));
         let measured = (live() - before) as usize;
         let claimed = std::mem::size_of::<ExprCore>() + exprs::info(id).state_bytes;
-        assert_eq!(measured, claimed, "{src}");
+        if measured != claimed {
+            failures
+                .push(format!("{src}: the cell holds {measured} bytes, the report says {claimed}"));
+        }
         drop(core);
     }
-    assert!(compiled >= 3, "only {compiled} composite expressions compiled");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
