@@ -134,7 +134,7 @@ def __getattr__(name):
         from raptorbt._raptorbt import RuntimeContext
 
         warnings.warn(
-            "raptorbt.strategy.PortfolioContext is deprecated and will be removed in 1.0; "
+            "raptorbt.strategy.PortfolioContext is deprecated, an alias kept for old code; "
             "portfolio strategies now receive a raptorbt.RuntimeContext",
             DeprecationWarning,
             stacklevel=2,

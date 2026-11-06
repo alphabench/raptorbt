@@ -21,11 +21,11 @@ independent; with ``workers > 1`` the runs go through a ``multiprocessing`` pool
 or with ``executor="thread"`` through threads of this process, and the rows are put back in
 run order, so the result is the same whatever the worker count.
 
-Threads suit runs of ``raptorbt.Engine.run_columns``: a ruleset whose conditions and series
-are not Python callables runs its batch without the interpreter lock (Python actions take it
-only when their rule fires), so the engines of different points run at once on one copy of
-the data, with no process start and nothing pickled. ``run`` may then be any callable; it
-must not share mutable state between points. The manifest (a JSONL file, one row per finished run, keyed ``"point/window"``)
+Threads suit runs that spend their time in native code that releases the interpreter lock:
+the points run at once on one copy of the data, with no process start and nothing pickled.
+``run`` may then be any callable; it must not share mutable state between points.
+
+The manifest (a JSONL file, one row per finished run, keyed ``"point/window"``)
 records each finished run; a sweep resumed with the same manifest skips them.
 
 The ``run`` function is the user's: it takes ``(params, window)`` and returns a JSON-able

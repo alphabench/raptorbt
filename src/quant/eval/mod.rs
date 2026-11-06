@@ -637,8 +637,7 @@ impl Plan {
             });
         }
 
-        let out_regs: Vec<usize> =
-            outs.iter().map(|(id, i)| reg_of[*id] + *i as usize).collect();
+        let out_regs: Vec<usize> = outs.iter().map(|(id, i)| reg_of[*id] + *i as usize).collect();
         let (locs, n_slots) = assign_locs(&steps, n_regs, &out_regs);
         Ok(Plan {
             d: Arc::new(PlanData {

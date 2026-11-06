@@ -8,8 +8,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use raptorbt::data::BarStamp;
-use raptorbt::quant::eval::{Bar, ClockCtx, Plan, Stream};
 use raptorbt::quant::eval::PanelPlan;
+use raptorbt::quant::eval::{Bar, ClockCtx, Plan, Stream};
 use raptorbt::quant::lang::{compile, Env};
 use raptorbt::quant::registry::{all, Domain, Family, FnDef, ParamKind, ParamVal};
 use raptorbt::runtime::exprs::{self, ExprCore};

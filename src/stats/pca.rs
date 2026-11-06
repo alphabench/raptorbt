@@ -80,10 +80,7 @@ pub fn pca_factors<C: AsRef<[f64]>>(
     target: Option<&[f64]>,
 ) -> Result<Pca, StatsError> {
     if cols.len() > MAX_SERIES {
-        return Err(StatsError::Invalid(format!(
-            "{} series, at most {MAX_SERIES}",
-            cols.len()
-        )));
+        return Err(StatsError::Invalid(format!("{} series, at most {MAX_SERIES}", cols.len())));
     }
     if cols.len() < 2 {
         return Err(StatsError::InsufficientObservations {

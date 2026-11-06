@@ -163,10 +163,7 @@ pub fn sensitivity_surface<N: AsRef<str>>(
         if grid.insert(key.clone(), *metric).is_some() {
             let shown: Vec<String> =
                 names.iter().zip(vals).map(|(n, v)| format!("'{}': {v:?}", n.as_ref())).collect();
-            return Err(StatsError::Invalid(format!(
-                "duplicate cell {{{}}}",
-                shown.join(", ")
-            )));
+            return Err(StatsError::Invalid(format!("duplicate cell {{{}}}", shown.join(", "))));
         }
         order.push(key);
     }

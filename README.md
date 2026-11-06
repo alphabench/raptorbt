@@ -14,6 +14,13 @@ simulated venue or against a broker adapter, and decides the same thing in each,
 The priorities are strictly ordered: quantitative correctness, speed, memory, expressiveness, usability for AI
 agents, production reliability. Speed is never bought with correctness.
 
+The same engine analyses data. An expression such as `zscore(close, 20) > 1 and adx(14) > 20` is written once and
+evaluated over history in an analysis session, inside a backtest and on a live feed (`ctx.indicators.expr`), with
+the same value on every bar. Every TA-Lib function has a counterpart, replayed against TA-Lib 0.6.4 fixtures; the
+differences are pinned in [docs/quantitative-correctness/matrix.md](docs/quantitative-correctness/matrix.md).
+Statistics (stationarity, cointegration, GARCH, regimes and more) are in `raptorbt.stats`, with no dependency
+beyond NumPy.
+
 It models orders and their lifecycle, fills, fee schedules by date, margin, option structures, expiries and
 corporate actions, trading sessions, multi-timeframe bars, risk limits, and an append-only journal that lets a
 crashed live node resume. It does not ship market data, a trading calendar or a broker account: you bring those.
@@ -316,6 +323,59 @@ curve = result.equity_curve()
 assert len(curve) > 0 and result.metrics.total_trades == len(trades)
 print(result.metrics.total_return_pct, [t.pnl for t in trades])
 ```
+
+## Analysis
+
+`raptorbt.analysis.Session` is the loop for people and for AI agents: load bars once, evaluate an expression or a
+statistic, and read a summary of at most 2 KB (shape, warm-up, distribution, flags, last values) with a short handle
+that the next expression reads as a series. Large arrays never have to be printed. The same session runs from a
+shell with `python -m raptorbt` (`eval`, `factor`, `functions`, `describe`, `show`, `export`, `stats`, `skills`),
+which prints JSON. One loop, on a synthetic mean-reverting series: is it stationary, how fast does it revert, and
+what signal does that suggest?
+
+```python
+import numpy as np
+from raptorbt.analysis import Session
+
+n = 1500
+rng = np.random.default_rng(11)
+x = np.zeros(n)
+for i in range(1, n):
+    x[i] = 0.9 * x[i - 1] + rng.normal()
+close = 100 + x
+ts = (np.arange(n, dtype=np.int64) + 1) * 60_000_000_000
+
+session = Session()
+session.load({"timestamps": ts, "close": close}, bar_stamp="close")
+
+stationarity = session.stats("stationarity", session.eval("close")["handle"])
+print(stationarity["reading"], stationarity["n"])  # stationary 1500
+
+half_life = session.eval("half_life(close, 200)")
+print(half_life["warmup"], round(half_life["dist"]["p50"], 2))  # 199 5.51
+
+window = int(round(2 * half_life["dist"]["p50"]))
+signal = session.eval(f"zscore(close, {window}) < -1")
+print(window, signal["kind"], signal["true"], signal["known"])  # 11 bool 394 1490
+```
+
+The signal window comes from the measured half-life, not a guess. A test over a window describes the window; it is
+not a trading rule, so the next step is a backtest. `examples/analysis/` holds this loop and two more:
+`factor_research.py` (a cross-sectional factor on many instruments) and `expression_to_strategy.py` (the same
+expression registered in a `Strategy`). The skills `analysis`, `expressions` and `statistics` teach the rest:
+`skills.for_task("...")`.
+
+Things to know before relying on a value:
+
+- Every function is causal; batch and streaming evaluation run one kernel and give the same bits.
+- `rsi` on a flat series is 100 (zero average loss), so `rsi > 70` is true on a name that has not traded. This is
+  decided, not a bug; `compat="talib"` reads 0 there.
+- `adx`, `atr`, `macd`, `mfi`, `minus_di`, `plus_di` and `rsi` take `compat="native"` (default; the engine's own
+  seeding) or `compat="talib"` (TA-Lib's). Other functions follow TA-Lib's convention.
+- `at("1d", ...)` shows a daily value from the next trading day's first bar, never earlier.
+- A universe is fixed when the run is built; an instrument added later is not in a cross-section.
+- `raptorbt.analysis` reads and writes files, so it cannot be imported inside a sandboxed strategy environment that forbids file access;
+  `raptorbt.expressions` and `raptorbt.stats` are allowed.
 
 ## What you can rely on
 

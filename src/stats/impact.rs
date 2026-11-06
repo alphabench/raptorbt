@@ -108,18 +108,14 @@ pub fn impact_estimate(
     let lo = finite_series(low, "low", MIN_DAYS)?;
     let v = finite_series(volume, "volume", MIN_DAYS)?;
     if !(c.len() == h.len() && h.len() == lo.len() && lo.len() == v.len()) {
-        return Err(StatsError::Invalid(
-            "high, low, close and volume differ in length".into(),
-        ));
+        return Err(StatsError::Invalid("high, low, close and volume differ in length".into()));
     }
     if c.iter().any(|x| *x <= 0.0)
         || h.iter().any(|x| *x <= 0.0)
         || lo.iter().any(|x| *x <= 0.0)
         || h.iter().zip(lo).any(|(a, b)| a < b)
     {
-        return Err(StatsError::Invalid(
-            "prices must be positive with high not below low".into(),
-        ));
+        return Err(StatsError::Invalid("prices must be positive with high not below low".into()));
     }
     if quantity.is_nan() || quantity <= 0.0 {
         return Err(StatsError::Invalid("quantity must be positive".into()));

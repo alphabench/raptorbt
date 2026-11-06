@@ -136,9 +136,7 @@ pub fn event_study(
         return Err(StatsError::Invalid(format!("give 1 to {MAX_EVENTS} event dates")));
     }
     if pre > MAX_WINDOW || post > MAX_WINDOW {
-        return Err(StatsError::Invalid(format!(
-            "pre and post are 0 to {MAX_WINDOW} periods"
-        )));
+        return Err(StatsError::Invalid(format!("pre and post are 0 to {MAX_WINDOW} periods")));
     }
     if estimation < MIN_ESTIMATION {
         return Err(StatsError::Invalid(format!(

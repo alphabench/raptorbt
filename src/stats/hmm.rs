@@ -327,10 +327,10 @@ fn filter(y: &[f64], nat: &Nat, pi0: &[f64]) -> Option<Filtered> {
             pred[t * k + i] = (0..k).map(|j| nat.p[i * k + j] * prev[j]).sum();
         }
         let mut top = f64::NEG_INFINITY;
-        for i in 0..k {
+        for (i, fi) in f.iter_mut().enumerate() {
             let d = y[t] - nat.mu[i];
-            f[i] = -0.5 * (LN_2PI + nat.var[i].ln()) - 0.5 * d * d / nat.var[i];
-            top = top.max(f[i]);
+            *fi = -0.5 * (LN_2PI + nat.var[i].ln()) - 0.5 * d * d / nat.var[i];
+            top = top.max(*fi);
         }
         let mut c = 0.0;
         for i in 0..k {
@@ -464,8 +464,8 @@ fn nll_grad(y: &[f64], u: &[f64], k: usize) -> Option<(f64, Vec<f64>)> {
     }
     for i in 0..k {
         let (mut gm, mut gv) = (0.0, 0.0);
-        for t in 0..n {
-            let d = y[t] - nat.mu[i];
+        for (t, &yt) in y.iter().enumerate() {
+            let d = yt - nat.mu[i];
             let w = s.gamma[t * k + i];
             gm += w * d / nat.var[i];
             gv += w * (-0.5 + 0.5 * d * d / nat.var[i]);

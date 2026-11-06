@@ -5,37 +5,6 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **Expression sweeps.** `rb.expr("sma(close, $n) > sma(close, $m)").sweep(data, n=[5, 10], m=[50, 100])`
-  (or `points=[...]`) evaluates every binding in one joint plan: a node no parameter touches, or two
-  bindings spell alike, runs once, and each result is bit-identical to evaluating it alone. The result
-  states `n_trials`; a sweep past `max_combinations` / `max_bytes` raises `sweep_too_large` with its
-  size. `Session.sweep` and `python -m raptorbt sweep` give a compact table with a handle per binding.
-  `expr("... $n ...")` without a value is now accepted as a template; evaluating it still raises
-  `expr_unbound_parameter`.
-- **Analysis for agents.** `raptorbt.analysis.Session` loads bars once, evaluates expressions
-  and statistics, and returns a summary of at most 2 KB (shape, warm-up, distribution, flags)
-  with a short handle that the next expression reads as a series. The same work gives the same
-  handle; the store is bounded and an evicted handle's error carries the call that remakes it.
-  `python -m raptorbt` (`eval`, `functions`, `describe`, `show`, `export`, `stats`, `skills`)
-  runs it from a shell, with JSON output and sessions kept on disk. New skill
-  `raptorbt-analysis`, three examples, and the error codes `unknown_handle`, `handle_expired`
-  and `session_memory_exceeded`. `raptorbt.analysis` is not imported by `import raptorbt`.
-- **Panels in a session.** `Session.load_panel` takes many instruments; a cross-sectional
-  expression returns a summary that names instruments (coverage per date, the names at both ends
-  of the last cross-section). `Session.factor` and `python -m raptorbt factor` give
-  `factor_report` as numbers under the 2 KB cap (rank IC, its overlap-corrected t, hit rate,
-  gross long-short spread, turnover, `no_costs: true`), with the per-date arrays behind a handle.
-  `capabilities()["analysis"]` lists the entry points.
-- `expr(text, series={...})` reads named series besides the five columns;
-  `raptorbt.expressions.functions` ranks by name, TA-Lib name, family and description, and
-  `describe` adds a working example, warm-up, reference and conventions.
-- `skills.for_task` weights rare words, indexes function and module names (`doji`, `garch`),
-  stems `analysis`/`analyses`, and lists what the matches depend on.
-
 ## [1.0.0] - 2026-11-04
 
 The first stable release. It covers everything since 0.13.4, including the
@@ -77,6 +46,67 @@ flag, because the old numbers were wrong.
 - **Skills for AI agents**, shipped in the wheel and checked by
   `python -m raptorbt.skills check`, and runnable `examples/`.
 - **Opt-in crash reporting**, off by default.
+- **An expression language.** `rb.expr("zscore(close, 20) > 1 and adx(14) > 20")`
+  is compiled in Rust, typechecked with a position and a did-you-mean, and evaluated in
+  batch or one bar at a time from the same kernel, so the two give the same bits. Python
+  operators on `rb.col` build the same expression. `raptorbt.expressions.functions` and
+  `describe` list the registry (215 functions: every TA-Lib function, the candlestick
+  patterns and the Hilbert functions among them, plus regressions, beta, correlation,
+  range volatilities and fractional differencing). Cross-sectional operators (`rank`
+  and the like) and `at("1d", ...)` for a coarser timeframe are part of it.
+- **Expressions in a strategy.** `ctx.indicators.expr(text, instrument=...)` and
+  `expr_all(text)` run an expression on the bank, in a backtest and on a `LiveNode`,
+  with no new order path. A strategy that uses it needs a host with this build.
+- **TA-Lib agreement.** Every TA-Lib function (158) has a counterpart, replayed against
+  TA-Lib 0.6.4 fixtures. Each is `exact`, `converges`, a pinned `defined_difference` or,
+  for candlesticks, equal on every bar; the table is
+  `docs/quantitative-correctness/matrix.md`. Existing numbers are unchanged.
+- **`raptorbt.stats`.** Stationarity, cointegration, GARCH, Markov regimes, PCA factors,
+  event study, HAC t-statistics, Hurst, impact, SPA, PBO and more, in Rust with no
+  dependency beyond NumPy. `cointegration` no longer raises `IndexError` from seven series up.
+- **`raptorbt.analysis`, `python -m raptorbt`, three skills and `examples/analysis/`**
+  (see Analysis for agents under Unreleased). `capabilities()` gains `functions`,
+  `statistics` and `analysis`.
+
+#### Behaviours decided
+
+- A flat series reads `rsi` 100 (zero average loss), so `rsi > 70` is true on a name that has
+  not traded. `compat="talib"` reads 0.
+- `compat="native"` (default) keeps the engine's existing numbers; `compat="talib"` is TA-Lib's
+  seeding. It exists on `adx`, `atr`, `macd`, `mfi`, `minus_di`, `plus_di` and `rsi`. Every other
+  function follows TA-Lib's convention.
+- A daily value from `at("1d", ...)` is first visible on the next trading day's first bar, in
+  batch and live alike.
+- A cross-section's universe is the strategy's instruments when the run is built and stays
+  frozen; an instrument added to a live node later does not join it.
+- `raptorbt.analysis` cannot be imported inside a sandboxed strategy environment that forbids file access (it reads and writes files);
+  `raptorbt.expressions` and `raptorbt.stats` are allowed.
+- **Expression sweeps.** `rb.expr("sma(close, $n) > sma(close, $m)").sweep(data, n=[5, 10], m=[50, 100])`
+  (or `points=[...]`) evaluates every binding in one joint plan: a node no parameter touches, or two
+  bindings spell alike, runs once, and each result is bit-identical to evaluating it alone. The result
+  states `n_trials`; a sweep past `max_combinations` / `max_bytes` raises `sweep_too_large` with its
+  size. `Session.sweep` and `python -m raptorbt sweep` give a compact table with a handle per binding.
+  `expr("... $n ...")` without a value is now accepted as a template; evaluating it still raises
+  `expr_unbound_parameter`.
+- **Analysis for agents.** `raptorbt.analysis.Session` loads bars once, evaluates expressions
+  and statistics, and returns a summary of at most 2 KB (shape, warm-up, distribution, flags)
+  with a short handle that the next expression reads as a series. The same work gives the same
+  handle; the store is bounded and an evicted handle's error carries the call that remakes it.
+  `python -m raptorbt` (`eval`, `functions`, `describe`, `show`, `export`, `stats`, `skills`)
+  runs it from a shell, with JSON output and sessions kept on disk. New skill
+  `raptorbt-analysis`, three examples, and the error codes `unknown_handle`, `handle_expired`
+  and `session_memory_exceeded`. `raptorbt.analysis` is not imported by `import raptorbt`.
+- **Panels in a session.** `Session.load_panel` takes many instruments; a cross-sectional
+  expression returns a summary that names instruments (coverage per date, the names at both ends
+  of the last cross-section). `Session.factor` and `python -m raptorbt factor` give
+  `factor_report` as numbers under the 2 KB cap (rank IC, its overlap-corrected t, hit rate,
+  gross long-short spread, turnover, `no_costs: true`), with the per-date arrays behind a handle.
+  `capabilities()["analysis"]` lists the entry points.
+- `expr(text, series={...})` reads named series besides the five columns;
+  `raptorbt.expressions.functions` ranks by name, TA-Lib name, family and description, and
+  `describe` adds a working example, warm-up, reference and conventions.
+- `skills.for_task` weights rare words, indexes function and module names (`doji`, `garch`),
+  stems `analysis`/`analyses`, and lists what the matches depend on.
 
 ### Results change
 
