@@ -67,3 +67,9 @@ def test_every_error_code_is_listed():
 def test_the_built_in_adapters_are_listed():
     names = {a["name"] for a in raptorbt.capabilities()["adapters"]}
     assert {"PaperExecution", "SimulatedExecution"} <= names
+
+
+def test_every_statistic_is_listed():
+    import raptorbt.stats
+
+    assert raptorbt.capabilities()["statistics"]["functions"] == sorted(raptorbt.stats.__all__)

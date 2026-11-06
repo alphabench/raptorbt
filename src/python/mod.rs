@@ -22,4 +22,5 @@ pub mod research_bindings;
 pub mod runtime_bindings;
 pub mod schedule_bindings;
 pub mod session_bindings;
+pub mod stats_bindings;
 pub mod strategy_bindings;

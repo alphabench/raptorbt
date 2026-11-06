@@ -313,8 +313,13 @@ def _raised_codes():
     for path in src.rglob("*.rs"):
         text = path.read_text()
         found |= set(RS_CODE.findall(text))
-        # core/error.rs maps its variants to codes; lang/mod.rs maps the expression language's.
-        if (path.name, path.parent.name) in {("error.rs", "core"), ("mod.rs", "lang")}:
+        # core/error.rs maps its variants to codes; lang/mod.rs maps the expression language's;
+        # stats/error.rs maps the statistics' (the bindings pass `StatsError::code()` through).
+        if (path.name, path.parent.name) in {
+            ("error.rs", "core"),
+            ("mod.rs", "lang"),
+            ("error.rs", "stats"),
+        }:
             found |= set(RS_MAP.findall(text))
     return found
 

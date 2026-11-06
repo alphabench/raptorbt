@@ -2444,4 +2444,83 @@ class ExprStream:
 
 def expr_registry_json() -> str: ...
 
+# --- Statistics --------------------------------------------------------------
+# Natives behind ``raptorbt.stats``: arrays in, a dict of full-precision results out. The
+# public functions, their wording and their argument checks are in that module.
+
+def stats_stationarity(series: np.ndarray, alpha: float) -> dict[str, Any]: ...
+def stats_cointegration(
+    names: list[str], series: list[np.ndarray], alpha: float
+) -> dict[str, Any]: ...
+def stats_hurst(increments: np.ndarray) -> dict[str, Any]: ...
+def stats_garch(
+    returns: np.ndarray, model: str, dist: str, horizon: int, periods_per_year: int | None
+) -> dict[str, Any]: ...
+def stats_regimes(
+    returns: np.ndarray,
+    regimes: int,
+    min_support_bars: float,
+    min_duration_periods: float,
+    series: bool,
+) -> dict[str, Any]: ...
+def stats_hac(returns: np.ndarray, lags: int | None) -> dict[str, Any]: ...
+def stats_pbo(strategies: list[np.ndarray], splits: int) -> dict[str, Any]: ...
+def stats_spa(
+    names: list[str],
+    strategies: list[np.ndarray],
+    benchmark: np.ndarray | None,
+    reps: int,
+    block_size: int | None,
+    seed: int,
+) -> dict[str, Any]: ...
+def stats_spa_replay(
+    loss_diff: list[np.ndarray], block: int, indices: np.ndarray
+) -> dict[str, Any]: ...
+def stats_pca(
+    names: list[str],
+    returns: list[np.ndarray],
+    components: int,
+    target: np.ndarray | None,
+) -> dict[str, Any]: ...
+def stats_events(
+    dates: list[int],
+    asset: np.ndarray,
+    market: np.ndarray,
+    events: list[int],
+    estimation: int,
+    gap: int,
+    pre: int,
+    post: int,
+) -> dict[str, Any]: ...
+def stats_impact(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+    quantity: float,
+    spread_model: str,
+    coefficient: float,
+) -> dict[str, Any]: ...
+def stats_surface(
+    names: list[str], cells: list[tuple[list[float], float]]
+) -> dict[str, Any]: ...
+def stats_audit_bars(
+    t: np.ndarray,
+    open: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+    interval_seconds: int,
+    outlier_z: float,
+    mad_scale: float,
+    listed: int,
+    daily_gap_days: float,
+    intraday_gap_bars: float,
+    split_factors: list[float],
+    split_tolerance: float,
+    min_bars: int,
+    dead_bar_share_max: float,
+) -> dict[str, Any]: ...
+
 def _last_panic_location() -> str | None: ...

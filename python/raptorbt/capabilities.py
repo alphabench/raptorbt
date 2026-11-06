@@ -6,9 +6,9 @@ engine half comes from the engine's own types (``_raptorbt.capabilities_json``,
 which includes the expression ``functions`` from the function registry),
 the hooks from the strategy hook tables, the indicators from the functions the
 extension registered as indicators and the streaming constructors of
-``Indicator``, the adapters from ``raptorbt.execution`` and the error codes from
-``raptorbt.errors.CODES``. A test fails when something public exists that the
-manifest does not list.
+``Indicator``, the adapters from ``raptorbt.execution``, the error codes from
+``raptorbt.errors.CODES`` and the statistics from ``raptorbt.stats.__all__``. A test fails
+when something public exists that the manifest does not list.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any
 
 from raptorbt import _raptorbt
 from raptorbt import errors as _errors
+from raptorbt import stats as _stats
 from raptorbt.strategy import api as _api
 
 __all__ = ["capabilities"]
@@ -95,4 +96,5 @@ def capabilities() -> dict[str, Any]:
     out["indicators"] = _indicators()
     out["adapters"] = _adapters()
     out["error_codes"] = sorted(_errors.CODES)
+    out["statistics"] = {"functions": sorted(_stats.__all__)}
     return out

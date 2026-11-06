@@ -233,5 +233,8 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register the expression language
     python::expr_bindings::register(m)?;
 
+    // Register the statistics
+    python::stats_bindings::register(m)?;
+
     Ok(())
 }

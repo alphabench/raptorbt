@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 import raptorbt
+import raptorbt.stats
 from raptorbt import (
     BacktestConfig,
     KernelSession,
@@ -846,6 +847,25 @@ def _():
 @case("expr_unsupported_here", "expression")
 def _():
     raptorbt.expr('at("1d", at("1d", close))')
+
+
+# -- statistics -----------------------------------------------------------------------------------
+
+
+@case("insufficient_observations")
+def _():
+    raptorbt.stats.hac_tstat(np.arange(5, dtype=np.float64))
+
+
+@case("degenerate_series")
+def _():
+    raptorbt.stats.hac_tstat(np.full(60, 0.01))
+
+
+@case("did_not_converge")
+def _():
+    # a variance past the double range: no start has a finite likelihood
+    raptorbt.stats.markov_regimes(np.tile([1e170, -1e170, 2e170, -3e170], 100))
 
 
 @case("below_one_lot", "lots")

@@ -143,3 +143,47 @@ fn unusable_options_are_typed_errors() {
         assert!(matches!(bfgs(rosenbrock, &[-1.2, 1.0], &opts), Err(OptError::BadOption { .. })));
     }
 }
+
+/// An objective whose value never changes while it reports a gradient: no step lowers it, as at
+/// the rounding noise of a real likelihood. The line search fails along steepest descent for any
+/// gradient, so the status depends only on the gradient against `stall_gtol`.
+fn flat_with_gradient(slope: f64) -> impl FnMut(&[f64], &mut [f64]) -> f64 {
+    move |_x, g| {
+        g[0] = slope;
+        1.0
+    }
+}
+
+#[test]
+fn a_line_search_failure_with_a_large_gradient_stays_a_failure() {
+    // |g| = 1 against stall_gtol * max(1, |f|) = 1e-6: this is not a minimum
+    let r = bfgs(flat_with_gradient(1.0), &[3.0], &BfgsOptions::default()).unwrap();
+    assert_eq!(r.status, BfgsStatus::LineSearchFailed);
+    assert!(!r.converged());
+    assert_eq!(r.x, vec![3.0], "no step was taken");
+}
+
+#[test]
+fn a_stall_with_a_small_gradient_reports_precision() {
+    // |g| = 1e-7 is above gtol (1e-8) so the run is not converged by its gradient, and below
+    // stall_gtol (1e-6): the objective has no resolution left to find a lower point
+    let r = bfgs(flat_with_gradient(1e-7), &[3.0], &BfgsOptions::default()).unwrap();
+    assert_eq!(r.status, BfgsStatus::Converged(Convergence::Precision));
+    assert!(r.converged());
+    assert_eq!(r.x, vec![3.0]);
+}
+
+#[test]
+fn stall_gtol_alone_separates_the_two() {
+    // the same objective and gradient; only the threshold moves, in both directions
+    let tight = BfgsOptions { stall_gtol: 1e-8, ..BfgsOptions::default() };
+    let r = bfgs(flat_with_gradient(1e-7), &[3.0], &tight).unwrap();
+    assert_eq!(r.status, BfgsStatus::LineSearchFailed);
+    let loose = BfgsOptions { stall_gtol: 2.0, ..BfgsOptions::default() };
+    let r = bfgs(flat_with_gradient(1.0), &[3.0], &loose).unwrap();
+    assert_eq!(r.status, BfgsStatus::Converged(Convergence::Precision));
+    // zero is allowed: no stall is ever read as converged
+    let none = BfgsOptions { stall_gtol: 0.0, ..BfgsOptions::default() };
+    let r = bfgs(flat_with_gradient(1e-7), &[3.0], &none).unwrap();
+    assert_eq!(r.status, BfgsStatus::LineSearchFailed);
+}

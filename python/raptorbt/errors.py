@@ -48,6 +48,7 @@ SKILLS = (
     "deployment",
     "troubleshooting",
     "expressions",
+    "statistics",
 )
 
 _UNSET: Any = object()
@@ -694,6 +695,19 @@ CODES: dict[str, Code] = {
     "expr_unsupported_here": _c(
         ExpressionError, "expressions", "A construct the language names but this engine does not run yet.",
         ["a construct raptorbt-expressions lists as available"],
+    ),
+    # Statistics
+    "insufficient_observations": _c(
+        InvalidData, "statistics", "A statistic was given fewer observations than it needs; the message gives the count it got and the count it needs.",
+        ["at least the number of observations the message names (raptorbt-statistics lists each statistic's minimum)"],
+    ),
+    "degenerate_series": _c(
+        InvalidData, "statistics", "The data cannot support the statistic: a constant series, series that are exact combinations of one another, or a fit with no residual.",
+        ["series that vary and are not exact combinations of one another", "a longer sample"],
+    ),
+    "did_not_converge": _c(
+        InvalidData, "statistics", "A fitted model (GARCH, Markov-switching regimes) did not settle; no number is returned.",
+        ["a longer or cleaner sample", "fewer regimes (k=2)"],
     ),
     # Option structures and sizing
     "invalid_structure": _c(

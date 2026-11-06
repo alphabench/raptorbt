@@ -158,6 +158,23 @@ Load when:
 - Evaluating a formula over a stored history and bar by bar with identical numbers.
 - Looking up which expression functions exist, their warm-up and how they treat unknown values.
 
+## Statistics
+
+Statistical tests and fits over arrays for research: stationarity, cointegration, memory (Hurst), GARCH volatility, Markov regimes, HAC t-statistics, overfitting (PBO, SPA), factors, event studies, trading cost, parameter surfaces and a data audit. Which test answers which question, how many observations it needs, what it refuses and which results are not causal.
+
+Name: `raptorbt-statistics`  
+Path: [statistics/SKILL.md](statistics/SKILL.md)  
+Status: stable  
+API version: 1.x  
+Depends on: raptorbt-core
+
+Load when:
+
+- Choosing a test for a research question (stationarity, cointegration, memory, volatility, regimes, edge, overfitting, factors, events, cost).
+- Checking whether a backtest result is distinguishable from zero, or was the best of many tries (HAC, PBO, SPA).
+- Auditing bars before a study, or telling a parameter plateau from a spike.
+- Reading a regime, volatility or cointegration result and knowing which parts are not causal.
+
 ## Orders
 
 Order construction and lifecycle: the typed order kinds, sizing forms, time in force, brackets, OCO links, modify and cancel, option structures, and the reasons an order is refused.
