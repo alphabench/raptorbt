@@ -153,6 +153,7 @@ impl Kernel<3, 1> for Atr {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 1] {
         if !all_finite(&x) {
             return [f64::NAN];
@@ -181,6 +182,7 @@ impl Kernel<3, 1> for Natr {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 1] {
         if !all_finite(&x) {
             return [f64::NAN];
@@ -205,6 +207,7 @@ impl Kernel<3, 1> for Trange {
         1
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], h: &H) -> [f64; 1] {
         let pc = h.ago(2, 1);
         if !(all_finite(&x) && pc.is_finite()) {
@@ -237,6 +240,7 @@ impl Kernel<3, 3> for Keltner {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 3] {
         if !all_finite(&x) {
             return [f64::NAN; 3];
@@ -271,6 +275,7 @@ impl Kernel<2, 3> for Donchian {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 3] {
         let upper = self.hi.push(x[0]);
         let lower = self.lo.push(x[1]);
@@ -302,6 +307,7 @@ impl Kernel<3, 2> for Supertrend {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 2] {
         let [high, low, close] = x;
         if !all_finite(&x) {

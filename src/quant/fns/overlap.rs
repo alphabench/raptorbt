@@ -13,7 +13,7 @@ use crate::quant::registry::{
     int_param, regs, Domain, Family, FnDef, InputDef, Invariance, Legacy, Memory, NanPolicy,
     NanRule, OutKind, ParamDef, ParamKind, ParamVal, Reference, Relation,
 };
-use crate::quant::window::RollExt;
+use crate::quant::window::{RollExt, ShiftedWin};
 
 const MAX_PERIOD: i64 = 1 << 24;
 
@@ -41,21 +41,20 @@ impl Kernel<1, 1> for Sma {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let x = x[0];
         self.n += 1;
-        if x.is_finite() {
-            self.sum += x;
-        } else {
-            self.bad += 1;
-        }
+        // A non-finite value is counted and adds 0, so the sum's dependency chain holds two
+        // additions and no select on the finiteness of an input (same bits as skipping it).
+        let fx = x.is_finite();
+        self.sum += if fx { x } else { 0.0 };
+        self.bad += usize::from(!fx);
         if self.n > self.p as u64 {
             let old = h.ago(0, self.p);
-            if old.is_finite() {
-                self.sum -= old;
-            } else {
-                self.bad -= 1;
-            }
+            let fo = old.is_finite();
+            self.sum -= if fo { old } else { 0.0 };
+            self.bad -= usize::from(!fo);
         }
         if self.n < self.p as u64 || self.bad > 0 {
             [f64::NAN]
@@ -86,6 +85,7 @@ impl Kernel<1, 1> for Ema {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [self.st.step(x[0])]
     }
@@ -135,10 +135,10 @@ impl Ring {
         self.buf[self.head]
     }
 
-    /// Oldest to newest (valid once full).
-    fn iter(&self) -> impl Iterator<Item = f64> + '_ {
-        let (a, b) = self.buf.split_at(self.head);
-        b.iter().chain(a.iter()).copied()
+    /// The `j`-th value held, oldest first (valid once full).
+    #[inline(always)]
+    fn at(&self, j: usize) -> f64 {
+        self.buf[(self.head + j) % self.buf.len()]
     }
 }
 
@@ -164,18 +164,15 @@ impl RingSma {
     }
 
     fn push(&mut self, x: f64) -> f64 {
-        if x.is_finite() {
-            self.sum += x;
-        } else {
-            self.bad += 1;
-        }
+        // A non-finite value is counted and adds 0 (no select on the sum's dependency chain).
+        let fx = x.is_finite();
+        self.sum += if fx { x } else { 0.0 };
+        self.bad += usize::from(!fx);
         let old = self.ring.push(x);
         if self.ring.leaving() {
-            if old.is_finite() {
-                self.sum -= old;
-            } else {
-                self.bad -= 1;
-            }
+            let fo = old.is_finite();
+            self.sum -= if fo { old } else { 0.0 };
+            self.bad -= usize::from(!fo);
         }
         if !self.ring.full() || self.bad > 0 {
             f64::NAN
@@ -227,19 +224,6 @@ impl EmaSt {
             }
         }
     }
-}
-
-/// Linear weights 1..=p, newest heaviest; the legacy `StreamingWma` arithmetic. NaN when any
-/// value is non-finite.
-fn weighted_mean(window: impl Iterator<Item = f64>, p: usize) -> f64 {
-    let mut s = 0.0;
-    for (i, v) in window.enumerate() {
-        if !v.is_finite() {
-            return f64::NAN;
-        }
-        s += (i + 1) as f64 * v;
-    }
-    s / ((p * (p + 1)) as f64 / 2.0)
 }
 
 const KAMA_MAX: f64 = 2.0 / 31.0;
@@ -433,7 +417,7 @@ enum Inner {
     Identity,
     Sma(RingSma),
     Ema(EmaSt),
-    Wma(Ring, usize),
+    Wma(Ring, ShiftedWin),
     Dema([EmaSt; 2]),
     Tema([EmaSt; 3]),
     Trima(RingSma, RingSma),
@@ -490,7 +474,7 @@ impl MaCore {
             MaKind::Mama => Inner::Mama(Box::new(MamaSt::new(0.5, 0.05))),
             MaKind::Sma => Inner::Sma(RingSma::new(period)),
             MaKind::Ema => Inner::Ema(EmaSt::new(period)),
-            MaKind::Wma => Inner::Wma(Ring::new(period), period),
+            MaKind::Wma => Inner::Wma(Ring::new(period), ShiftedWin::new(period)),
             MaKind::Dema => Inner::Dema([EmaSt::new(period), EmaSt::new(period)]),
             MaKind::Tema => {
                 Inner::Tema([EmaSt::new(period), EmaSt::new(period), EmaSt::new(period)])
@@ -521,10 +505,10 @@ impl MaCore {
             }
             Inner::Sma(s) => s.push(x),
             Inner::Ema(e) => e.step(x),
-            Inner::Wma(r, p) => {
-                r.push(x);
-                if r.full() {
-                    weighted_mean(r.iter(), *p)
+            Inner::Wma(r, w) => {
+                let old = r.push(x);
+                if w.push(x, old, |j| r.at(j)) {
+                    w.weighted_mean()
                 } else {
                     f64::NAN
                 }
@@ -582,6 +566,7 @@ impl Kernel<1, 1> for MaFn {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [self.core.step(x[0])]
     }
@@ -601,6 +586,7 @@ impl Kernel<1, 1> for Wilder {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [self.st.step(x[0])]
     }
@@ -610,6 +596,7 @@ impl Kernel<1, 1> for Wilder {
 /// mean (as `StreamingBollinger`), whatever the middle band's `matype`.
 pub struct BBands {
     window: RingSma,
+    var: ShiftedWin,
     ma: Option<MaCore>,
     up: f64,
     dn: f64,
@@ -624,18 +611,20 @@ impl Kernel<1, 3> for BBands {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 3] {
-        let mean = self.window.push(x[0]);
+        let x = x[0];
+        let old = if self.window.ring.full() { self.window.ring.oldest() } else { f64::NAN };
+        let mean = self.window.push(x);
+        let clean = self.var.push(x, old, |j| self.window.ring.at(j));
         let mid = match &mut self.ma {
             None => mean,
-            Some(m) => m.step(x[0]),
+            Some(m) => m.step(x),
         };
-        if mid.is_nan() || mean.is_nan() {
+        if mid.is_nan() || mean.is_nan() || !clean {
             return [f64::NAN, mid, f64::NAN];
         }
-        let variance =
-            self.window.ring.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / self.window.p as f64;
-        let sd = variance.sqrt();
+        let sd = (self.var.m2() / self.window.p as f64).sqrt();
         [mid + self.up * sd, mid, mid - self.dn * sd]
     }
 }
@@ -664,6 +653,7 @@ impl Kernel<2, 1> for Mavp {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         let [v, per] = x;
         let pick = if per.is_finite() {
@@ -725,6 +715,7 @@ impl Kernel<1, 1> for Midpoint {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [self.0.step(x[0], x[0])]
     }
@@ -742,6 +733,7 @@ impl Kernel<2, 1> for Midprice {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         [self.0.step(x[0], x[1])]
     }
@@ -884,6 +876,7 @@ impl Kernel<2, 1> for Sar {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         if !x[0].is_finite() || !x[1].is_finite() {
             return [f64::NAN];
@@ -1148,6 +1141,7 @@ fn make_bbands(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn 
     }
     let k = BBands {
         window: RingSma::new(period.max(1)),
+        var: ShiftedWin::new(period.max(1)),
         ma,
         up: float_param(p, 1)?,
         dn: float_param(p, 2)?,
@@ -1222,7 +1216,7 @@ pub const DEFS: &[FnDef] = &[
             tolerance: 0.0,
         }),
         talib_name: Some("SMA"),
-        doc: "Simple moving average of the last `period` values.",
+        doc: "Simple moving average of the last `period` values. Bit-for-bit the running sum of `ctx.indicators.sma` (add the new value, subtract the one leaving, divide), so a single very large value (a 1e12 print among prices near 100) leaves its rounding in the sum after it has gone: about one part in 1e16 of the spike, which is a visible error on the average until the series resets. Use `sum(x, period) / period` (compensated and re-summed) when that matters.",
         refs: &[],
         rev: 1,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
@@ -1272,11 +1266,11 @@ pub const DEFS: &[FnDef] = &[
         out_kind: OutKind::Series,
         warmup: warmup_period,
         memory: Memory::Finite,
-        legacy: Some(Legacy { nan: NanPolicy::Recover, pinned_to: "indicators::streaming::StreamingWma", tolerance: 0.0 }),
+        legacy: Some(Legacy { nan: NanPolicy::Recover, pinned_to: "indicators::streaming::StreamingWma", tolerance: 1e-12 }),
         talib_name: Some("WMA"),
-        doc: "Linear-weighted moving average of the last `period` values, newest weighted heaviest.",
+        doc: "Linear-weighted moving average of the last `period` values, newest weighted heaviest. Kept as running sums of deviations from a reference near the window's mean, rebuilt exactly when the reference drifts, a large value leaves or every max(period, 1024) bars; equal to the streaming core to 1e-12 of the window's scale, not bit for bit.",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1408,7 +1402,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("MA"),
         doc: "Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA (limits 0.5 and 0.05, whatever the period; see `mama`), 8 T3. Period 1 returns the input. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
-        rev: 2,
+        rev: 3,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1430,7 +1424,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("MAVP"),
         doc: "Moving average whose period changes every bar: `periods` (cut to a whole number in minperiod..maxperiod) picks, per bar, which period's `matype` average to read. Each period's average starts so that it takes its first value at the first output bar, as TA-Lib's does, so a recursive kind (matype 1, 3, 4, 6, 8) carries no state from before it; a NaN period gives NaN. Warm-up is the longest period's.",
         refs: &[],
-        rev: 2,
+        rev: 3,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1448,11 +1442,11 @@ pub const DEFS: &[FnDef] = &[
         out_kind: OutKind::Series,
         warmup: bbands_warmup,
         memory: Memory::Infinite { settle: bbands_settle },
-        legacy: Some(Legacy { nan: NanPolicy::Recover, pinned_to: "indicators::streaming::StreamingBollinger", tolerance: 0.0 }),
+        legacy: Some(Legacy { nan: NanPolicy::Recover, pinned_to: "indicators::streaming::StreamingBollinger", tolerance: 1e-12 }),
         talib_name: Some("BBANDS"),
         doc: "Bollinger bands: a `matype` average of the last `period` values (default SMA) plus nbdevup and minus nbdevdn population standard deviations of the window around its simple mean. Outputs upper, middle, lower.",
         refs: &["Bollinger, Bollinger on Bollinger Bands, 2001"],
-        rev: 2,
+        rev: 3,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftEquivariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -1863,7 +1857,7 @@ mod family_tests {
     }
 
     #[test]
-    fn wma_hand_value_and_legacy_bits() {
+    fn wma_hand_value_and_legacy_within_tolerance() {
         // (1 * 1 + 2 * 2 + 3 * 3) / 6 = 14 / 6.
         let out = one("wma", &[i(3)], &[1.0, 2.0, 3.0]);
         assert!(out[0].is_nan() && out[1].is_nan());
@@ -1874,7 +1868,18 @@ mod family_tests {
                 let mut core = StreamingWma::new(p as usize);
                 let legacy: Vec<f64> =
                     data.iter().map(|&x| core.update(x).unwrap_or(NAN)).collect();
-                prop_assert_eq!(bits(&one("wma", &[i(p)], &data)), bits(&legacy));
+                // Pinned at 1e-12 of the window's scale (`Legacy.tolerance`), not bitwise: this
+                // is a running sum, the legacy core a fresh weighted sum every bar.
+                let got = one("wma", &[i(p)], &data);
+                let p = p as usize;
+                for (j, (g, l)) in got.iter().zip(&legacy).enumerate() {
+                    if l.is_nan() || j + 1 < p {
+                        prop_assert!(g.is_nan() && l.is_nan(), "bar {j}");
+                        continue;
+                    }
+                    let scale = data[j + 1 - p..=j].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                    prop_assert!((g - l).abs() <= 1e-12 * scale, "bar {j}: {g} against {l}");
+                }
                 Ok(())
             })
             .unwrap();
@@ -2013,7 +2018,7 @@ mod family_tests {
     }
 
     #[test]
-    fn bbands_equals_the_streaming_bollinger_bitwise_on_finite_data() {
+    fn bbands_equals_the_streaming_bollinger_on_finite_data() {
         let strategy = (1i64..30, 0.5f64..3.0, prop::collection::vec(-1e4f64..1e4, 0..200));
         runner(24)
             .run(&strategy, |(p, k, data)| {
@@ -2032,9 +2037,11 @@ mod family_tests {
                 let o = batch("bbands", &[i(p), f(k), f(k), i(0)], &[&data], 3);
                 let full = (p as usize).saturating_sub(1);
                 for (j, (mid, up, lo)) in legacy.iter().enumerate().skip(full) {
+                    // The middle band is the legacy running mean, bit for bit; the bands add a
+                    // deviation from the O(1) window sums, pinned at 1e-12 (`Legacy.tolerance`).
                     prop_assert_eq!(canon_bits(o[1][j]), canon_bits(*mid), "middle {}", j);
-                    prop_assert_eq!(canon_bits(o[0][j]), canon_bits(*up), "upper {}", j);
-                    prop_assert_eq!(canon_bits(o[2][j]), canon_bits(*lo), "lower {}", j);
+                    prop_assert!(close(o[0][j], *up), "upper {}: {} against {}", j, o[0][j], up);
+                    prop_assert!(close(o[2][j], *lo), "lower {}: {} against {}", j, o[2][j], lo);
                 }
                 Ok(())
             })

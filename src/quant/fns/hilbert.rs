@@ -64,8 +64,11 @@ pub(crate) enum HtMode {
     Period,
     /// `ht_phasor`.
     Phasor,
-    /// `ht_dcphase`, `ht_sine`, `ht_trendmode`, `ht_trendline`.
+    /// `ht_dcphase`, `ht_sine`, `ht_trendmode`.
     Phase,
+    /// `ht_trendline`: the same bars as `Phase`, without the phase, sine and trend-mode block
+    /// (a sine and a cosine per bar of the cycle) that its output does not read.
+    Trendline,
     /// `mama`.
     Mama { fast: f64, slow: f64 },
 }
@@ -74,7 +77,7 @@ impl HtMode {
     /// First bar whose Hilbert step is recorded.
     fn start(self) -> u64 {
         match self {
-            HtMode::Phase => 37,
+            HtMode::Phase | HtMode::Trendline => 37,
             _ => 12,
         }
     }
@@ -82,7 +85,7 @@ impl HtMode {
     /// Leading NaN outputs on clean data.
     fn lookback(self) -> u64 {
         match self {
-            HtMode::Phase => 63,
+            HtMode::Phase | HtMode::Trendline => 63,
             _ => 32,
         }
     }
@@ -272,6 +275,10 @@ impl Ht {
 
         let phase_family = match self.mode {
             HtMode::Phase => Some(self.phase_block(n, smoothed)),
+            HtMode::Trendline => {
+                let nan = f64::NAN;
+                Some(((nan, nan, nan), (self.trendline_block(n), nan)))
+            }
             _ => None,
         };
         if let HtMode::Mama { fast, slow } = self.mode {
@@ -303,6 +310,23 @@ impl Ht {
             }
         }
         out
+    }
+
+    /// Instantaneous trendline for bar `n`: the mean of the raw price over one cycle, then a
+    /// 4-3-2-1 weighting with the means of the three bars before.
+    fn trendline_block(&mut self, n: u64) -> f64 {
+        let cycle = (self.smooth_period + 0.5) as usize;
+        let mut mean = 0.0;
+        for i in 0..cycle {
+            mean += self.px[(n as usize - i) % PX_LEN];
+        }
+        if cycle > 0 {
+            mean /= cycle as f64;
+        }
+        let h = self.trend_hist;
+        let trendline = (4.0 * mean + 3.0 * h[0] + 2.0 * h[1] + h[2]) / 10.0;
+        self.trend_hist = [mean, h[0], h[1]];
+        trendline
     }
 
     /// Dominant cycle phase, sine pair, instantaneous trendline and trend/cycle mode for bar `n`.
@@ -345,17 +369,7 @@ impl Ht {
         self.leadsine = ((phase + 45.0) * DEG_TO_RAD).sin();
         self.smooth_idx = (self.smooth_idx + 1) % SMOOTH_LEN;
 
-        // Trendline: mean of the raw price over one cycle, then a 4-3-2-1 weighting.
-        let mut mean = 0.0;
-        for i in 0..cycle {
-            mean += self.px[(n as usize - i) % PX_LEN];
-        }
-        if cycle > 0 {
-            mean /= cycle as f64;
-        }
-        let h = self.trend_hist;
-        let trendline = (4.0 * mean + 3.0 * h[0] + 2.0 * h[1] + h[2]) / 10.0;
-        self.trend_hist = [mean, h[0], h[1]];
+        let trendline = self.trendline_block(n);
 
         let mut trend = 1.0;
         if (self.sine > self.leadsine && prev_sine <= prev_lead)
@@ -413,6 +427,7 @@ impl<const O: usize> Kernel<1, O> for HtKernel<O> {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; O] {
         (self.pick)(&self.ht.step(x[0]))
     }
@@ -454,7 +469,7 @@ fn make_trendmode(_: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<d
 }
 
 fn make_trendline(_: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    make_ht(HtMode::Phase, |o| [o.trendline], "ht_trendline", ins, outs)
+    make_ht(HtMode::Trendline, |o| [o.trendline], "ht_trendline", ins, outs)
 }
 
 fn float_param(p: &[ParamVal], i: usize) -> Result<f64, String> {

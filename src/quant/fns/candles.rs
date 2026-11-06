@@ -120,10 +120,15 @@ fn range_of(b: &[[f64; 4]], t: RangeType, j: usize) -> f64 {
 pub struct Cx<'a> {
     b: &'a [[f64; 4]],
     set: &'a CandleSettings,
-    avgs: &'a [(Set, usize)],
+    /// The index into `tot` of each declared (setting, offset), `NO_AVG` for one not declared.
+    slot: &'a [[u8; MAX_OFF]; N_SETS],
     tot: &'a [f64],
     pen: f64,
 }
+
+/// Bar offsets a pattern may read an average at, and the marker of an undeclared pair.
+const MAX_OFF: usize = 8;
+const NO_AVG: u8 = u8::MAX;
 
 impl Cx<'_> {
     fn o(&self, j: usize) -> f64 {
@@ -181,15 +186,13 @@ impl Cx<'_> {
 
     /// The setting's average range for the bar `off` back. A pattern declares every
     /// (setting, offset) it reads in its spec; an undeclared one is a bug in the spec.
+    #[inline(always)]
     fn avg(&self, set: Set, off: usize) -> f64 {
         let s = self.set.get(set);
         let x = if s.period > 0 {
-            let k = self
-                .avgs
-                .iter()
-                .position(|&a| a == (set, off))
-                .unwrap_or_else(|| unreachable!("undeclared average {set:?} at {off}"));
-            self.tot[k] / s.period as f64
+            let k = self.slot[set as usize][off];
+            assert!(k != NO_AVG, "undeclared average {set:?} at {off}");
+            self.tot[usize::from(k)] / s.period as f64
         } else {
             range_of(self.b, s.range, off)
         };
@@ -1208,10 +1211,17 @@ struct CandleKernel {
     set: CandleSettings,
     pen: f64,
     lb: usize,
-    /// Bar `j` back at index `j`, `lb + 2` of them: one more than the window, which the
-    /// oldest range leaving a running total comes from.
-    bars: Vec<[f64; 4]>,
+    /// The last `lb + 2` bars, newest first, in a buffer of twice that length with every bar
+    /// written at `pos` and `pos + lb + 2`: `buf[pos..pos + lb + 2]` is always contiguous with
+    /// bar `j` back at index `j` (one more than the window, which the oldest range leaving a
+    /// running total comes from), and a step writes two bars instead of copying the window.
+    buf: Vec<[f64; 4]>,
+    pos: usize,
+    /// Bars among the last `lb + 1` that hold a non-finite value; a bar that does not exist
+    /// yet is NaN, so the first `lb` bars end in NaN too.
+    bad: usize,
     tot: Vec<f64>,
+    slot: [[u8; MAX_OFF]; N_SETS],
     /// The previous bar had a clean window, so the totals are current.
     live: bool,
 }
@@ -1219,65 +1229,76 @@ struct CandleKernel {
 impl CandleKernel {
     fn new(spec: &'static Spec, set: CandleSettings, pen: f64) -> Self {
         let lb = spec.lookback(&set);
+        let mut slot = [[NO_AVG; MAX_OFF]; N_SETS];
+        for (t, &(s, off)) in spec.avgs.iter().enumerate() {
+            slot[s as usize][off] = u8::try_from(t).expect("few averages per pattern");
+        }
         Self {
             spec,
             set,
             pen,
             lb,
-            bars: vec![[f64::NAN; 4]; lb + 2],
+            buf: vec![[f64::NAN; 4]; 2 * (lb + 2)],
+            pos: 0,
+            bad: lb + 1,
             tot: vec![0.0; spec.avgs.len()],
+            slot,
             live: false,
         }
     }
 }
 
+fn is_clean(b: &[f64; 4]) -> bool {
+    b.iter().all(|v| v.is_finite())
+}
+
 impl Kernel<4, 1> for CandleKernel {
     fn heap_bytes(&self) -> usize {
-        self.bars.capacity() * std::mem::size_of::<[f64; 4]>()
+        self.buf.capacity() * std::mem::size_of::<[f64; 4]>()
             + self.tot.capacity() * std::mem::size_of::<f64>()
     }
 
+    /// Bars are held here, not read from the history.
     fn lookback(&self) -> usize {
-        self.lb + 1
+        0
     }
 
-    fn step<H: Hist<4>>(&mut self, x: [f64; 4], h: &H) -> [f64; 1] {
-        self.bars[0] = x;
-        for j in 1..self.bars.len() {
-            for k in 0..4 {
-                self.bars[j][k] = h.ago(k, j);
-            }
+    #[inline(always)]
+    fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
+        let len = self.lb + 2;
+        if !is_clean(&self.buf[self.pos + self.lb]) {
+            self.bad -= 1;
         }
-        // A bar that does not exist reads NaN, so the first `lb` bars end here too.
-        if !self.bars[..=self.lb].iter().all(|b| b.iter().all(|v| v.is_finite())) {
+        if !is_clean(&x) {
+            self.bad += 1;
+        }
+        self.pos = if self.pos == 0 { len - 1 } else { self.pos - 1 };
+        self.buf[self.pos] = x;
+        self.buf[self.pos + len] = x;
+        if self.bad > 0 {
             self.live = false;
             return [f64::NAN];
         }
+        let bars = &self.buf[self.pos..self.pos + len];
         for (t, &(set, off)) in self.spec.avgs.iter().enumerate() {
             let s = self.set.get(set);
             if s.period == 0 {
                 continue;
             }
             if self.live {
-                let add = range_of(&self.bars, s.range, off + 1);
-                let drop = range_of(&self.bars, s.range, off + 1 + s.period);
+                let add = range_of(bars, s.range, off + 1);
+                let drop = range_of(bars, s.range, off + 1 + s.period);
                 self.tot[t] += add - drop;
             } else {
                 let mut sum = 0.0;
                 for k in (off + 1..=off + s.period).rev() {
-                    sum += range_of(&self.bars, s.range, k);
+                    sum += range_of(bars, s.range, k);
                 }
                 self.tot[t] = sum;
             }
         }
         self.live = true;
-        let cx = Cx {
-            b: &self.bars,
-            set: &self.set,
-            avgs: self.spec.avgs,
-            tot: &self.tot,
-            pen: self.pen,
-        };
+        let cx = Cx { b: bars, set: &self.set, slot: &self.slot, tot: &self.tot, pen: self.pen };
         [f64::from((self.spec.eval)(&cx))]
     }
 }

@@ -7,18 +7,24 @@ each library is timed in its own process and the results meet in a JSON file:
     uv run --no-project --python 3.12 --with ta-lib==0.6.4 --with numpy \\
         python benches/python/talib_compare.py talib --out /tmp/talib.json
 
-    # 2. raptorbt, single-threaded then parallel (rayon reads the variable at import)
+    # 2. raptorbt, rayon pool of one thread then of all cores (rayon reads the variable once, at
+    #    its first use, so the pool size is fixed by the process: one process per setting)
     uv run maturin develop --release
     python benches/python/talib_compare.py raptorbt --threads 1 --out /tmp/rb1.json
     python benches/python/talib_compare.py raptorbt --threads 0 --out /tmp/rbN.json   # 0 = all cores
 
     # 3. merge, print the verdicts, write docs/quantitative-correctness/speed.md
+    #    (give two or more runs of each library to take the fastest of them per measurement)
     python benches/python/talib_compare.py report /tmp/talib.json /tmp/rb1.json /tmp/rbN.json \\
         --json /tmp/speed.json --md docs/quantitative-correctness/speed.md
 
-Speed bar (single-threaded, single series): within 1.1x of TA-Lib for 90% of functions and
-within 1.5x for all. A function's ratio is its worst case across sizes and periods.
-Time is the median of several runs after one warm-up; ratio = raptorbt / TA-Lib, so below 1.0 is faster.
+Speed bar (single series, one thread): within 1.1x of TA-Lib for 90% of functions and
+within 1.5x for all. A single-series evaluation never uses the rayon pool (only sweeps and
+panels do), so the series rows are one-thread whatever `--threads` says; the cases that run
+several series at once say how many Python threads they use, and the table names the rayon pool
+size separately. A function's ratio is its worst case across sizes and periods.
+Time is the median of several calls after one warm-up, the fastest of the process runs given to
+`report`; ratio = raptorbt / TA-Lib, so below 1.0 is faster.
 """
 
 from __future__ import annotations
@@ -132,7 +138,7 @@ def run_talib(args) -> None:
         close, high, low = data["close"], data["high"], data["low"]
         # rolling_max at p=200, the long-window case
         t = bench(lambda: talib.MAX(close, 200), runs_for(n))
-        result["cases"].append({"case": "rolling_max_200", "n": n, "seconds": t})
+        result["cases"].append({"case": "rolling_max_200", "n": n, "mode": "single", "seconds": t})
 
         # the shared-node formula, written as a TA-Lib user would: every term recomputes SMA and EMA
         def shared():
@@ -142,7 +148,8 @@ def run_talib(args) -> None:
                 acc = acc + (s - e * k) / s
             return acc
 
-        result["cases"].append({"case": "shared_nodes", "n": n, "seconds": bench(shared, runs_for(n))})
+        result["cases"].append({"case": "shared_nodes", "n": n, "mode": "single",
+                                "seconds": bench(shared, runs_for(n))})
 
         per = n // INSTRUMENTS
         cols = [np.ascontiguousarray(close[i * per:(i + 1) * per]) for i in range(INSTRUMENTS)]
@@ -205,9 +212,11 @@ def run_raptorbt(args) -> None:
     import raptorbt as rb
     from concurrent.futures import ThreadPoolExecutor
 
+    # The pool size rayon will have: it reads RAYON_NUM_THREADS once, so this process's setting
+    # is the truth for every row below.
     threads = args.threads or os.cpu_count()
-    result = {"library": "raptorbt", "machine": machine(threads), "series": [], "cases": [],
-              "skipped": []}
+    result = {"library": "raptorbt", "machine": machine(threads) | {"rayon_threads": threads},
+              "series": [], "cases": [], "skipped": []}
     funcs = oracle()
     _, by_talib = registry(rb)
     for n in SIZES:
@@ -232,13 +241,13 @@ def run_raptorbt(args) -> None:
                 print(f"rb    {name:<14} n={n:>9,} p={period}  {t*1e3:9.2f} ms  {src}", flush=True)
 
         close = data["close"]
-        result["cases"].append({"case": "rolling_max_200", "n": n,
+        result["cases"].append({"case": "rolling_max_200", "n": n, "mode": "single", "workers": 1,
                                 "seconds": bench(lambda: rb.rolling_max(close, 200), runs_for(n))})
         terms = " + ".join(f"(sma(close, 20) - ema(close, 20) * {k}) / sma(close, 20)"
                            for k in range(1, SHARED_TERMS + 1))
         try:
             e = rb.expr(terms)
-            result["cases"].append({"case": "shared_nodes", "n": n,
+            result["cases"].append({"case": "shared_nodes", "n": n, "mode": "single", "workers": 1,
                                     "seconds": bench(lambda: e.eval(data), runs_for(n))})
         except Exception as ex:  # noqa: BLE001
             print(f"note: shared_nodes skipped: {ex}")
@@ -247,6 +256,7 @@ def run_raptorbt(args) -> None:
         cols = [{"close": np.ascontiguousarray(close[i * per:(i + 1) * per])} for i in range(INSTRUMENTS)]
         e = rb.expr("sma(close, 20)")
         result["cases"].append({"case": "instruments_500", "mode": "single", "n": n,
+                                "workers": 1,
                                 "seconds": bench(lambda: [e.eval(c) for c in cols], runs_for(n))})
         workers = os.cpu_count() or 1
         with ThreadPoolExecutor(workers) as pool:  # Expr.eval releases the GIL
@@ -277,17 +287,43 @@ def run_raptorbt(args) -> None:
 # ------------------------------------------------------------------ report
 
 
+def merge_runs(runs: list[dict]) -> dict:
+    """One result from several runs of the same library: for every measurement, the fastest run.
+
+    The machine is shared and its load moves the clock by up to 2x between runs; the fastest of
+    several medians is the least disturbed one. Both libraries get the same treatment (pass the
+    same number of runs of each), so a ratio is never a quiet run against a busy one.
+    """
+    out = json.loads(json.dumps(runs[0]))
+    out["runs"] = len(runs)
+    for r in runs[1:]:
+        for key, rows, ident in (("series", out["series"], lambda x: (x["function"], x["n"], x["period"])),
+                                 ("cases", out["cases"], lambda x: (x["case"], x["n"], x.get("mode")))):
+            best = {ident(x): x for x in rows}
+            for x in r[key]:
+                k = ident(x)
+                if k not in best:
+                    rows.append(x)
+                    best[k] = x
+                elif x["seconds"] < best[k]["seconds"]:
+                    best[k].update(x)
+        if "sweep" in out and "sweep" in r:
+            for f in ("joint_seconds", "independent_seconds"):
+                out["sweep"][f] = min(out["sweep"][f], r["sweep"][f])
+    return out
+
+
 def load(paths):
-    talib, rbs = None, []
+    talibs, by_threads = [], {}
     for p in paths:
         d = json.loads(pathlib.Path(p).read_text())
         if d["library"] == "talib":
-            talib = d
+            talibs.append(d)
         else:
-            rbs.append(d)
-    if talib is None or not rbs:
-        sys.exit("report needs one talib JSON and at least one raptorbt JSON")
-    return talib, rbs
+            by_threads.setdefault(d["machine"]["threads"], []).append(d)
+    if not talibs or not by_threads:
+        sys.exit("report needs at least one talib JSON and at least one raptorbt JSON")
+    return merge_runs(talibs), [merge_runs(v) for v in by_threads.values()]
 
 
 def verdicts(talib: dict, rb: dict):
@@ -316,9 +352,12 @@ def run_report(args) -> None:
     worst = verdicts(talib, single)
     lines = ["# Speed against TA-Lib", "",
              f"TA-Lib {talib.get('version')} on {talib['machine']['platform']}, "
-             f"{talib['machine']['cpu_count']} cores. Median of several runs after a warm-up. "
+             f"{talib['machine']['cpu_count']} cores. Each measurement is the median of several calls after a "
+             f"warm-up, then the fastest of {talib.get('runs', 1)} process run(s) of each library. "
              "Ratio is raptorbt / TA-Lib; below 1.0 is faster. "
-             f"Single-threaded raptorbt run: {single['machine']['threads']} thread(s).", "",
+             f"Series rows come from the run with a rayon pool of {single['machine']['threads']} "
+             "thread(s); a single-series evaluation does not use the pool, so they are one-thread "
+             "whatever it is.", "",
              "## Single series, single thread", "",
              "| Function | Worst ratio | Where | Verdict |", "|---|---|---|---|"]
     for f, (r, where) in sorted(worst.items()):
@@ -335,25 +374,29 @@ def run_report(args) -> None:
     skipped = sorted({s["function"] for s in single.get("skipped", [])})
     lines += ["", summary, "", f"Not registered or not comparable here: {len(skipped)} (see JSON)."]
 
-    lines += ["", "## Cases", "", "| Case | Bars | Mode | TA-Lib s | raptorbt s | Ratio |", "|---|---|---|---|---|---|"]
+    lines += ["", "## Cases", "",
+              "| Case | Bars | Python threads | Rayon pool | TA-Lib s | raptorbt s | Ratio |",
+              "|---|---|---|---|---|---|---|"]
     for rb in rbs:
+        pool = rb["machine"].get("rayon_threads", rb["machine"]["threads"])
         for c in rb["cases"]:
             ref = next((t for t in talib["cases"]
-                        if t["case"] == c["case"] and t["n"] == c["n"] and t.get("mode") == c.get("mode")), None)
+                        if t["case"] == c["case"] and t["n"] == c["n"]
+                        and t.get("mode", "single") == c.get("mode", "single")), None)
             if ref is None:
                 continue
             ratio = c["seconds"] / ref["seconds"]
-            mode = c.get("mode") or ("single" if rb["machine"]["threads"] == 1 else "parallel")
-            mode = f"{mode} ({rb['machine']['threads']} rayon threads)"
-            lines.append(f"| {c['case']} | {c['n']:,} | {mode} | {ref['seconds']:.4f} | "
+            workers = c.get("workers", 1)
+            lines.append(f"| {c['case']} | {c['n']:,} | {workers} | {pool} | {ref['seconds']:.4f} | "
                          f"{c['seconds']:.4f} | {ratio:.2f} |")
-            out["cases"].append(c | {"talib_seconds": ref["seconds"], "ratio": ratio, "mode": mode})
+            out["cases"].append(c | {"talib_seconds": ref["seconds"], "ratio": ratio,
+                                     "python_threads": workers, "rayon_threads": pool})
     sweeps = [(r["machine"]["threads"], r["sweep"]) for r in rbs if "sweep" in r]
     if sweeps:
         lines += ["", "## Sweep", "",
                   "100 bindings of `sma(close, $n) > sma(close, $m)`: the joint plan against each binding "
                   "evaluated on its own. No TA-Lib counterpart.", "",
-                  "| Bars | Bindings | rayon threads | Joint s | Independent s | Joint / independent |",
+                  "| Bars | Bindings | Rayon pool | Joint s | Independent s | Joint / independent |",
                   "|---|---|---|---|---|---|"]
         for threads, sw in sweeps:
             ratio = sw["joint_seconds"] / sw["independent_seconds"]
@@ -362,7 +405,9 @@ def run_report(args) -> None:
             out.setdefault("sweeps", []).append(sw | {"threads": threads, "ratio": ratio})
     lines += ["", "The shared-nodes case is one raptorbt program summing 20 terms that share `sma` and `ema`, "
               "against TA-Lib recomputing both per term. The instruments case is `sma(close, 20)` over 500 "
-              "instruments; the parallel rows use a thread pool on both sides.", ""]
+              "instruments; the rows with more than one Python thread call it from that many threads on both "
+              "sides (each call is one series on one thread, and does not use the rayon pool). The rows "
+              "with one Python thread are the ones to hold against the single-series bar.", ""]
     print(summary)
     for f, v in sorted(out["verdicts"].items()):
         print(f"{f:<16} {v['ratio']:6.2f}  {v['verdict']:<10} {v['where']}")

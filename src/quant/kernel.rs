@@ -65,24 +65,26 @@ pub trait Node: Send + Sync {
 /// in the slice, so they cannot be addressed.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceHist<'a, const I: usize> {
-    prefix: [&'a [f64]; I],
+    cols: [&'a [f64]; I],
+    /// The current bar. Only indices below it are ever read.
+    i: usize,
 }
 
 impl<'a, const I: usize> SliceHist<'a, I> {
     /// History as seen from bar `i`. Panics when `i` exceeds a column.
     pub fn new(cols: [&'a [f64]; I], i: usize) -> Self {
-        Self { prefix: array::from_fn(|j| &cols[j][..i]) }
+        assert!(cols.iter().all(|c| i <= c.len()), "bar {i} beyond a column");
+        Self { cols, i }
     }
 }
 
 impl<const I: usize> Hist<I> for SliceHist<'_, I> {
     #[inline(always)]
     fn ago(&self, input: usize, k: usize) -> f64 {
-        let s = self.prefix[input];
-        if k == 0 || k > s.len() {
+        if k == 0 || k > self.i {
             f64::NAN
         } else {
-            s[s.len() - k]
+            self.cols[input][self.i - k]
         }
     }
 }
@@ -127,7 +129,8 @@ impl<const I: usize> Hist<I> for RingHist<I> {
 
 /// Binds a kernel to registers and gives it both modes.
 pub struct Adapter<K, const I: usize, const O: usize> {
-    kernel: K,
+    /// `None` only while `run_batch` holds the kernel in a local (see there).
+    kernel: Option<K>,
     in_regs: [usize; I],
     out_regs: [usize; O],
     ring: RingHist<I>,
@@ -137,7 +140,7 @@ impl<K: Kernel<I, O>, const I: usize, const O: usize> Adapter<K, I, O> {
     pub fn new(kernel: K, in_regs: [usize; I], out_regs: [usize; O]) -> Self {
         assert!(I >= 1, "a kernel reads at least one input");
         let ring = RingHist::new(kernel.lookback());
-        Self { kernel, in_regs, out_regs, ring }
+        Self { kernel: Some(kernel), in_regs, out_regs, ring }
     }
 }
 
@@ -145,21 +148,31 @@ impl<K: Kernel<I, O>, const I: usize, const O: usize> Node for Adapter<K, I, O> 
     fn run_batch(&mut self, ins: &[&[f64]], outs: &mut [&mut [f64]]) {
         assert_eq!(ins.len(), I, "input arity");
         assert_eq!(outs.len(), O, "output arity");
-        let cols: [&[f64]; I] = array::from_fn(|j| ins[j]);
-        let n = cols[0].len();
-        assert!(cols.iter().all(|c| c.len() == n) && outs.iter().all(|o| o.len() == n));
+        let n = outs.first().map_or(ins[0].len(), |o| o.len());
+        assert!(ins.iter().all(|c| c.len() == n) && outs.iter().all(|o| o.len() == n));
+        // Slices cut to `n` once, so the loop below indexes them without a check each bar.
+        let cols: [&[f64]; I] = array::from_fn(|j| &ins[j][..n]);
+        let mut outs = outs.iter_mut();
+        let mut out: [&mut [f64]; O] = array::from_fn(|_| &mut **outs.next().expect("arity"));
+        // The kernel runs from a local, not through `self`: its state then lives in registers
+        // for the whole column instead of being loaded and stored around every bar, which put a
+        // memory round trip on the critical path of every accumulator (a rolling sum took 24 ns
+        // a bar through `self` and 5 from a local).
+        let mut kernel = self.kernel.take().expect("kernel present between calls");
         for i in 0..n {
-            let h = SliceHist::new(cols, i);
-            let y = self.kernel.step(array::from_fn(|j| cols[j][i]), &h);
-            for (o, v) in outs.iter_mut().zip(y) {
+            // `i < n` and every column has `n` values.
+            let h = SliceHist { cols, i };
+            let y = kernel.step(array::from_fn(|j| cols[j][i]), &h);
+            for (o, v) in out.iter_mut().zip(y) {
                 o[i] = v;
             }
         }
+        self.kernel = Some(kernel);
     }
 
     fn step(&mut self, regs: &mut Regs) {
         let x: [f64; I] = array::from_fn(|j| regs.get(self.in_regs[j]));
-        let y = self.kernel.step(x, &self.ring);
+        let y = self.kernel.as_mut().expect("kernel present between calls").step(x, &self.ring);
         self.ring.push(x);
         for (r, v) in self.out_regs.iter().zip(y) {
             regs.set(*r, v);
@@ -167,7 +180,9 @@ impl<K: Kernel<I, O>, const I: usize, const O: usize> Node for Adapter<K, I, O> 
     }
 
     fn state_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.ring.heap_bytes() + self.kernel.heap_bytes()
+        std::mem::size_of::<Self>()
+            + self.ring.heap_bytes()
+            + self.kernel.as_ref().map_or(0, |k| k.heap_bytes())
     }
 }
 

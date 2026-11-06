@@ -1108,7 +1108,7 @@ Beta of the second input on the first: covariance of their simple returns over t
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `BETA`
 - invariance: scale_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `ceil([x])`
 
@@ -1134,7 +1134,7 @@ Pearson correlation of the two inputs over the last `period` values. A flat wind
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `CORREL`
 - invariance: scale_invariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `cos([x])`
 
@@ -1212,7 +1212,7 @@ Value at the newest bar of the least-squares line through the last `period` valu
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `LINEARREG`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `linearreg_angle([x], period=14)`
 
@@ -1225,7 +1225,7 @@ Angle in degrees of the least-squares line through the last `period` values: ata
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `LINEARREG_ANGLE`
 - invariance: none
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `linearreg_intercept([x], period=14)`
 
@@ -1238,7 +1238,7 @@ Intercept (value at the oldest bar of the window) of the least-squares line thro
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `LINEARREG_INTERCEPT`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `linearreg_slope([x], period=14)`
 
@@ -1251,7 +1251,7 @@ Slope per bar of the least-squares line through the last `period` values. A flat
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `LINEARREG_SLOPE`
 - invariance: scale_equivariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `ln([x])`
 
@@ -1434,7 +1434,7 @@ Population standard deviation of the last `period` values (divisor `period`), ti
 - legacy: pinned to `indicators::streaming::StreamingStdDev` (within 1e-12 on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `STDDEV`
 - invariance: shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `sub([a], [b])`
 
@@ -1499,7 +1499,7 @@ Time series forecast: the least-squares line through the last `period` values, o
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `TSF`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `typprice([high], [low], [close])`
 
@@ -1525,7 +1525,7 @@ Population variance of the last `period` values (divisor `period`). A flat windo
 - memory: finite: it forgets any bar after its window
 - TA-Lib: `VAR`
 - invariance: shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `wclprice([high], [low], [close])`
 
@@ -1582,7 +1582,7 @@ Absolute price oscillator: fast average - slow average, both of type `matype` (0
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `APO`
 - invariance: scale_equivariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `aroon([high], [low], period) -> (aroondown, aroonup)`
 
@@ -1694,7 +1694,7 @@ MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `MACDEXT`
 - invariance: scale_equivariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `macdfix([x], signalperiod=9) -> (macd, macdsignal, macdhist)`
 
@@ -1806,7 +1806,7 @@ Percentage price oscillator: (fast average - slow average) / slow average * 100,
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `PPO`
 - invariance: scale_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ### `roc([x], period)`
 
@@ -1887,7 +1887,7 @@ TA-Lib's SLOW stochastic: the fast %K over `fastk_period` bars, smoothed by `slo
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `STOCH`
 - invariance: scale_invariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 - reference: Lane, Lane's Stochastics, 1984
 
 ### `stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`
@@ -1929,7 +1929,7 @@ Stochastic RSI: the fast stochastic over `fastk_period` bars of the RSI of `peri
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `STOCHRSI`
 - invariance: scale_invariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 - reference: Chande, Kroll, The New Technical Trader, 1994
 
 ### `trix([x], period)`
@@ -1985,10 +1985,10 @@ Bollinger bands: a `matype` average of the last `period` values (default SMA) pl
 - outputs: `upperband`, `middleband`, `lowerband` (numeric)
 - warm-up: set by the parameters; the first known value is at that index on clean data
 - memory: infinite: the seed fades; see `settle(eps)`
-- legacy: pinned to `indicators::streaming::StreamingBollinger` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- legacy: pinned to `indicators::streaming::StreamingBollinger` (within 1e-12 on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `BBANDS`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 2 (a change to the numbers raises it, and the program hash with it)
+- revision: 3 (a change to the numbers raises it, and the program hash with it)
 - reference: Bollinger, Bollinger on Bollinger Bands, 2001
 
 ### `dema([x], period)`
@@ -2044,7 +2044,7 @@ Moving average chosen by `matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `MA`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 2 (a change to the numbers raises it, and the program hash with it)
+- revision: 3 (a change to the numbers raises it, and the program hash with it)
 
 ### `mavp([x], periods, minperiod=2, maxperiod=30, matype=0)`
 
@@ -2057,7 +2057,7 @@ Moving average whose period changes every bar: `periods` (cut to a whole number 
 - memory: infinite: the seed fades; see `settle(eps)`
 - TA-Lib: `MAVP`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 2 (a change to the numbers raises it, and the program hash with it)
+- revision: 3 (a change to the numbers raises it, and the program hash with it)
 
 ### `midpoint([x], period)`
 
@@ -2115,7 +2115,7 @@ Parabolic SAR, extended: separate long and short factors, a start value (positiv
 
 ### `sma([x], period)`
 
-Simple moving average of the last `period` values.
+Simple moving average of the last `period` values. Bit-for-bit the running sum of `ctx.indicators.sma` (add the new value, subtract the one leaving, divide), so a single very large value (a 1e12 print among prices near 100) leaves its rounding in the sum after it has gone: about one part in 1e16 of the spike, which is a visible error on the average until the series resets. Use `sum(x, period) / period` (compensated and re-summed) when that matters.
 
 - inputs: `x` (default `close`)
 - parameters: `period`: int in [1, 16777216], required
@@ -2184,17 +2184,17 @@ Wilder smoothing: alpha = 1/period, seeded with the mean of the first `period` v
 
 ### `wma([x], period)`
 
-Linear-weighted moving average of the last `period` values, newest weighted heaviest.
+Linear-weighted moving average of the last `period` values, newest weighted heaviest. Kept as running sums of deviations from a reference near the window's mean, rebuilt exactly when the reference drifts, a large value leaves or every max(period, 1024) bars; equal to the streaming core to 1e-12 of the window's scale, not bit for bit.
 
 - inputs: `x` (default `close`)
 - parameters: `period`: int in [1, 16777216], required
 - outputs: `value` (numeric)
 - warm-up: set by the parameters; the first known value is at that index on clean data
 - memory: finite: it forgets any bar after its window
-- legacy: pinned to `indicators::streaming::StreamingWma` (bitwise on finite input); a NaN input is handled as `recover` by the legacy indicator
+- legacy: pinned to `indicators::streaming::StreamingWma` (within 1e-12 on finite input); a NaN input is handled as `recover` by the legacy indicator
 - TA-Lib: `WMA`
 - invariance: scale_equivariant, shift_equivariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ## quant
 
@@ -2718,7 +2718,7 @@ Biased (population) skewness of the last `period` values: m3 / m2^1.5. NaN for a
 - warm-up: set by the parameters; the first known value is at that index on clean data
 - memory: finite: it forgets any bar after its window
 - invariance: scale_invariant, shift_invariant
-- revision: 1 (a change to the numbers raises it, and the program hash with it)
+- revision: 2 (a change to the numbers raises it, and the program hash with it)
 
 ## vol_price
 

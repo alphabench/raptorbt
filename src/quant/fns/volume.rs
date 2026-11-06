@@ -58,6 +58,7 @@ impl Kernel<4, 1> for Ad {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         if !x.iter().all(|v| v.is_finite()) {
             return [f64::NAN];
@@ -103,6 +104,7 @@ impl Kernel<4, 1> for Adosc {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         if !x.iter().all(|v| v.is_finite()) {
             return [f64::NAN];
@@ -152,6 +154,7 @@ impl Kernel<2, 1> for Obv {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         let [close, volume] = x;
         if !(close.is_finite() && volume.is_finite()) {
@@ -200,6 +203,7 @@ impl Kernel<4, 1> for Vwap {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         if !x.iter().all(|v| v.is_finite()) {
             return [f64::NAN];
@@ -235,6 +239,7 @@ impl Kernel<1, 1> for VolumeRoc {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let old = h.ago(0, self.p);
         if x[0].is_finite() && old.is_finite() && old != 0.0 {

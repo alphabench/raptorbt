@@ -514,6 +514,7 @@ impl Kernel<1, 1> for Change {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let x = x[0];
         let base = h.ago(0, self.p);
@@ -566,6 +567,7 @@ impl Kernel<4, 1> for Bop {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         if !all_finite(&x) {
             return [f64::NAN];
@@ -676,6 +678,7 @@ impl Kernel<1, 1> for Rsi {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         if !x[0].is_finite() {
             return [f64::NAN];
@@ -704,6 +707,7 @@ impl Kernel<1, 1> for Cmo {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         if !x[0].is_finite() {
             return [f64::NAN];
@@ -790,6 +794,7 @@ impl Kernel<1, 3> for Macd {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 3] {
         let f = self.fast.push(x[0]);
         let s = self.slow.push(x[0]);
@@ -827,6 +832,7 @@ impl Kernel<1, 1> for Po {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         let f = self.fast.push(x[0]);
         let s = self.slow.push(x[0]);
@@ -859,6 +865,7 @@ impl Kernel<1, 1> for Trix {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         let v1 = self.e[0].push(x[0]);
         let v2 = self.e[1].push(v1);
@@ -924,6 +931,7 @@ impl Kernel<3, 2> for StochF {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 2] {
         let fk = self.k.push(x[0], x[1], x[2]);
         let fd = self.d.push(fk);
@@ -952,6 +960,7 @@ impl Kernel<3, 2> for Stoch {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 2] {
         let fk = self.k.push(x[0], x[1], x[2]);
         let slow_k = self.sk.push(fk);
@@ -981,6 +990,7 @@ impl Kernel<1, 2> for StochRsi {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 2] {
         let r = if x[0].is_finite() {
             self.rsi.push(x[0]).map_or(f64::NAN, |(ag, al)| rsi_talib(ag, al))
@@ -1016,6 +1026,7 @@ impl Kernel<3, 2> for Stochastic {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 2] {
         let hh = self.hh.push(x[0]);
         let ll = self.ll.push(x[1]);
@@ -1062,6 +1073,7 @@ impl Kernel<3, 1> for Willr {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 1] {
         let hh = self.hh.push(x[0]);
         let ll = self.ll.push(x[1]);
@@ -1076,73 +1088,30 @@ impl Kernel<3, 1> for Willr {
 // ------------------------------------------------------------------------------------- Aroon
 
 /// Rolling max or min over `p` bars that also reports how many bars ago it was set. Ties keep
-/// the latest bar. Same deque as `RollExt`, which does not expose the index.
+/// the latest bar.
 struct ExtIdx {
-    p: usize,
-    is_max: bool,
-    idx: Box<[u64]>,
-    val: Box<[f64]>,
-    head: usize,
-    len: usize,
-    n: u64,
-    last_bad: Option<u64>,
+    e: RollExt,
 }
 
 impl ExtIdx {
     /// Heap owned, at capacity.
     fn heap_bytes(&self) -> usize {
-        std::mem::size_of_val(&*self.idx) + std::mem::size_of_val(&*self.val)
+        self.e.heap_bytes()
     }
-}
 
-impl ExtIdx {
     fn new(p: usize, is_max: bool) -> Self {
-        let p = p.max(1);
-        Self {
-            p,
-            is_max,
-            idx: vec![0; p].into_boxed_slice(),
-            val: vec![f64::NAN; p].into_boxed_slice(),
-            head: 0,
-            len: 0,
-            n: 0,
-            last_bad: None,
-        }
-    }
-
-    fn slot(&self, j: usize) -> usize {
-        (self.head + j) % self.p
+        Self { e: RollExt::new(p.max(1), is_max) }
     }
 
     /// Bars since the extreme of the last `p` bars; None before the window is full or while it
     /// holds a non-finite value.
+    #[inline(always)]
     fn push(&mut self, x: f64) -> Option<usize> {
-        let cur = self.n;
-        self.n += 1;
-        while self.len > 0 && cur - self.idx[self.head] >= self.p as u64 {
-            self.head = self.slot(1);
-            self.len -= 1;
-        }
-        if x.is_finite() {
-            while self.len > 0 {
-                let back = self.val[self.slot(self.len - 1)];
-                if (self.is_max && back <= x) || (!self.is_max && back >= x) {
-                    self.len -= 1;
-                } else {
-                    break;
-                }
-            }
-            let at = self.slot(self.len);
-            self.idx[at] = cur;
-            self.val[at] = x;
-            self.len += 1;
+        if self.e.push(x).is_nan() {
+            None
         } else {
-            self.last_bad = Some(cur);
+            Some(self.e.since())
         }
-        if self.n < self.p as u64 || self.last_bad.is_some_and(|b| cur - b < self.p as u64) {
-            return None;
-        }
-        Some((cur - self.idx[self.head]) as usize)
     }
 }
 
@@ -1189,6 +1158,7 @@ impl Kernel<2, 2> for Aroon {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 2] {
         match self.0.push(x[0], x[1]) {
             Some((bh, bl)) => {
@@ -1212,6 +1182,7 @@ impl Kernel<2, 1> for AroonOsc {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         match self.0.push(x[0], x[1]) {
             Some((bh, bl)) => [self.0.factor() * (bl as f64 - bh as f64)],
@@ -1282,6 +1253,7 @@ impl Kernel<2, 1> for Dm {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
         if !all_finite(&x) {
             return [f64::NAN];
@@ -1386,6 +1358,7 @@ impl Kernel<3, 1> for Dir {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 1] {
         if !all_finite(&x) {
             return [f64::NAN];
@@ -1459,6 +1432,7 @@ impl Kernel<3, 1> for Cci {
         self.p - 1
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], h: &H) -> [f64; 1] {
         let cur = (self.n % self.p as u64) as usize;
         self.n += 1;
@@ -1487,41 +1461,77 @@ impl Kernel<3, 1> for Cci {
 }
 
 /// Money flow index, native: 100 when there is no negative flow (flat included), else
-/// `100 - 100 / (1 + pos / neg)`. The flows of the last `period` bars are summed afresh in order
-/// on every bar, as `indicators::volume::mfi` does.
+/// `100 - 100 / (1 + pos / neg)`. The flows of the last `period` bars are summed afresh, oldest
+/// first, on every bar, as `indicators::volume::mfi` does (so the sums carry no rounding from
+/// bars that have left, and are bit for bit the legacy's); each bar's flow is worked out once,
+/// when the bar arrives, and kept in a ring.
 pub struct Mfi {
     p: usize,
+    /// (positive flow, negative flow) of the last `p` bars, NaN for a bar whose flow could not
+    /// be formed (it or the typical price before it, or its volume, is not finite).
+    ring: Box<[(f64, f64)]>,
+    head: usize,
+    n: u64,
+    prev_tp: f64,
+    bad: usize,
+}
+
+impl Mfi {
+    fn new(p: usize) -> Self {
+        Self {
+            p,
+            ring: vec![(f64::NAN, f64::NAN); p].into_boxed_slice(),
+            head: 0,
+            n: 0,
+            prev_tp: f64::NAN,
+            bad: 0,
+        }
+    }
 }
 
 impl Kernel<4, 1> for Mfi {
     fn heap_bytes(&self) -> usize {
-        0
+        std::mem::size_of_val(&*self.ring)
     }
 
     fn lookback(&self) -> usize {
-        self.p
+        0
     }
 
-    fn step<H: Hist<4>>(&mut self, x: [f64; 4], h: &H) -> [f64; 1] {
-        let at = |i: usize, k: usize| if k == 0 { x[i] } else { h.ago(i, k) };
-        let mut prev = typical(&x, h, self.p);
-        if !prev.is_finite() {
+    #[inline(always)]
+    fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
+        let tp = (x[0] + x[1] + x[2]) / 3.0;
+        let flows = if tp.is_finite() && x[3].is_finite() && self.prev_tp.is_finite() {
+            let flow = tp * x[3];
+            if tp > self.prev_tp {
+                (flow, 0.0)
+            } else if tp < self.prev_tp {
+                (0.0, flow)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (f64::NAN, f64::NAN)
+        };
+        self.prev_tp = tp;
+        // The flow of a non-finite product is as unusable as a missing one.
+        let flows =
+            if flows.0.is_finite() && flows.1.is_finite() { flows } else { (f64::NAN, f64::NAN) };
+        let leaving = std::mem::replace(&mut self.ring[self.head], flows);
+        self.head = if self.head + 1 == self.p { 0 } else { self.head + 1 };
+        if self.n >= self.p as u64 && leaving.0.is_nan() {
+            self.bad -= 1;
+        }
+        self.bad += usize::from(flows.0.is_nan());
+        self.n += 1;
+        if self.n <= self.p as u64 || self.bad > 0 {
             return [f64::NAN];
         }
         let (mut pos, mut neg) = (0.0, 0.0);
-        for k in (0..self.p).rev() {
-            let t = typical(&x, h, k);
-            let v = at(3, k);
-            if !(t.is_finite() && v.is_finite()) {
-                return [f64::NAN];
-            }
-            let flow = t * v;
-            if t > prev {
-                pos += flow;
-            } else if t < prev {
-                neg += flow;
-            }
-            prev = t;
+        let (newer, older) = self.ring.split_at(self.head);
+        for &(up, down) in older.iter().chain(newer) {
+            pos += up;
+            neg += down;
         }
         let out = if neg == 0.0 { 100.0 } else { 100.0 - (100.0 / (1.0 + pos / neg)) };
         [finite_or_nan(out)]
@@ -1565,6 +1575,7 @@ impl Kernel<4, 1> for MfiRoll {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<4>>(&mut self, x: [f64; 4], _h: &H) -> [f64; 1] {
         let slot = (self.n % self.p as u64) as usize;
         if self.n >= self.p as u64 {
@@ -1732,6 +1743,7 @@ impl Kernel<3, 1> for Ultosc {
         1
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], h: &H) -> [f64; 1] {
         let pc = h.ago(2, 1);
         let (bp, tr) = if all_finite(&x) && pc.is_finite() {
@@ -2075,7 +2087,7 @@ fn make_mfi(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Nod
     if is_talib(p, 1) {
         build(MfiRoll::new(n), ins, outs, "mfi")
     } else {
-        build(Mfi { p: n }, ins, outs, "mfi")
+        build(Mfi::new(n), ins, outs, "mfi")
     }
 }
 
@@ -2438,7 +2450,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("MACDEXT"),
         doc: "MACD with a moving-average type (`matype`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3) for each of the fast, slow and signal averages. The slower period is the slow one. Each average starts so that the fast and slow lines first land on the later lookback, as TA-Lib does. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -2482,7 +2494,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("APO"),
         doc: "Absolute price oscillator: fast average - slow average, both of type `matype` (0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA, 6 KAMA, 7 MAMA, 8 T3). The slower period is the slow one. Kinds other than 0, 2 and 5 hold their state on a NaN.",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -2504,7 +2516,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("PPO"),
         doc: "Percentage price oscillator: (fast average - slow average) / slow average * 100, `matype` as in apo. 0 when the slow average is 0 (TA-Lib's value).",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -2596,7 +2608,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("STOCH"),
         doc: "TA-Lib's SLOW stochastic: the fast %K over `fastk_period` bars, smoothed by `slowk_matype` over `slowk_period` is slowk, smoothed again by `slowd_matype` over `slowd_period` is slowd. A range of 0 gives 0 (TA-Lib's value). Both outputs are NaN until slowd is ready. Note `stochastic` is a different thing: raptorbt's fast stochastic (use `stochf` for TA-Lib's fast one).",
         refs: &["Lane, Lane's Stochastics, 1984"],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleInvariant, Invariance::ShiftInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -2618,7 +2630,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("STOCHRSI"),
         doc: "Stochastic RSI: the fast stochastic over `fastk_period` bars of the RSI of `period` (TA-Lib's RSI, so a flat series reads RSI 0), and its `fastd_matype` average. A flat RSI window gives 0. Both outputs are NaN until fastd is ready.",
         refs: &["Chande, Kroll, The New Technical Trader, 1994"],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleInvariant, Invariance::ShiftInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,

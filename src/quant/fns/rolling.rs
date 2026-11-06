@@ -5,7 +5,7 @@
 //! A windowed function outputs NaN while its window holds a non-finite value, then recovers; a
 //! lagged one is NaN while the bar `k` back is missing or NaN.
 
-use super::math::{fin, float_param, negligible, pair_stats, MapN};
+use super::math::{fin, float_param, map_node, negligible, pair_stats};
 use crate::quant::eval::ops;
 use crate::quant::kernel::{Adapter, Hist, Kernel, Node};
 use crate::quant::registry::{
@@ -35,6 +35,7 @@ impl Kernel<1, 1> for ZScore {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let m = self.mean.push(x[0], h, 0);
         let v = self.var.push(x[0], h, 0);
@@ -84,6 +85,7 @@ impl Kernel<1, 1> for Moment {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let Some((mean, s2, s3, s4)) = moments(self.p, x[0], h) else {
             return [f64::NAN];
@@ -158,6 +160,7 @@ impl Kernel<1, 1> for Quantile {
         self.w.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         if !self.w.push(x[0], h) {
             return [f64::NAN];
@@ -189,6 +192,7 @@ impl Kernel<1, 1> for RankTs {
         self.w.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         if !self.w.push(x[0], h) {
             return [f64::NAN];
@@ -242,6 +246,7 @@ impl Kernel<1, 1> for BarsSince {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         let x = x[0];
         let cur = self.n;
@@ -298,6 +303,7 @@ impl Kernel<1, 1> for Lagged {
         self.k
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         let (x, old) = (x[0], h.ago(0, self.k));
         [match self.kind {
@@ -325,6 +331,7 @@ impl Kernel<1, 1> for Clip {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [if x[0].is_nan() { f64::NAN } else { x[0].clamp(self.lo, self.hi) }]
     }
@@ -346,6 +353,7 @@ impl Kernel<2, 1> for Cov {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], h: &H) -> [f64; 1] {
         [pair_stats(self.p, x, h, false).map_or(f64::NAN, |s| fin(s.sxy / s.n))]
     }
@@ -367,6 +375,7 @@ impl Kernel<1, 1> for EwmMean {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         let x = x[0];
         if !x.is_finite() {
@@ -397,6 +406,7 @@ impl Kernel<1, 1> for EwmVar {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         let x = x[0];
         if !x.is_finite() {
@@ -515,23 +525,26 @@ make_lag!(make_pct_change, Lag::Pct, "pct_change");
 make_lag!(make_log_return, Lag::Log, "log_return");
 
 fn make_abs(_p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k = MapN::<1>(|x| fin(x[0].abs()));
-    Ok(Box::new(Adapter::new(k, regs::<1>(ins, "abs inputs")?, regs::<1>(outs, "abs outputs")?)))
+    map_node::<1, _>(|x| fin(x[0].abs()), ins, outs, "abs")
 }
 
 fn make_sign(_p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k = MapN::<1>(|x| {
-        if x[0].is_nan() {
-            f64::NAN
-        } else if x[0] > 0.0 {
-            1.0
-        } else if x[0] < 0.0 {
-            -1.0
-        } else {
-            0.0
-        }
-    });
-    Ok(Box::new(Adapter::new(k, regs::<1>(ins, "sign inputs")?, regs::<1>(outs, "sign outputs")?)))
+    map_node::<1, _>(
+        |x| {
+            if x[0].is_nan() {
+                f64::NAN
+            } else if x[0] > 0.0 {
+                1.0
+            } else if x[0] < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        },
+        ins,
+        outs,
+        "sign",
+    )
 }
 
 fn make_clip(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
@@ -571,20 +584,20 @@ fn make_ewm_var(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn
 
 /// Kleene: an unknown condition is unknown, whatever the branches hold.
 fn make_if_else(_p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k = MapN::<3>(|x| {
-        if x[0].is_nan() {
-            f64::NAN
-        } else if x[0] != 0.0 {
-            fin(x[1])
-        } else {
-            fin(x[2])
-        }
-    });
-    Ok(Box::new(Adapter::new(
-        k,
-        regs::<3>(ins, "if_else inputs")?,
-        regs::<1>(outs, "if_else outputs")?,
-    )))
+    map_node::<3, _>(
+        |x| {
+            if x[0].is_nan() {
+                f64::NAN
+            } else if x[0] != 0.0 {
+                fin(x[1])
+            } else {
+                fin(x[2])
+            }
+        },
+        ins,
+        outs,
+        "if_else",
+    )
 }
 
 // ---------------------------------------------------------------- the table
@@ -650,6 +663,12 @@ const SCALE_SHIFT_INV: &[Invariance] = &[Invariance::ScaleInvariant, Invariance:
 macro_rules! nolib {
     ($name:literal, $inputs:expr, $params:expr, $warm:expr, $memory:expr, $doc:expr, $inv:expr,
      $nan:expr, $domain:expr, $hand:literal, $make:expr) => {
+        nolib!(@rev 1; $name, $inputs, $params, $warm, $memory, $doc, $inv, $nan, $domain, $hand,
+            $make)
+    };
+    // The same with the function's revision stated: bumped when its numbers change.
+    (@rev $rev:literal; $name:literal, $inputs:expr, $params:expr, $warm:expr, $memory:expr,
+     $doc:expr, $inv:expr, $nan:expr, $domain:expr, $hand:literal, $make:expr) => {
         FnDef {
             name: $name,
             family: Family::Rolling,
@@ -663,7 +682,7 @@ macro_rules! nolib {
             talib_name: None,
             doc: $doc,
             refs: &[],
-            rev: 1,
+            rev: $rev,
             invariance: $inv,
             causal: true,
             nan_rule: $nan,
@@ -676,7 +695,7 @@ macro_rules! nolib {
 }
 
 pub const DEFS: &[FnDef] = &[
-    nolib!("zscore", IN_X, PERIOD_2, warm_period, Memory::Finite,
+    nolib!(@rev 2; "zscore", IN_X, PERIOD_2, warm_period, Memory::Finite,
         "(x - mean) / stdev over the last `period` values, population stdev. NaN when the window is flat or its spread is under 1e-12 of its level.",
         SCALE_SHIFT_INV, NanRule::Windowed, Domain::Any, "zscore_hand_value", make_zscore),
     nolib!("skew", IN_X, PERIOD_3, warm_period, Memory::Finite,

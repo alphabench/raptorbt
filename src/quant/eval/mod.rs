@@ -61,19 +61,20 @@ pub mod ops {
         }
     }
 
+    /// Overflow is NaN, never inf: a series holds finite values or NaN.
     #[inline(always)]
     pub fn add(a: f64, b: f64) -> f64 {
-        a + b
+        finite_or_nan(a + b)
     }
 
     #[inline(always)]
     pub fn sub(a: f64, b: f64) -> f64 {
-        a - b
+        finite_or_nan(a - b)
     }
 
     #[inline(always)]
     pub fn mul(a: f64, b: f64) -> f64 {
-        a * b
+        finite_or_nan(a * b)
     }
 
     /// Division by zero is NaN, never inf.

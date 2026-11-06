@@ -6,12 +6,12 @@
 //! it holds a non-finite value.
 
 use crate::quant::eval::ops;
-use crate::quant::kernel::{Adapter, Hist, Kernel, Node};
+use crate::quant::kernel::{Adapter, Hist, Kernel, Node, Regs};
 use crate::quant::registry::{
     int_param, regs, Domain, Family, FnDef, InputDef, Invariance, Legacy, Memory, NanPolicy,
     NanRule, OutKind, ParamDef, ParamKind, ParamVal, Reference, Relation,
 };
-use crate::quant::window::{RollExt, RollSum};
+use crate::quant::window::{PairWin, RollExt, RollSum, ShiftedWin};
 
 const MAX_PERIOD: i64 = 1 << 24;
 
@@ -35,29 +35,55 @@ pub(crate) fn float_param(params: &[ParamVal], i: usize) -> Result<f64, String> 
 
 // ---------------------------------------------------------------- elementwise
 
-/// A stateless function of this bar's inputs. One definition serves batch and streaming.
-pub struct MapN<const N: usize>(pub fn([f64; N]) -> f64);
+/// A stateless function of this bar's inputs: a node of its own rather than a kernel in an
+/// adapter, so a batch run is one tight loop over zipped slices the compiler can vectorise. The
+/// streaming step calls the same `f`, so the two modes cannot differ.
+pub struct MapNode<const N: usize, F> {
+    f: F,
+    in_regs: [usize; N],
+    out_reg: usize,
+}
 
-impl<const N: usize> Kernel<N, 1> for MapN<N> {
-    fn heap_bytes(&self) -> usize {
-        0
+/// Build a [`MapNode`] on the registers a plan assigned.
+pub fn map_node<const N: usize, F>(
+    f: F,
+    ins: &[usize],
+    outs: &[usize],
+    what: &str,
+) -> Result<Box<dyn Node>, String>
+where
+    F: Fn([f64; N]) -> f64 + Send + Sync + 'static,
+{
+    let [out_reg] = regs::<1>(outs, &format!("{what} outputs"))?;
+    Ok(Box::new(MapNode { f, in_regs: regs::<N>(ins, &format!("{what} inputs"))?, out_reg }))
+}
+
+impl<const N: usize, F: Fn([f64; N]) -> f64 + Send + Sync> Node for MapNode<N, F> {
+    fn run_batch(&mut self, ins: &[&[f64]], outs: &mut [&mut [f64]]) {
+        assert_eq!(ins.len(), N, "input arity");
+        assert_eq!(outs.len(), 1, "output arity");
+        let out = &mut *outs[0];
+        let n = out.len();
+        let cols: [&[f64]; N] = std::array::from_fn(|j| &ins[j][..n]);
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = (self.f)(std::array::from_fn(|j| cols[j][i]));
+        }
     }
 
-    fn lookback(&self) -> usize {
-        0
+    fn step(&mut self, regs: &mut Regs) {
+        let v = (self.f)(std::array::from_fn(|j| regs.get(self.in_regs[j])));
+        regs.set(self.out_reg, v);
     }
 
-    #[inline(always)]
-    fn step<H: Hist<N>>(&mut self, x: [f64; N], _h: &H) -> [f64; 1] {
-        [(self.0)(x)]
+    fn state_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
     }
 }
 
 macro_rules! elementwise {
     (@make $n:literal, $f:expr) => {{
         fn make(_p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-            let k = MapN::<$n>($f);
-            Ok(Box::new(Adapter::new(k, regs::<$n>(ins, "inputs")?, regs::<1>(outs, "outputs")?)))
+            map_node::<$n, _>($f, ins, outs, "elementwise")
         }
         make
     }};
@@ -166,6 +192,7 @@ impl Kernel<1, 1> for Sum {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         [fin(self.rs.push(x[0], h, 0))]
     }
@@ -184,6 +211,7 @@ impl Kernel<1, 1> for Ext {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 1] {
         [self.e.push(x[0])]
     }
@@ -203,6 +231,7 @@ impl Kernel<1, 2> for MinMax {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], _h: &H) -> [f64; 2] {
         [self.lo.push(x[0]), self.hi.push(x[0])]
     }
@@ -285,6 +314,7 @@ impl Kernel<1, 1> for ArgOne {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
         [self.t.push(x[0], h)]
     }
@@ -305,6 +335,7 @@ impl Kernel<1, 2> for ArgBoth {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 2] {
         [self.lo.push(x[0], h), self.hi.push(x[0], h)]
     }
@@ -312,18 +343,23 @@ impl Kernel<1, 2> for ArgBoth {
 
 // ---------------------------------------------------------------- variance
 
-/// Population variance replicating `indicators::streaming::StreamingStdDev` operation for
-/// operation: a running sum (add the new value, then subtract the one leaving) gives the mean,
-/// then the squared deviations are summed oldest to newest. Differs from the legacy core only
-/// on a window of one repeated value, which is exactly 0 here (the legacy mean of a repeated
-/// value can be off by an ulp, leaving a variance near 1e-34).
+/// Population variance (or its square root times `nbdev`) over a [`ShiftedWin`]: O(1) a bar,
+/// accurate to a few ulps of the window's spread whatever its level. Pinned to
+/// `indicators::streaming::StreamingStdDev` to 1e-12 relative, not bitwise: the legacy core sums
+/// the squared deviations over the whole window every bar. A window of one repeated value is
+/// exactly 0 here (the legacy mean of a repeated value can be off by an ulp, leaving a variance
+/// near 1e-34).
 struct PopVar {
+    w: ShiftedWin,
     p: usize,
-    sum: f64,
-    bad: usize,
-    n: u64,
     /// Multiplier for the standard deviation; `None` outputs the variance.
     std_scale: Option<f64>,
+}
+
+impl PopVar {
+    fn new(p: usize, std_scale: Option<f64>) -> Self {
+        Self { w: ShiftedWin::new(p), p, std_scale }
+    }
 }
 
 impl Kernel<1, 1> for PopVar {
@@ -335,34 +371,13 @@ impl Kernel<1, 1> for PopVar {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
-        let x = x[0];
-        self.n += 1;
-        if x.is_finite() {
-            self.sum += x;
-        } else {
-            self.bad += 1;
-        }
-        if self.n > self.p as u64 {
-            let old = h.ago(0, self.p);
-            if old.is_finite() {
-                self.sum -= old;
-            } else {
-                self.bad -= 1;
-            }
-        }
-        if self.n < self.p as u64 || self.bad > 0 {
+        let (x, p) = (x[0], self.p);
+        if !self.w.push(x, h.ago(0, p), |j| if j + 1 == p { x } else { h.ago(0, p - 1 - j) }) {
             return [f64::NAN];
         }
-        let mean = self.sum / self.p as f64;
-        let mut acc = 0.0;
-        let mut flat = true;
-        for age in (0..self.p).rev() {
-            let v = if age == 0 { x } else { h.ago(0, age) };
-            flat &= v == x;
-            acc += (v - mean).powi(2);
-        }
-        let var = if flat { 0.0 } else { acc / self.p as f64 };
+        let var = self.w.m2() / p as f64;
         [match self.std_scale {
             Some(k) => fin(var.sqrt() * k),
             None => fin(var),
@@ -381,39 +396,19 @@ enum LinMode {
     Forecast,
 }
 
-/// Least-squares line through the window, x = 0 at the oldest bar. Fitted on deviations from
-/// the mean, so a long level offset costs no precision; a window of one repeated value has
-/// slope exactly 0.
+/// Least-squares line through the window, x = 0 at the oldest bar, over a [`ShiftedWin`]: O(1)
+/// a bar, on deviations from a reference near the window's mean, so a long level offset costs no
+/// precision; a window of one repeated value has slope exactly 0.
 struct LinReg {
+    w: ShiftedWin,
     p: usize,
     mode: LinMode,
 }
 
-/// The window mean and slope, or `None` while the window is short or holds a non-finite value.
-fn fit_line<H: Hist<1>>(p: usize, x: f64, h: &H) -> Option<(f64, f64)> {
-    let mut sum = 0.0;
-    let mut flat = true;
-    for age in (0..p).rev() {
-        let v = if age == 0 { x } else { h.ago(0, age) };
-        if !v.is_finite() {
-            return None;
-        }
-        flat &= v == x;
-        sum += v;
+impl LinReg {
+    fn new(p: usize, mode: LinMode) -> Self {
+        Self { w: ShiftedWin::new(p), p, mode }
     }
-    if flat {
-        return Some((x, 0.0));
-    }
-    let n = p as f64;
-    let mean = sum / n;
-    let xbar = (n - 1.0) / 2.0;
-    let mut num = 0.0;
-    for age in (0..p).rev() {
-        let v = if age == 0 { x } else { h.ago(0, age) };
-        num += ((p - 1 - age) as f64 - xbar) * (v - mean);
-    }
-    let sxx = n * (n * n - 1.0) / 12.0;
-    Some((mean, num / sxx))
 }
 
 impl Kernel<1, 1> for LinReg {
@@ -425,11 +420,14 @@ impl Kernel<1, 1> for LinReg {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<1>>(&mut self, x: [f64; 1], h: &H) -> [f64; 1] {
-        let Some((mean, slope)) = fit_line(self.p, x[0], h) else {
+        let (x, p) = (x[0], self.p);
+        if !self.w.push(x, h.ago(0, p), |j| if j + 1 == p { x } else { h.ago(0, p - 1 - j) }) {
             return [f64::NAN];
-        };
-        let n = self.p as f64;
+        }
+        let (mean, slope) = (self.w.mean(), self.w.slope());
+        let n = p as f64;
         let xbar = (n - 1.0) / 2.0;
         [fin(match self.mode {
             LinMode::Value => mean + slope * (n - 1.0 - xbar),
@@ -521,7 +519,9 @@ pub(crate) fn negligible(s: f64, n: f64, mean: f64) -> bool {
     s.is_nan() || s <= 1e-24 * n * mean * mean
 }
 
+/// Correlation over a [`PairWin`]: O(1) a bar.
 struct Correl {
+    w: PairWin,
     p: usize,
 }
 
@@ -534,10 +534,15 @@ impl Kernel<2, 1> for Correl {
         self.p
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], h: &H) -> [f64; 1] {
-        let Some(s) = pair_stats(self.p, x, h, false) else {
+        let p = self.p;
+        let old = [h.ago(0, p), h.ago(1, p)];
+        let at = |j: usize| if j + 1 == p { x } else { [h.ago(0, p - 1 - j), h.ago(1, p - 1 - j)] };
+        if !self.w.push(x, old, at) {
             return [f64::NAN];
-        };
+        }
+        let s = pair_stats_of(&self.w, p);
         if negligible(s.sxx, s.n, s.mx) || negligible(s.syy, s.n, s.my) {
             return [f64::NAN];
         }
@@ -545,9 +550,26 @@ impl Kernel<2, 1> for Correl {
     }
 }
 
+fn pair_stats_of(w: &PairWin, p: usize) -> PairStats {
+    let [mx, my] = w.means();
+    let [sxx, syy, sxy] = w.centred();
+    PairStats { n: p as f64, mx, my, sxx, syy, sxy }
+}
+
+/// The simple return `cur / prev - 1`, NaN when `prev` is zero or non-finite or the result is.
+#[inline(always)]
+fn ret(cur: f64, prev: f64) -> f64 {
+    if prev.is_finite() && prev != 0.0 {
+        (cur - prev) / prev
+    } else {
+        f64::NAN
+    }
+}
+
 /// TA-Lib's beta: the slope of the second input's returns on the first input's returns over
-/// `p` returns (`p + 1` prices).
+/// `p` returns (`p + 1` prices), over a [`PairWin`] of the returns: O(1) a bar.
 struct Beta {
+    w: PairWin,
     p: usize,
 }
 
@@ -560,10 +582,19 @@ impl Kernel<2, 1> for Beta {
         self.p + 1
     }
 
+    #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], h: &H) -> [f64; 1] {
-        let Some(s) = pair_stats(self.p, x, h, true) else {
-            return [f64::NAN];
+        let p = self.p;
+        let r = |age: usize, i: usize| {
+            let cur = if age == 0 { x[i] } else { h.ago(i, age) };
+            ret(cur, h.ago(i, age + 1))
         };
+        let new = [r(0, 0), r(0, 1)];
+        let old = [r(p, 0), r(p, 1)];
+        if !self.w.push(new, old, |j| [r(p - 1 - j, 0), r(p - 1 - j, 1)]) {
+            return [f64::NAN];
+        }
+        let s = pair_stats_of(&self.w, p);
         if negligible(s.sxx, s.n, s.mx) {
             return [f64::NAN];
         }
@@ -643,13 +674,12 @@ fn make_minmaxindex(
 
 fn make_var(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
     let p = period_of(p)?;
-    let k = PopVar { p, sum: 0.0, bad: 0, n: 0, std_scale: None };
+    let k = PopVar::new(p, None);
     Ok(Box::new(Adapter::new(k, regs::<1>(ins, "var inputs")?, regs::<1>(outs, "var outputs")?)))
 }
 
 fn make_stddev(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k =
-        PopVar { p: period_of(p)?, sum: 0.0, bad: 0, n: 0, std_scale: Some(float_param(p, 1)?) };
+    let k = PopVar::new(period_of(p)?, Some(float_param(p, 1)?));
     Ok(Box::new(Adapter::new(
         k,
         regs::<1>(ins, "stddev inputs")?,
@@ -660,7 +690,7 @@ fn make_stddev(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn 
 macro_rules! make_linreg {
     ($fname:ident, $mode:expr, $label:literal) => {
         fn $fname(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-            let k = LinReg { p: period_of(p)?, mode: $mode };
+            let k = LinReg::new(period_of(p)?, $mode);
             Ok(Box::new(Adapter::new(
                 k,
                 regs::<1>(ins, concat!($label, " inputs"))?,
@@ -676,7 +706,8 @@ make_linreg!(make_linearreg_slope, LinMode::Slope, "linearreg_slope");
 make_linreg!(make_tsf, LinMode::Forecast, "tsf");
 
 fn make_correl(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k = Correl { p: period_of(p)? };
+    let p = period_of(p)?;
+    let k = Correl { w: PairWin::new(p), p };
     Ok(Box::new(Adapter::new(
         k,
         regs::<2>(ins, "correl inputs")?,
@@ -685,7 +716,8 @@ fn make_correl(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn 
 }
 
 fn make_beta(p: &[ParamVal], ins: &[usize], outs: &[usize]) -> Result<Box<dyn Node>, String> {
-    let k = Beta { p: period_of(p)? };
+    let p = period_of(p)?;
+    let k = Beta { w: PairWin::new(p), p };
     Ok(Box::new(Adapter::new(k, regs::<2>(ins, "beta inputs")?, regs::<1>(outs, "beta outputs")?)))
 }
 
@@ -697,10 +729,15 @@ const SCALE_SHIFT_INV: &[Invariance] = &[Invariance::ScaleInvariant, Invariance:
 /// A windowed function of the one input `x` (TA-Lib's `close`).
 macro_rules! windowed {
     ($name:literal, $talib:literal, $params:expr, $doc:expr, $inv:expr, $make:expr) => {
-        windowed!($name, $talib, $params, $doc, $inv, $make, Relation::Exact, None, &["value"])
+        windowed!(@rev 1; $name, $talib, $params, $doc, $inv, $make, Relation::Exact, None, &["value"])
     };
     ($name:literal, $talib:literal, $params:expr, $doc:expr, $inv:expr, $make:expr,
      $relation:expr, $legacy:expr, $outputs:expr) => {
+        windowed!(@rev 1; $name, $talib, $params, $doc, $inv, $make, $relation, $legacy, $outputs)
+    };
+    // The same with the function's revision stated: bumped when its numbers change.
+    (@rev $rev:literal; $name:literal, $talib:literal, $params:expr, $doc:expr, $inv:expr,
+     $make:expr, $relation:expr, $legacy:expr, $outputs:expr) => {
         FnDef {
             name: $name,
             family: Family::Math,
@@ -714,7 +751,7 @@ macro_rules! windowed {
             talib_name: Some($talib),
             doc: $doc,
             refs: &[],
-            rev: 1,
+            rev: $rev,
             invariance: $inv,
             causal: true,
             nan_rule: NanRule::Windowed,
@@ -729,12 +766,12 @@ macro_rules! windowed {
 pub const DEFS: &[FnDef] = &[
     // Math operators
     elementwise!("add", "ADD", IN_AB, 2, "a + b.", Domain::Any, &[Invariance::ScaleEquivariant],
-        |x| fin(ops::add(x[0], x[1]))),
+        |x| ops::add(x[0], x[1])),
     elementwise!("sub", "SUB", IN_AB, 2, "a - b.", Domain::Any,
         &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant],
-        |x| fin(ops::sub(x[0], x[1]))),
+        |x| ops::sub(x[0], x[1])),
     elementwise!("mult", "MULT", IN_AB, 2, "a * b.", Domain::Any, &[],
-        |x| fin(ops::mul(x[0], x[1]))),
+        |x| ops::mul(x[0], x[1])),
     elementwise!("div", "DIV", IN_AB, 2, "a / b; a zero divisor gives NaN, never infinity.",
         Domain::Any, &[Invariance::ScaleInvariant], |x| ops::div(x[0], x[1])),
     windowed!("max", "MAX", PERIOD_30,
@@ -820,7 +857,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("BETA"),
         doc: "Beta of the second input on the first: covariance of their simple returns over the last `period` returns divided by the variance of the first's. Defined on returns, not levels; first valid at bar `period`. A first input with no movement gives NaN (TA-Lib gives 0).",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: &[Invariance::ScaleInvariant],
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -844,7 +881,7 @@ pub const DEFS: &[FnDef] = &[
         talib_name: Some("CORREL"),
         doc: "Pearson correlation of the two inputs over the last `period` values. A flat window gives NaN (TA-Lib gives 0).",
         refs: &[],
-        rev: 1,
+        rev: 2,
         invariance: SCALE_SHIFT_INV,
         causal: true,
         nan_rule: NanRule::Windowed,
@@ -855,20 +892,20 @@ pub const DEFS: &[FnDef] = &[
         relation: Relation::DefinedDifference,
         make: make_correl,
     },
-    windowed!("linearreg", "LINEARREG", PERIOD_14_FIT,
+    windowed!(@rev 2; "linearreg", "LINEARREG", PERIOD_14_FIT,
         "Value at the newest bar of the least-squares line through the last `period` values.",
-        SCALE_SHIFT_EQ, make_linearreg),
-    windowed!("linearreg_angle", "LINEARREG_ANGLE", PERIOD_14_FIT,
+        SCALE_SHIFT_EQ, make_linearreg, Relation::Exact, None, &["value"]),
+    windowed!(@rev 2; "linearreg_angle", "LINEARREG_ANGLE", PERIOD_14_FIT,
         "Angle in degrees of the least-squares line through the last `period` values: atan(slope) * 180 / pi, with the slope per bar in the input's own units.",
         &[], make_linearreg_angle, Relation::DefinedDifference, None, &["value"]),
-    windowed!("linearreg_intercept", "LINEARREG_INTERCEPT", PERIOD_14_FIT,
+    windowed!(@rev 2; "linearreg_intercept", "LINEARREG_INTERCEPT", PERIOD_14_FIT,
         "Intercept (value at the oldest bar of the window) of the least-squares line through the last `period` values.",
-        SCALE_SHIFT_EQ, make_linearreg_intercept),
-    windowed!("linearreg_slope", "LINEARREG_SLOPE", PERIOD_14_FIT,
+        SCALE_SHIFT_EQ, make_linearreg_intercept, Relation::Exact, None, &["value"]),
+    windowed!(@rev 2; "linearreg_slope", "LINEARREG_SLOPE", PERIOD_14_FIT,
         "Slope per bar of the least-squares line through the last `period` values. A flat window has slope exactly 0.",
         &[Invariance::ScaleEquivariant, Invariance::ShiftInvariant], make_linearreg_slope,
         Relation::DefinedDifference, None, &["value"]),
-    windowed!("stddev", "STDDEV", STDDEV_PARAMS,
+    windowed!(@rev 2; "stddev", "STDDEV", STDDEV_PARAMS,
         "Population standard deviation of the last `period` values (divisor `period`), times `nbdev`. A flat window is exactly 0.",
         &[Invariance::ShiftInvariant], make_stddev, Relation::DefinedDifference,
         Some(Legacy {
@@ -876,10 +913,10 @@ pub const DEFS: &[FnDef] = &[
             pinned_to: "indicators::streaming::StreamingStdDev",
             tolerance: 1e-12,
         }), &["value"]),
-    windowed!("tsf", "TSF", PERIOD_14_FIT,
+    windowed!(@rev 2; "tsf", "TSF", PERIOD_14_FIT,
         "Time series forecast: the least-squares line through the last `period` values, one bar past the newest.",
-        SCALE_SHIFT_EQ, make_tsf),
-    windowed!("var", "VAR", PERIOD_5,
+        SCALE_SHIFT_EQ, make_tsf, Relation::Exact, None, &["value"]),
+    windowed!(@rev 2; "var", "VAR", PERIOD_5,
         "Population variance of the last `period` values (divisor `period`). A flat window is exactly 0.",
         &[Invariance::ShiftInvariant], make_var, Relation::DefinedDifference, None, &["value"]),
 ];

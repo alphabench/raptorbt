@@ -85,6 +85,7 @@ impl<const I: usize> Kernel<I, 1> for Win<I> {
         self.lens.iter().copied().max().unwrap_or(1) - 1
     }
 
+    #[inline(always)]
     fn step<H: Hist<I>>(&mut self, x: [f64; I], h: &H) -> [f64; 1] {
         let mut ok = true;
         for (j, &xj) in x.iter().enumerate() {
@@ -540,6 +541,7 @@ impl Kernel<3, 1> for RangePos {
         0
     }
 
+    #[inline(always)]
     fn step<H: Hist<3>>(&mut self, x: [f64; 3], _h: &H) -> [f64; 1] {
         let hh = self.hi.push(x[0]);
         let ll = self.lo.push(x[1]);
