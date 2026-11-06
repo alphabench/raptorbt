@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import itertools
 import json
 import math
 import numbers
@@ -49,7 +50,17 @@ import numpy as np
 
 from raptorbt import _raptorbt, errors
 
-__all__ = ["Expr", "ExprStream", "col", "describe", "expr", "factor_report", "functions"]
+__all__ = [
+    "Expr",
+    "ExprStream",
+    "ExprSweep",
+    "ExprSweepPoint",
+    "col",
+    "describe",
+    "expr",
+    "factor_report",
+    "functions",
+]
 
 _FIELDS = ("open", "high", "low", "close", "volume")
 _NAN = float("nan")
@@ -314,7 +325,7 @@ class Expr:
     ``x.macd().macdsignal``.
     """
 
-    __slots__ = ("_src", "_params", "_prog", "_atom", "_outputs", "_groups")
+    __slots__ = ("_src", "_params", "_native", "_pending", "_series", "_atom", "_outputs", "_groups")
     #: Make NumPy defer to the reflected operators instead of broadcasting over an Expr.
     __array_ufunc__ = None
 
@@ -340,11 +351,29 @@ class Expr:
         self._params = bound
         self._atom = _atom
         self._groups = tuple(dict.fromkeys(groups))
-        self._prog = _raptorbt.ExprProgram(
-            source, bound or None, list(self._groups) or None, dict(series) if series else None
-        )
-        names = self._prog.outputs
+        self._series = dict(series) if series else {}
+        self._pending = None
+        try:
+            self._native = _raptorbt.ExprProgram(
+                source, bound or None, list(self._groups) or None, self._series or None
+            )
+        except errors.ExpressionError as e:
+            if e.code != "expr_unbound_parameter":
+                raise
+            # A `$name` with no value is a template: it can be swept, and any other use refuses
+            # with this same error.
+            self._native = None
+            self._pending = e
+            self._outputs = ()
+            return
+        names = self._native.outputs
         self._outputs = tuple(names) if len(names) > 1 else ()
+
+    @property
+    def _prog(self):
+        if self._native is None:
+            raise self._pending
+        return self._native
 
     # -- identity
 
@@ -438,7 +467,14 @@ class Expr:
         return self._prog.settle(eps)
 
     def __repr__(self) -> str:
+        if self._native is None:
+            return f"Expr({self._src}, unbound: {', '.join(_raptorbt.expr_param_names(self._src))})"
         return f"Expr({self._prog.canonical})"
+
+    @property
+    def parameters(self) -> tuple[str, ...]:
+        """The ``$name`` constants the text reads, sorted: the ones :meth:`sweep` can vary."""
+        return tuple(_raptorbt.expr_param_names(self._src))
 
     # -- evaluation
 
@@ -528,6 +564,140 @@ class Expr:
         bar's ``timestamp=`` in :meth:`ExprStream.update`."""
         return ExprStream(self._prog, self._prog.stream(bar_stamp, tz_offset_ns, session, bar_ns))
 
+    def sweep(
+        self,
+        data: Mapping[str, Any],
+        /,
+        *,
+        grid: Mapping[str, Any] | None = None,
+        points: Sequence[Mapping[str, float]] | None = None,
+        bar_stamp: str | None = None,
+        tz_offset_ns: int = 0,
+        session: Any = None,
+        bar_ns: int | None = None,
+        instruments: Sequence[str] | None = None,
+        present: Any = None,
+        max_combinations: int | None = None,
+        max_bytes: int | None = None,
+        **axes: Any,
+    ) -> ExprSweep:
+        """Evaluate the expression under many values of its ``$name`` constants at once.
+
+        ``sma(close, $n) > sma(close, $m)`` swept with ``n=[5, 10, 20], m=[50, 100, 200]`` is
+        nine expressions, tried in one pass: a name per keyword (or ``grid={...}``, for a
+        parameter named like one of this method's options) tries every combination, the last
+        varying fastest; ``points=[{"n": 5, "m": 50}, ...]`` tries exactly the bindings listed.
+        Returns an :class:`ExprSweep` with one result per binding, in input order, each with its
+        ``params``. Every result equals, bit for bit, what ``expr(text, params=binding).eval``
+        returns: a node no parameter touches, and one two bindings spell alike, is computed
+        once, and nothing else is shared. The numbers do not depend on the thread count.
+
+        A parameter the text never reads is refused, as is a ``$name`` left with no value
+        (``expr_unbound_parameter``). The sweep states ``n_trials``, the number of bindings tried:
+        a score picked as the best of them is biased by that number (see
+        ``raptorbt.research.deflated_sharpe``). ``max_combinations`` and ``max_bytes`` bound the
+        sweep (defaults 10,000 and 4 GiB: the buffers and the results held at once); past them
+        it raises ``sweep_too_large`` and states the size, before any large allocation.
+
+        A cross-sectional expression is swept the same way over the 2-D ``data`` of
+        :meth:`eval_panel` (``instruments`` and ``present`` as there), one panel evaluation per
+        binding without sharing between bindings; ``n_kernel_steps`` is then ``None``. The clock
+        arguments are as for :meth:`eval`.
+        """
+        op = "Expr.sweep"
+        if isinstance(data, Mapping) and not isinstance(data, dict):
+            data = dict(data)
+        axes_list, point_list = _space(grid, axes, points, op)
+        used = _raptorbt.expr_param_names(self._src)
+        asked = [n for n, _ in axes_list] if axes_list is not None else sorted(
+            {k for p in point_list for k in p}
+        )
+        for name in asked:
+            if name not in used:
+                raise _refuse(
+                    "invalid_parameter",
+                    f"parameter {name!r} is not read by the expression; it reads: "
+                    f"{', '.join(used) if used else 'no parameter'}",
+                    operation=op,
+                    parameter=name,
+                    value=name,
+                    valid=list(used) or ["the expression reads no $name"],
+                )
+        first = (
+            {n: v[0] for n, v in axes_list} if axes_list is not None else dict(point_list[0])
+        )
+        proto = Expr(self._src, {**self._params, **first}, groups=self._groups, series=self._series)
+        names = proto.outputs if len(proto.outputs) > 1 else ("value",)
+        if proto.is_panel:
+            bindings, outputs = self._sweep_panel(
+                axes_list, point_list, data, instruments, present, bar_stamp, tz_offset_ns,
+                session, bar_ns, max_combinations, max_bytes, op,
+            )
+            steps = (None, None)
+        else:
+            got = _raptorbt.expr_sweep(
+                self._src, self._params or None, self._series or None, data, axes_list, point_list,
+                bar_stamp, tz_offset_ns, session, bar_ns, max_combinations, max_bytes,
+            )
+            bindings, outputs = got["params"], got["outputs"]
+            steps = (got["n_kernel_steps"], got["independent_kernel_steps"])
+        results = [
+            ExprSweepPoint(b, cols[0] if len(cols) == 1 else dict(zip(names, cols)))
+            for b, cols in zip(bindings, outputs)
+        ]
+        return ExprSweep(self._src, results, tuple(names), steps[0], steps[1])
+
+    def _sweep_panel(
+        self, axes_list, point_list, data, instruments, present, bar_stamp, tz_offset_ns, session,
+        bar_ns, max_combinations, max_bytes, op,
+    ):
+        limit_n, limit_bytes = _raptorbt.expr_sweep_limits()
+        limit_n = limit_n if max_combinations is None else max_combinations
+        limit_bytes = limit_bytes if max_bytes is None else max_bytes
+        if axes_list is not None:
+            total = math.prod(len(v) for _, v in axes_list)
+            bindings = (
+                dict(zip((n for n, _ in axes_list), combo))
+                for combo in itertools.product(*(v for _, v in axes_list))
+            )
+        else:
+            total, bindings = len(point_list), iter(point_list)
+        if total > limit_n:
+            raise _refuse(
+                "sweep_too_large",
+                f"the sweep has {total} combinations; at most {limit_n} are allowed",
+                operation=op,
+                parameter="max_combinations",
+                value=total,
+                valid=[f"at most {limit_n} combinations; fewer values per parameter"],
+            )
+        out_bindings: list[dict[str, float]] = []
+        outputs: list[list[Any]] = []
+        for b in bindings:
+            full = {**self._params, **b}
+            e = Expr(self._src, full, groups=self._groups, series=self._series)
+            got = e.eval_panel(
+                data, instruments=instruments, present=present, bar_stamp=bar_stamp,
+                tz_offset_ns=tz_offset_ns, session=session, bar_ns=bar_ns,
+            )
+            cols = list(got.values()) if isinstance(got, dict) else [got]
+            if not outputs:
+                need = total * sum(c.nbytes for c in cols)
+                if need > limit_bytes:
+                    raise _refuse(
+                        "sweep_too_large",
+                        f"the sweep of {total} combinations needs about {need} bytes "
+                        f"({need / (1 << 30):.2f} GiB); at most {limit_bytes} bytes "
+                        f"({limit_bytes / (1 << 30):.2f} GiB) are allowed",
+                        operation=op,
+                        parameter="max_bytes",
+                        value=need,
+                        valid=[f"at most {limit_bytes} bytes; fewer combinations or fewer bars"],
+                    )
+            out_bindings.append(full)
+            outputs.append(cols)
+        return out_bindings, outputs
+
     # -- truth is not defined
 
     def __bool__(self) -> bool:
@@ -608,6 +778,154 @@ class Expr:
             return Expr(f"{base if atom else f'({base})'}.{name}", params, groups=groups)
         hint = f"; outputs: {', '.join(outputs)}" if outputs else ""
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}{hint}")
+
+
+# ------------------------------------------------------------------ sweeps
+
+
+def _axis(name: str, values: Any, op: str) -> list[float]:
+    """The values of one swept parameter as floats: a non-empty list of finite numbers."""
+    if isinstance(values, (str, bytes, Mapping)) or not hasattr(values, "__iter__"):
+        raise _refuse(
+            "invalid_parameter",
+            f"{name} must be a list of numbers, got {type(values).__name__}; one value is [{name}]",
+            operation=op,
+            parameter=name,
+            value=repr(values),
+            valid=["a list of numbers such as [5, 10, 20]"],
+        )
+    out = []
+    for v in values:
+        if isinstance(v, (bool, np.bool_)) or not isinstance(v, numbers.Real) or not math.isfinite(v):
+            raise _refuse(
+                "invalid_parameter",
+                f"{name} holds {v!r}; every value must be a finite number",
+                operation=op,
+                parameter=name,
+                value=repr(v),
+                valid=["finite numbers"],
+            )
+        out.append(float(v))
+    if not out:
+        raise _refuse(
+            "invalid_parameter",
+            f"{name} has no values; a sweep needs at least one",
+            operation=op,
+            parameter=name,
+            valid=["a list of numbers such as [5, 10, 20]"],
+        )
+    return out
+
+
+def _space(
+    grid: Mapping[str, Any] | None,
+    axes: Mapping[str, Any],
+    points: Sequence[Mapping[str, float]] | None,
+    op: str,
+) -> tuple[list[tuple[str, list[float]]] | None, list[dict[str, float]] | None]:
+    """``(axes, None)`` for a grid or ``(None, points)``: what to try, as the native sweep takes it."""
+    both = {**(grid or {})}
+    for k, v in axes.items():
+        if k in both:
+            raise _refuse(
+                "invalid_parameter", f"{k} is given twice (grid= and as a keyword)",
+                operation=op, parameter=k, valid=["one list per parameter"],
+            )
+        both[k] = v
+    if points is not None:
+        if both:
+            raise _refuse(
+                "invalid_parameter",
+                "give a grid (keywords or grid=) or points, not both",
+                operation=op,
+                parameter="points",
+                valid=["n=[5, 10], m=[50, 100]", "points=[{'n': 5, 'm': 50}]"],
+            )
+        if isinstance(points, (str, bytes, Mapping)) or not hasattr(points, "__iter__"):
+            raise _refuse(
+                "invalid_parameter", "points must be a list of {name: value} mappings",
+                operation=op, parameter="points", value=repr(points),
+                valid=["[{'n': 5, 'm': 50}, ...]"],
+            )
+        listed = list(points)
+        if not listed or not all(isinstance(p, Mapping) and p for p in listed):
+            raise _refuse(
+                "invalid_parameter", "points must be a non-empty list of non-empty {name: value} mappings",
+                operation=op, parameter="points", valid=["[{'n': 5, 'm': 50}, ...]"],
+            )
+        return None, [{str(k): _axis(str(k), [v], op)[0] for k, v in p.items()} for p in listed]
+    if not both:
+        raise _refuse(
+            "invalid_parameter",
+            "a sweep needs the parameters to vary: n=[5, 10, 20], or points=[...]",
+            operation=op,
+            parameter="grid",
+            valid=["n=[5, 10, 20]", "points=[{'n': 5}]"],
+        )
+    return [(str(k), _axis(str(k), v, op)) for k, v in both.items()], None
+
+
+class ExprSweepPoint:
+    """One binding of a sweep: its ``params`` (every ``$name`` the text reads) and the result,
+    an array for one output or a dict of arrays keyed by output name."""
+
+    __slots__ = ("params", "value")
+
+    def __init__(self, params: dict[str, float], value: Any):
+        self.params = params
+        self.value = value
+
+    def __repr__(self) -> str:
+        return f"ExprSweepPoint(params={self.params})"
+
+
+class ExprSweep(Sequence):
+    """The result of :meth:`Expr.sweep`: one :class:`ExprSweepPoint` per binding, in input
+    order.
+
+    ``n_trials`` is the number of bindings tried (the count a selection among them must be
+    corrected for). ``n_kernel_steps`` is how many kernel nodes the joint plan ran, and
+    ``independent_kernel_steps`` how many evaluating each binding alone would have run
+    (``None`` for a panel sweep, which shares nothing between bindings).
+    """
+
+    __slots__ = ("source", "points", "outputs", "n_kernel_steps", "independent_kernel_steps")
+
+    def __init__(
+        self,
+        source: str,
+        points: list[ExprSweepPoint],
+        outputs: tuple[str, ...],
+        n_kernel_steps: int | None,
+        independent_kernel_steps: int | None,
+    ):
+        self.source = source
+        self.points = points
+        self.outputs = outputs
+        self.n_kernel_steps = n_kernel_steps
+        self.independent_kernel_steps = independent_kernel_steps
+
+    def __len__(self) -> int:
+        return len(self.points)
+
+    def __getitem__(self, i):
+        return self.points[i]
+
+    @property
+    def n_trials(self) -> int:
+        """Bindings tried."""
+        return len(self.points)
+
+    @property
+    def params(self) -> list[dict[str, float]]:
+        return [p.params for p in self.points]
+
+    @property
+    def values(self) -> list[Any]:
+        return [p.value for p in self.points]
+
+    def __repr__(self) -> str:
+        return f"ExprSweep({self.source!r}, n_trials={self.n_trials})"
 
 
 # ------------------------------------------------------------------ calls built from Python

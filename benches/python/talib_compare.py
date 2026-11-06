@@ -39,6 +39,7 @@ SIZES = (1_000_000, 10_000_000)
 PERIODS = (14, 200)
 INSTRUMENTS = 500
 SHARED_TERMS = 20
+SWEEP_BARS = SIZES[0]
 BAR_ONE = 1.1
 BAR_ALL = 1.5
 BAR_SHARE = 0.9
@@ -253,12 +254,22 @@ def run_raptorbt(args) -> None:
                                     "workers": workers,
                                     "seconds": bench(lambda: list(pool.map(e.eval, cols)), runs_for(n))})
 
-    if hasattr(rb.expr("close"), "sweep"):
-        print("note: sweep exists but this harness has no sweep case wired yet")
-        result["skipped"].append({"function": "sweep", "reason": "not wired"})
-    else:
-        print("note: sweep case skipped: Expr.sweep is not available in this build")
-        result["skipped"].append({"function": "sweep", "reason": "Expr.sweep not available"})
+    # 100 bindings of one crossover on SWEEP_BARS bars: the joint plan against evaluating each
+    # binding on its own. TA-Lib has no counterpart, so the report prints the two side by side.
+    # The size bound (4 GiB of buffers and results) keeps this to the smaller size.
+    text = "sma(close, $n) > sma(close, $m)"
+    cross = rb.expr(text)
+    sweep_data = {"close": bars(SWEEP_BARS)["close"]}
+    points = [{"n": 10 * i, "m": 10 * j + 5} for i in range(1, 11) for j in range(1, 11)]
+    alone = [rb.expr(text, params=p) for p in points]
+    result["sweep"] = {
+        "n": SWEEP_BARS, "bindings": len(points), "expression": text,
+        "joint_seconds": bench(lambda: cross.sweep(sweep_data, points=points), runs_for(SWEEP_BARS)),
+        "independent_seconds": bench(lambda: [e.eval(sweep_data) for e in alone], runs_for(SWEEP_BARS)),
+    }
+    sw = result["sweep"]
+    print(f"rb    sweep {sw['bindings']} bindings n={sw['n']:,}  joint {sw['joint_seconds']*1e3:9.2f} ms  "
+          f"independent {sw['independent_seconds']*1e3:9.2f} ms", flush=True)
     pathlib.Path(args.out).write_text(json.dumps(result, indent=1))
     print(f"wrote {args.out}")
 
@@ -337,6 +348,18 @@ def run_report(args) -> None:
             lines.append(f"| {c['case']} | {c['n']:,} | {mode} | {ref['seconds']:.4f} | "
                          f"{c['seconds']:.4f} | {ratio:.2f} |")
             out["cases"].append(c | {"talib_seconds": ref["seconds"], "ratio": ratio, "mode": mode})
+    sweeps = [(r["machine"]["threads"], r["sweep"]) for r in rbs if "sweep" in r]
+    if sweeps:
+        lines += ["", "## Sweep", "",
+                  "100 bindings of `sma(close, $n) > sma(close, $m)`: the joint plan against each binding "
+                  "evaluated on its own. No TA-Lib counterpart.", "",
+                  "| Bars | Bindings | rayon threads | Joint s | Independent s | Joint / independent |",
+                  "|---|---|---|---|---|---|"]
+        for threads, sw in sweeps:
+            ratio = sw["joint_seconds"] / sw["independent_seconds"]
+            lines.append(f"| {sw['n']:,} | {sw['bindings']} | {threads} | {sw['joint_seconds']:.4f} | "
+                         f"{sw['independent_seconds']:.4f} | {ratio:.2f} |")
+            out.setdefault("sweeps", []).append(sw | {"threads": threads, "ratio": ratio})
     lines += ["", "The shared-nodes case is one raptorbt program summing 20 terms that share `sma` and `ema`, "
               "against TA-Lib recomputing both per term. The instruments case is `sma(close, 20)` over 500 "
               "instruments; the parallel rows use a thread pool on both sides.", ""]

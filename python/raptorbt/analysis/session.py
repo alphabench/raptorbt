@@ -241,6 +241,154 @@ class Session:
         self._evict(op, keep=hid)
         return copy.deepcopy(entry.result)
 
+    def sweep(
+        self,
+        expr: Any,
+        *,
+        data: str | None = None,
+        tz_offset_ns: int = 0,
+        score: str | None = None,
+        grid: Mapping[str, Any] | None = None,
+        points: Any = None,
+        **axes: Any,
+    ) -> dict[str, Any]:
+        """Evaluate ``expr`` under many values of its ``$name`` constants and keep each result.
+
+        ``sma(close, $n) > sma(close, $m)`` with ``n=[5, 10, 20], m=[50, 100]`` (or ``grid=``,
+        or ``points=[{...}]``, see :meth:`raptorbt.expressions.Expr.sweep`) is six bindings run
+        in one pass; each binding's result is a handle of its own, the one :meth:`eval` of the
+        bound expression returns. Returns a compact table: ``columns`` (``handle``, the swept
+        parameters, ``score``), one row per binding, and ``n_trials``, the number of bindings
+        tried. ``score`` is a statistic of each series (``true_rate``, ``mean``, ``std``,
+        ``min``, ``max``, ``last``, ``known``, ``leading_nan``; the default is ``true_rate`` for
+        a boolean and ``mean`` for a number) or an expression, which may read the same
+        ``$name``s and is reduced to the mean of its known values. A table too long for the
+        size cap keeps the highest scores, in score order, and says how many it left out; every
+        binding still has its handle. The table states the selection bias: the best of
+        ``n_trials`` scores is not the score of one chosen in advance.
+        """
+        op = "Session.sweep"
+        text = expr.source if isinstance(expr, expressions.Expr) else expr
+        if not isinstance(text, str):
+            raise errors.InvalidType(
+                f"an expression is text, got {type(expr).__name__}", code="expr_type", operation=op,
+                parameter="expr", value=repr(expr), valid=["a string such as 'sma(close, $n) > close'"],
+            )
+        ds = self.dataset(data)
+        if ds.kind == "panel":
+            raise errors.make(
+                "expr_unsupported_here",
+                "a sweep runs over the bars of one instrument; sweep a panel with "
+                "Expr.sweep(arrays, ...) and eval_panel's arguments",
+                operation=op, parameter="data", value=ds.name,
+                valid=["a dataset loaded with Session.load"],
+            )
+        used = self._resolve_text(text, ds, op)
+        env = {name: h.leading[out] for name, (h, out) in used.items()}
+        template = expressions.Expr(text, series=env)
+        feed = {**ds.arrays, **{n: h.get()[o] for n, (h, o) in used.items()}}
+        swept = _sweep_names(grid, axes, points)
+        found = template.sweep(
+            feed, grid=grid, points=points, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns,
+            bar_ns=ds.bar_ns, **axes,
+        )
+        if len(found.outputs) != 1 or found.outputs[0] != "value":
+            raise errors.make(
+                "expr_type",
+                "a sweep summarises one series per binding; select an output of the expression",
+                operation=op, parameter="expr", value=text,
+                valid=[f"({text}).{o}" for o in found.outputs],
+            )
+        keep = [h.id for h, _ in used.values()]
+        bound = {}
+        for point in found:
+            key = tuple(sorted(point.params.items()))
+            if key not in bound:
+                bound[key] = expressions.Expr(text, point.params, series=env)
+        ids = {
+            key: "h_" + hashlib.sha256(
+                f"{e.bound_hash(ds.bar_stamp, tz_offset_ns)}\n{ds.sha256}\n{raptorbt.__version__}".encode()
+            ).hexdigest()[:10]
+            for key, e in bound.items()
+        }
+        distinct = len(ids)
+        if distinct > self.max_handles:
+            raise errors.InvalidParameter(
+                f"the sweep makes {distinct} distinct results; the session holds at most "
+                f"max_handles={self.max_handles}",
+                code="session_memory_exceeded", operation=op, parameter="max_handles",
+                value=self.max_handles,
+                valid=["fewer combinations", f"Session(max_handles>={distinct})"],
+            )
+        new = {ids[k]: next(p for p in found if tuple(sorted(p.params.items())) == k).value.nbytes
+               for k in ids if ids[k] not in self._handles}
+        self._room(sum(new.values()), op, keep=keep, what=f"the {len(new)} results of the sweep")
+        for point in found:
+            key = tuple(sorted(point.params.items()))
+            hid = ids[key]
+            if hid in self._handles:
+                self._handles.move_to_end(hid)
+                continue
+            a = np.ascontiguousarray(point.value, dtype="<f8")
+            a.setflags(write=False)
+            e = bound[key]
+            entry = self._summarise(
+                hid, e.canonical, e, ds, tz_offset_ns, {e.outputs[0]: a}, used, a.nbytes
+            )
+            self._gone.pop(hid, None)
+            self._handles[hid] = entry
+            self._used += a.nbytes
+            self._evict(op, keep=hid)
+        for h, _ in used.values():
+            if h.id in self._handles:
+                self._handles.move_to_end(h.id)
+
+        kind = bound[next(iter(bound))].kinds[0]
+        label, scores = self._scores(score, kind, found, tz_offset_ns, ds, op)
+        rows = [
+            [ids[tuple(sorted(p.params.items()))], *[_whole(p.params[n]) for n in swept], _sum.show(sc) if sc is not None else None]
+            for p, sc in zip(found, scores)
+        ]
+        result: dict[str, Any] = {
+            "expression": text, "data": ds.name, "n_trials": found.n_trials, "n_distinct": distinct,
+            "swept": swept, "score": label, "columns": ["handle", *swept, "score"], "rows": rows,
+            "order": "input",
+            "kernel_steps": {"joint": found.n_kernel_steps, "independent": found.independent_kernel_steps},
+            "note": f"best of n_trials={found.n_trials}: a selection among them is biased upward; "
+                    "pass the Sharpe of every trial to raptorbt.research.deflated_sharpe",
+        }
+        if _sum.size(result) > _sum.CALL_BYTES:
+            ranked = sorted(range(len(rows)), key=lambda i: (rows[i][-1] is None, -(rows[i][-1] or 0.0)))
+            keep_n = len(rows)
+            while keep_n > 1 and _sum.size({**result, "rows": [rows[i] for i in ranked[:keep_n]], "order": "score, highest first", "omitted": len(rows) - keep_n}) > _sum.CALL_BYTES:
+                keep_n -= 1
+            result["rows"] = [rows[i] for i in ranked[:keep_n]]
+            result["order"] = "score, highest first"
+            result["omitted"] = len(rows) - keep_n
+        return result
+
+    def _scores(self, score: str | None, kind: str, found: Any, tz_offset_ns: int, ds: _data.Dataset, op: str) -> tuple[str, list[float | None]]:
+        """The label and one score per binding of ``found``: a statistic or an expression."""
+        label = score if score is not None else ("true_rate" if kind == "bool" else "mean")
+        if label in _SCORES:
+            return label, [_SCORES[label](p.value) for p in found]
+        if not isinstance(label, str):
+            raise errors.InvalidParameter(
+                f"score is a statistic name or an expression, got {type(label).__name__}",
+                code="invalid_parameter", operation=op, parameter="score", value=repr(label),
+                valid=sorted(_SCORES),
+            )
+        probe = expressions.Expr(label)
+        names = list(probe.parameters)
+        if not names:
+            out = probe.eval(ds.arrays, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns)
+            return label, [_known_mean(out)] * len(found)
+        pts = [{n: p.params[n] for n in names if n in p.params} for p in found]
+        scored = probe.sweep(
+            ds.arrays, points=pts, bar_stamp=ds.bar_stamp, tz_offset_ns=tz_offset_ns, bar_ns=ds.bar_ns
+        )
+        return label, [_known_mean(p.value) for p in scored]
+
     def _evaluate(
         self,
         program: expressions.Expr,
@@ -697,6 +845,46 @@ class Session:
                 )
             kw["interval_seconds"] = max(1, ds.bar_ns // 10**9)
         return fn(a["timestamps"] / 1e9, a["open"], a["high"], a["low"], a["close"], a["volume"], **kw)
+
+
+def _whole(x: float) -> float | int:
+    """A parameter as shown: ``5`` for ``5.0``."""
+    return int(x) if float(x).is_integer() else x
+
+
+def _known(a: Any) -> np.ndarray:
+    a = np.asarray(a, dtype=np.float64)
+    return a[np.isfinite(a)]
+
+
+def _known_mean(a: Any) -> float | None:
+    v = _known(a)
+    return float(v.mean()) if v.size else None
+
+
+def _last_known(a: Any) -> float | None:
+    v = _known(a)
+    return float(v[-1]) if v.size else None
+
+
+#: The statistics ``Session.sweep`` can score a series by; each is None where nothing is known.
+_SCORES: dict[str, Callable[[Any], float | None]] = {
+    "true_rate": _known_mean,
+    "mean": _known_mean,
+    "std": lambda a: float(_known(a).std()) if _known(a).size else None,
+    "min": lambda a: float(_known(a).min()) if _known(a).size else None,
+    "max": lambda a: float(_known(a).max()) if _known(a).size else None,
+    "last": _last_known,
+    "known": lambda a: float(_known(a).size),
+    "leading_nan": lambda a: float(_sum.leading_nan(np.asarray(a, dtype=np.float64))),
+}
+
+
+def _sweep_names(grid: Mapping[str, Any] | None, axes: Mapping[str, Any], points: Any) -> list[str]:
+    """The parameters a sweep varies, in the order the table shows them."""
+    if points is not None:
+        return sorted({str(k) for p in points for k in p})
+    return [str(k) for k in (*(grid or {}), *axes)]
 
 
 def _short(text: str, n: int = 60) -> str:

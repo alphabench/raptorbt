@@ -71,6 +71,22 @@ def _parser() -> argparse.ArgumentParser:
     e.add_argument("--use", help="which loaded dataset to evaluate over (default: the newest)")
     e.add_argument("--tz-offset-ns", type=int, default=0, help="zone daily windows of at(...) are cut in")
 
+    w = sessioned(sub.add_parser(
+        "sweep", allow_abbrev=False,
+        help="evaluate an expression under many values of its $names: python -m raptorbt sweep "
+             "'sma(close, $n) > sma(close, $m)' --n 5,10,20 --m 50,100",
+    ))
+    w.add_argument("expression")
+    data_options(w)
+    w.add_argument("--use", help="which loaded dataset to evaluate over (default: the newest)")
+    w.add_argument("--tz-offset-ns", type=int, default=0, help="zone daily windows of at(...) are cut in")
+    w.add_argument("--score", help="what each row shows: a statistic (true_rate, mean, std, min, max, last, known, "
+                   "leading_nan) or an expression")
+    w.add_argument("--grid", action="append", default=[], metavar="NAME=V1,V2",
+                   help="a parameter and its values, for a name that is also an option (repeatable)")
+    w.add_argument("--points", help='bindings as a JSON list of objects, e.g. \'[{"n": 5, "m": 50}]\' (not with a grid)')
+    w.set_defaults(axes=[])
+
     f = sub.add_parser("functions", help="search the expression functions")
     f.add_argument("query", nargs="*")
     f.add_argument("--limit", type=int, default=20)
@@ -178,6 +194,69 @@ def _eval(a: argparse.Namespace) -> Any:
                 bars, picked = _select_columns(bars, named, picked)
             s.load_panel(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, instruments=picked, name=a.name)
         return s.eval(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns)
+
+    return _with_session(a, work)
+
+
+def _numbers(name: str, text: str) -> list[float]:
+    try:
+        return [float(v) for v in text.split(",")]
+    except ValueError:
+        raise errors.InvalidParameter(
+            f"{name} takes comma-separated numbers, got {text!r}", code="invalid_parameter",
+            operation="sweep", parameter=name, value=text, valid=["5,10,20"],
+        ) from None
+
+
+def _axes(a: argparse.Namespace) -> dict[str, list[float]]:
+    """The grid: ``--name v1,v2`` for every parameter, and ``--grid name=v1,v2``."""
+    axes: dict[str, list[float]] = {}
+    rest = list(a.axes)
+    while rest:
+        flag = rest.pop(0)
+        if not flag.startswith("--") or len(flag) < 3:
+            raise errors.InvalidParameter(
+                f"unrecognized argument {flag!r}: a parameter is --name v1,v2,v3", code="invalid_parameter",
+                operation="sweep", parameter="grid", value=flag, valid=["--n 5,10,20"],
+            )
+        name, eq, value = flag[2:].partition("=")
+        if not eq:
+            if not rest:
+                raise errors.InvalidParameter(
+                    f"{flag} needs its values, e.g. {flag} 5,10,20", code="invalid_parameter",
+                    operation="sweep", parameter=name, valid=[f"{flag} 5,10,20"],
+                )
+            value = rest.pop(0)
+        axes[name] = _numbers(name, value)
+    for item in a.grid:
+        name, eq, value = item.partition("=")
+        if not eq:
+            raise errors.InvalidParameter(
+                f"--grid takes NAME=V1,V2, got {item!r}", code="invalid_parameter", operation="sweep",
+                parameter="grid", value=item, valid=["--grid n=5,10,20"],
+            )
+        axes[name] = _numbers(name, value)
+    return axes
+
+
+def _sweep(a: argparse.Namespace) -> Any:
+    axes = _axes(a)
+    points = None
+    if a.points is not None:
+        try:
+            points = json.loads(a.points)
+        except json.JSONDecodeError as e:
+            raise errors.InvalidParameter(
+                f"--points is not JSON: {e}", code="invalid_input", operation="sweep", parameter="points",
+                value=a.points, valid=['a JSON list of objects such as \'[{"n": 5}]\''],
+            ) from None
+
+    def work(s: Session) -> Any:
+        if a.data is not None:
+            bars = read_bars(a.data, time_unit=a.time_unit, field=a.field, timestamps=a.timestamps)
+            s.load(bars, bar_stamp=a.bar_stamp, bar_ns=a.bar_ns, name=a.name)
+        return s.sweep(a.expression, data=a.use, tz_offset_ns=a.tz_offset_ns, score=a.score,
+                       grid=axes or None, points=points)
 
     return _with_session(a, work)
 
@@ -324,14 +403,19 @@ def _export_skills(dest: Path, task: str | None) -> dict[str, Any]:
 
 
 _COMMANDS = {
-    "eval": _eval, "functions": _functions, "describe": _describe, "show": _show,
+    "eval": _eval, "sweep": _sweep, "functions": _functions, "describe": _describe, "show": _show,
     "export": _export, "stats": _stats, "factor": _factor, "skills": _skills,
 }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        args = _parser().parse_args(argv)
+        parser = _parser()
+        args, extra = parser.parse_known_args(argv)
+        if args.cmd == "sweep":
+            args.axes = extra
+        elif extra:
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
         result = _COMMANDS[args.cmd](args)
     except errors.RaptorBTError as e:
         print(json.dumps(e.to_dict(), separators=(",", ":")))

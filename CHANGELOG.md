@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Expression sweeps.** `rb.expr("sma(close, $n) > sma(close, $m)").sweep(data, n=[5, 10], m=[50, 100])`
+  (or `points=[...]`) evaluates every binding in one joint plan: a node no parameter touches, or two
+  bindings spell alike, runs once, and each result is bit-identical to evaluating it alone. The result
+  states `n_trials`; a sweep past `max_combinations` / `max_bytes` raises `sweep_too_large` with its
+  size. `Session.sweep` and `python -m raptorbt sweep` give a compact table with a handle per binding.
+  `expr("... $n ...")` without a value is now accepted as a template; evaluating it still raises
+  `expr_unbound_parameter`.
 - **Analysis for agents.** `raptorbt.analysis.Session` loads bars once, evaluates expressions
   and statistics, and returns a summary of at most 2 KB (shape, warm-up, distribution, flags)
   with a short handle that the next expression reads as a series. The same work gives the same

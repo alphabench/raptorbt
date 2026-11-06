@@ -185,6 +185,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `structure_limit_breached` | `InvalidParameter` | The legs' prices make the net premium worse than net_limit. | a net_limit the legs' prices can meet; order_type='market' without net_limit | `raptorbt-orders` |
 | `structure_margin_exceeded` | `InvalidParameter` | The margin model needs more for the group than is available. | fewer lots; more available margin; a structure that needs less margin | `raptorbt-risk` |
 | `structure_missing_mark` | `StateError` | A price or mark a structure needs was not supplied. | marks: a price for every leg's symbol | `raptorbt-instruments` |
+| `sweep_too_large` | `InvalidParameter` | A sweep has more combinations, or would need more memory, than its bound; the message states the size it needed. | fewer values per parameter; fewer bars; a larger max_combinations or max_bytes | `raptorbt-expressions` |
 | `universe_instrument` | `InvalidParameter` | ctx.instrument was given a Universe role, which names many symbols; ask for one of them. | one symbol of the role: ctx.role(name) lists them | `raptorbt-instruments` |
 | `universe_size` | `InvalidParameter` | A Universe role is bound to fewer symbols than its min or more than its max. | a list with between the role's min and max symbols | `raptorbt-live-trading` |
 | `unknown_account` | `InvalidParameter` | A strategy or call names an account that is not in accounts. | a name from accounts={name: AccountSpec(...)} | `raptorbt-portfolio` |

@@ -20,6 +20,7 @@ use super::errors::Fail;
 use super::numpy_bridge::numpy_cow_f64;
 use super::schedule_bindings::PySessionSchedule;
 use crate::data::BarStamp;
+use crate::quant::eval::sweep::{param_names, sweep, Space, SweepError, SweepLimits};
 use crate::quant::eval::{
     eval, eval_panel, Bar, ClockCtx, EvalError, Inputs, PanelInputs, PanelPlan, Plan, Stream,
 };
@@ -843,6 +844,205 @@ pub fn factor_report_native<'py>(
     Ok(out)
 }
 
+/// The `$name`s `source` reads, sorted.
+#[pyfunction]
+pub fn expr_param_names(source: &str) -> PyResult<Vec<String>> {
+    param_names(source)
+        .map(|names| names.into_iter().collect())
+        .map_err(|e| compile_fail(source, e))
+}
+
+/// The bound on a sweep: `(max_combinations, max_bytes)`.
+#[pyfunction]
+pub fn expr_sweep_limits() -> (usize, usize) {
+    let l = SweepLimits::default();
+    (l.max_combinations, l.max_bytes)
+}
+
+/// A failed sweep as the structured error.
+fn sweep_fail(operation: &str, source: &str, e: SweepError) -> PyErr {
+    let text = e.to_string();
+    match e {
+        SweepError::Compile(e) => compile_fail(source, e),
+        SweepError::Eval(e) => eval_fail(operation, e),
+        SweepError::Unused { name, mut valid } => {
+            if valid.is_empty() {
+                valid.push("the expression reads no $name".to_string());
+            }
+            Fail::new("invalid_parameter", text)
+                .op(operation)
+                .param(&name)
+                .value(name.as_str())
+                .valid(valid)
+                .into()
+        }
+        SweepError::Empty => Fail::new("invalid_parameter", text)
+            .op(operation)
+            .param("grid")
+            .valid(["at least one value for each parameter, or at least one point"])
+            .into(),
+        SweepError::TooManyCombinations { combinations, max } => Fail::new("sweep_too_large", text)
+            .op(operation)
+            .param("max_combinations")
+            .value(combinations)
+            .valid([format!("at most {max} combinations; fewer values per parameter")])
+            .into(),
+        SweepError::TooManyBytes { bytes, max, .. } => Fail::new("sweep_too_large", text)
+            .op(operation)
+            .param("max_bytes")
+            .value(bytes)
+            .valid([format!("at most {max} bytes; fewer combinations or fewer bars")])
+            .into(),
+    }
+}
+
+/// Evaluate `source` under every binding of `grid` (a list of `(name, values)`, every
+/// combination, the last name varying fastest) or `points` (a list of dicts) as one joint plan:
+/// a node no parameter touches, or two bindings spell alike, computes once. Returns a dict
+/// with `params` (the full binding of each result), `outputs` (a list of arrays per binding, in
+/// binding order) and the kernel-step counts. `params` and `series` are as for `ExprProgram`.
+#[pyfunction]
+#[pyo3(signature = (source, params, series, data, grid=None, points=None, bar_stamp=None, tz_offset_ns=0, session=None, bar_ns=None, max_combinations=None, max_bytes=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn expr_sweep<'py>(
+    py: Python<'py>,
+    source: &str,
+    params: Option<BTreeMap<String, f64>>,
+    series: Option<BTreeMap<String, usize>>,
+    data: &Bound<'py, PyAny>,
+    grid: Option<Vec<(String, Vec<f64>)>>,
+    points: Option<Vec<BTreeMap<String, f64>>>,
+    bar_stamp: Option<&str>,
+    tz_offset_ns: i64,
+    session: Option<&PySessionSchedule>,
+    bar_ns: Option<i64>,
+    max_combinations: Option<usize>,
+    max_bytes: Option<usize>,
+) -> PyResult<Bound<'py, PyDict>> {
+    const OP: &str = "Expr.sweep";
+    let space = match (grid, points) {
+        (Some(g), None) => Space::Grid(g),
+        (None, Some(p)) => Space::Points(p),
+        _ => {
+            return Err(Fail::new("invalid_parameter", "give a grid or points, not both")
+                .op(OP)
+                .param("grid")
+                .valid(["grid={name: [values]}", "points=[{name: value}]"])
+                .into())
+        }
+    };
+    let mut env = Env { params: params.unwrap_or_default(), ..Env::default() };
+    let named = series.unwrap_or_default();
+    for (name, warm) in &named {
+        env.series.insert(name.clone(), Handle { ty: Ty::series(), warm: *warm });
+    }
+    let dict = data.cast::<PyDict>().map_err(|_| {
+        PyErr::from(
+            Fail::new(
+                "invalid_input_type",
+                format!(
+                    "data must be a dict of float64 numpy arrays, got {}",
+                    data.get_type().name().map(|n| n.to_string()).unwrap_or_default()
+                ),
+            )
+            .op(OP)
+            .param("data"),
+        )
+    })?;
+    let float_col = |name: &str| -> PyResult<Option<PyReadonlyArray1<'py, f64>>> {
+        let Some(v) = dict.get_item(name)? else { return Ok(None) };
+        v.extract::<PyReadonlyArray1<'py, f64>>().map(Some).map_err(|_| {
+            PyErr::from(
+                Fail::new(
+                    "invalid_array",
+                    format!(
+                        "'{name}' must be a 1-D numpy float64 array, got {}; convert with \
+                         np.asarray(x, dtype=np.float64)",
+                        v.get_type().name().map(|n| n.to_string()).unwrap_or_default()
+                    ),
+                )
+                .op(OP)
+                .param(name),
+            )
+        })
+    };
+    let mut held: Vec<(Field, PyReadonlyArray1<'py, f64>)> = Vec::new();
+    for f in Field::ALL {
+        if let Some(a) = float_col(f.name())? {
+            held.push((f, a));
+        }
+    }
+    let mut held_series: Vec<(&str, PyReadonlyArray1<'py, f64>)> = Vec::new();
+    for name in named.keys() {
+        if let Some(a) = float_col(name)? {
+            held_series.push((name.as_str(), a));
+        }
+    }
+    let cols: Vec<(Field, Cow<'_, [f64]>)> =
+        held.iter().map(|(f, a)| (*f, numpy_cow_f64(a))).collect();
+    let series_cols: Vec<(&str, Cow<'_, [f64]>)> =
+        held_series.iter().map(|(n, a)| (*n, numpy_cow_f64(a))).collect();
+    let stamps: Option<PyReadonlyArray1<'py, i64>> = match dict.get_item("timestamps")? {
+        None => None,
+        Some(v) => Some(v.extract::<PyReadonlyArray1<'py, i64>>().map_err(|_| {
+            PyErr::from(
+                Fail::new(
+                    "invalid_array",
+                    "'timestamps' must be a 1-D numpy int64 array of nanoseconds",
+                )
+                .op(OP)
+                .param("timestamps"),
+            )
+        })?),
+    };
+    let stamps: Option<Cow<'_, [i64]>> = stamps.as_ref().map(|a| match a.as_slice() {
+        Ok(s) => Cow::Borrowed(s),
+        Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+    });
+    let clock = clock_from(OP, bar_stamp, tz_offset_ns, session, bar_ns)?;
+    let limits = SweepLimits {
+        max_combinations: max_combinations.unwrap_or(SweepLimits::default().max_combinations),
+        max_bytes: max_bytes.unwrap_or(SweepLimits::default().max_bytes),
+    };
+    let result = py.detach(|| {
+        let mut inputs = Inputs::new();
+        for (f, c) in &cols {
+            inputs = inputs.field(*f, c);
+        }
+        for (name, c) in &series_cols {
+            inputs = inputs.handle(name, c);
+        }
+        if let Some(ts) = &stamps {
+            inputs = inputs.timestamps(ts);
+        }
+        if let Some(clock) = clock {
+            inputs = inputs.clock(clock);
+        }
+        sweep(source, &env, &space, &inputs, &limits)
+    });
+    let out = result.map_err(|e| sweep_fail(OP, source, e))?;
+    let bindings = pyo3::types::PyList::empty(py);
+    for b in &out.bindings {
+        let d = PyDict::new(py);
+        for (k, v) in b {
+            d.set_item(k, v)?;
+        }
+        bindings.append(d)?;
+    }
+    let outputs = pyo3::types::PyList::empty(py);
+    for cols in out.columns {
+        let one: Vec<Bound<'py, PyArray1<f64>>> =
+            cols.into_iter().map(|v| PyArray1::from_vec(py, v)).collect();
+        outputs.append(one)?;
+    }
+    let res = PyDict::new(py);
+    res.set_item("params", bindings)?;
+    res.set_item("outputs", outputs)?;
+    res.set_item("n_kernel_steps", out.n_kernel_steps)?;
+    res.set_item("independent_kernel_steps", out.independent_kernel_steps)?;
+    Ok(res)
+}
+
 /// The function registry as JSON text; `raptorbt.expressions` parses it.
 #[pyfunction]
 pub fn expr_registry_json() -> String {
@@ -853,6 +1053,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExprProgram>()?;
     m.add_class::<PyExprStream>()?;
     m.add_function(wrap_pyfunction!(expr_registry_json, m)?)?;
+    m.add_function(wrap_pyfunction!(expr_sweep, m)?)?;
+    m.add_function(wrap_pyfunction!(expr_param_names, m)?)?;
+    m.add_function(wrap_pyfunction!(expr_sweep_limits, m)?)?;
     m.add_function(wrap_pyfunction!(factor_report_native, m)?)?;
     Ok(())
 }

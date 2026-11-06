@@ -697,6 +697,11 @@ CODES: dict[str, Code] = {
         ExpressionError, "expressions", "A construct the language names but this engine does not run yet.",
         ["a construct raptorbt-expressions lists as available"],
     ),
+    "sweep_too_large": _c(
+        InvalidParameter, "expressions",
+        "A sweep has more combinations, or would need more memory, than its bound; the message states the size it needed.",
+        ["fewer values per parameter", "fewer bars", "a larger max_combinations or max_bytes"],
+    ),
     # Statistics
     "insufficient_observations": _c(
         InvalidData, "statistics", "A statistic was given fewer observations than it needs; the message gives the count it got and the count it needs.",

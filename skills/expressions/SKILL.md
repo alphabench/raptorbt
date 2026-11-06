@@ -52,6 +52,8 @@ the engine appears with no other change.
 | `raptorbt.col` | The columns (`col.open`, `high`, `low`, `close`, `volume`) and a builder for every function. |
 | `raptorbt.expressions.Expr` | A checked expression. |
 | `raptorbt.expressions.ExprStream` | The bar-by-bar evaluator from `Expr.stream()`. |
+| `Expr.sweep(data, n=[...], m=[...])` / `Expr.sweep(data, points=[{...}])` | Evaluate under many values of the `$name` constants the text reads, in one pass. Returns an `ExprSweep`: one `ExprSweepPoint` (`params`, `value`) per binding in input order, plus `n_trials`, `n_kernel_steps`. See "Sweeps". |
+| `Expr.parameters` | The `$name`s the text reads, sorted. |
 | `Expr.eval_panel(data, instruments=None, present=None, ...)` | Evaluate over many names: 2-D arrays (dates by names), or a mapping of instrument to its own bars. Returns 2-D arrays. See "Panels". |
 | `raptorbt.col.group(name)` / `raptorbt.expr(text, groups=[...])` | A group series (a numeric label per name) read by `group_rank`, `group_zscore`, `group_demean`. |
 | `raptorbt.expressions.factor_report(factor, prices, horizons=(1, 5, 20), quantiles=5, lag=1, ...)` | Rank IC, quantile returns, long-short spread, turnover and coverage of a factor. See "Panels". |
@@ -153,6 +155,64 @@ except rb.errors.ExpressionError as err:
     assert err.position == 4
     assert "sma" in err.valid
     print(err.snippet)
+```
+
+Sweeps. A `$name` with no value is a template: `eval` refuses it, `sweep` tries it under many
+values. Every binding equals what `expr(text, params=...)` alone returns, bit for bit; the
+moving averages are computed once for the whole grid (5 distinct ones, not the 12 that six
+bindings would run alone), and `n_trials` states how many bindings were tried.
+
+```python
+import numpy as np
+import raptorbt as rb
+
+rng = np.random.default_rng(5)
+close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, 400))
+close[50] = np.nan
+text = "sma(close, $n) > sma(close, $m)"
+cross = rb.expr(text)
+
+swept = cross.sweep({"close": close}, n=[5, 10, 20], m=[50, 100])
+assert swept.n_trials == 6 and len(swept) == 6
+assert swept.n_kernel_steps == 5 and swept.independent_kernel_steps == 12
+
+first = swept[0]
+assert first.params == {"n": 5, "m": 50}
+alone = rb.expr(text, params=first.params).eval({"close": close})
+assert np.array_equal(first.value, alone, equal_nan=True)
+
+try:
+    cross.eval({"close": close})
+except rb.errors.ExpressionError as err:
+    assert err.code == "expr_unbound_parameter"
+try:
+    cross.sweep({"close": close}, n=[5], m=[50], k=[1])
+except rb.errors.RaptorBTError as err:
+    assert err.code == "invalid_parameter" and err.parameter == "k"
+```
+
+A sweep is a multiple-testing search. Score each binding, and give the Sharpe of every one of
+the `n_trials` to `raptorbt.research.deflated_sharpe`, not only the best: its `trials` is how
+many were tried.
+
+```python
+import numpy as np
+import raptorbt as rb
+from raptorbt.research import deflated_sharpe
+
+rng = np.random.default_rng(8)
+close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, 600))
+ret = np.diff(close) / close[:-1]
+swept = rb.expr("sma(close, $n) > sma(close, $m)").sweep(
+    {"close": close}, n=[3, 5, 8, 13], m=[21, 34, 55]
+)
+sharpes = []
+for point in swept:
+    held = np.nan_to_num(point.value[:-1])          # the signal of bar t earns the return of t + 1
+    r = ret * held
+    sharpes.append(float(r.mean() / r.std() * np.sqrt(252)))
+out = deflated_sharpe(sharpes, max(sharpes), samples=len(ret))
+assert out["trials"] == swept.n_trials == 12
 ```
 
 Python's `and`, `or`, `not` and a chained comparison would keep one operand and drop the other,
@@ -311,6 +371,7 @@ assert h["long_short_mean"] > 0
   `timeframe=` stream alike.
 - [Core](../core/SKILL.md): errors are `raptorbt.errors.RaptorBTError`; an expression refusal
   is an `ExpressionError`, also a `ValueError`.
+- [Optimization](../optimization/SKILL.md): `raptorbt.research.sweep` sweeps strategies; `Expr.sweep` sweeps one expression's constants. The first is where a Sharpe comes from, the second what to try; `deflated_sharpe` takes the count from either.
 - [Analysis](../analysis/SKILL.md): to explore a formula over bars, `raptorbt.analysis.Session`
   evaluates it, summarises the result (warm-up, distribution, flags) and keeps it under a handle
   that a later formula reads as a series (`expr(text, series={"h_...": warm_up})` is how a handle
@@ -430,6 +491,26 @@ the base clock.
   forms and `quantile_xs` sort each date. There are no cross-sectional functions across
   timeframes (one clock per panel).
 
+**Sweeps.** `Expr.sweep` compiles the text once per binding and merges the programs into one
+DAG, so a node that no parameter touches, and a node two bindings spell the same, is one node and
+runs once (`n_kernel_steps` against `independent_kernel_steps` counts them). Nothing is
+rewritten and no prefix-sum or lane shortcut is taken, so a binding's numbers are bit-identical
+to evaluating it alone, with NaN data, `at(...)` and any thread count (a test pins each).
+Independent nodes run in parallel waves and a buffer is reused once its last reader has run.
+The size is bounded before anything large is allocated: `max_combinations` (default 10,000)
+and `max_bytes` (default 4 GiB: the buffers plus a result per binding); past either it raises
+`sweep_too_large` and states the size. A parameter the text never reads is refused
+(`invalid_parameter`), and one left with no value (`expr_unbound_parameter`). A cross-sectional
+expression is swept binding by binding over the panel arrays, sharing nothing between bindings.
+The result states `n_trials`: the best of `n_trials` scores is biased upward by that number, so
+report it with any headline figure and pass every trial's Sharpe to
+`raptorbt.research.deflated_sharpe`. `Expr.sweep` sweeps one expression's constants over series;
+`raptorbt.research.sweep` runs a user function (a whole backtest, with walk-forward windows and a
+manifest) over a `Design` of points. Use `Expr.sweep` to choose among signals cheaply, and
+`research.sweep` to test the strategy built from the one you chose. Fixed names such as `data`,
+`grid`, `points` and the clock arguments are options: pass a parameter called one of them as
+`grid={"points": [...]}`.
+
 **Periods and parameters.** A period is a constant integer between 1 and 16,777,216 (or a
 `$name` bound in `params`); a series cannot be a period. Depth and size are limited (64 levels,
 4,096 nodes).
@@ -461,7 +542,9 @@ same expression values as one that never stopped.
 - A series where a constant belongs, such as `sma(close, close)`: `expr_type` at the argument.
 - A misspelt function or column: `expr_unknown_function` or `expr_type`, with `valid` holding
   the closest names.
-- `sma(close, $n)` without `params={"n": 20}`: `expr_unbound_parameter`.
+- `sma(close, $n)` evaluated without `params={"n": 20}`: `expr_unbound_parameter`, raised by
+  `eval`, `stream` and every other use. `expr` itself accepts the text, because `sweep` can bind it.
+- Reading the best score of a sweep as if it were chosen in advance: `n_trials` bindings were tried.
 - An integer array passed to `eval`: refused with `invalid_array`; convert with
   `np.asarray(x, dtype=np.float64)`.
 - Treating warm-up NaN as false: unknown is not false. Test with `np.isnan` or compare from the

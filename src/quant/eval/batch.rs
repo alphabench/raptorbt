@@ -12,7 +12,7 @@ use crate::quant::lang::BinOp;
 
 /// An operand of an elementwise step: another buffer, or the destination itself (the step
 /// computes in place because that input dies here).
-enum Opd<'a> {
+pub(super) enum Opd<'a> {
     Slice(&'a [f64]),
     InPlace,
 }
@@ -26,7 +26,7 @@ fn operand<'a>(loc: Loc, dst: usize, pool: &'a [Vec<f64>], cols: &[&'a [f64]]) -
 }
 
 #[inline(always)]
-fn zip1(dst: &mut [f64], a: Opd, f: impl Fn(f64) -> f64) {
+pub(super) fn zip1(dst: &mut [f64], a: Opd, f: impl Fn(f64) -> f64) {
     match a {
         Opd::Slice(a) => {
             for (d, x) in dst.iter_mut().zip(a) {
@@ -67,7 +67,7 @@ fn zip2(dst: &mut [f64], a: Opd, b: Opd, f: impl Fn(f64, f64) -> f64) {
     }
 }
 
-fn zip_bin(op: BinOp, dst: &mut [f64], a: Opd, b: Opd) {
+pub(super) fn zip_bin(op: BinOp, dst: &mut [f64], a: Opd, b: Opd) {
     match op {
         BinOp::Add => zip2(dst, a, b, ops::add),
         BinOp::Sub => zip2(dst, a, b, ops::sub),

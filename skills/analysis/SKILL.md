@@ -69,6 +69,7 @@ invocations.
 | `load(bars, bar_stamp, bar_ns=None, name=None)` | Copy the bars in. `bars`: a dict (or a DataFrame, or anything answering `bars["close"]`; no pandas is imported) of float64 `open`, `high`, `low`, `close`, `volume` (any subset) and int64 `timestamps`. `bar_stamp` (`"open"` or `"close"`) is required: it says whether a timestamp starts or ends its bar. The input is never modified. Returns the data's facts. |
 | `load_panel(bars, bar_stamp, bar_ns=None, instruments=None, name=None)` | A panel, in the shapes `Expr.eval_panel` takes: a dict of 2-D arrays (dates by names) with 1-D `timestamps` (and a bool `present`), or a mapping of instrument to its own bars (aligned on the union of timestamps, absent where there is no bar). `instruments` selects and orders, or names the columns (default S0, S1, ...); a name is text of at most 64 characters. `bar_stamp` is required. |
 | `eval(expr, data=None, tz_offset_ns=0)` | Evaluate text (or an `Expr`) over the newest data (or `data=` a name) and return the summary. Over a panel, a cross-sectional expression (`rank`, `zscore_xs`, ...) is allowed and the summary is a panel summary. |
+| `sweep(expr, n=[...], m=[...], score=None, data=None, tz_offset_ns=0)` | Evaluate text with `$name` constants under every combination (or `grid={...}`, or `points=[{...}]`; see `Expr.sweep`) in one pass, and keep each binding's result as a handle of its own: the handle `eval` of the bound text returns. Returns a table: `columns` (`handle`, the swept names, `score`), `rows`, `n_trials` (bindings tried), `n_distinct`, `kernel_steps` and a `note` on selection bias. `score` is a statistic (`true_rate`, `mean`, `std`, `min`, `max`, `last`, `known`, `leading_nan`; default `true_rate` for a boolean, `mean` for a number) or an expression, which may read the same `$name`s and is reduced to the mean of its known values. A table past the 4 KB call cap keeps the highest scores, ordered by score, and says `omitted`; every binding still has its handle. One series per binding: select an output of a multi-output call. Bars only, not a panel. |
 | `factor(target, horizons=(1, 5, 20), quantiles=5, lag=1, min_names=10, data=None)` | `factor_report` on a panel handle (or an expression, evaluated first) against the loaded `close`. Returns, per horizon, `n_scored`, `ic_mean`, `t_hac` (the t-statistic with a Newey-West correction for the overlap of `h`-bar returns, `hac_lags` lags) beside `t_naive`, `hit_rate`, `long_short_mean` and `long_short_t_hac`; and `turnover` (top and bottom quantile), `autocorr`, `names` per date and `no_costs: true`: every spread is gross. Past 2 KB the last horizons move to `truncated_horizons`. The per-date arrays are behind the summary's `handle`. |
 | `series(handle, tail=None, instruments=None)` | The stored series, a read-only float64 array at full precision (a dict of arrays for a multi-output handle or a factor report). `instruments` picks panel columns by name; an unknown one raises `unknown_symbol` with the nearest. |
 | `describe_handle(handle)` | Expression, data, outputs, size, dependencies and the call that recreates it. |
@@ -100,6 +101,7 @@ Command line (`python -m raptorbt`), JSON on stdout:
 | Command | Prints |
 | --- | --- |
 | `eval EXPR --data FILE --bar-stamp close` | The summary. `--data` is a `.csv` (header; integer or ISO-8601 timestamps with an offset), `.npz` or `.npy`; omit it to reuse the session's bars. |
+| `sweep EXPR --n 5,10,20 --m 50,100` | The sweep table. Put `EXPR` first; each other `--name v1,v2` is a parameter (`--grid name=v1,v2` for a name that is also an option, `--points JSON` for listed bindings). `--score STAT_OR_EXPR`, `--data`, `--use` as for `eval`. |
 | `functions WORDS...` | `{"count", "shown", "functions": [{name, family, signature, talib, doc}]}` (`--limit`, default 20). |
 | `describe NAME` | The function in full. |
 | `eval EXPR --panel FILE --bar-stamp close` | The panel summary. `--panel` is a long `.csv` (time, `instrument`, prices) or an `.npz` of 2-D arrays with `timestamps` and `instruments`; `--instruments A,B` selects. |
@@ -315,6 +317,33 @@ assert ic.shape == (n,)
 assert s.series(z["handle"], tail=1, instruments=["N03", "N01"]).shape == (1, 2)
 ```
 
+Try a family of settings in one call. The table gives one row per setting with its handle and
+score, and `n_trials`: the best of them is the best of that many, not a setting chosen in
+advance, so carry the count to `raptorbt.research.deflated_sharpe` with the Sharpe of every
+trial. A row's handle is the one `eval` of the bound text returns.
+
+```python
+import numpy as np
+from raptorbt.analysis import Session
+
+n = 300
+rng = np.random.default_rng(3)
+close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, n))
+bars = {"timestamps": np.arange(1, n + 1, dtype=np.int64) * 60 * 10**9, "close": close}
+
+s = Session()
+s.load(bars, bar_stamp="close")
+t = s.sweep("sma(close, $n) > sma(close, $m)", n=[5, 10], m=[30, 60])
+assert t["n_trials"] == 4 and t["columns"] == ["handle", "n", "m", "score"]
+assert t["score"] == "true_rate" and len(t["rows"]) == 4
+first = t["rows"][0]
+assert first[1:3] == [5, 30]
+assert s.eval("sma(close, 5) > sma(close, 30)")["handle"] == first[0]
+
+by_distance = s.sweep("sma(close, $n)", n=[5, 20], score="abs(close - sma(close, $n))")
+assert by_distance["score"] == "abs(close - sma(close, $n))" and by_distance["n_trials"] == 2
+```
+
 ## 6. Composition
 
 - [Expressions](../expressions/SKILL.md): the language, its functions and their warm-up. A
@@ -379,6 +408,8 @@ assert s.series(z["handle"], tail=1, instruments=["N03", "N01"]).shape == (1, 2)
 - Expecting `Session.stats` to accept NaN: warm-up is cut for you, but a NaN inside the series is
   refused by the test.
 - Writing a handle in a strategy: it exists only in the session.
+- Taking the best row of a `sweep` as the answer: it is the best of `n_trials`. Report the count and deflate with `raptorbt.research.deflated_sharpe`.
+- A sweep over a panel dataset: `expr_unsupported_here`; sweep the arrays with `Expr.sweep`.
 - Reading `t_naive` of a long horizon as evidence: the overlap inflates it; `t_hac` corrects it.
 - Reading a factor's long-short spread as a return you could keep: it has no costs.
 - An instrument name with a different spelling than the panel's: `unknown_symbol` lists the

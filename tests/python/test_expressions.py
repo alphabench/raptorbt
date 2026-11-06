@@ -260,7 +260,8 @@ def test_a_nan_input_is_unknown_in_a_window_and_then_recovers():
 )
 def test_refusals_carry_code_position_snippet_and_valid(text, params, code, position, valid):
     with pytest.raises(ExpressionError) as info:
-        rb.expr(text, params=params)
+        # An unbound `$name` makes a template (it can be swept); any use of it refuses.
+        rb.expr(text, params=params).eval({"close": np.arange(5.0)})
     e = info.value
     assert e.code == code and e.operation == "expr" and e.parameter == "expression"
     assert e.value == text
@@ -495,5 +496,6 @@ def test_the_root_exports_expr_and_col_and_the_rest_lives_in_the_module():
     assert {"expr", "col"} <= set(rb.__all__)
     assert not {"Expr", "ExprStream", "functions", "describe"} & set(rb.__all__)
     assert set(rb.expressions.__all__) == {
-        "Expr", "ExprStream", "col", "describe", "expr", "factor_report", "functions"
+        "Expr", "ExprStream", "ExprSweep", "ExprSweepPoint", "col", "describe", "expr",
+        "factor_report", "functions",
     }  # fmt: skip

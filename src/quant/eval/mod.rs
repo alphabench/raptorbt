@@ -12,6 +12,7 @@
 mod batch;
 pub mod panel;
 mod stream;
+pub mod sweep;
 
 pub use batch::{eval, eval_many};
 pub use panel::{eval_panel, PanelInputs, PanelPlan, PanelStream};

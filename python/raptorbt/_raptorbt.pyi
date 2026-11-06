@@ -2464,6 +2464,22 @@ class ExprStream:
     def reset(self) -> None: ...
 
 def expr_registry_json() -> str: ...
+def expr_param_names(source: str) -> list[str]: ...
+def expr_sweep_limits() -> tuple[int, int]: ...
+def expr_sweep(
+    source: str,
+    params: dict[str, float] | None,
+    series: dict[str, int] | None,
+    data: Any,
+    grid: list[tuple[str, list[float]]] | None = ...,
+    points: list[dict[str, float]] | None = ...,
+    bar_stamp: str | None = ...,
+    tz_offset_ns: int = ...,
+    session: Any = ...,
+    bar_ns: int | None = ...,
+    max_combinations: int | None = ...,
+    max_bytes: int | None = ...,
+) -> dict[str, Any]: ...
 def factor_report_native(
     factor: Any,
     prices: Any,

@@ -841,7 +841,12 @@ def _():
 
 @case("expr_unbound_parameter", "expression")
 def _():
-    raptorbt.expr("sma(close, $n)")
+    raptorbt.expr("sma(close, $n)").eval({"close": np.arange(5.0)})
+
+
+@case("sweep_too_large", "max_combinations")
+def _():
+    raptorbt.expr("sma(close, $n)").sweep({"close": np.arange(20.0)}, n=[2, 3, 4], max_combinations=2)
 
 
 @case("expr_unsupported_here", "expression")

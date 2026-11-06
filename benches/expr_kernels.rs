@@ -9,6 +9,7 @@
 //! instruments (so 1M is 2,000 bars each), which is what a universe scan looks like.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use raptorbt::quant::eval::sweep::{SweepLimits, SweepPlan};
 use raptorbt::quant::eval::{eval, eval_many, Bar, Inputs, Plan, Stream};
 use raptorbt::quant::lang::{compile, Env, Field};
 
@@ -137,5 +138,43 @@ fn bench_kernels(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_kernels);
+/// 100 bindings of `sma(close,$n) > sma(close,$m)` over 1M bars: the joint plan, which computes
+/// each distinct moving average once, against evaluating every binding on its own.
+fn bench_sweep(c: &mut Criterion) {
+    const N: usize = 1_000_000;
+    const SRC: &str = "sma(close, $n) > sma(close, $m)";
+    let close = series(N, 7);
+    let inputs = Inputs::new().field(Field::Close, &close);
+    let periods: Vec<f64> = (1..=10).map(|k| (k * 10) as f64).collect();
+    let programs: Vec<_> = periods
+        .iter()
+        .flat_map(|n| periods.iter().map(move |m| (*n, *m)))
+        .map(|(n, m)| {
+            let mut env = Env::default();
+            env.params.insert("n".into(), n);
+            env.params.insert("m".into(), m + 5.0);
+            compile(SRC, &env).unwrap()
+        })
+        .collect();
+    let joint = SweepPlan::new(&programs).unwrap();
+    let plans: Vec<Plan> = programs.iter().map(|p| Plan::new(p).unwrap()).collect();
+    eprintln!(
+        "sweep: {} bindings, {} kernel steps joint, {} independent",
+        joint.n_bindings(),
+        joint.n_kernel_steps(),
+        joint.independent_kernel_steps()
+    );
+
+    let mut g = c.benchmark_group("sweep/sma_cross_100");
+    g.throughput(Throughput::Elements((N * programs.len()) as u64)).sample_size(10);
+    g.bench_function("joint", |b| {
+        b.iter(|| black_box(joint.eval(&inputs, &SweepLimits::default()).unwrap()));
+    });
+    g.bench_function("independent", |b| {
+        b.iter(|| black_box(plans.iter().map(|p| eval(p, &inputs).unwrap()).collect::<Vec<_>>()));
+    });
+    g.finish();
+}
+
+criterion_group!(benches, bench_kernels, bench_sweep);
 criterion_main!(benches);
