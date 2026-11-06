@@ -260,8 +260,8 @@ raptorbt indicator, and to what tolerance, is its `legacy` row in the registry.
 `run_strategy_backtest`, which has no shared runtime: use `run_strategies` or
 `run_portfolio_strategy`.
 
-**In a strategy.** An expression with several outputs needs one picked, with `output="signal"` or
-in the text (`macd(close).signal`); otherwise `expr_type` lists the names. `.values` does not
+**In a strategy.** An expression with several outputs needs one picked, with `output="macdsignal"` or
+in the text (`macd(close).macdsignal`); otherwise `expr_type` lists the names. `.values` does not
 exist on an expression handle. A recursive function (`ema`) keeps settling after `.warmup`:
 `.ready` is true from the first bar the value can be known, and the value approaches the one a
 longer history would give as `settle(eps)` bars pass. A manifest's `warmup=Bars(n)` is the

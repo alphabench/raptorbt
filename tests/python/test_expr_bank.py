@@ -154,6 +154,8 @@ def test_an_expression_on_a_timeframe_reads_the_composite_bars_with_their_volume
             self.volumes, self.seen = [], []
 
         def on_start(self, ctx):
+            # The expression's stream is not delivered to on_bar unless the strategy subscribes.
+            self.subscribe("ASSET", timeframe="5m")
             self.h = ctx.indicators.expr("sma(volume, 2)", instrument="ASSET", timeframe="5m")
 
         def on_bar(self, ctx, event):
@@ -223,7 +225,7 @@ def test_a_strategy_with_no_expression_is_unmoved_by_one_beside_it():
                 self.close_position()
 
     def trades(result):
-        return [(t.entry_time, t.entry_price, t.exit_time, t.exit_price, t.size) for t in result.trades()]
+        return [(t.entry_time, t.entry_price, t.exit_time, t.exit_price, t.size) for t in result.result.trades()]
 
     data = {"ASSET": bars(200)}
     alone = run_strategies([Cross()], data, config(), bar_stamp="close")[0]
@@ -237,6 +239,8 @@ def test_a_strategy_with_no_expression_is_unmoved_by_one_beside_it():
 def report(strategies, data=None):
     data = data or {"ASSET": bars(10)}
     node = LiveNode(strategies, list(data), config(), bar_stamp="close")
+    # A symbol's rings are allocated on its first push, at the rows the node keeps.
+    feed(node, data, 0, 1)
     out = node.memory_report()
     node.finish()
     return out
@@ -327,7 +331,7 @@ def test_a_multi_output_expression_needs_a_selection():
     with pytest.raises(ExpressionError) as e:
         run(Bare(), {"ASSET": bars()})
     assert e.value.code == "expr_type"
-    assert {"macd", "signal"} <= set(e.value.valid)
+    assert {"macd", "macdsignal", "macdhist"} <= set(e.value.valid)
 
     class Picked(Strategy):
         def __init__(self):
@@ -335,8 +339,8 @@ def test_a_multi_output_expression_needs_a_selection():
             self.rows = []
 
         def on_start(self, ctx):
-            self.by_name = ctx.indicators.expr("macd(close)", instrument="ASSET", output="signal")
-            self.by_text = ctx.indicators.expr("macd(close).signal", instrument="ASSET")
+            self.by_name = ctx.indicators.expr("macd(close)", instrument="ASSET", output="macdsignal")
+            self.by_text = ctx.indicators.expr("macd(close).macdsignal", instrument="ASSET")
 
         def on_bar(self, ctx):
             self.rows.append((self.by_name.value, self.by_text.value))
@@ -344,7 +348,7 @@ def test_a_multi_output_expression_needs_a_selection():
     s = Picked()
     data = {"ASSET": bars()}
     run(s, data)
-    want = rb.expr("macd(close).signal").eval(data["ASSET"])
+    want = rb.expr("macd(close).macdsignal").eval(data["ASSET"])
     for i, (a, b) in enumerate(s.rows):
         assert a == b
         assert (a is None) == bool(np.isnan(want[i]))

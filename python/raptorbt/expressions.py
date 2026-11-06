@@ -116,9 +116,13 @@ def _refuse(code: str, message: str, *, operation: str, **detail: Any) -> errors
 # ------------------------------------------------------------------ rendering
 
 
+class _NotANumber(Exception):
+    """An operand is not a number: caught where it is built, never seen by a caller."""
+
+
 def _number(x: Any, operation: str) -> str:
     if isinstance(x, bool) or not isinstance(x, numbers.Real):
-        raise TypeError
+        raise _NotANumber
     if isinstance(x, numbers.Integral):
         return str(int(x))
     v = float(x)
@@ -133,7 +137,7 @@ def _number(x: Any, operation: str) -> str:
 
 
 def _operand(x: Any, operation: str) -> tuple[str, dict[str, float]]:
-    """Source text and `$name` bindings of one operand; ``TypeError`` when it is neither an
+    """Source text and `$name` bindings of one operand; ``_NotANumber`` when it is neither an
     expression nor a number."""
     if isinstance(x, Expr):
         return x._src, x._params
@@ -173,7 +177,7 @@ class Expr:
 
     Functions are methods: ``col.close.sma(20)`` is ``sma(close, 20)``. The methods are generated
     from the function registry. A call with several outputs is selected by attribute:
-    ``x.macd().signal``.
+    ``x.macd().macdsignal``.
     """
 
     __slots__ = ("_src", "_params", "_prog", "_atom", "_outputs")
@@ -274,7 +278,7 @@ class Expr:
     def _binary(self, op: str, other: Any, *, flip: bool = False) -> Expr:
         try:
             src, params = _operand(other, "Expr")
-        except TypeError:
+        except _NotANumber:
             return NotImplemented
         a, b = (src, self._src), (self._src, src)
         left, right = a if flip else b
@@ -417,7 +421,7 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
             continue
         try:
             text = _number(v, op)
-        except TypeError:
+        except _NotANumber:
             raise _refuse(
                 "expr_type",
                 f"parameter {p['name']!r} of {name}() must be a constant, got {type(v).__name__}",

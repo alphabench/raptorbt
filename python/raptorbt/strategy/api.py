@@ -907,7 +907,7 @@ class IndicatorsView:
         ``expression`` is text or a ``raptorbt.expressions.Expr``; ``params`` binds its ``$name``
         constants. It reads open, high, low, close and volume of the primary bars, or of
         ``timeframe``'s composite bars. An expression with several outputs (``macd(close)``)
-        needs ``output=`` to pick one (or select in the text: ``macd(close).signal``).
+        needs ``output=`` to pick one (or select in the text: ``macd(close).macdsignal``).
 
         The returned handle is shared by every strategy that registers the same canonical
         expression on the same stream. Backtest and live give the numbers
@@ -945,7 +945,7 @@ class IndicatorsView:
             raise errors.make(
                 "expr_type",
                 f"this expression has {len(names)} outputs; pick one with output= or select it in "
-                "the text (macd(close).signal)",
+                "the text (macd(close).macdsignal)",
                 operation="ctx.indicators.expr",
                 parameter="output",
                 valid=list(names),

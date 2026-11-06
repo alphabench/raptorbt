@@ -110,9 +110,9 @@ fn a_cell_shows_the_batch_value_at_every_bar() {
                     after.values[0],
                     want[i]
                 );
-            } else {
-                assert!(want[i].is_nan(), "{src}: bar {i} is known before the warm-up ends");
             }
+            // Before the warm-up the cell shows nothing, even where a Kleene `and` has already
+            // decided the batch value.
             before = after;
         }
     }
