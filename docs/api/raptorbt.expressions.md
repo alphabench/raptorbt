@@ -57,17 +57,221 @@ from the function registry. A call with several outputs is selected by attribute
 
 | Member | What it is |
 | --- | --- |
+| `abs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``abs([x])`` with this expression as the first input. |
+| `acos(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``acos([x])`` with this expression as the first input. |
+| `ad(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ad([high], [low], [close], [volume])`` with this expression as the first input. |
+| `add(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``add([a], [b])`` with this expression as the first input. |
+| `adosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``adosc([high], [low], [close], [volume], fast=3, slow=10)`` with this expression as the first input. |
+| `adx(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``adx([high], [low], [close], period, compat='native')`` with this expression as the first input. |
+| `adxr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``adxr([high], [low], [close], period)`` with this expression as the first input. |
+| `apo(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``apo([x], fastperiod=12, slowperiod=26, matype=0)`` with this expression as the first input. |
+| `aroon(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``aroon([high], [low], period) -> (aroondown, aroonup)`` with this expression as the first input. |
+| `aroonosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``aroonosc([high], [low], period)`` with this expression as the first input. |
+| `asin(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``asin([x])`` with this expression as the first input. |
+| `atan(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``atan([x])`` with this expression as the first input. |
+| `atr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``atr([high], [low], [close], period, compat='native')`` with this expression as the first input. |
+| `autocorr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``autocorr([x], period, lag=1)`` with this expression as the first input. |
+| `avgprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``avgprice([open], [high], [low], [close])`` with this expression as the first input. |
+| `bars_since_max(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``bars_since_max([x], period)`` with this expression as the first input. |
+| `bars_since_min(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``bars_since_min([x], period)`` with this expression as the first input. |
+| `bbands(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``bbands([x], period, nbdevup=2.0, nbdevdn=2.0, matype=0) -> (upperband, middleband, lowerband)`` with this expression as the first input. |
+| `beta(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``beta([high], [low], period=5)`` with this expression as the first input. |
+| `body_pct(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``body_pct([open], [close])`` with this expression as the first input. |
+| `bop(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``bop([open], [high], [low], [close])`` with this expression as the first input. |
 | `canonical` | The canonical text: equal for every spelling of the same expression. |
+| `cci(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cci([high], [low], [close], period)`` with this expression as the first input. |
+| `cdl2crows(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl2crows([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3blackcrows(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3blackcrows([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3inside(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3inside([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3linestrike(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3linestrike([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3outside(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3outside([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3starsinsouth(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3starsinsouth([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdl3whitesoldiers(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdl3whitesoldiers([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlabandonedbaby(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlabandonedbaby([open], [high], [low], [close], penetration=0.3)`` with this expression as the first input. |
+| `cdladvanceblock(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdladvanceblock([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlbelthold(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlbelthold([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlbreakaway(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlbreakaway([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlclosingmarubozu(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlclosingmarubozu([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlconcealbabyswall(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlconcealbabyswall([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlcounterattack(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlcounterattack([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdldarkcloudcover(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdldarkcloudcover([open], [high], [low], [close], penetration=0.5)`` with this expression as the first input. |
+| `cdldoji(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdldoji([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdldojistar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdldojistar([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdldragonflydoji(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdldragonflydoji([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlengulfing(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlengulfing([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdleveningdojistar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdleveningdojistar([open], [high], [low], [close], penetration=0.3)`` with this expression as the first input. |
+| `cdleveningstar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdleveningstar([open], [high], [low], [close], penetration=0.3)`` with this expression as the first input. |
+| `cdlgapsidesidewhite(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlgapsidesidewhite([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlgravestonedoji(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlgravestonedoji([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhammer(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhammer([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhangingman(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhangingman([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlharami(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlharami([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlharamicross(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlharamicross([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhighwave(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhighwave([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhikkake(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhikkake([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhikkakemod(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhikkakemod([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlhomingpigeon(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlhomingpigeon([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlidentical3crows(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlidentical3crows([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlinneck(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlinneck([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlinvertedhammer(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlinvertedhammer([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlkicking(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlkicking([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlkickingbylength(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlkickingbylength([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlladderbottom(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlladderbottom([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdllongleggeddoji(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdllongleggeddoji([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdllongline(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdllongline([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlmarubozu(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlmarubozu([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlmatchinglow(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlmatchinglow([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlmathold(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlmathold([open], [high], [low], [close], penetration=0.5)`` with this expression as the first input. |
+| `cdlmorningdojistar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlmorningdojistar([open], [high], [low], [close], penetration=0.3)`` with this expression as the first input. |
+| `cdlmorningstar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlmorningstar([open], [high], [low], [close], penetration=0.3)`` with this expression as the first input. |
+| `cdlonneck(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlonneck([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlpiercing(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlpiercing([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlrickshawman(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlrickshawman([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlrisefall3methods(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlrisefall3methods([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlseparatinglines(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlseparatinglines([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlshootingstar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlshootingstar([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlshortline(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlshortline([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlspinningtop(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlspinningtop([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlstalledpattern(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlstalledpattern([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlsticksandwich(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlsticksandwich([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdltakuri(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdltakuri([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdltasukigap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdltasukigap([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlthrusting(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlthrusting([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdltristar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdltristar([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlunique3river(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlunique3river([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlupsidegap2crows(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlupsidegap2crows([open], [high], [low], [close])`` with this expression as the first input. |
+| `cdlxsidegap3methods(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cdlxsidegap3methods([open], [high], [low], [close])`` with this expression as the first input. |
+| `ceil(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ceil([x])`` with this expression as the first input. |
+| `clip(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``clip([x], lo, hi)`` with this expression as the first input. |
+| `cmo(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cmo([x], period)`` with this expression as the first input. |
+| `correl(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``correl([high], [low], period=30)`` with this expression as the first input. |
+| `cos(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cos([x])`` with this expression as the first input. |
+| `cosh(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cosh([x])`` with this expression as the first input. |
+| `cov(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``cov([a], [b], period)`` with this expression as the first input. |
+| `dema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``dema([x], period)`` with this expression as the first input. |
+| `diff(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``diff([x], k=1)`` with this expression as the first input. |
+| `div(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``div([a], [b])`` with this expression as the first input. |
+| `donchian(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``donchian([high], [low], period) -> (upper, middle, lower)`` with this expression as the first input. |
+| `downside_dev(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``downside_dev([x], period, mar=0.0)`` with this expression as the first input. |
+| `dx(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``dx([high], [low], [close], period)`` with this expression as the first input. |
 | `ema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ema([x], period)`` with this expression as the first input. |
 | `eval(self, data: 'Mapping[str, Any]')` | Evaluate over whole columns. |
+| `ewm_mean(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_mean([x], alpha=0.1)`` with this expression as the first input. |
+| `ewm_var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ewm_var([x], alpha=0.1)`` with this expression as the first input. |
+| `exp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``exp([x])`` with this expression as the first input. |
 | `fields` | The columns the expression reads, sorted. |
+| `floor(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``floor([x])`` with this expression as the first input. |
+| `fracdiff(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``fracdiff([x], d, threshold)`` with this expression as the first input. |
+| `gap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``gap([open], [close])`` with this expression as the first input. |
+| `half_life(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``half_life([x], period)`` with this expression as the first input. |
 | `hash` | Hex sha256 of the canonical text and the revisions of the functions it calls. |
+| `ht_dcperiod(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_dcperiod([x])`` with this expression as the first input. |
+| `ht_dcphase(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_dcphase([x])`` with this expression as the first input. |
+| `ht_phasor(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_phasor([x]) -> (inphase, quadrature)`` with this expression as the first input. |
+| `ht_sine(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_sine([x]) -> (sine, leadsine)`` with this expression as the first input. |
+| `ht_trendline(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_trendline([x])`` with this expression as the first input. |
+| `ht_trendmode(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ht_trendmode([x])`` with this expression as the first input. |
+| `hurst_rs(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``hurst_rs([x], period)`` with this expression as the first input. |
+| `if_else(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``if_else(cond, a, b)`` with this expression as the first input. |
+| `kama(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``kama([x], period)`` with this expression as the first input. |
+| `keltner(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``keltner([high], [low], [close], ema_period, atr_period, multiplier=2.0) -> (middle, upper, lower)`` with this expression as the first input. |
+| `kurt(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``kurt([x], period)`` with this expression as the first input. |
+| `linearreg(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg([x], period=14)`` with this expression as the first input. |
+| `linearreg_angle(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg_angle([x], period=14)`` with this expression as the first input. |
+| `linearreg_intercept(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg_intercept([x], period=14)`` with this expression as the first input. |
+| `linearreg_slope(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``linearreg_slope([x], period=14)`` with this expression as the first input. |
+| `ln(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ln([x])`` with this expression as the first input. |
+| `log10(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``log10([x])`` with this expression as the first input. |
+| `log_return(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``log_return([x], k=1)`` with this expression as the first input. |
+| `ma(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ma([x], period, matype=0)`` with this expression as the first input. |
+| `macd(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``macd([x], fastperiod=12, slowperiod=26, signalperiod=9, compat='native') -> (macd, macdsignal, macdhist)`` with this expression as the first input. |
+| `macdext(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``macdext([x], fastperiod=12, fastmatype=0, slowperiod=26, slowmatype=0, signalperiod=9, signalmatype=0) -> (macd, macdsignal, macdhist)`` with this expression as the first input. |
+| `macdfix(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``macdfix([x], signalperiod=9) -> (macd, macdsignal, macdhist)`` with this expression as the first input. |
+| `mama(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``mama([x], fastlimit=0.5, slowlimit=0.05) -> (mama, fama)`` with this expression as the first input. |
+| `mavp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``mavp([x], periods, minperiod=2, maxperiod=30, matype=0)`` with this expression as the first input. |
+| `max(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``max([x], period=30)`` with this expression as the first input. |
+| `max_drawdown(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``max_drawdown([x], period)`` with this expression as the first input. |
+| `maxindex(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``maxindex([x], period=30)`` with this expression as the first input. |
+| `medprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``medprice([high], [low])`` with this expression as the first input. |
+| `mfi(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``mfi([high], [low], [close], [volume], period, compat='native')`` with this expression as the first input. |
+| `midpoint(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``midpoint([x], period)`` with this expression as the first input. |
+| `midprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``midprice([high], [low], period)`` with this expression as the first input. |
+| `min(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``min([x], period=30)`` with this expression as the first input. |
+| `minindex(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``minindex([x], period=30)`` with this expression as the first input. |
+| `minmax(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``minmax([x], period=30) -> (min, max)`` with this expression as the first input. |
+| `minmaxindex(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``minmaxindex([x], period=30) -> (minidx, maxidx)`` with this expression as the first input. |
+| `minus_di(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``minus_di([high], [low], [close], period, compat='native')`` with this expression as the first input. |
+| `minus_dm(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``minus_dm([high], [low], period)`` with this expression as the first input. |
+| `mom(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``mom([x], period)`` with this expression as the first input. |
+| `mult(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``mult([a], [b])`` with this expression as the first input. |
+| `natr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``natr([high], [low], [close], period)`` with this expression as the first input. |
+| `obv(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``obv([close], [volume])`` with this expression as the first input. |
 | `outputs` | Names of the output columns (``("value",)`` for a single series). |
+| `pct_change(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``pct_change([x], k=1)`` with this expression as the first input. |
+| `plus_di(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``plus_di([high], [low], [close], period, compat='native')`` with this expression as the first input. |
+| `plus_dm(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``plus_dm([high], [low], period)`` with this expression as the first input. |
+| `ppo(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ppo([x], fastperiod=12, slowperiod=26, matype=0)`` with this expression as the first input. |
+| `quantile(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``quantile([x], period, q=0.5)`` with this expression as the first input. |
+| `range_pos(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``range_pos([high], [low], [close], period)`` with this expression as the first input. |
+| `rank_ts(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rank_ts([x], period)`` with this expression as the first input. |
+| `roc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``roc([x], period)`` with this expression as the first input. |
+| `rocp(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rocp([x], period)`` with this expression as the first input. |
+| `rocr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rocr([x], period)`` with this expression as the first input. |
+| `rocr100(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rocr100([x], period)`` with this expression as the first input. |
+| `rolling_alpha(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_alpha(y, x, period)`` with this expression as the first input. |
+| `rolling_beta(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_beta(y, x, period)`` with this expression as the first input. |
+| `rolling_corr_spearman(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_corr_spearman(a, b, period)`` with this expression as the first input. |
+| `rolling_cvar_hist(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_cvar_hist([x], period, q)`` with this expression as the first input. |
+| `rolling_r2(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_r2(y, x, period)`` with this expression as the first input. |
+| `rolling_residual(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_residual(y, x, period)`` with this expression as the first input. |
+| `rolling_sharpe(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_sharpe([x], period)`` with this expression as the first input. |
+| `rolling_var_hist(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rolling_var_hist([x], period, q)`` with this expression as the first input. |
+| `rsi(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rsi([x], period, compat='native')`` with this expression as the first input. |
+| `sar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sar([high], [low], acceleration=0.02, maximum=0.2)`` with this expression as the first input. |
+| `sarext(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sarext([high], [low], startvalue=0.0, offsetonreverse=0.0, accelerationinitlong=0.02, accelerationlong=0.02, accelerationmaxlong=0.2, accelerationinitshort=0.02, accelerationshort=0.02, accelerationmaxshort=0.2)`` with this expression as the first input. |
 | `settle(self, eps: 'float') -> 'int'` | Bars until functions with infinite memory (``ema``) have forgotten their seed to within ``eps``, a number in (0, 1). Equals :attr:`warmup` when there are none. |
+| `shift(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``shift([x], k=1)`` with this expression as the first input. |
+| `sign(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sign([x])`` with this expression as the first input. |
+| `sin(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sin([x])`` with this expression as the first input. |
+| `sinh(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sinh([x])`` with this expression as the first input. |
+| `skew(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``skew([x], period)`` with this expression as the first input. |
 | `sma(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sma([x], period)`` with this expression as the first input. |
 | `source` | The text this expression was made from (a built expression: its full rendering). |
+| `sqrt(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sqrt([x])`` with this expression as the first input. |
+| `stddev(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stddev([x], period=5, nbdev=1.0)`` with this expression as the first input. |
+| `stoch(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stoch([high], [low], [close], fastk_period=5, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0) -> (slowk, slowd)`` with this expression as the first input. |
+| `stochastic(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochastic([high], [low], [close], k_period=14, d_period=3) -> (k, d)`` with this expression as the first input. |
+| `stochf(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochf([high], [low], [close], fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`` with this expression as the first input. |
+| `stochrsi(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``stochrsi([x], period, fastk_period=5, fastd_period=3, fastd_matype=0) -> (fastk, fastd)`` with this expression as the first input. |
 | `stream(self) -> 'ExprStream'` | A bar-by-bar evaluator. Fed the same bars, it returns the numbers :meth:`eval` does, bit for bit. |
+| `sub(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sub([a], [b])`` with this expression as the first input. |
+| `sum(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sum([x], period=30)`` with this expression as the first input. |
+| `supertrend(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``supertrend([high], [low], [close], period, multiplier=3.0) -> (line, direction)`` with this expression as the first input. |
+| `t3(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``t3([x], period, vfactor=0.7)`` with this expression as the first input. |
+| `tan(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tan([x])`` with this expression as the first input. |
+| `tanh(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tanh([x])`` with this expression as the first input. |
+| `tema(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tema([x], period)`` with this expression as the first input. |
+| `trange(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``trange([high], [low], [close])`` with this expression as the first input. |
+| `trima(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``trima([x], period)`` with this expression as the first input. |
+| `trix(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``trix([x], period)`` with this expression as the first input. |
+| `true_range_pct(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``true_range_pct([high], [low], [close])`` with this expression as the first input. |
+| `tsf(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tsf([x], period=14)`` with this expression as the first input. |
+| `typprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``typprice([high], [low], [close])`` with this expression as the first input. |
+| `ultosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ultosc([high], [low], [close], timeperiod1=7, timeperiod2=14, timeperiod3=28)`` with this expression as the first input. |
+| `var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``var([x], period=5)`` with this expression as the first input. |
+| `vol_close(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_close([close], period)`` with this expression as the first input. |
+| `vol_garman_klass(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_garman_klass([open], [high], [low], [close], period)`` with this expression as the first input. |
+| `vol_parkinson(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_parkinson([high], [low], period)`` with this expression as the first input. |
+| `vol_rogers_satchell(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_rogers_satchell([open], [high], [low], [close], period)`` with this expression as the first input. |
+| `vol_yang_zhang(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_yang_zhang([open], [high], [low], [close], period)`` with this expression as the first input. |
+| `volume_roc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``volume_roc([volume], period)`` with this expression as the first input. |
+| `vwap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vwap([high], [low], [close], [volume])`` with this expression as the first input. |
 | `warmup` | Leading bars that are unknown (NaN) on clean data. |
+| `wclprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wclprice([high], [low], [close])`` with this expression as the first input. |
+| `wilder(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wilder([x], period)`` with this expression as the first input. |
+| `willr(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``willr([high], [low], [close], period)`` with this expression as the first input. |
+| `wma(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``wma([x], period)`` with this expression as the first input. |
+| `zscore(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``zscore([x], period)`` with this expression as the first input. |
 
 ### `ExprStream`
 
