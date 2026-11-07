@@ -8,6 +8,7 @@ pub mod hurst;
 pub mod impact;
 pub mod pbo;
 pub mod pca;
+pub mod predictive;
 pub mod quality;
 pub mod spa;
 pub mod stationarity;

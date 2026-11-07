@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import raptorbt as rb
-from raptorbt import errors, expressions
+from raptorbt import errors, expressions, stats
 from raptorbt.analysis import Session
 from raptorbt.analysis import data as adata
 from raptorbt.analysis import summary as asum
@@ -604,6 +604,33 @@ def test_stats_run_on_handles_and_cut_the_warm_up():
     a, b = s.eval("close")["handle"], s.eval("sma(close, 3)")["handle"]
     c = s.stats("cointegration", a, b)
     assert c["analysis"]["trimmed_leading"] == 2 and "analysis" in c
+
+
+def test_predictive_test_reads_the_close_and_the_sessions_of_the_signals_own_bars():
+    s = session(300)
+    h = s.eval("roc(close, 3)")["handle"]
+    got = s.stats("predictive_test", h, horizons=[1, 5])
+    lead = got["analysis"]["trimmed_leading"]
+    close, signal = bars(300)["close"], s.series(h)
+    direct = stats.predictive_test(signal[lead:], close[lead:], horizons=[1, 5])
+    assert got["horizons"]["5"]["t_nonoverlap"] == direct["horizons"]["5"]["t_nonoverlap"]
+    assert got["analysis"]["handles"] == [h]
+    # one observation per session: five hourly bars a day, the signal known from the first bar
+    day, hour = 86_400 * 10**9, 3_600 * 10**9
+    n = 60
+    ts = np.concatenate([d * day + np.arange(5) * hour for d in range(n // 5)]).astype(np.int64)
+    rng = np.random.default_rng(4)
+    px = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    t = Session()
+    t.load({"timestamps": ts, "close": px}, bar_stamp="close")
+    sig = t.eval("close / sma(close, 2) - 1")["handle"]
+    ses = t.stats("predictive_test", sig, to_session_close=True)["horizons"]["session"]
+    assert ses["n"] == 12 and ses["n_independent"] == 12
+    two = t.eval("close * 2")["handle"]  # prices may be any handle: the return is the same
+    other = t.stats("predictive_test", sig, horizons=[1], prices=two)
+    assert other["horizons"]["1"]["n"] > 30
+    plain = t.stats("predictive_test", sig, horizons=[1])
+    assert other["horizons"]["1"]["slope"] == pytest.approx(plain["horizons"]["1"]["slope"], rel=1e-12)
 
 
 def test_stats_refuse_what_they_cannot_run_with_typed_errors():

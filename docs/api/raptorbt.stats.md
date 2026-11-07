@@ -42,6 +42,7 @@ fitted on the whole sample.
 | [`markov_regimes`](#markov_regimes) | function | Hidden Markov regimes: a Markov-switching mean and variance fitted to returns. |
 | [`pbo_cscv`](#pbo_cscv) | function | The probability of backtest overfitting by combinatorially symmetric cross-validation. |
 | [`pca_factors`](#pca_factors) | function | Principal components of a panel of return series, and what a target loads on them. |
+| [`predictive_test`](#predictive_test) | function | Does one causal signal predict the return that follows it, on a single series. |
 | [`sensitivity_surface`](#sensitivity_surface) | function | How a metric moves across a parameter grid: a plateau of similar cells, or a spike. |
 | [`spa_test`](#spa_test) | function | Whether the best strategy beats the benchmark after allowing for the search across all. |
 | [`stationarity`](#stationarity) | function | Is a series stationary: the augmented Dickey-Fuller and the KPSS test, read together. |
@@ -173,6 +174,10 @@ naive one the t distribution with ``n - 1`` degrees of freedom. At least 30 obse
 constant. ``lags`` defaults to ``floor(4 (n / 100) ** (2 / 9))`` and must be 0 to
 ``n // 2 - 1``. Not causal: a statement about the whole sample.
 
+``warnings`` holds ``nonnegative_series`` when no value is below zero: the mean of squared
+returns, volumes or absolute moves is positive by construction, and a large t says so, not
+that the series carries an edge.
+
 ### `hurst`
 
 *function*
@@ -280,6 +285,63 @@ made positive, so the sign never depends on the SVD routine. With ``target`` (sa
 the result adds its regression on the components' scores: ``r_squared``, ``alpha_per_period``
 and the ``exposures_per_unit_score`` with OLS t-statistics (not HAC). A component with no
 variance (a collinear panel) is reported with beta 0 and t 0. Not causal.
+
+### `predictive_test`
+
+*function*
+
+```python
+predictive_test(signal: 'Series', prices: 'Series', *, horizons: 'Sequence[int] | int | None' = None, lag: 'int' = 1, cost_bps_per_side: 'float | None' = None, quantiles: 'int | None' = None, timestamps: 'Series | None' = None, session: 'Any' = None, to_session_close: 'bool' = False) -> 'dict[str, Any]'
+```
+
+Does one causal signal predict the return that follows it, on a single series.
+
+``signal`` and ``prices`` hold one value per bar (NaN in ``signal`` is unknown, a price is
+positive). The observation of bar ``t`` is the signal there against the return of entering
+``lag`` bars later (default 1: a signal computed at a close cannot trade that close) and
+holding ``h`` bars: ``prices[t + lag + h] / prices[t + lag] - 1``. This forward return exists
+only here and never feeds an expression.
+
+With ``to_session_close=True`` (and no ``horizons``) there is one observation per session in
+which the signal becomes known: the first bar with a finite signal, entered ``lag`` bars
+later, held to that session's last bar. "Does the first hour predict the rest of the day." It
+needs ``timestamps`` (integer nanoseconds, non-decreasing); a session is a calendar day in the
+zone of ``session`` (a :class:`raptorbt.SessionSchedule`, or the zone's offset from UTC in
+nanoseconds; UTC when ``None``). A session that crosses midnight (MCX evening) is two.
+
+Per horizon (``result["horizons"][str(h)]``, or ``"session"``): ``n`` observations and
+``n_independent`` (those whose bar index is a multiple of ``h``, whose windows share no bar;
+all of them in session mode); ``slope`` and ``intercept`` of the least-squares line of return
+on signal over all ``n``; **``t_nonoverlap``** with ``p_nonoverlap``, the t of the slope of
+the same line over the independent observations (Student's t, ``n_independent - 2`` degrees
+of freedom, NaN under 10): the headline. ``t_hac`` is the Newey-West t of the slope over all
+``n`` with ``h - 1`` lags and **over-rejects for ``h > 1`` when the signal is persistent**:
+on 1,500 no-skill samples (iid 1% returns, 1,000 bars, ``h = 20``, an AR(1) signal of
+persistence 0.98) its standard deviation was 1.34 and it passed 1.96 on 14.5% of them, where
+``t_nonoverlap`` had 1.03 and a p-value under 0.05 on 5.6%; with an iid signal both were near
+5%. Read ``t_nonoverlap``.
+Also ``rank_corr`` (Spearman), ``hit_rate`` (the share of observations with signal and return
+of the same sign, among those where both are non-zero) and, with ``quantiles``,
+``quantile_returns`` (mean return per signal bucket, highest last), ``quantile_spread`` and
+its Welch t over the independent observations.
+
+The rule "long above zero, short below, flat at zero", rebalanced every ``h`` bars, has
+``rule_mean`` and ``rule_t_nonoverlap`` over the independent observations, its ``turnover``
+(mean absolute position change per rebalance: entering from flat is one, a flip two) and
+``breakeven_cost_bps_per_side = mean(rule return) / turnover``: the flat cost per side at
+which it earns nothing. A signal whose breakeven is below its costs is not a strategy. With
+``cost_bps_per_side`` the result adds ``net_mean`` and ``t_net`` (the rule less ``c`` times the
+position change). That is a flat rate on the traded notional, not the broker's schedule (no
+minimums, no per-side taxes, no slippage model): it rules a signal out, a backtest prices the
+survivors. Centre a signal that cannot change sign: the rule is always long.
+
+``warnings`` names what makes a number weak (``signal_constant``, ``mostly_nan``,
+``small_sample``: under 30 independent observations, ``nonnegative_signal``); ``flags`` a
+likely unadjusted split and a breakeven below the cost; ``assumptions`` what the test took for
+granted. ``forward_return`` per horizon is the return each bar's observation was scored on
+(NaN where none): bars after ``T`` never change those before ``T - lag - h``. Refused:
+``insufficient_observations`` (fewer than 10 known signal values, or no usable session),
+``invalid_input`` (an infinite value, a non-positive price, lengths that differ).
 
 ### `sensitivity_surface`
 

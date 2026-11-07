@@ -2512,6 +2512,16 @@ def stats_regimes(
     series: bool,
 ) -> dict[str, Any]: ...
 def stats_hac(returns: np.ndarray, lags: int | None) -> dict[str, Any]: ...
+def stats_predictive(
+    signal: np.ndarray,
+    prices: np.ndarray,
+    sessions: np.ndarray | None,
+    horizons: list[int],
+    lag: int,
+    quantiles: int | None,
+    cost_bps_per_side: float | None,
+    to_session_close: bool,
+) -> dict[str, Any]: ...
 def stats_pbo(strategies: list[np.ndarray], splits: int) -> dict[str, Any]: ...
 def stats_spa(
     names: list[str],

@@ -178,3 +178,137 @@ def test_garch_does_not_depend_on_the_units_of_the_returns(scale):
     r = np.array(out)
     base, got = stats.garch(r), stats.garch(r * scale)
     assert got["persistence"] == pytest.approx(base["persistence"], abs=1e-3)
+
+
+# ------------------------------------------------------------------------ predictive_test
+
+
+def planted_lead():
+    """40 observations at lag 1, h 1 with `y = 0.01 x + 0.001 z`: x = (-1, -1, 1, 1) repeated,
+    z = (1, -1, 1, -1), so sum x z = 0 and mean x = mean z = 0 per period. The slope is exactly
+    0.01 and the intercept 0; the residual is 0.001 z, SSR = 40e-6, so the t is
+    0.01 / sqrt(1e-6 / 38) = 10 sqrt(38). The rule sign(x) earns 0.01 + 0.001 x z, mean 0.01; its
+    position changes are 1 (from flat) and 2 at each of 19 flips: mean 39 / 40 = 0.975, and the
+    breakeven is 0.01 / 0.975 = 102.564 bps."""
+    x = np.tile([-1.0, -1.0, 1.0, 1.0], 10)
+    z = np.tile([1.0, -1.0, 1.0, -1.0], 10)
+    r = 0.01 * x + 0.001 * z
+    prices = 100.0 * np.concatenate([[1.0, 1.0], np.cumprod(1.0 + r)])
+    return np.concatenate([x, [np.nan, np.nan]]), prices, r
+
+
+def test_a_planted_lead_has_its_hand_computed_slope_t_and_breakeven():
+    signal, prices, r = planted_lead()
+    out = stats.predictive_test(signal, prices, horizons=[1], quantiles=2, cost_bps_per_side=10.0)
+    h = out["horizons"]["1"]
+    assert (h["n"], h["n_independent"]) == (40, 40)
+    assert h["slope"] == pytest.approx(0.01, abs=1e-12) and h["intercept"] == pytest.approx(0.0, abs=1e-12)
+    assert h["t_nonoverlap"] == pytest.approx(10.0 * np.sqrt(38.0), rel=1e-9)
+    # x has two levels (ranks 10.5 and 30.5) and y four (ranks 5.5, 15.5, 25.5, 35.5, ten each, when
+    # its ties hold exactly): cov 100, sd 10 and sqrt(125), so 2 / sqrt(5) = 0.894. The returns come
+    # back from a product of prices, so the ties are broken by rounding at 1e-16 and the value
+    # falls between that and the 10 / sqrt(133.25) = 0.866 of a total order
+    assert h["hit_rate"] == 1.0
+    assert 10.0 / np.sqrt(133.25) - 1e-9 <= h["rank_corr"] <= 2.0 / np.sqrt(5.0) + 1e-9
+    assert h["quantile_spread"] == pytest.approx(0.02, abs=1e-12)
+    assert h["rule_mean"] == pytest.approx(0.01, abs=1e-12)
+    assert h["turnover"] == pytest.approx(0.975)
+    assert h["breakeven_cost_bps_per_side"] == pytest.approx(0.01 / 0.975 * 1e4)
+    assert h["net_mean"] == pytest.approx(0.01 - 0.001 * 0.975)
+    assert h["t_net"] > 10 and out["flags"] == []
+    assert out["warnings"] == []  # 40 independent observations: past the 30 of small_sample
+    few = stats.predictive_test(signal[:22], prices[:22], horizons=[1])  # 20 observations
+    assert any(w.startswith("small_sample") for w in few["warnings"])
+    assert h["forward_return"][0] == pytest.approx(r[0]) and np.isnan(h["forward_return"][40])
+    # a cost above the breakeven is flagged
+    dear = stats.predictive_test(signal, prices, horizons=[1], cost_bps_per_side=150.0)
+    assert any("does not pay its costs" in f for f in dear["flags"])
+    assert "net_mean" not in stats.predictive_test(signal, prices, horizons=[1])["horizons"]["1"]
+
+
+def test_a_session_observation_runs_from_the_known_signal_to_the_close():
+    # twelve sessions of four hourly bars; the signal is known from the second bar, entered one
+    # bar later (bar 2) and held to bar 3, a return of exactly 0.01 v for the session value v = +-1
+    day = 86_400 * 10**9
+    ts = np.concatenate([k * day + np.arange(4) * 3_600 * 10**9 for k in range(12)])
+    v = np.where(np.arange(12) % 2 == 0, 1.0, -1.0)
+    signal = np.concatenate([[np.nan, a, a, a] for a in v])
+    prices = np.concatenate([[100.0, 100.0, 100.0, 100.0 * (1 + 0.01 * a)] for a in v])
+    out = stats.predictive_test(signal, prices, to_session_close=True, timestamps=ts)
+    h = out["horizons"]["session"]
+    assert (h["n"], h["n_independent"]) == (12, 12)
+    assert h["slope"] == pytest.approx(0.01, abs=1e-12)
+    assert h["forward_return"][1] == pytest.approx(0.01) and h["forward_return"][5] == pytest.approx(-0.01)
+    assert np.isnan(h["forward_return"][0]) and np.isnan(h["forward_return"][2])
+    # a zone that moves midnight across the first bars splits the sessions elsewhere: IST puts the
+    # 18:30 UTC boundary a day earlier, here every bar is before it, so the sessions are the same
+    ist = stats.predictive_test(signal, prices, to_session_close=True, timestamps=ts, session=19_800 * 10**9)
+    assert ist["horizons"]["session"]["n"] == 12
+    assert refusal(stats.predictive_test, signal, prices, to_session_close=True) == "invalid_input"
+    assert refusal(stats.predictive_test, signal, prices, to_session_close=True, timestamps=ts, horizons=[1]) == "invalid_input"
+
+
+def test_no_skill_persistent_signal_rejects_near_five_percent_on_the_headline_t():
+    # Measured on 1,500 samples (iid 1 % returns, 1,000 bars, h = 20, an AR(1) signal of
+    # persistence 0.98): t_nonoverlap p < 0.05 on 5.6 %, sd 1.03; t_hac |t| > 1.96 on 14.5 %, sd
+    # 1.34. Here 400 seeded samples; the bound is four binomial standard errors of 5 %.
+    count, h = 400, 20
+    reject = hac = 0
+    for seed in range(count):
+        rng = np.random.default_rng(5000 + seed)
+        px = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, 1001))
+        z = rng.normal(size=1001)
+        x = np.empty(1001)
+        x[0] = z[0]
+        for i in range(1, 1001):
+            x[i] = 0.98 * x[i - 1] + z[i]
+        r = stats.predictive_test(x, px, horizons=[h])["horizons"][str(h)]
+        reject += r["p_nonoverlap"] < 0.05
+        hac += abs(r["t_hac"]) > 1.96
+    se = np.sqrt(0.05 * 0.95 / count)
+    assert abs(reject / count - 0.05) < 4 * se, reject / count
+    assert hac / count > 0.05 + 4 * se, hac / count  # Newey-West still over-rejects: pinned
+
+
+def test_bars_after_t_do_not_change_what_was_scored_before_it():
+    rng = np.random.default_rng(11)
+    n, lag, h, t_cut = 300, 1, 5, 200
+    px = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, n))
+    sig = rng.normal(size=n)
+    later = px.copy()
+    later[t_cut:] *= rng.uniform(0.2, 5.0, n - t_cut)  # poisoned from bar t_cut on
+    a = stats.predictive_test(sig, px, horizons=[h], lag=lag)["horizons"][str(h)]["forward_return"]
+    b = stats.predictive_test(sig, later, horizons=[h], lag=lag)["horizons"][str(h)]["forward_return"]
+    last = t_cut - 1 - lag - h  # the last signal bar whose window ends before the poison
+    assert np.array_equal(a[: last + 1], b[: last + 1])
+    assert not np.array_equal(a[last + 1 : t_cut], b[last + 1 : t_cut], equal_nan=True)
+    # and a truncated run agrees with the full one on every bar its windows cover
+    cut = stats.predictive_test(sig[:t_cut], px[:t_cut], horizons=[h], lag=lag)["horizons"][str(h)]
+    assert np.array_equal(cut["forward_return"][: last + 1], a[: last + 1])
+
+
+def test_a_signal_that_cannot_be_tested_says_so():
+    signal, prices, _ = planted_lead()
+    flat = stats.predictive_test(np.ones(42), prices, horizons=[1])
+    assert flat["horizons"]["1"]["signal_constant"] and np.isnan(flat["horizons"]["1"]["t_nonoverlap"])
+    assert any(w.startswith("signal_constant") for w in flat["warnings"])
+    sparse = np.full(42, np.nan)
+    sparse[:12] = np.arange(12.0)
+    assert any(w.startswith("mostly_nan") for w in stats.predictive_test(sparse, prices, horizons=[1])["warnings"])
+    assert refusal(stats.predictive_test, np.full(42, np.nan), prices, horizons=[1]) == "insufficient_observations"
+    assert refusal(stats.predictive_test, signal, prices[:-1], horizons=[1]) == "invalid_input"
+    bad = prices.copy()
+    bad[5] = -1.0
+    assert refusal(stats.predictive_test, signal, bad, horizons=[1]) == "invalid_input"
+    assert refusal(stats.predictive_test, signal, prices) == "invalid_input"  # no horizons
+    # a signal that never goes below zero has an always-long rule: said
+    assert any(w.startswith("nonnegative_signal") for w in stats.predictive_test(np.abs(signal), prices, horizons=[1])["warnings"])
+
+
+def test_hac_tstat_warns_when_the_series_cannot_be_negative():
+    rng = np.random.default_rng(3)
+    squared = rng.normal(0.0, 0.01, 500) ** 2
+    out = stats.hac_tstat(squared)
+    assert out["hac_t"] > 10  # positive by construction
+    assert any(w.startswith("nonnegative_series") for w in out["warnings"])
+    assert stats.hac_tstat(rng.normal(0.001, 0.01, 500))["warnings"] == []

@@ -24,7 +24,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.sampling`](raptorbt.sampling.md) | 6 |
 | [`raptorbt.sizing`](raptorbt.sizing.md) | 8 |
 | [`raptorbt.skills`](raptorbt.skills.md) | 5 |
-| [`raptorbt.stats`](raptorbt.stats.md) | 13 |
+| [`raptorbt.stats`](raptorbt.stats.md) | 14 |
 | [`raptorbt.strategy`](raptorbt.strategy.md) | 57 |
 | [`raptorbt.strategy.orders`](raptorbt.strategy.orders.md) | 12 |
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |

@@ -49,6 +49,7 @@ __all__ = [
     "markov_regimes",
     "pbo_cscv",
     "pca_factors",
+    "predictive_test",
     "sensitivity_surface",
     "spa_test",
     "stationarity",
@@ -94,6 +95,8 @@ _JOHANSEN_CALIBRATION = (
     "20% -> 5%, 11% -> 7%; 12 series at 60 / 120 / 250 / 500 100% -> 0.3%, 80% -> 1%, 32% -> 2%, "
     "15% -> 3% (5% nominal)"
 )
+
+_DAY_NS = 86_400 * 10**9
 
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 
@@ -437,15 +440,182 @@ def hac_tstat(returns: Series, *, lags: int | None = None) -> dict[str, Any]:
     naive one the t distribution with ``n - 1`` degrees of freedom. At least 30 observations, not
     constant. ``lags`` defaults to ``floor(4 (n / 100) ** (2 / 9))`` and must be 0 to
     ``n // 2 - 1``. Not causal: a statement about the whole sample.
+
+    ``warnings`` holds ``nonnegative_series`` when no value is below zero: the mean of squared
+    returns, volumes or absolute moves is positive by construction, and a large t says so, not
+    that the series carries an edge.
     """
     op = "raptorbt.stats.hac_tstat"
     out = _raptorbt.stats_hac(
         _series(returns, "returns", op), None if lags is None else _int(lags, "lags", op)
     )
+    out["warnings"] = []
+    if np.nanmin(np.asarray(returns, dtype=np.float64)) >= 0.0:
+        out["warnings"].append(
+            "nonnegative_series: the series cannot be negative (squared returns, volumes, "
+            "absolute moves), so its mean is positive by construction and its t measures that "
+            "sign, not an edge. Test a signed series, or test whether a signal predicts it "
+            "(predictive_test)"
+        )
     out["assumptions"] = [
         "tests the mean against zero, two-sided, normal reference for the t",
         "Newey-West: robust to autocorrelation and heteroskedasticity up to the lags shown",
         "a t near 2 on a strategy chosen from many tries is not evidence (see pbo_cscv, spa_test)",
+    ]
+    return out
+
+
+def predictive_test(
+    signal: Series,
+    prices: Series,
+    *,
+    horizons: Sequence[int] | int | None = None,
+    lag: int = 1,
+    cost_bps_per_side: float | None = None,
+    quantiles: int | None = None,
+    timestamps: Series | None = None,
+    session: Any = None,
+    to_session_close: bool = False,
+) -> dict[str, Any]:
+    """Does one causal signal predict the return that follows it, on a single series.
+
+    ``signal`` and ``prices`` hold one value per bar (NaN in ``signal`` is unknown, a price is
+    positive). The observation of bar ``t`` is the signal there against the return of entering
+    ``lag`` bars later (default 1: a signal computed at a close cannot trade that close) and
+    holding ``h`` bars: ``prices[t + lag + h] / prices[t + lag] - 1``. This forward return exists
+    only here and never feeds an expression.
+
+    With ``to_session_close=True`` (and no ``horizons``) there is one observation per session in
+    which the signal becomes known: the first bar with a finite signal, entered ``lag`` bars
+    later, held to that session's last bar. "Does the first hour predict the rest of the day." It
+    needs ``timestamps`` (integer nanoseconds, non-decreasing); a session is a calendar day in the
+    zone of ``session`` (a :class:`raptorbt.SessionSchedule`, or the zone's offset from UTC in
+    nanoseconds; UTC when ``None``). A session that crosses midnight (MCX evening) is two.
+
+    Per horizon (``result["horizons"][str(h)]``, or ``"session"``): ``n`` observations and
+    ``n_independent`` (those whose bar index is a multiple of ``h``, whose windows share no bar;
+    all of them in session mode); ``slope`` and ``intercept`` of the least-squares line of return
+    on signal over all ``n``; **``t_nonoverlap``** with ``p_nonoverlap``, the t of the slope of
+    the same line over the independent observations (Student's t, ``n_independent - 2`` degrees
+    of freedom, NaN under 10): the headline. ``t_hac`` is the Newey-West t of the slope over all
+    ``n`` with ``h - 1`` lags and **over-rejects for ``h > 1`` when the signal is persistent**:
+    on 1,500 no-skill samples (iid 1% returns, 1,000 bars, ``h = 20``, an AR(1) signal of
+    persistence 0.98) its standard deviation was 1.34 and it passed 1.96 on 14.5% of them, where
+    ``t_nonoverlap`` had 1.03 and a p-value under 0.05 on 5.6%; with an iid signal both were near
+    5%. Read ``t_nonoverlap``.
+    Also ``rank_corr`` (Spearman), ``hit_rate`` (the share of observations with signal and return
+    of the same sign, among those where both are non-zero) and, with ``quantiles``,
+    ``quantile_returns`` (mean return per signal bucket, highest last), ``quantile_spread`` and
+    its Welch t over the independent observations.
+
+    The rule "long above zero, short below, flat at zero", rebalanced every ``h`` bars, has
+    ``rule_mean`` and ``rule_t_nonoverlap`` over the independent observations, its ``turnover``
+    (mean absolute position change per rebalance: entering from flat is one, a flip two) and
+    ``breakeven_cost_bps_per_side = mean(rule return) / turnover``: the flat cost per side at
+    which it earns nothing. A signal whose breakeven is below its costs is not a strategy. With
+    ``cost_bps_per_side`` the result adds ``net_mean`` and ``t_net`` (the rule less ``c`` times the
+    position change). That is a flat rate on the traded notional, not the broker's schedule (no
+    minimums, no per-side taxes, no slippage model): it rules a signal out, a backtest prices the
+    survivors. Centre a signal that cannot change sign: the rule is always long.
+
+    ``warnings`` names what makes a number weak (``signal_constant``, ``mostly_nan``,
+    ``small_sample``: under 30 independent observations, ``nonnegative_signal``); ``flags`` a
+    likely unadjusted split and a breakeven below the cost; ``assumptions`` what the test took for
+    granted. ``forward_return`` per horizon is the return each bar's observation was scored on
+    (NaN where none): bars after ``T`` never change those before ``T - lag - h``. Refused:
+    ``insufficient_observations`` (fewer than 10 known signal values, or no usable session),
+    ``invalid_input`` (an infinite value, a non-positive price, lengths that differ).
+    """
+    op = "raptorbt.stats.predictive_test"
+    sig, px = _series(signal, "signal", op), _series(prices, "prices", op)
+    if sig.shape != px.shape:
+        raise _refuse(op, f"signal and prices must have one value per bar, got {len(sig)} and {len(px)}")
+    lg = _int(lag, "lag", op)
+    if lg < 0:
+        raise _refuse(op, "lag must be 0 or more", "lag")
+    if quantiles is not None:
+        quantiles = _int(quantiles, "quantiles", op)
+        if quantiles < 2:
+            raise _refuse(op, "quantiles must be at least 2", "quantiles")
+    if cost_bps_per_side is not None:
+        cost = float(cost_bps_per_side)
+        if not np.isfinite(cost) or cost < 0:
+            raise _refuse(op, "cost_bps_per_side must be a number of at least 0", "cost_bps_per_side")
+        cost_bps_per_side = cost
+    hs: list[int] = []
+    labels: np.ndarray | None = None
+    if to_session_close:
+        if horizons is not None:
+            raise _refuse(op, "to_session_close takes no horizons: the return runs to the close", "horizons")
+        if timestamps is None:
+            raise _refuse(op, "to_session_close needs timestamps, to know which bars share a session", "timestamps")
+    else:
+        if horizons is None:
+            raise _refuse(op, "give horizons, bars ahead to score, e.g. [1, 5]", "horizons")
+        hs = [_int(h, "horizons", op) for h in ([horizons] if isinstance(horizons, int) else horizons)]
+        if not hs or min(hs) < 1:
+            raise _refuse(op, "horizons must be a non-empty list of integers >= 1", "horizons")
+        if session is not None or timestamps is not None:
+            pass  # accepted for the caller's own bookkeeping; only session mode reads them
+    if timestamps is not None:
+        ts = np.asarray(timestamps)
+        if ts.shape != sig.shape or ts.dtype.kind not in "iu" or (len(ts) > 1 and (np.diff(ts.astype(np.int64)) < 0).any()):
+            raise _refuse(op, "timestamps must be one non-decreasing integer (nanoseconds) per bar", "timestamps")
+        if to_session_close:
+            zone = 0
+            if session is not None:
+                zone = getattr(session, "tz_offset_ns", session)
+                if isinstance(zone, bool) or not isinstance(zone, (int, np.integer)):
+                    raise _refuse(
+                        op, "session is a raptorbt.SessionSchedule or the zone's offset from UTC in "
+                        "nanoseconds", "session",
+                    )
+            labels = (ts.astype(np.int64) + int(zone)) // _DAY_NS
+    out = _raptorbt.stats_predictive(
+        sig, px, labels, hs, lg, quantiles, cost_bps_per_side, bool(to_session_close)
+    )
+    known = sig[np.isfinite(sig)]
+    warnings: list[str] = []
+    flags: list[str] = []
+    if out["n_signal_known"] < 0.5 * out["n_bars"]:
+        warnings.append(
+            f"mostly_nan: the signal is known on {out['n_signal_known']} of {out['n_bars']} bars; "
+            "the test rests on those alone"
+        )
+    if known.size and known.min() >= 0.0:
+        warnings.append(
+            "nonnegative_signal: the signal is never below zero, so the long/short rule is always "
+            "long (rule_* is the return of holding, not of the signal); centre it first. The slope "
+            "and rank correlation are unaffected"
+        )
+    for key, h in out["horizons"].items():
+        if h["signal_constant"]:
+            warnings.append(f"signal_constant: horizon {key}: the signal does not vary, so no slope or t exists")
+        if h["small_sample"]:
+            warnings.append(
+                f"small_sample: horizon {key}: {h['n_independent']} independent observations "
+                "(under 30): the t is a rough guide, and NaN under 10"
+            )
+        if cost_bps_per_side is not None and h["breakeven_cost_bps_per_side"] < cost_bps_per_side:
+            flags.append(
+                f"horizon {key}: breakeven {h['breakeven_cost_bps_per_side']:.3g} bps per side is "
+                f"below the {cost_bps_per_side:g} bps charged: the rule does not pay its costs"
+            )
+    if out["big_move_count"]:
+        flags.append(
+            f"{out['big_move_count']} one-bar price moves beyond a ratio of 1.5: likely a split or "
+            "bonus the prices are not adjusted for; it reads as a return and distorts every statistic"
+        )
+    out["warnings"], out["flags"] = warnings, flags
+    out["assumptions"] = [
+        "prices are adjusted for splits, bonuses and dividends; this is not checked",
+        "the signal at a bar uses only data up to that bar (causal); this is not checked",
+        "returns are simple, entered `lag` bars after the signal and held to the horizon or the "
+        "session's last bar",
+        "the headline t uses every h-th observation (windows that share no bar); t_hac still "
+        "over-rejects for h > 1",
+        "the rule is sign(signal), rebalanced every h bars; a flat per-side rate on the traded "
+        "notional is not the broker's schedule",
     ]
     return out
 

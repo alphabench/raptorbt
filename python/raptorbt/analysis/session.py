@@ -59,7 +59,7 @@ _PRESETS = (
     "cds", "cds_cross", "bcd",
 )
 
-_STATS_ONE = ("stationarity", "hurst", "garch", "markov_regimes", "hac_tstat")
+_STATS_ONE = ("stationarity", "hurst", "garch", "markov_regimes", "hac_tstat", "predictive_test")
 _STATS_MANY = ("cointegration", "pbo_cscv", "spa_test", "pca_factors")
 _STATS_BARS = ("audit_bars", "impact_estimate")
 _STATS_ALL = (*_STATS_ONE, *_STATS_MANY, *_STATS_BARS)
@@ -867,7 +867,9 @@ class Session:
         """Run a :mod:`raptorbt.stats` function on handles.
 
         - One series (``stationarity``, ``hurst``, ``garch``, ``markov_regimes``,
-          ``hac_tstat``): one handle.
+          ``hac_tstat``): one handle. ``predictive_test`` takes the signal's handle; its prices
+          are the ``close`` of the bars the signal was made on (or ``prices=`` another handle),
+          its timestamps and, with ``to_session_close``, its session calendar those bars' too.
         - Several series (``cointegration``, ``pbo_cscv``, ``spa_test``, ``pca_factors``): one
           or more handles, keyed by handle name; a keyword that is a handle name
           (``target=``, ``benchmark=``) is read as its series.
@@ -923,11 +925,40 @@ class Session:
             if isinstance(v, str) and v in columns:
                 kwargs[key] = columns[v][lead:]
         first = next(iter(series.values()))
+        if name == "predictive_test":
+            self._predictive_inputs(entries[handles[0]][0], lead, kwargs, op)
         result = fn(first, **kwargs) if name in _STATS_ONE else fn(series, **kwargs)
         analysis = {"handles": list(handles), "trimmed_leading": lead}
         if alignment is not None:
             analysis["aligned"] = alignment
         return {**result, "analysis": analysis}
+
+    def _predictive_inputs(self, entry: _Handle, lead: int, kw: dict[str, Any], op: str) -> None:
+        """What ``predictive_test`` reads beside the signal, from the bars the signal was made on:
+        the close (unless ``prices=`` names a handle), the timestamps and the session calendar of
+        a ``to_session_close`` test."""
+        ds = self._data.get(entry.data)
+        if ds is None or ds.sha256 != entry.data_sha or ds.kind != "bars":
+            raise errors.InvalidParameter(
+                f"the signal was made on bars ({entry.data!r}) that are no longer loaded, so its "
+                "prices cannot be read", code="invalid_input", operation=op, parameter="handles",
+                valid=[f"Session.load the bars of {entry.data!r} again and recompute the signal"],
+            )
+        if "prices" not in kw:
+            if "close" not in ds.arrays:
+                raise errors.InvalidData(
+                    f"{ds.name!r} has no 'close' to take forward returns from", code="missing_field",
+                    operation=op, parameter="prices", valid=["bars with a close column", "prices=<handle>"],
+                )
+            kw["prices"] = ds.arrays["close"][lead:]
+        if kw.get("to_session_close"):
+            kw.setdefault("timestamps", ds.arrays["timestamps"][lead:])
+            session = kw.get("session", ds.session)
+            if isinstance(session, str):
+                session, _ = self._schedule_of(session, op)
+            elif session is None and ds.session is not None:
+                session, _ = self._schedule_of(ds.session, op)
+            kw["session"] = session
 
     def _aligned(
         self, arrays: dict[str, np.ndarray], entries: dict[str, _Handle], op: str

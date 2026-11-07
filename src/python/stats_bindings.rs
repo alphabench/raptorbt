@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -23,6 +23,7 @@ use crate::stats::hurst;
 use crate::stats::impact::{self, SpreadModel};
 use crate::stats::pbo;
 use crate::stats::pca;
+use crate::stats::predictive::{self, PredictiveParams};
 use crate::stats::quality::{self, AuditRules, Bars, Gap};
 use crate::stats::spa;
 use crate::stats::stationarity::{self, ADF_CRITICAL_KEYS, KPSS_CRITICAL_KEYS};
@@ -397,6 +398,71 @@ fn stats_hac<'py>(
     d.set_item("lags", r.lags)?;
     d.set_item("per_period_sharpe", r.per_period_sharpe)?;
     d.set_item("lag1_autocorrelation", r.lag1_autocorrelation)?;
+    Ok(d)
+}
+
+#[pyfunction]
+#[pyo3(signature = (signal, prices, sessions, horizons, lag, quantiles, cost_bps_per_side, to_session_close))]
+#[allow(clippy::too_many_arguments)]
+fn stats_predictive<'py>(
+    py: Python<'py>,
+    signal: PyReadonlyArray1<'py, f64>,
+    prices: PyReadonlyArray1<'py, f64>,
+    sessions: Option<PyReadonlyArray1<'py, i64>>,
+    horizons: Vec<usize>,
+    lag: usize,
+    quantiles: Option<usize>,
+    cost_bps_per_side: Option<f64>,
+    to_session_close: bool,
+) -> PyResult<Dict<'py>> {
+    const OP: &str = "raptorbt.stats.predictive_test";
+    let (s, p) = (numpy_cow_f64(&signal), numpy_cow_f64(&prices));
+    let labels: Option<Vec<i64>> = sessions.map(|a| a.as_array().iter().copied().collect());
+    let params = PredictiveParams { horizons, lag, quantiles, cost_bps_per_side, to_session_close };
+    let r = py
+        .detach(|| predictive::predictive_test(&s, &p, labels.as_deref(), &params))
+        .map_err(|e| fail(OP, e))?;
+    let d = PyDict::new(py);
+    d.set_item("n_bars", r.n_bars)?;
+    d.set_item("n_signal_known", r.n_signal_known)?;
+    d.set_item("lag", r.lag)?;
+    d.set_item("to_session_close", r.to_session_close)?;
+    d.set_item("cost_bps_per_side", r.cost_bps_per_side)?;
+    d.set_item("big_move_count", r.big_move_count)?;
+    let by = PyDict::new(py);
+    for h in r.horizons {
+        let x = PyDict::new(py);
+        x.set_item("horizon", h.horizon)?;
+        x.set_item("n", h.n)?;
+        x.set_item("n_independent", h.n_independent)?;
+        x.set_item("small_sample", h.n_independent < predictive::SMALL_SAMPLE)?;
+        x.set_item("signal_constant", h.signal_constant)?;
+        x.set_item("slope", h.slope)?;
+        x.set_item("intercept", h.intercept)?;
+        x.set_item("slope_nonoverlap", h.slope_nonoverlap)?;
+        x.set_item("t_nonoverlap", h.t_nonoverlap)?;
+        x.set_item("p_nonoverlap", h.p_nonoverlap)?;
+        x.set_item("t_hac", h.t_hac)?;
+        x.set_item("hac_lags", h.hac_lags)?;
+        x.set_item("rank_corr", h.rank_corr)?;
+        x.set_item("hit_rate", h.hit_rate)?;
+        if !h.quantile_returns.is_empty() {
+            x.set_item("quantile_returns", &h.quantile_returns)?;
+            x.set_item("quantile_spread", h.quantile_spread)?;
+            x.set_item("quantile_spread_t_nonoverlap", h.quantile_spread_t_nonoverlap)?;
+        }
+        x.set_item("rule_mean", h.rule_mean)?;
+        x.set_item("rule_t_nonoverlap", h.rule_t_nonoverlap)?;
+        x.set_item("turnover", h.turnover)?;
+        x.set_item("breakeven_cost_bps_per_side", h.breakeven_cost_bps_per_side)?;
+        if r.cost_bps_per_side.is_some() {
+            x.set_item("net_mean", h.net_mean)?;
+            x.set_item("t_net", h.t_net)?;
+        }
+        x.set_item("forward_return", PyArray1::from_vec(py, h.forward_return))?;
+        by.set_item(h.key, x)?;
+    }
+    d.set_item("horizons", by)?;
     Ok(d)
 }
 
@@ -842,6 +908,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stats_garch, m)?)?;
     m.add_function(wrap_pyfunction!(stats_regimes, m)?)?;
     m.add_function(wrap_pyfunction!(stats_hac, m)?)?;
+    m.add_function(wrap_pyfunction!(stats_predictive, m)?)?;
     m.add_function(wrap_pyfunction!(stats_pbo, m)?)?;
     m.add_function(wrap_pyfunction!(stats_spa, m)?)?;
     m.add_function(wrap_pyfunction!(stats_spa_replay, m)?)?;

@@ -32,6 +32,7 @@ Pick the test by the question:
 | How volatile will the next bars be, and how fast does a shock fade? | `garch` |
 | Which calm or turbulent regime was the market in, over a past sample? | `markov_regimes` |
 | Is a strategy's mean return different from zero, given autocorrelation? | `hac_tstat` |
+| Does one causal signal on one series (the first hour, a momentum score) predict the return that follows it? | `predictive_test` |
 | How likely is it that the strategy I picked from many is overfitted? | `pbo_cscv` |
 | After searching many strategies, does the best one beat the benchmark? | `spa_test` |
 | What do several return series have in common, and what does a target load on it? | `pca_factors` |
@@ -74,6 +75,7 @@ The sample each function needs:
 | `hac_tstat` | one series of returns | 30 |
 | `pbo_cscv` | 2 to 200 return series | 4 times `splits` rows (64 at the default 16) |
 | `spa_test` | 1 to 200 return series | 60 |
+| `predictive_test` | a signal and prices, one value per bar | 10 known signal values; 10 independent observations for a t |
 | `pca_factors` | 2 to 40 return series | 60 |
 | `event_study` | dated asset and market returns, 1 to 100 events | an estimation window of 60 or more before each event |
 | `impact_estimate` | daily high, low, close, volume | 20 days |
@@ -92,6 +94,7 @@ All keyword parameters below have the default shown; the first positional argume
 | `raptorbt.stats.garch(returns, *, model="garch", dist="t", horizon=10, periods_per_year=None)` | Parameters, persistence, half-life, forecast volatility path, recent conditional volatility, robust standard errors. |
 | `raptorbt.stats.markov_regimes(returns, *, k=2, min_support_bars=10.0, min_duration_periods=2.0, series=False)` | Regime statistics, transition matrix, smoothed and filtered probabilities, timeline. |
 | `raptorbt.stats.hac_tstat(returns, *, lags=None)` | Mean, Newey-West standard error, t and p, the naive t and p, per-period Sharpe. |
+| `raptorbt.stats.predictive_test(signal, prices, *, horizons=None, lag=1, cost_bps_per_side=None, quantiles=None, timestamps=None, session=None, to_session_close=False)` | A signal against the forward return, per horizon or to the session close: `n`, `n_independent`, OLS `slope`, `intercept`, the headline `t_nonoverlap` (with `p_nonoverlap`), `t_hac`, `rank_corr`, `hit_rate`, quantile means and spread, the sign rule's `rule_mean`, `turnover`, `breakeven_cost_bps_per_side` and, with a cost, `net_mean` and `t_net`; `warnings`, `flags`, `assumptions`, and each bar's `forward_return`. |
 | `raptorbt.stats.pbo_cscv(cols, *, splits=16)` | Probability of backtest overfitting and the Sharpe ratios behind it. |
 | `raptorbt.stats.spa_test(cols, *, benchmark=None, reps=1000, block_size=None, seed=0)` | Three p-values for the best strategy against the benchmark, with the bootstrap used. |
 | `raptorbt.stats.pca_factors(cols, *, components=3, target=None)` | Explained variance, loadings by component, and a target's regression on the scores. |
@@ -120,6 +123,23 @@ All keyword parameters below have the default shown; the first positional argume
    a fit or a test prints a confident figure that means little.
 
 ### 4.1 Where a result is not to be read at face value
+
+**One series or a panel.** `predictive_test` scores a signal on a single series (an instrument's
+bars): "does the 9:15 to 10:15 return predict the rest of the day" (`to_session_close=True`,
+needs `timestamps`; one observation per session), "does a 20-bar momentum score predict the next
+5 bars" (`horizons=[5]`). `expressions.factor_report` scores a signal across many names at each
+date (rank IC, quantile spreads over the cross-section) and needs a panel of at least ten names;
+use it when the question is which names to hold, `predictive_test` when it is whether to hold one.
+Read `t_nonoverlap`: the t of the slope over every `h`-th observation, whose forward windows
+share no bar. `t_hac` over-rejects for `h > 1` when the signal is persistent (no-skill AR(1)
+signal of persistence 0.98, 1,000 bars, `h = 20`, 1,500 samples: `t_hac` past 1.96 on 14.5%,
+`t_nonoverlap` below p 0.05 on 5.6%). Check `breakeven_cost_bps_per_side` against the costs the
+rule will pay; a flat rate is not a broker's schedule, it rules a signal out.
+
+**The mean of a series that cannot be negative.** `hac_tstat` of squared returns, volumes or
+absolute moves gives a large t because the series is positive by construction; the result's
+`warnings` holds `nonnegative_series`. To ask whether a signal predicts such a series, use
+`predictive_test` with that series' own levels as the target, or test a signed series.
 
 **Johansen rank.** Read `johansen["rank"]`, not `rank_at_5pct`. The asymptotic critical values
 assume many observations against the number of series `q`. On independent random walks the
@@ -309,6 +329,28 @@ assert stats.pbo_cscv(edge, splits=8)["pbo"] < stats.pbo_cscv(noise, splits=8)["
 spa = stats.spa_test(edge, reps=500, seed=1)
 assert spa["best_strategy"] == "edge" and spa["p_value_spa_consistent"] < 0.05
 assert spa == stats.spa_test(edge, reps=500, seed=1)
+```
+
+Predicting one series. A signal that leads the next bar's return by a planted slope, and the same
+signal with no edge. The headline is `t_nonoverlap`; the breakeven says what the rule can afford.
+
+```python
+import numpy as np
+from raptorbt import stats
+
+rng = np.random.default_rng(13)
+n = 800
+x = rng.normal(size=n)
+r = rng.normal(0.0, 0.01, n + 1)
+r[2:] += 0.004 * x[: n - 1]  # bar t's signal leads the return of bar t + 2: lag 1, one bar held
+prices = 100.0 * np.cumprod(1.0 + r[:n])
+
+lead = stats.predictive_test(x, prices, horizons=[1], cost_bps_per_side=5.0)["horizons"]["1"]
+assert lead["t_nonoverlap"] > 4 and abs(lead["slope"] - 0.004) < 0.002
+assert lead["breakeven_cost_bps_per_side"] > 5 and lead["net_mean"] > 0
+
+blind = stats.predictive_test(rng.normal(size=n), prices, horizons=[1])["horizons"]["1"]
+assert abs(blind["t_nonoverlap"]) < 3.5
 ```
 
 Factors. Five series sharing a factor; a target that loads on it.
