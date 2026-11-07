@@ -762,3 +762,9 @@ same expression values as one that never stopped.
 - [Indicators](../indicators/SKILL.md)
 - [Analysis](../analysis/SKILL.md)
 - [Troubleshooting](../troubleshooting/SKILL.md)
+
+Worked examples:
+
+- `examples/analysis/expression_to_strategy.py`: an expression checked in a session, then used in a strategy.
+- `examples/analysis/factor_research.py`: a cross-sectional factor scored against the returns that follow it.
+- `examples/analysis/stationarity_to_signal.py`: a stationarity test turned into a signal.
