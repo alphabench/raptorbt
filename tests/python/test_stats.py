@@ -248,6 +248,24 @@ def test_a_session_observation_runs_from_the_known_signal_to_the_close():
     assert refusal(stats.predictive_test, signal, prices, to_session_close=True, timestamps=ts, horizons=[1]) == "invalid_input"
 
 
+def test_a_session_pays_entry_and_exit_every_session():
+    # six long sessions then six short, each returning 0.01 v from the entry at bar 2 to its close
+    # (overnight excluded): every session is a round trip, turnover 2, rule_mean 0.01,
+    # breakeven 0.01 / 2 * 1e4 = 50 bps per side, net at 10 bps = 0.01 - 0.001 * 2 = 0.008
+    day = 86_400 * 10**9
+    ts = np.concatenate([k * day + np.arange(4) * 3_600 * 10**9 for k in range(12)])
+    v = np.array([1.0] * 6 + [-1.0] * 6)
+    signal = np.concatenate([[np.nan, a, a, a] for a in v])
+    prices = np.concatenate([[100.0, 100.0, 100.0, 100.0 * (1 + 0.01 * a)] for a in v])
+    h = stats.predictive_test(
+        signal, prices, to_session_close=True, timestamps=ts, cost_bps_per_side=10.0
+    )["horizons"]["session"]
+    assert h["rule_mean"] == pytest.approx(0.01, abs=1e-12)
+    assert h["turnover"] == pytest.approx(2.0, abs=1e-12)
+    assert h["breakeven_cost_bps_per_side"] == pytest.approx(50.0, abs=1e-9)
+    assert h["net_mean"] == pytest.approx(0.008, abs=1e-12)
+
+
 def test_no_skill_persistent_signal_rejects_near_five_percent_on_the_headline_t():
     # Measured on 1,500 samples (iid 1 % returns, 1,000 bars, h = 20, an AR(1) signal of
     # persistence 0.98): t_nonoverlap p < 0.05 on 5.6 %, sd 1.03; t_hac |t| > 1.96 on 14.5 %, sd

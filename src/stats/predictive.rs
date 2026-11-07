@@ -32,10 +32,12 @@
 //! * The rule `position = sign(signal)` (long above zero, short below, flat at zero), held for
 //!   the horizon: `rule_mean` and `rule_t_nonoverlap` over the independent observations (a
 //!   portfolio rebalanced every `h` bars). Its `turnover` is the mean `|position change|` per
-//!   rebalance (entering from flat counts one side; a flip two), and
+//!   rebalance (entering from flat counts one side; a flip two; in session mode every non-flat
+//!   session is a round trip, entered and closed inside the session, so it counts two), and
 //!   `breakeven_cost_bps_per_side = mean(rule return) / turnover` in basis points. With
 //!   `cost_bps_per_side = c`: `net_mean` of `rule return - c |change|` and its `t_net`. A flat
-//!   rate on the traded notional, not a broker's schedule; the last position is never closed.
+//!   rate on the traded notional, not a broker's schedule; the last position is never closed
+//!   (bar horizons).
 //!
 //! A signal that is constant has no slope: the t's are NaN and `signal_constant` is set.
 
@@ -328,10 +330,19 @@ fn analyse(
         })
         .collect();
     let rule: Vec<f64> = pos.iter().zip(&yi).map(|(a, b)| a * b).collect();
+    // Session mode: the return runs from the entry to that session's close, so the overnight is
+    // not held and every non-flat session is a round trip (one side in, one out). Bar horizons
+    // hold the position until the next rebalance, so only the change is traded.
     let change: Vec<f64> = pos
         .iter()
         .enumerate()
-        .map(|(i, v)| (v - if i == 0 { 0.0 } else { pos[i - 1] }).abs())
+        .map(|(i, v)| {
+            if p.to_session_close {
+                2.0 * v.abs()
+            } else {
+                (v - if i == 0 { 0.0 } else { pos[i - 1] }).abs()
+            }
+        })
         .collect();
     let (rule_mean, rule_t_nonoverlap) = mean_t(&rule);
     let turnover =
@@ -597,6 +608,33 @@ mod tests {
         assert!(h.forward_return[2].is_nan() && h.forward_return[0].is_nan());
         // the same call without labels, or with horizons, is refused
         assert!(predictive_test(&signal, &prices, None, &params).is_err());
+    }
+
+    /// Every session enters at bar 2 and exits at its close, so each is a round trip: turnover 2,
+    /// not the session-to-session position change. rule = sign(v) * 0.01 v = 0.01 every session;
+    /// breakeven 0.01 / 2 * 1e4 = 50 bps per side; net at 10 bps = 0.01 - 0.001 * 2 = 0.008.
+    #[test]
+    fn a_session_pays_entry_and_exit_every_session() {
+        let (mut signal, mut prices, mut labels) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..12 {
+            let v = if k < 6 { 1.0 } else { -1.0 };
+            signal.extend([f64::NAN, v, v, v]);
+            prices.extend([100.0, 100.0, 100.0, 100.0 * (1.0 + 0.01 * v)]);
+            labels.extend([k as i64; 4]);
+        }
+        let params = PredictiveParams {
+            horizons: vec![],
+            lag: 1,
+            quantiles: None,
+            cost_bps_per_side: Some(10.0),
+            to_session_close: true,
+        };
+        let r = predictive_test(&signal, &prices, Some(&labels), &params).unwrap();
+        let h = &r.horizons[0];
+        assert!((h.rule_mean - 0.01).abs() < 1e-12);
+        assert!((h.turnover - 2.0).abs() < 1e-12, "{}", h.turnover);
+        assert!((h.breakeven_cost_bps_per_side - 50.0).abs() < 1e-9);
+        assert!((h.net_mean - 0.008).abs() < 1e-12, "{}", h.net_mean);
     }
 
     #[test]

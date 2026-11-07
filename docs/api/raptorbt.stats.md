@@ -327,7 +327,9 @@ its Welch t over the independent observations.
 
 The rule "long above zero, short below, flat at zero", rebalanced every ``h`` bars, has
 ``rule_mean`` and ``rule_t_nonoverlap`` over the independent observations, its ``turnover``
-(mean absolute position change per rebalance: entering from flat is one, a flip two) and
+(mean absolute position change per rebalance: entering from flat is one, a flip two; with
+``to_session_close`` every non-flat session is a round trip, entered and closed inside the
+session, so it is two) and
 ``breakeven_cost_bps_per_side = mean(rule return) / turnover``: the flat cost per side at
 which it earns nothing. A signal whose breakeven is below its costs is not a strategy. With
 ``cost_bps_per_side`` the result adds ``net_mean`` and ``t_net`` (the rule less ``c`` times the
