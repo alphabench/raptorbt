@@ -207,6 +207,15 @@ Registered functions with no TA-Lib counterpart (checked on their own reference)
 - rolling_residual
 - rolling_sharpe
 - rolling_var_hist
+- session_bar
+- session_first
+- session_gap
+- session_high
+- session_low
+- session_open
+- session_return
+- session_volume
+- session_vwap
 - shift
 - sign
 - skew
