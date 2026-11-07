@@ -39,8 +39,8 @@ A handle is a series in the next expression: `zscore(h_0a1b2c3d4e, 20)`.
 A **summary** is the answer to `eval`. It states facts and never advice: `handle`, `kind`
 (`number` or `bool`), `shape`, `warmup`, `nan` (leading and interior), `dist` (min, p05, p50, p95,
 max, mean, std; for a boolean `known`, `true` and `true_rate` instead), `last` (5 values),
-`flags`, `causal`, `reference`, `sha256`. Shown numbers are rounded to 6 digits; the stored
-series is not. A result with several outputs (`macd(close)`) returns `{"handle", "outputs":
+`flags`, `causal`, `reference`, `sha256`. Shown numbers are rounded to 6 significant digits; the stored
+series is not. When an exact value is needed, ask for the last values at full precision (`series(handle, tail=n)`; the research tool's `tail`) and quote exactly what is returned, never the rounded summary. A result with several outputs (`macd(close)`) returns `{"handle", "outputs":
 [summary, ...]}`, each output is the handle `<handle>_<output>`, and `truncated_outputs` lists
 outputs left out if the 4 KB cap for a call is reached.
 

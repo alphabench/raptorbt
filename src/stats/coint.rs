@@ -410,6 +410,13 @@ pub struct JohansenSummary {
     /// critical values, until one is not. The oracle pins it; it over-rejects at small `n / q`
     /// (see `rank`).
     pub rank_at_5pct: usize,
+    /// Eigenvalues (squared canonical correlations), descending, as statsmodels' `.eig`.
+    pub eigenvalues: Vec<f64>,
+    /// Maximum-eigenvalue statistics, hypothesis `rank = i` against `rank = i + 1`
+    /// (statsmodels' `.lr2`), raw and not scaled.
+    pub max_eigenvalue_statistics: Vec<f64>,
+    /// Their asymptotic 5% critical values (statsmodels' `.cvm[:, 1]`).
+    pub max_eigenvalue_critical_5pct: Vec<f64>,
     pub trace_statistics: Vec<f64>,
     pub trace_critical_5pct: Vec<f64>,
     /// The same rule on the Reinsel-Ahn scaled statistics: the rank to read.
@@ -489,6 +496,9 @@ pub fn cointegration(cols: &[&[f64]], alpha: f64) -> Result<Cointegration, Stats
         engle_granger: eg,
         johansen: JohansenSummary {
             rank_at_5pct: rank,
+            eigenvalues: jo.eig,
+            max_eigenvalue_statistics: jo.lr2,
+            max_eigenvalue_critical_5pct: jo.cvm.iter().map(|r| r[1]).collect(),
             trace_statistics: jo.lr1,
             trace_critical_5pct: jo.cvt.iter().map(|r| r[1]).collect(),
             rank: rank_of(&trace_scaled),

@@ -330,3 +330,29 @@ def test_hac_tstat_warns_when_the_series_cannot_be_negative():
     assert out["hac_t"] > 10  # positive by construction
     assert any(w.startswith("nonnegative_series") for w in out["warnings"])
     assert stats.hac_tstat(rng.normal(0.001, 0.01, 500))["warnings"] == []
+
+
+# ------------------------------------------------------------------ fields the answers carry
+
+
+def test_garch_reports_the_variances_beside_the_volatilities():
+    rng = np.random.default_rng(6)
+    g = stats.garch(rng.normal(0, 0.01, 1000), horizon=5)
+    vols, var = g["forecast_vol_per_period"], g["forecast_variance_per_period"]
+    assert len(var) == len(vols) == 5
+    assert var == pytest.approx([v * v for v in vols], rel=1e-12)
+    assert g["forecast_cumulative_variance"] == pytest.approx(sum(var), rel=1e-14)
+    assert g["forecast_cumulative_vol"] ** 2 == pytest.approx(g["forecast_cumulative_variance"], rel=1e-12)
+
+
+def test_cointegration_carries_the_eigenvalues_and_max_eigenvalue_statistics():
+    rng = np.random.default_rng(11)
+    x = np.cumsum(rng.normal(size=400))
+    y = 0.8 * x + rng.normal(size=400)
+    jo = stats.cointegration({"x": x, "y": y})["johansen"]
+    eig, lr2 = jo["eigenvalues"], jo["max_eigenvalue_statistics"]
+    assert len(eig) == len(lr2) == len(jo["max_eigenvalue_critical_5pct"]) == 2
+    assert eig[0] >= eig[1] > 0.0 and all(e < 1.0 for e in eig)
+    t = jo["effective_observations"]
+    assert lr2[0] == pytest.approx(-t * np.log(1.0 - eig[0]), rel=1e-12)
+    assert lr2[1] == pytest.approx(-t * np.log(1.0 - eig[1]), rel=1e-12)

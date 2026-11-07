@@ -195,6 +195,12 @@ pub struct GarchResult {
     pub last_vol_per_period: f64,
     pub forecast_vol_per_period: Vec<f64>,
     pub forecast_cumulative_vol: f64,
+    /// The squares of `forecast_vol_per_period`: conditional variances of the per-period return,
+    /// in decimal-return units (arch's percent-squared `forecast().variance` over 1e4).
+    pub forecast_variance_per_period: Vec<f64>,
+    /// The sum of `forecast_variance_per_period` (the variance of the summed return over the
+    /// horizon; `forecast_cumulative_vol` is its square root).
+    pub forecast_cumulative_variance: f64,
     pub recent_conditional_vol: Vec<f64>,
     pub last_vol_annualised: Option<f64>,
     pub forecast_vol_annualised: Option<Vec<f64>>,
@@ -844,6 +850,8 @@ pub fn garch(returns: &[f64], opts: &GarchOptions) -> Result<GarchResult, GarchE
         aic: 2.0 * k as f64 - 2.0 * llf,
         last_vol_per_period: last_vol,
         forecast_cumulative_vol: var_path.iter().sum::<f64>().sqrt(),
+        forecast_variance_per_period: var_path.clone(),
+        forecast_cumulative_variance: var_path.iter().sum::<f64>(),
         forecast_vol_annualised: ann.map(|a| forecast_vol.iter().map(|v| v * a).collect()),
         forecast_vol_per_period: forecast_vol,
         recent_conditional_vol: vol[n.saturating_sub(TIMELINE_MAX)..].to_vec(),

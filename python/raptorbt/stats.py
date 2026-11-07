@@ -188,6 +188,9 @@ def cointegration(cols: Columns, *, alpha: float = _ALPHA) -> dict[str, Any]:
     constant and the others and tests the residual (the spread) for a unit root; Johansen reads
     the rank of the whole system (constant in the relation, one lagged difference, 5% trace).
 
+    ``johansen["eigenvalues"]`` (descending), ``["max_eigenvalue_statistics"]`` and
+    ``["max_eigenvalue_critical_5pct"]`` are statsmodels' ``eig``, ``lr2`` and ``cvm[:, 1]``
+    (raw, not Reinsel-Ahn scaled).
     ``johansen["rank"]`` is the rank to read: the 5% trace test on statistics multiplied by
     Reinsel and Ahn's ``(T - q k) / T`` (``trace_statistics_scaled``, ``scale_factor``; ``T``
     the ``effective_observations``, ``q`` the number of series, ``k = 2``). The unscaled
@@ -301,7 +304,11 @@ def garch(
     ``garch`` or ``gjr``; ``dist`` is ``normal`` or ``t``; ``horizon`` is 1 to 60 bars. The
     result carries the parameters, the persistence, the half-life of a shock, the forecast
     volatility path, the last 60 conditional volatilities and, with ``periods_per_year``, the
-    annualised ones. Parameters are in the units of ``returns``; variances are per bar.
+    annualised ones. Parameters are in the units of ``returns``. Every ``*_vol*`` key is a
+    volatility (a standard deviation) of the per-bar return, not a variance; the variances are
+    ``forecast_variance_per_period`` (the squares of ``forecast_vol_per_period``, decimal-return
+    units: arch's percent-squared ``forecast().variance`` over 1e4) and
+    ``forecast_cumulative_variance`` (their sum, the square of ``forecast_cumulative_vol``).
 
     Also returned: ``std_errors`` and ``covariance_robust`` (robust sandwich, ``None`` if
     the Hessian cannot be inverted; ``parameter_names`` is their order), and ``rescale`` (the

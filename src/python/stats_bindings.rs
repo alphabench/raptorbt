@@ -180,6 +180,9 @@ fn stats_cointegration<'py>(
     let r = py.detach(|| coint::cointegration(&refs, alpha)).map_err(|e| fail(OP, e))?;
     let jo = PyDict::new(py);
     jo.set_item("rank_at_5pct", r.johansen.rank_at_5pct)?;
+    jo.set_item("eigenvalues", &r.johansen.eigenvalues)?;
+    jo.set_item("max_eigenvalue_statistics", &r.johansen.max_eigenvalue_statistics)?;
+    jo.set_item("max_eigenvalue_critical_5pct", &r.johansen.max_eigenvalue_critical_5pct)?;
     jo.set_item("trace_statistics", &r.johansen.trace_statistics)?;
     jo.set_item("trace_critical_5pct", &r.johansen.trace_critical_5pct)?;
     jo.set_item("rank", r.johansen.rank)?;
@@ -292,6 +295,8 @@ fn stats_garch<'py>(
     d.set_item("last_vol_per_period", r.last_vol_per_period)?;
     d.set_item("forecast_vol_per_period", &r.forecast_vol_per_period)?;
     d.set_item("forecast_cumulative_vol", r.forecast_cumulative_vol)?;
+    d.set_item("forecast_variance_per_period", &r.forecast_variance_per_period)?;
+    d.set_item("forecast_cumulative_variance", r.forecast_cumulative_variance)?;
     d.set_item("recent_conditional_vol", &r.recent_conditional_vol)?;
     d.set_item("rescale", r.rescale)?;
     if let Some(v) = r.last_vol_annualised {
