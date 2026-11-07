@@ -190,6 +190,7 @@ fn merge(dag: &mut Dag, p: &Program) -> Vec<NodeId> {
             ),
             Op::Out { call, index } => dag.out(map[*call], *index),
             Op::At { spec, body } => dag.at(*spec, body.clone(), node.ty.clone()),
+            Op::SessionBar => dag.session_bar(),
         };
         map.push(id);
     }
@@ -337,7 +338,9 @@ impl SweepPlan {
     pub fn eval(&self, inputs: &Inputs, limits: &SweepLimits) -> Result<Vec<Columns>, SweepError> {
         let plan = &self.plan;
         let d = &*plan.d;
-        let (n, cols) = inputs.resolve(plan)?;
+        let n = inputs.rows()?;
+        let session = inputs.session_column(plan, n)?;
+        let (n, cols) = inputs.resolve(plan, session.as_deref())?;
         let bytes = self.bytes(n);
         if bytes > limits.max_bytes {
             return Err(SweepError::TooManyBytes {

@@ -366,6 +366,55 @@ assert list(held[4:]) == [4.0] * 4 + [8.0] * 4   # each day shows the previous d
 assert e.warmup is None and e.warmup_by_clock == {"base": 0, "1d": 0}
 ```
 
+The session so far. "Does the first hour predict the rest of the day" needs the current session's
+open and its n-th bar, which `at` does not give. `session_bar()` is the 0-based index of the bar
+within its trading session (NaN outside one); `session_open()`, `session_high()`,
+`session_low()`, `session_volume()` and `session_vwap()` are the session's first open and its
+running extremes, volume and volume-weighted price so far; `session_return()` is the close over
+the session's open, minus 1; `session_gap()` is today's open over the previous session's last
+close, minus 1; and `session_first(x, n)` is `x` at the session's n-th bar, unknown before that bar
+and held until the session ends. They read the bar and the session's earlier bars only. The
+schedule decides what a session is, so a half day, a Muhurat evening or a holiday needs no special
+case, and they need the timestamps, `bar_stamp` and a `session=` schedule, as `at` needs its clock:
+
+```python
+import numpy as np
+import raptorbt as rb
+
+MIN = 60 * 10**9
+DAY = 86_400 * 10**9
+MON = 19_730  # Monday 2024-01-08
+nse = rb.SessionSchedule.nse_equity()
+
+# Two NSE days of 25 fifteen-minute bars (09:15-15:30 IST), each stamped at its close.
+ts = np.concatenate([d * DAY + (225 + 15 * (np.arange(25) + 1)) * MIN for d in (MON, MON + 1)])
+close = np.concatenate([100.0 + 0.1 * np.arange(25), 110.0 - 0.2 * np.arange(25)])
+open_ = np.concatenate([[100.0], close[:24], [108.0], close[25:49]])
+data = {"timestamps": ts, "open": open_, "high": close + 0.2, "low": close - 0.2,
+        "close": close, "volume": np.full(50, 10.0)}
+
+# The first hour's return (four 15-minute bars), known from the fourth bar of the day.
+first_hour = rb.expr("session_first(session_return(), 4)")
+got = first_hour.eval(data, bar_stamp="close", session=nse)
+assert np.isnan(got[:3]).all() and np.isnan(got[25:28]).all()
+assert np.allclose(got[3:25], close[3] / 100.0 - 1.0)       # day one: 100.3 / 100 - 1
+assert np.allclose(got[28:], close[28] / 108.0 - 1.0)       # day two opens at 108
+
+# Is the rest of the day moving with it? The sign of the first hour against the move since.
+since = rb.expr("close / session_first(close, 4) - 1").eval(data, bar_stamp="close", session=nse)
+assert np.isnan(since[:3]).all() and since[3] == 0.0 and since[24] > 0.0
+
+# Today's open over yesterday's close; day one has no yesterday.
+gap = rb.expr("session_gap()").eval(data, bar_stamp="close", session=nse)
+assert np.isnan(gap[:25]).all() and np.allclose(gap[25:], 108.0 / close[24] - 1.0)
+
+# No schedule, no session: the call is refused, never given a guess.
+try:
+    first_hour.eval(data, bar_stamp="close")
+except rb.errors.RaptorBTError as err:
+    assert err.code == "missing_field" and err.parameter == "session"
+```
+
 Many names at once. A cross-sectional function (`rank`, `zscore_xs`, `demean_xs`, `winsorize_xs`,
 `quantile_xs`, `count_xs`, and `group_rank`, `group_zscore`, `group_demean`) compares the names
 of each date, so the expression has a value only over a panel and is evaluated with `eval_panel`:
@@ -516,6 +565,29 @@ the base clock.
 - *Cost.* A step is one window push and, once a window completes, one step of the inner stream,
   with no allocation of its own. With a session the window builder allocates per bar, as the
   runtime's does.
+
+**The session functions.** `session_bar()` and the functions built on it (`session_open`,
+`session_high`, `session_low`, `session_volume`, `session_vwap`, `session_return`,
+`session_first(x, n)`, `session_gap`) run on the same clock inputs as `at` and are refused
+without them: timestamps (`missing_field`), `bar_stamp` (`missing_bar_stamp`) and a
+`raptorbt.SessionSchedule` (`missing_field`, parameter `session`); in `ctx.indicators.expr` the
+instrument's own schedule is used, and an instrument with none is refused.
+
+- *Which bars.* A bar belongs to the session of its date when the schedule is open at it
+  (`open <= t < close`, a close-stamped bar by the last nanosecond it covers); other bars (a
+  closed day, a holiday, outside the windows) have no index and every session function is NaN
+  there. A per-date override (`with_session_override`) makes a Muhurat or half-day session.
+- *The first bar.* The first bar a stream sees of a date is bar 0. A live node that starts after
+  the open should be given the session's bars (warm-up or replay), or it will call its first bar
+  the session's first.
+- *Warm-up.* `session_first(x, n)` is unknown for the first `n - 1` bars of a session;
+  `session_gap` is unknown in the first session a stream sees, longer than its warm-up says.
+- *Where not.* Inside `at(...)` (the window has no timestamps of its own) and over a panel the
+  session functions are `expr_unsupported_here`; `at(...)` inside their arguments is fine.
+- *Not covered.* Bars on a date a schedule does not cover (the MCX preset before 2024-11-04, a
+  schedule built from calendar documents) raise `session_not_covered` in `eval`, `sweep`, `stream`
+  and every runner, as for `at`; they are never read as a closed day.
+- *Cost.* One date comparison per bar, no allocation.
 
 **Panels.** A panel is a 2-D array, dates by names, NaN where a value is unknown.
 

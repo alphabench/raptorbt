@@ -23,7 +23,9 @@ _PREFERRED = ("close", "high", "low", "open", "volume")
 def registry():
     from raptorbt import expressions
 
-    return [expressions.describe(r["name"]) for r in expressions.functions()]
+    # The session family reads the bars' clock and a schedule, not a column: its hand tests are
+    # fns::session::tests and tests/python/test_expr_session.py.
+    return [expressions.describe(r["name"]) for r in expressions.functions() if r["family"] != "session"]
 
 
 def talib_names(fn):

@@ -2,7 +2,7 @@
 
 # Expression functions
 
-215 functions in 10 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
+224 functions in 11 families, sorted by family and name. Call them in text (`sma(close, 20)`) or as `raptorbt.col` methods (`raptorbt.col.close.sma(20)`). An input left out reads its default field.
 
 ## candles
 
@@ -2719,6 +2719,116 @@ Biased (population) skewness of the last `period` values: m3 / m2^1.5. NaN for a
 - memory: finite: it forgets any bar after its window
 - invariance: scale_invariant, shift_invariant
 - revision: 2 (a change to the numbers raises it, and the program hash with it)
+
+## session
+
+### `session_bar([session_bar])`
+
+0-based index of the bar within its trading session, as the instrument's schedule cuts it; NaN on a bar outside every session (a closed day, a holiday, outside the windows). Needs the bar timestamps, the bar stamp and a session schedule, as `at` does, and is refused without them. The first bar a stream sees of a date is bar 0.
+
+- inputs: `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_first(x, [session_bar], n)`
+
+`x` at the session's n-th bar (n = 1 is the first), held until the session ends and NaN before that bar: `session_first(session_return(), 4)` at 15-minute bars is the first hour's return, known from the fourth bar of the day. Reads no later bar.
+
+- inputs: `x`, `session_bar` (default `session_bar`)
+- parameters: `n`: int in [1, 1048576], required
+- outputs: `value` (numeric)
+- warm-up: set by the parameters; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_gap([open], [close], [session_bar])`
+
+Today's first open over the previous session's last known close, minus 1, held for the session. NaN in the first session a stream sees, so it may stay unknown longer than its warm-up.
+
+- inputs: `open` (default `open`), `close` (default `close`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_high([high], [session_bar])`
+
+The highest high so far in the session, this bar included. A NaN high gives NaN at its bar and leaves the extreme alone.
+
+- inputs: `high` (default `high`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_low([low], [session_bar])`
+
+The lowest low so far in the session, this bar included. A NaN low gives NaN at its bar and leaves the extreme alone.
+
+- inputs: `low` (default `low`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_open([open], [session_bar])`
+
+The session's first open, held for the whole session. NaN before the session's first bar was seen.
+
+- inputs: `open` (default `open`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_equivariant, shift_equivariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_return([open], [close], [session_bar])`
+
+The close over the session's first open, minus 1.
+
+- inputs: `open` (default `open`), `close` (default `close`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: scale_invariant
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_volume([volume], [session_bar])`
+
+Volume summed over the session so far, this bar included.
+
+- inputs: `volume` (default `volume`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
+
+### `session_vwap([high], [low], [close], [volume], [session_bar])`
+
+Volume-weighted average of the typical price (high + low + close) / 3 over the session so far, this bar included. NaN while the session's volume is zero.
+
+- inputs: `high` (default `high`), `low` (default `low`), `close` (default `close`), `volume` (default `volume`), `session_bar` (default `session_bar`)
+- parameters: none
+- outputs: `value` (numeric)
+- warm-up: 0 bars at the defaults; the first known value is at that index on clean data
+- memory: finite: it forgets any bar after its window
+- invariance: none
+- revision: 1 (a change to the numbers raises it, and the program hash with it)
 
 ## vol_price
 

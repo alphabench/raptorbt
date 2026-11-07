@@ -205,6 +205,9 @@ pub enum EvalError {
     NoTimestamps,
     /// The program uses `at(...)` and no bar stamp (and zone) was bound to it.
     NoClock,
+    /// The program uses the session functions and the clock has no session schedule: a session
+    /// is the instrument's schedule, and none is guessed.
+    NoSession,
     /// The kernels' state would exceed [`STATE_LIMIT_BYTES`]: a period that is long for the
     /// data. `bytes` is what the kernels built so far held when the limit was crossed.
     State {
@@ -251,6 +254,11 @@ impl fmt::Display for EvalError {
                 "the expression's windows hold {bytes} bytes, over the {limit}-byte limit on one \
                  evaluation: use shorter periods"
             ),
+            EvalError::NoSession => write!(
+                f,
+                "the program uses the session functions, which need the instrument's session \
+                 schedule (a raptorbt.SessionSchedule); none was given"
+            ),
             EvalError::Timeframe { tf, base_ns, valid } => write!(
                 f,
                 "at(\"{tf}\") must be a coarser exact multiple of the {base_ns} ns base bars; \
@@ -293,9 +301,14 @@ impl ClockCtx {
         }
     }
 
-    /// Only for measuring a stream's size: UTC, close-stamped, no session.
+    /// Only for measuring a stream's size: UTC, close-stamped, and a stand-in schedule so a
+    /// program with session functions can be built (the clock holds no heap of its own).
     pub(crate) fn probe() -> Self {
-        Self::new(0, BarStamp::Close, None)
+        Self::new(
+            0,
+            BarStamp::Close,
+            Some(crate::core::session_schedule::SessionSchedule::nse_equity()),
+        )
     }
 
     /// The text of what decides the numbers, for the bound hash: the zone, the stamp and the
@@ -361,7 +374,7 @@ impl<'a> Inputs<'a> {
         plan: &Plan,
         n: usize,
     ) -> Result<Option<(&'a [i64], &ClockCtx)>, EvalError> {
-        if plan.d.ats.is_empty() {
+        if !plan.has_at() {
             return Ok(None);
         }
         let ts = self.timestamps.ok_or(EvalError::NoTimestamps)?;
@@ -376,8 +389,8 @@ impl<'a> Inputs<'a> {
         Ok(Some((ts, clock)))
     }
 
-    /// The length and the plan's input columns in the plan's order.
-    fn resolve(&self, plan: &Plan) -> Result<(usize, Vec<&'a [f64]>), EvalError> {
+    /// The number of bars, from the columns supplied: they must be one length.
+    fn rows(&self) -> Result<usize, EvalError> {
         let supplied: Vec<(&str, &'a [f64])> = Field::ALL
             .iter()
             .zip(&self.fields)
@@ -395,11 +408,36 @@ impl<'a> Inputs<'a> {
                 got: c.len(),
             });
         }
+        Ok(n)
+    }
+
+    /// The session index of every bar, when the plan reads the session clock: from the
+    /// timestamps and the clock's schedule, so a plan without them is refused.
+    fn session_column(&self, plan: &Plan, n: usize) -> Result<Option<Vec<f64>>, EvalError> {
+        if !plan.d.inputs.iter().any(|s| matches!(s, Source::SessionBar)) {
+            return Ok(None);
+        }
+        let (ts, clock) = self.at_inputs(plan, n)?.ok_or(EvalError::NoTimestamps)?;
+        Ok(Some(crate::quant::fns::session::session_column(ts, clock)?))
+    }
+
+    /// The length and the plan's input columns in the plan's order; `session` is the session
+    /// clock's column when the plan reads it ([`Inputs::session_column`]).
+    fn resolve<'s>(
+        &self,
+        plan: &Plan,
+        session: Option<&'s [f64]>,
+    ) -> Result<(usize, Vec<&'s [f64]>), EvalError>
+    where
+        'a: 's,
+    {
+        let n = self.rows()?;
         let cols = plan
             .d
             .inputs
             .iter()
             .map(|s| match s {
+                Source::SessionBar => session.ok_or(EvalError::NoTimestamps),
                 Source::Field(f) => {
                     self.fields[*f as usize].ok_or(EvalError::MissingField(f.name()))
                 }
@@ -460,6 +498,8 @@ pub(crate) enum Source {
     Field(Field),
     /// Index into the plan's handle names.
     Handle(usize),
+    /// The session clock: the index of the bar within its session, from the timestamps.
+    SessionBar,
 }
 
 #[derive(Debug)]
@@ -693,6 +733,10 @@ impl Plan {
                         node: n_calls - 1,
                     }
                 }
+                Op::SessionBar => {
+                    inputs.push(Source::SessionBar);
+                    Step::Load { dst, input: inputs.len() - 1 }
+                }
                 Op::Out { .. } | Op::At { .. } => continue,
             });
         }
@@ -740,7 +784,7 @@ impl Plan {
 
     /// Whether the plan runs an `at(...)`, so it needs timestamps and a [`ClockCtx`].
     pub fn has_at(&self) -> bool {
-        !self.d.ats.is_empty()
+        !self.d.ats.is_empty() || self.d.inputs.iter().any(|s| matches!(s, Source::SessionBar))
     }
 
     /// Number of output columns.

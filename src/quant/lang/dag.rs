@@ -120,6 +120,10 @@ pub enum Op {
         spec: BarSpec,
         body: Arc<Program>,
     },
+    /// `session_bar()`: the 0-based index of the bar within its trading session, NaN outside
+    /// one. The only leaf that reads the bars' timestamps and the instrument's schedule; every
+    /// other session function is a kernel of it.
+    SessionBar,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +211,7 @@ fn digest_of(op: &Op, nodes: &[Node]) -> [u8; 32] {
             h.update([0]);
             h.update(body.dag.node(body.root).digest);
         }
+        Op::SessionBar => h.update([9]),
     }
     h.finalize().into()
 }
@@ -250,6 +255,11 @@ impl Dag {
 
     pub fn field(&mut self, f: Field) -> NodeId {
         self.intern(Op::Field(f), Ty::series(), 0)
+    }
+
+    /// The session clock leaf: a series on the base clock.
+    pub fn session_bar(&mut self) -> NodeId {
+        self.intern(Op::SessionBar, Ty::series(), 0)
     }
 
     pub fn handle(&mut self, name: &str, ty: Ty, warm: usize) -> NodeId {
@@ -303,7 +313,7 @@ impl Dag {
         let mut s = vec![0usize; id + 1];
         for (i, n) in self.nodes.iter().enumerate().take(id + 1) {
             s[i] = match &n.op {
-                Op::Const(_) | Op::Field(_) => 0,
+                Op::Const(_) | Op::Field(_) | Op::SessionBar => 0,
                 Op::Handle(_) => n.warm,
                 Op::Unary(_, x) => s[*x],
                 Op::Binary(_, a, b) => s[*a].max(s[*b]),
@@ -341,6 +351,9 @@ impl Dag {
                     m.insert("at", crate::quant::fns::at::REV);
                     body.dag.collect_revs(m);
                 }
+                Op::SessionBar => {
+                    m.insert("session_bar", crate::quant::fns::session::REV);
+                }
                 _ => {}
             }
         }
@@ -356,7 +369,7 @@ impl Dag {
         let mut w = vec![0usize; id + 1];
         for (i, n) in self.nodes.iter().enumerate().take(id + 1) {
             w[i] = match &n.op {
-                Op::Const(_) | Op::Field(_) => 0,
+                Op::Const(_) | Op::Field(_) | Op::SessionBar => 0,
                 Op::Handle(_) => n.warm,
                 Op::Unary(_, x) => w[*x],
                 Op::Binary(_, a, b) => w[*a].max(w[*b]),

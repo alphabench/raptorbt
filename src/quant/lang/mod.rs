@@ -161,8 +161,15 @@ impl Program {
         self.dag.node(self.root).warm
     }
 
-    /// Whether the program calls `at`, so it needs timestamps, a bar stamp and a zone to run.
+    /// Whether the program calls `at` or reads the session clock (`session_bar()` and the
+    /// functions built on it), so it needs timestamps, a bar stamp and a zone to run (and a
+    /// schedule, for the session clock).
     pub fn has_at(&self) -> bool {
+        self.dag.nodes().iter().any(|n| matches!(n.op, Op::At { .. } | Op::SessionBar))
+    }
+
+    /// Whether the program calls `at`: its warm-up in base bars then depends on the bar width.
+    pub fn has_at_node(&self) -> bool {
         self.dag.nodes().iter().any(|n| matches!(n.op, Op::At { .. }))
     }
 
@@ -204,7 +211,7 @@ impl Program {
     /// costs at most `(warmup + 1) * ceil(w / base_ns)` bars. A month or a year has no fixed
     /// width, and without `base_ns` there is nothing to divide by: none then.
     pub fn warmup_bars(&self, base_ns: Option<i64>) -> Option<usize> {
-        if !self.has_at() {
+        if !self.has_at_node() {
             return Some(self.warmup());
         }
         let base = base_ns.filter(|b| *b > 0)?;

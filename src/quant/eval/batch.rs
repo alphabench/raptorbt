@@ -98,7 +98,9 @@ fn slot_of(plan: &Plan, reg: usize) -> usize {
 /// warm-up gives all-NaN outputs. No column at all, a column the program reads that is missing,
 /// or columns of different lengths are typed errors.
 pub fn eval(plan: &Plan, inputs: &Inputs) -> Result<Columns, EvalError> {
-    let (n, cols) = inputs.resolve(plan)?;
+    let n = inputs.rows()?;
+    let session = inputs.session_column(plan, n)?;
+    let (n, cols) = inputs.resolve(plan, session.as_deref())?;
     let at_inputs = inputs.at_inputs(plan, n)?;
     let d = &*plan.d;
     let mut nodes = d.instantiate()?;

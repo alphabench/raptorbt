@@ -260,6 +260,15 @@ from the function registry. A call with several outputs is selected by attribute
 | `rsi(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``rsi([x], period, compat='native')`` with this expression as the first input. |
 | `sar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sar([high], [low], acceleration=0.02, maximum=0.2)`` with this expression as the first input. |
 | `sarext(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sarext([high], [low], startvalue=0.0, offsetonreverse=0.0, accelerationinitlong=0.02, accelerationlong=0.02, accelerationmaxlong=0.2, accelerationinitshort=0.02, accelerationshort=0.02, accelerationmaxshort=0.2)`` with this expression as the first input. |
+| `session_bar(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_bar([session_bar])`` with this expression as the first input. |
+| `session_first(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_first(x, [session_bar], n)`` with this expression as the first input. |
+| `session_gap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_gap([open], [close], [session_bar])`` with this expression as the first input. |
+| `session_high(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_high([high], [session_bar])`` with this expression as the first input. |
+| `session_low(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_low([low], [session_bar])`` with this expression as the first input. |
+| `session_open(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_open([open], [session_bar])`` with this expression as the first input. |
+| `session_return(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_return([open], [close], [session_bar])`` with this expression as the first input. |
+| `session_volume(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_volume([volume], [session_bar])`` with this expression as the first input. |
+| `session_vwap(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``session_vwap([high], [low], [close], [volume], [session_bar])`` with this expression as the first input. |
 | `settle(self, eps: 'float') -> 'int'` | Bars until functions with infinite memory (``ema``) have forgotten their seed to within ``eps``, a number in (0, 1). Equals :attr:`warmup` when there are none. |
 | `shift(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``shift([x], k=1)`` with this expression as the first input. |
 | `sign(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``sign([x])`` with this expression as the first input. |
@@ -291,7 +300,7 @@ from the function registry. A call with several outputs is selected by attribute
 | `tsf(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``tsf([x], period=14)`` with this expression as the first input. |
 | `typprice(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``typprice([high], [low], [close])`` with this expression as the first input. |
 | `ultosc(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``ultosc([high], [low], [close], timeperiod1=7, timeperiod2=14, timeperiod3=28)`` with this expression as the first input. |
-| `uses_at` | True when the expression uses ``at(...)``: evaluating it needs timestamps. |
+| `uses_at` | True when the expression reads the bars' clock, ``at(...)`` or a session function (``session_open()``): evaluating it needs timestamps, ``bar_stamp`` and, for the session functions, a ``session`` schedule. |
 | `var(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``var([x], period=5)`` with this expression as the first input. |
 | `vol_close(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_close([close], period)`` with this expression as the first input. |
 | `vol_garman_klass(self: 'Expr', *args: 'Any', **kwargs: 'Any') -> 'Expr'` | ``vol_garman_klass([open], [high], [low], [close], period)`` with this expression as the first input. |

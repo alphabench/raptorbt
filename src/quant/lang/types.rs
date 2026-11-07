@@ -18,6 +18,7 @@ use super::dag::{BinOp, Dag, Field, NodeId, UnOp};
 use super::parser::{Expr, ExprKind};
 use super::{canon, suggest, ErrorCode, ExprError, Program, MAX_PERIOD};
 use crate::quant::fns::at as at_fn;
+use crate::quant::fns::session as session_fn;
 use crate::quant::registry::{self, Family, FnDef, OutKind, ParamDef, ParamKind, ParamVal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -295,6 +296,19 @@ impl Checker<'_> {
         if name == "at" {
             return self.at_call(e, args).and_then(plain);
         }
+        // The session clock itself: `session_bar()` with no argument is the leaf; with one it is
+        // the registry's pass-through of that series.
+        if name == session_fn::CLOCK_INPUT && args.is_empty() {
+            return self.session_clock(e).and_then(plain);
+        }
+        // `session_bar(session_bar())` is the clock again, so a builder that spells out the
+        // defaulted input means what the bare call means.
+        if name == session_fn::CLOCK_INPUT && args.len() == 1 {
+            let id = self.value(&args[0])?;
+            if matches!(self.dag.node(id).op, super::dag::Op::SessionBar) {
+                return plain(id);
+            }
+        }
         let Some(def) = registry::lookup(name) else {
             return Err(self
                 .err(ErrorCode::UnknownFunction, e.start, format!("unknown function `{name}`"))
@@ -343,6 +357,8 @@ impl Checker<'_> {
                     ));
                 }
                 inputs.push(id);
+            } else if inp.default_field == Some(session_fn::CLOCK_INPUT) {
+                inputs.push(self.session_clock(e)?);
             } else if let Some(f) = inp.default_field.and_then(Field::from_name) {
                 inputs.push(self.dag.field(f));
             } else {
@@ -397,6 +413,20 @@ impl Checker<'_> {
         ty.elem = if def.out_kind == OutKind::Bool { Elem::Bool } else { Elem::F64 };
         let id = self.dag.call(def, params, inputs, ty);
         Ok(Checked { id, call: Some(def) })
+    }
+
+    /// The session clock leaf. An `at(...)` window has no timestamps of its own, so the session
+    /// is not defined there.
+    fn session_clock(&mut self, e: &Expr) -> Result<NodeId, ExprError> {
+        if self.in_at {
+            return Err(self.err(
+                ErrorCode::UnsupportedHere,
+                e.start,
+                "the session functions read the base bars' timestamps and the instrument's \
+                 schedule, and an `at(...)` window has neither: use them outside `at`",
+            ));
+        }
+        Ok(self.dag.session_bar())
     }
 
     /// `at("1d", body)`: see the module doc.

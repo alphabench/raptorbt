@@ -432,6 +432,8 @@ def test_every_method_builds_what_the_text_form_parses():
             # a boolean input is fed a comparison; any other reads its default field or close
             if i.get("elem") == "bool":
                 return "(close > open)", c > rb.col.open
+            if i["default_field"] == "session_bar":
+                return "session_bar()", rb.col.session_bar()
             f = i["default_field"] or "close"
             return f, getattr(rb.col, f)
 
@@ -443,7 +445,7 @@ def test_every_method_builds_what_the_text_form_parses():
         assert built.canonical == rb.expr(text).canonical, name
         assert built.hash == rb.expr(text).hash, name
         if all(i["default_field"] for i in ins):
-            defaults = [i["default_field"] for i in ins]
+            defaults = ["session_bar()" if i["default_field"] == "session_bar" else i["default_field"] for i in ins]
             via_col = getattr(rb.col, name)(*args)
             assert via_col.canonical == rb.expr(f"{name}({', '.join([*defaults, *map(literal, args)])})").canonical
 

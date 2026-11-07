@@ -241,7 +241,8 @@ def test_an_expression_over_every_function_still_fits_and_says_what_it_left_out(
     for f in expressions.functions():
         text = expressions.describe(f["name"])["example"]
         e = expressions.expr(text)
-        if e.kinds == ("number",) and len(e.outputs) == 1 and not e.is_panel:
+        # a session function reads the bars' clock, which a bare session does not have
+        if e.kinds == ("number",) and len(e.outputs) == 1 and not e.is_panel and not e.uses_at:
             parts.append(f"({text})")
     assert len(parts) > 100
 
@@ -689,6 +690,8 @@ def test_every_function_has_an_example_that_compiles_and_runs():
         text = expressions.describe(f["name"])["example"]
         try:
             e = expressions.expr(text)
+            if e.uses_at:
+                continue  # needs timestamps and a schedule: tests/python/test_expr_session.py
             out = e.eval_panel({k: np.column_stack([v] * 3) for k, v in d.items() if k != "timestamps"}) if e.is_panel else e.eval(d)
             first = next(iter(out.values())) if isinstance(out, dict) else out
             assert len(first) == 400

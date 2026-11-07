@@ -19,6 +19,7 @@ pub enum Family {
     Quant,
     Cross,
     At,
+    Session,
 }
 
 impl Family {
@@ -35,6 +36,7 @@ impl Family {
             Family::Quant => "quant",
             Family::Cross => "cross",
             Family::At => "at",
+            Family::Session => "session",
         }
     }
 }
@@ -260,7 +262,7 @@ pub struct FnDef {
 }
 
 /// Every table, one per family.
-pub fn tables() -> [&'static [FnDef]; 11] {
+pub fn tables() -> [&'static [FnDef]; 12] {
     [
         fns::math::DEFS,
         fns::rolling::DEFS,
@@ -273,6 +275,7 @@ pub fn tables() -> [&'static [FnDef]; 11] {
         fns::quant::DEFS,
         fns::cross::DEFS,
         fns::at::DEFS,
+        fns::session::DEFS,
     ]
 }
 

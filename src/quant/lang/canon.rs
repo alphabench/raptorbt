@@ -33,7 +33,8 @@ fn shape(dag: &Dag, id: NodeId) -> (u8, u8, u8) {
         | Op::Handle(_)
         | Op::Call { .. }
         | Op::Out { .. }
-        | Op::At { .. } => (ATOM, 0, 0),
+        | Op::At { .. }
+        | Op::SessionBar => (ATOM, 0, 0),
         Op::Unary(UnOp::Neg, _) => (UNARY, UNARY, 0),
         Op::Unary(UnOp::Not, _) => (NOT, NOT, 0),
         Op::Binary(op, _, _) => match op {
@@ -102,6 +103,7 @@ fn print(dag: &Dag, id: NodeId, min: u8, out: &mut String) {
             }
             out.push(')');
         }
+        Op::SessionBar => out.push_str("session_bar()"),
         Op::At { spec, body } => {
             out.push_str("at(\"");
             out.push_str(&crate::quant::fns::at::timeframe_text(*spec));

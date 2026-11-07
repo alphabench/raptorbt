@@ -6,6 +6,7 @@
 
 use super::{ops, Bar, ClockCtx, EvalError, Plan, Source, Step};
 use crate::quant::fns::at::AtState;
+use crate::quant::fns::session::SessionClock;
 use crate::quant::kernel::{Node, Regs};
 
 pub struct Stream {
@@ -14,6 +15,8 @@ pub struct Stream {
     nodes: Vec<Box<dyn Node>>,
     /// The program's `at(...)` states and the clock they were cut by.
     ats: Vec<AtState>,
+    /// The session clock, when the program reads it (`session_bar()` and what is built on it).
+    session: Option<SessionClock>,
     clock: Option<ClockCtx>,
     out: Vec<f64>,
     bars: usize,
@@ -40,17 +43,30 @@ impl Stream {
             Some(c) => plan.d.instantiate_ats(c)?,
             None => Vec::new(),
         };
+        let session = Self::session_for(plan, clock.as_ref())?;
         let mut s = Stream {
             plan: plan.clone(),
             regs: Regs::new(plan.d.n_regs),
             nodes: plan.d.instantiate()?,
             ats,
+            session,
             clock,
             out: vec![f64::NAN; plan.d.out_regs.len()],
             bars: 0,
         };
         s.seed_constants();
         Ok(s)
+    }
+
+    /// A fresh session clock for a plan that reads it; refused without a schedule.
+    fn session_for(
+        plan: &Plan,
+        clock: Option<&ClockCtx>,
+    ) -> Result<Option<SessionClock>, EvalError> {
+        if !plan.d.inputs.iter().any(|s| matches!(s, Source::SessionBar)) {
+            return Ok(None);
+        }
+        SessionClock::new(clock.ok_or(EvalError::NoClock)?).map(Some)
     }
 
     /// Constants are written once; no step overwrites their registers.
@@ -75,6 +91,7 @@ impl Stream {
         if let Some(clock) = &self.clock {
             self.ats = self.plan.d.instantiate_ats(clock)?;
         }
+        self.session = Self::session_for(&self.plan, self.clock.as_ref())?;
         self.out.fill(f64::NAN);
         self.bars = 0;
         self.seed_constants();
@@ -90,6 +107,7 @@ impl Stream {
             + self.nodes.iter().map(|n| n.state_bytes()).sum::<usize>()
             + self.ats.capacity() * std::mem::size_of::<AtState>()
             + self.ats.iter().map(|a| a.state_bytes()).sum::<usize>()
+            + self.session.as_ref().map_or(0, SessionClock::state_bytes)
     }
 
     /// Bars consumed so far.
@@ -130,6 +148,10 @@ impl Stream {
                     let v = match d.inputs[*input] {
                         Source::Field(f) => bar.get(f),
                         Source::Handle(k) => handles[k],
+                        Source::SessionBar => {
+                            let ts = ts.ok_or(EvalError::NoTimestamps)?;
+                            self.session.as_mut().map_or(f64::NAN, |c| c.step(ts))
+                        }
                     };
                     self.regs.set(*dst, v);
                 }

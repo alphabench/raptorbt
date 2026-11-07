@@ -149,6 +149,48 @@ fn an_at_expression_allocates_nothing_after_construction() {
     assert!(stream.ready() && known > 0, "the stream never produced a value");
 }
 
+/// The session functions step their clock and kernels without allocating, a session schedule
+/// bound, on emission-free bars of several dates. They are not in the registry-driven checks
+/// above, which have no clock to give them.
+#[test]
+fn a_session_expression_allocates_nothing_after_construction() {
+    use raptorbt::core::session_schedule::SessionSchedule;
+    const MIN: i64 = 60_000_000_000;
+    const DAY: i64 = 86_400_000_000_000;
+    let program = compile(
+        "session_vwap() + session_high() - session_low() + session_first(session_return(), 4) \
+         + session_gap() + session_volume() + session_open() + session_bar()",
+        &Env::default(),
+    )
+    .unwrap();
+    let plan = Plan::new(&program).unwrap();
+    let clock = ClockCtx::new(0, BarStamp::Close, Some(SessionSchedule::nse_equity()));
+    let before = live();
+    let mut stream = Stream::bound(&plan, clock).unwrap();
+    let built = (live() - before) as usize;
+    assert!(
+        built <= stream.state_bytes() + std::mem::size_of::<Stream>(),
+        "the stream holds {built} bytes, the report says {}",
+        stream.state_bytes()
+    );
+    let start = allocs();
+    let mut known = 0usize;
+    // Eight weekdays from Monday 2024-01-08 of 25 close-stamped fifteen-minute bars.
+    for d in 0..8i64 {
+        for k in 0..25i64 {
+            let c = 100.0 + ((d * 25 + k) as f64 * 0.3).sin() * 4.0;
+            let bar = Bar { open: c - 0.2, high: c + 0.6, low: c - 0.6, close: c, volume: 50.0 };
+            let ts = (19_730 + d) * DAY + (225 + 15 * (k + 1)) * MIN;
+            if !stream.update_at(ts, &bar, &[]).unwrap()[0].is_nan() {
+                known += 1;
+            }
+        }
+    }
+    let used = allocs() - start;
+    assert_eq!(used, 0, "{used} allocations over 200 bars");
+    assert!(known > 0, "the stream never produced a value");
+}
+
 /// A call of `def` with its inputs on the default fields and every parameter given: a default
 /// where there is one, else `pick` clamped into the parameter's range.
 fn call_of(def: &FnDef, pick: i64) -> String {
@@ -284,6 +326,10 @@ fn every_registered_function_updates_without_allocating() {
     let unit = rough_bars(4200, true);
     let (mut checked, mut failures) = (0usize, Vec::new());
     for def in all() {
+        // The session family reads the bars' clock and a schedule: its own check, above.
+        if def.family == Family::Session {
+            continue;
+        }
         // A cross-sectional function runs on a universe: its own check, below.
         if def.family == Family::Cross {
             match panel_case(def) {
@@ -330,7 +376,7 @@ fn every_registered_function_reports_the_heap_it_holds() {
     for def in all() {
         // Its cells are one per member of a shared panel run, whose heap the bank adds up as a
         // whole (`IndicatorBank::heap_bytes`); a cell here would measure a stream it lacks.
-        if def.family == Family::Cross {
+        if def.family == Family::Cross || def.family == Family::Session {
             continue;
         }
         let (src, program, plan) = match plan_of(def) {

@@ -131,7 +131,7 @@ impl PanelPlan {
 
 fn node_inputs(op: &Op) -> Vec<NodeId> {
     match op {
-        Op::Const(_) | Op::Field(_) | Op::Handle(_) | Op::At { .. } => Vec::new(),
+        Op::Const(_) | Op::Field(_) | Op::Handle(_) | Op::At { .. } | Op::SessionBar => Vec::new(),
         Op::Unary(_, x) => vec![*x],
         Op::Binary(_, a, b) => vec![*a, *b],
         Op::Call { inputs, .. } => inputs.clone(),
@@ -196,6 +196,7 @@ impl Cutter<'_> {
                 self.dag.out(c, *index)
             }
             Op::At { spec, body } => self.dag.at(*spec, body.clone(), ty),
+            Op::SessionBar => self.dag.session_bar(),
         };
         self.map.insert(x, id);
         id
@@ -207,6 +208,13 @@ impl PanelPlan {
     /// phase (every name run on its own).
     pub fn new(program: &Program) -> Result<PanelPlan, EvalError> {
         let nodes = program.dag.nodes();
+        if nodes.iter().any(|n| matches!(n.op, Op::SessionBar)) {
+            return Err(EvalError::Unsupported(
+                "the session functions read one instrument's bars and its schedule; they are not \
+                 defined over a panel"
+                    .to_string(),
+            ));
+        }
         let n = nodes.len();
         let is_cross =
             |i: NodeId| matches!(&nodes[i].op, Op::Call { def, .. } if def.family == Family::Cross);

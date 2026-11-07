@@ -232,6 +232,8 @@ def _example(row: dict[str, Any]) -> str:
             parts.append("(close > open)")
         elif row["domain"] == "unit":
             parts.append("(rsi(close, 5) / 100)")
+        elif i["default_field"] == "session_bar":
+            parts.append("session_bar()")
         else:
             parts.append(i["default_field"] or next(spare))
     for p in row["params"]:
@@ -264,7 +266,7 @@ def _refuse(code: str, message: str, *, operation: str, **detail: Any) -> errors
 
 # Text, not the compiled program (a $name may be unbound). A false positive, such as an
 # identifier ending in `at(`, only runs the coverage check once more.
-_AT_CALL = re.compile(r"\bat\s*\(")
+_AT_CALL = re.compile(r"\b(?:at|session_[a-z]+)\s*\(")
 
 
 def _covered(session: Any, uses_at: bool, timestamps: Any, operation: str):
@@ -464,7 +466,9 @@ class Expr:
 
     @property
     def uses_at(self) -> bool:
-        """True when the expression uses ``at(...)``: evaluating it needs timestamps."""
+        """True when the expression reads the bars' clock, ``at(...)`` or a session function
+        (``session_open()``): evaluating it needs timestamps, ``bar_stamp`` and, for the
+        session functions, a ``session`` schedule."""
         return self._prog.uses_at
 
     def bound_hash(self, bar_stamp: str | None = None, tz_offset_ns: int = 0, session: Any = None) -> str:
@@ -981,6 +985,8 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
     name, ins, prm = row["name"], row["inputs"], row["params"]
     op = name
     pos = [*lead, *args]
+    if name == "session_bar" and not pos and not kwargs:
+        return Expr("session_bar()", _atom=True)
     k = 0
     while k < len(pos) and k < len(ins) and isinstance(pos[k], Expr):
         k += 1
@@ -1028,6 +1034,9 @@ def _call(row: dict[str, Any], lead: tuple[Any, ...], args: tuple[Any, ...], kwa
             parts.append(v._src)
             params = _merge(params, v._params, op)
             groups += v._groups
+        elif inp["default_field"] == "session_bar":
+            # The session clock is a call, not a column: `session_bar()` is the leaf.
+            parts.append("session_bar()")
         elif inp["default_field"]:
             parts.append(inp["default_field"])
         else:

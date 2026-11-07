@@ -54,6 +54,7 @@ pub(crate) fn eval_fail(operation: &str, e: EvalError) -> PyErr {
         EvalError::State { .. } => Fail::new("expr_unsupported_here", text).param("expression"),
         EvalError::NoTimestamps => Fail::new("missing_field", text).param("timestamps"),
         EvalError::NoClock => Fail::new("missing_bar_stamp", text).param("bar_stamp"),
+        EvalError::NoSession => Fail::new("missing_field", text).param("session"),
         EvalError::Timeframe { valid, .. } => {
             Fail::new("expr_type", text).param("expression").valid(valid)
         }
@@ -255,7 +256,7 @@ impl PyExprProgram {
     /// `warmup_by_clock` and `warmup_bars`.
     #[getter]
     fn warmup(&self) -> Option<usize> {
-        (!self.program.has_at()).then(|| self.program.warmup())
+        (!self.program.has_at_node()).then(|| self.program.warmup())
     }
 
     /// Warm-up per clock: the base clock's, then each `at(...)` timeframe's in bars of that
@@ -822,7 +823,8 @@ pub fn factor_report_native<'py>(
         return Err(shape_fail(OP, "prices", prices.shape(), (n, m)));
     }
     let (f, p) = (panel_cow(&factor), panel_cow(&prices));
-    let params = FactorParams { horizons, quantiles, lag, min_names, jump_ratio, cost_bps_per_side };
+    let params =
+        FactorParams { horizons, quantiles, lag, min_names, jump_ratio, cost_bps_per_side };
     let r = py.detach(|| factor_report(&f, &p, n, m, &params)).map_err(|e| {
         let fail = Fail::new(e.code(), e.to_string()).op(OP);
         PyErr::from(match &e {

@@ -9,5 +9,6 @@ pub mod momentum;
 pub mod overlap;
 pub mod quant;
 pub mod rolling;
+pub mod session;
 pub mod vol_price;
 pub mod volume;
