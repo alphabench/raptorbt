@@ -219,6 +219,7 @@ fn _raptorbt(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     indicator!(python::bindings::bollinger_bands);
     indicator!(python::bindings::adx);
     indicator!(python::bindings::vwap);
+    indicator!(python::bindings::vwap_session);
     indicator!(python::bindings::supertrend);
     indicator!(python::bindings::rolling_min);
     indicator!(python::bindings::rolling_max);

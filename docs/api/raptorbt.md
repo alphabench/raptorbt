@@ -94,6 +94,7 @@ production quantitative trading:
 | [`BollingerBands`](#bollingerbands) | class | Bollinger bands in one order, ``(upper, middle, lower)``, by name or position. |
 | [`adx`](#adx) | function | Average Directional Index. |
 | [`vwap`](#vwap) | function | Volume Weighted Average Price. |
+| [`vwap_session`](#vwap_session) | function | Volume Weighted Average Price that restarts where `session_starts` is true. |
 | [`supertrend`](#supertrend) | function | Supertrend indicator. |
 | [`rolling_min`](#rolling_min) | function | Rolling minimum (Lowest Low Value). |
 | [`rolling_max`](#rolling_max) | function | Rolling maximum (Highest High Value). |
@@ -2840,6 +2841,16 @@ vwap(high, low, close, volume)
 ```
 
 Volume Weighted Average Price.
+
+### `vwap_session`
+
+*function*
+
+```python
+vwap_session(high, low, close, volume, session_starts)
+```
+
+Volume Weighted Average Price that restarts where `session_starts` is true.
 
 ### `winsorize_panel`
 

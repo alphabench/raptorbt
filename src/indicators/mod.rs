@@ -21,4 +21,4 @@ pub use tick_features::{
 };
 pub use trend::{ema, sma, supertrend, SupertrendResult};
 pub use volatility::{atr, bollinger_bands, BollingerBandsResult};
-pub use volume::{obv, vwap};
+pub use volume::{obv, vwap, vwap_session};

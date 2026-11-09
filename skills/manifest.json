@@ -259,6 +259,7 @@
         "raptorbt.bollinger_bands",
         "raptorbt.adx",
         "raptorbt.vwap",
+        "raptorbt.vwap_session",
         "raptorbt.supertrend",
         "raptorbt.rolling_min",
         "raptorbt.rolling_max",

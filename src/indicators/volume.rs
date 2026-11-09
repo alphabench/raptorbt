@@ -289,6 +289,53 @@ mod tests {
         assert!(result[4] >= 50.0 && result[4] <= 54.0);
     }
 
+    /// Two sessions of three bars; typical price tp = (h + l + c) / 3, all exact in binary.
+    /// Session 1 (start at 0): tp 11, 12, 13 with volume 10, 30, 10.
+    ///   bar 0: 110 / 10 = 11; bar 1: (110 + 360) / 40 = 11.75; bar 2: (470 + 130) / 50 = 12.
+    /// Session 2 (start at 3, sums reset): tp 20, 21, 30 with volume 0, 5, 15.
+    ///   bar 3: volume 0 so NaN; bar 4: 105 / 5 = 21; bar 5: (105 + 450) / 20 = 27.75.
+    #[test]
+    fn test_vwap_session_two_sessions_by_hand() {
+        let high = vec![12.0, 13.0, 14.0, 21.0, 24.0, 33.0];
+        let low = vec![10.0, 11.0, 12.0, 19.0, 18.0, 27.0];
+        let close = vec![11.0, 12.0, 13.0, 20.0, 21.0, 30.0];
+        let volume = vec![10.0, 30.0, 10.0, 0.0, 5.0, 15.0];
+        let starts = vec![true, false, false, true, false, false];
+
+        let r = vwap_session(&high, &low, &close, &volume, &starts).unwrap();
+
+        assert_eq!(r[0], 11.0);
+        assert_eq!(r[1], 11.75);
+        assert_eq!(r[2], 12.0);
+        assert!(r[3].is_nan());
+        assert_eq!(r[4], 21.0);
+        assert_eq!(r[5], 27.75);
+    }
+
+    /// One session start at index 0 is the cumulative VWAP, bit for bit.
+    #[test]
+    fn test_vwap_session_single_start_equals_vwap() {
+        let high = vec![52.0, 53.1, 54.7, 53.3, 52.9, 0.0];
+        let low = vec![50.0, 51.3, 52.2, 51.7, 50.1, 0.0];
+        let close = vec![51.0, 52.7, 53.9, 52.1, 51.3, 0.0];
+        let volume = vec![0.0, 1500.0, 2000.0, 1500.0, 1000.0, 0.0];
+        let mut starts = vec![false; 6];
+        starts[0] = true;
+
+        let a = vwap(&high, &low, &close, &volume).unwrap();
+        let b = vwap_session(&high, &low, &close, &volume, &starts).unwrap();
+
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_vwap_session_length_mismatch() {
+        let x = vec![1.0, 2.0];
+        assert!(vwap_session(&x, &x, &x, &x, &[true]).is_err());
+    }
+
     #[test]
     fn test_obv() {
         let close = vec![50.0, 51.0, 50.5, 52.0, 51.0];

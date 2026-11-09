@@ -56,6 +56,7 @@ Warm-up lengths, as the first index with a value:
 | `adx(p)` | `2p - 1` | one array |
 | `supertrend(p, m)` | line at `p - 1` | `(line, direction)`; direction is `0` while warming up, then `1` or `-1` |
 | `vwap(...)` | `0` | one array: cumulative over the whole array, no session reset |
+| `vwap_session(..., session_starts)` | `0` | one array: restarts where `session_starts` is true |
 
 ## 3. API reference
 
@@ -66,7 +67,8 @@ Warm-up lengths, as the first index with a value:
 | `raptorbt.stochastic(high, low, close, k_period=14, d_period=3)` | `(k, d)`. |
 | `raptorbt.bollinger_bands(data, period=20, std_dev=2.0)` | A `raptorbt.BollingerBands(upper, middle, lower)` of arrays. |
 | `raptorbt.supertrend(high, low, close, period=10, multiplier=3.0)` | `(line, direction)`. |
-| `raptorbt.vwap(high, low, close, volume)` | Cumulative typical-price VWAP. |
+| `raptorbt.vwap(high, low, close, volume)` | Cumulative typical-price VWAP over the whole array; it never resets. |
+| `raptorbt.vwap_session(high, low, close, volume, session_starts)` | Typical-price VWAP that restarts where the boolean array `session_starts` is true (mark the first bar of each session; the first bar should be true). NaN while the session's volume is zero. A NaN input makes the rest of its session NaN, as in `vwap`. Use it on an array you cut yourself, outside a strategy; inside a strategy or an expression use `session_vwap()` (the [expression](../expressions/SKILL.md) function), which reads the session from the instrument's schedule and skips a NaN bar instead of carrying it. On finite data both give the same numbers. |
 | `raptorbt.Indicator.sma/ema/wma/wilder_ma/roc/stddev/rsi/atr(period)` | Streaming, single output. |
 | `raptorbt.Indicator.donchian(period)`, `.bollinger(period, k=2.0)`, `.macd(fast, slow, signal)` | Streaming, multi output. |
 | `indicator.update_bar(o, h, l, c)`, `.value`, `.initialized`, `.update_count`, `.reset()` | State. `.linked` is true once a runtime owns the indicator. |
@@ -390,7 +392,7 @@ run_strategies([Owned()], {"ASSET": bars}, bar_stamp="close")
   streaming order `(middle, upper, lower)`.
 - Computing an indicator over the whole series in `on_start` and indexing it
   with `ctx.idx + 1`.
-- Using `vwap` across several days as if it reset at the open.
+- Using `vwap` across several days as if it reset at the open: it is cumulative; use `vwap_session` with the session starts, or `session_vwap()` in an expression.
 
 ## 9. Validation
 

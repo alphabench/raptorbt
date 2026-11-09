@@ -3017,6 +3017,27 @@ pub fn vwap<'py>(
     Ok(vec_to_numpy_f64(py, result))
 }
 
+/// Volume Weighted Average Price that restarts where `session_starts` is true.
+#[pyfunction]
+pub fn vwap_session<'py>(
+    py: Python<'py>,
+    high: PyReadonlyArray1<f64>,
+    low: PyReadonlyArray1<f64>,
+    close: PyReadonlyArray1<f64>,
+    volume: PyReadonlyArray1<f64>,
+    session_starts: PyReadonlyArray1<bool>,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let h = numpy_cow_f64(&high);
+    let l = numpy_cow_f64(&low);
+    let c = numpy_cow_f64(&close);
+    let v = numpy_cow_f64(&volume);
+    let s = numpy_to_vec_bool(session_starts);
+    let result = py
+        .detach(|| indicators::volume::vwap_session(&h, &l, &c, &v, &s))
+        .map_err(invalid_input)?;
+    Ok(vec_to_numpy_f64(py, result))
+}
+
 /// Supertrend indicator.
 #[pyfunction]
 #[pyo3(signature = (high, low, close, period=10, multiplier=3.0))]

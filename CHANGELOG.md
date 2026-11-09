@@ -5,6 +5,14 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `raptorbt.vwap_session(high, low, close, volume, session_starts)`: the
+  typical-price VWAP restarting where `session_starts` is true. `vwap` is
+  unchanged and stays cumulative over the whole array.
+
 ## [1.0.0] - 2026-11-04
 
 The first stable release. It covers everything since 0.13.4, including the

@@ -7,7 +7,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 
 | Module | Public names |
 | --- | --- |
-| [`raptorbt`](raptorbt.md) | 117 |
+| [`raptorbt`](raptorbt.md) | 118 |
 | [`raptorbt.adapters`](raptorbt.adapters.md) | 26 |
 | [`raptorbt.analysis`](raptorbt.analysis.md) | 1 |
 | [`raptorbt.capabilities`](raptorbt.capabilities.md) | 1 |
