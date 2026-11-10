@@ -318,6 +318,12 @@ impl PyFeeSchedule {
         Self { inner: Arc::new(self.inner.in_force_at(at)) }
     }
 
+    /// Every row group's earliest rates also in force from `at` (UTC ns), marked backdated in
+    /// their source: a run over days before any published rate is priced on the earliest known.
+    fn backdated(&self, at: i64) -> Self {
+        Self { inner: Arc::new(self.inner.backdated(at)) }
+    }
+
     /// The schedule as a rate card document (JSON text), every row dated
     /// `effective_from` (RFC 3339). A schedule whose rows take effect on
     /// several dates is refused; write `in_force_at(date)` for each.

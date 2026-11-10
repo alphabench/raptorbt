@@ -261,6 +261,47 @@ impl FeeSchedule {
         )))
     }
 
+    /// This schedule with every row group (venue, segment, underlying, settlement) also priced
+    /// before its earliest row, from `at` (UTC ns) on: a copy of that earliest row in force from
+    /// `at` until the original takes effect, its source saying it is backdated and from when.
+    /// A run over days no published rate covers is priced on the earliest rates known instead
+    /// of being refused (`fee_schedule_gap`); a group whose earliest row is already in force by
+    /// `at` gets nothing, so the rows that were in force price their own days as before.
+    pub fn backdated(&self, at: i64) -> FeeSchedule {
+        let mut rows = self.rows.clone();
+        let mut done: Vec<(&str, FeeSegment, Option<&str>, bool)> = Vec::new();
+        for r in &self.rows {
+            let key = (r.venue.as_str(), r.segment, r.underlying.as_deref(), r.settlement);
+            if done.contains(&key) {
+                continue;
+            }
+            done.push(key);
+            let Some(first) = self
+                .rows
+                .iter()
+                .filter(|x| {
+                    (x.venue.as_str(), x.segment, x.underlying.as_deref(), x.settlement) == key
+                })
+                .min_by_key(|x| x.effective_from)
+            else {
+                continue;
+            };
+            if first.effective_from <= at {
+                continue;
+            }
+            let mut early = first.clone();
+            early.meta.effective_until = Some(first.effective_from);
+            early.meta.source = format!(
+                "backdated: the rates in force from {} ({}), applied before any published rate",
+                ist_date_text(first.effective_from),
+                first.meta.source
+            );
+            early.effective_from = at;
+            rows.push(early);
+        }
+        FeeSchedule::new(format!("{} (backdated)", self.name), self.source.clone(), rows)
+    }
+
     /// The rows in force at `at` (UTC ns), one per venue, segment,
     /// underlying and event: the latest of each that has taken effect.
     /// Rows that have not taken effect yet are left out; this is the

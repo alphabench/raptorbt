@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `raptorbt.vwap_session(high, low, close, volume, session_starts)`: the
   typical-price VWAP restarting where `session_starts` is true. `vwap` is
   unchanged and stays cumulative over the whole array.
+- `FeeSchedule.backdated(at)`: every row group's earliest rates also in force
+  from `at`, each such row's source saying it is backdated and from when. A run
+  over days before any published rate can be priced on the earliest known
+  rates instead of being refused with `fee_schedule_gap`; the rows that were in
+  force keep pricing their own days.
 
 ## [1.0.0] - 2026-11-04
 

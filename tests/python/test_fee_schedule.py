@@ -89,8 +89,16 @@ def _signals(close, fast=10, slow=30):
 def _run(d, **cfg):
     entries, exits = _signals(d["close"])
     return raptorbt.run_single_backtest(
-        d["timestamps"], d["open"], d["high"], d["low"], d["close"], d["volume"],
-        entries, exits, symbol="TEST", config=BacktestConfig(initial_capital=1_000_000.0, **cfg),
+        d["timestamps"],
+        d["open"],
+        d["high"],
+        d["low"],
+        d["close"],
+        d["volume"],
+        entries,
+        exits,
+        symbol="TEST",
+        config=BacktestConfig(initial_capital=1_000_000.0, **cfg),
     )
 
 
@@ -279,3 +287,26 @@ def test_a_custom_gst_base_and_rounding_are_declared_per_row():
         c["brokerage"] + c["stt"] + c["exchange_txn"] + c["sebi_fee"] + c["stamp_duty"] + c["gst"]
     )
     json.dumps(c)
+
+
+def test_backdated_prices_days_before_the_earliest_rate_on_it_and_keeps_the_rest():
+    """A run over days no published rate covers is priced on the earliest rates when the
+    schedule is backdated, each such row saying so; the days the rows cover keep their own."""
+    presets = FeeSchedule.exchange_presets()
+    y2010 = 1_262_284_200 * 10**9  # 2010-01-01 00:00 IST
+    with pytest.raises(Exception, match="earliest row takes effect"):
+        presets.row("NSE", "DELIVERY", at=y2010)
+    back = presets.backdated(y2010)
+    early = back.row("NSE", "DELIVERY", at=y2010)
+    first = min(
+        (r for r in presets.rows() if r["label"] == "NSE:DELIVERY"),
+        key=lambda r: r["effective_from"],
+    )
+    assert early["rates"] == first["rates"] and early["source"].startswith("backdated:")
+    assert early["effective_until"] == first["effective_from"]
+    assert (
+        back.row("NSE", "DELIVERY", at=T0)["rates"]
+        == presets.row("NSE", "DELIVERY", at=T0)["rates"]
+    )
+    # a group already in force by then gets no copy
+    assert len(presets.backdated(T0).rows()) == len(presets.rows())
