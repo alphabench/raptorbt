@@ -372,7 +372,7 @@ struct Shared {
     /// Set for a windowed run: what each instrument carries (see [`WindowShape`]).
     window: Option<WindowShape>,
     /// The `(strategy, instrument)` pairs whose strategy said how many trailing rows it reads
-    /// (`Requirements.lookback`, `ctx.keep_history`): a windowed run holds that many. A strategy
+    /// (`ctx.keep_history`): a windowed run holds that many. A strategy
     /// that reads `ctx.series` of an instrument it did not say so for gets every row of it.
     history_declared: RefCell<std::collections::HashSet<(usize, usize)>>,
     /// Curve samples `drain_curve` has handed out, by strategy.
@@ -841,7 +841,7 @@ impl Shared {
                 format!(
                     "{}: ctx.series() reads every row, but rows before {first} were already \
                      released because nothing said they were needed. Say how many trailing rows \
-                     the strategy reads (Requirements(lookback=N) or ctx.keep_history(N)), or \
+                     the strategy reads (ctx.keep_history(N)), or \
                      run with history=\"all\"",
                     self.symbol_text(global.index())
                 ),
@@ -4109,8 +4109,7 @@ impl PyRuntime {
         Ok((PyArray1::from_slice(py, &ts[from..to]), PyArray1::from_slice(py, &equity[from..to])))
     }
 
-    /// Say that a strategy declared how many trailing rows it reads (`Requirements.lookback`,
-    /// `ctx.keep_history`, the warm-up): a windowed run holds that many of every instrument of
+    /// Say that a strategy declared how many trailing rows it reads (`ctx.keep_history`): a windowed run holds that many of every instrument of
     /// it, and its `ctx.series()` shows them. Without this, a read of `ctx.series()` keeps every
     /// row of the instrument from then on (and is refused if rows were already released).
     fn declare_history(&self, sid: usize) -> PyResult<()> {

@@ -30,4 +30,4 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |
 | [`raptorbt.version_check`](raptorbt.version_check.md) | 3 |
 
-Public names and members still without a docstring: 764.
+Public names and members still without a docstring: 763.

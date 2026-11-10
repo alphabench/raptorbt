@@ -63,11 +63,6 @@ or fixed.
 - `max_position`: `{role: MaxPosition(lots=, notional=, fraction=)}`, the largest position the
   strategy takes in a role (below).
 - `params`: a `StrategyConfig` dataclass, described by `params_schema`.
-- `lookback`: the most trailing rows of an instrument the strategy reads through `ctx.series`, a
-  positive integer. A windowed run (`run_strategies_windowed`) holds that many rows of its
-  instruments instead of all of them; a strategy that reads `ctx.series` and does not declare it
-  keeps every row. It is written to the manifest only when declared, so a strategy that does not
-  say keeps the fingerprint it had.
 
 ## Baskets
 
@@ -195,6 +190,6 @@ refused: export again):
              "choices": null, "nullable": false, "description": null}]}
 ```
 
-`lookback` is written (as a positive integer) only when declared. `warmup` is `{"seconds": n}` for a `Duration`; `strikes` is `{"by": "delta", "low", "high"}` for
+`warmup` is `{"seconds": n}` for a `Duration`; `strikes` is `{"by": "delta", "low", "high"}` for
 `ByDelta`; a renko timeframe is written `"1renko:2.5"`. `Requirements.from_dict` reads it back
 (`params` returns as a `ParamSchema`), and `requirements_hash` is equal for the round trip.

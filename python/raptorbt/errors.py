@@ -349,7 +349,7 @@ CODES: dict[str, Code] = {
     "history_exhausted": _c(
         StateError, "live-trading",
         "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten. In a windowed run: ctx.series() was read for rows already released.",
-        ["raise history= on the node", "ask the strategy to keep fewer rows (subscribe(..., history=))", "declare how many rows a windowed strategy reads (Requirements(lookback=N), ctx.keep_history(N)) or run with history='all'"],
+        ["raise history= on the node", "ask the strategy to keep fewer rows (subscribe(..., history=))", "declare how many rows a windowed strategy reads ctx.keep_history(N) or run with history='all'"],
     ),
     "invalid_initial_positions": _c(
         InvalidParameter, "live-trading", "initial_positions names a strategy or position that does not fit the node.",

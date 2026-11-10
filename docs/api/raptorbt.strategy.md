@@ -901,7 +901,7 @@ stops, or mark equity. The next trade print does all three.
 
 ```python
 class Requirements
-Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None, max_position: 'Mapping[str, MaxPosition] | None' = None, lookback: 'int | None' = None) -> None
+Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None, max_position: 'Mapping[str, MaxPosition] | None' = None) -> None
 ```
 
 Everything a deployer must know about a strategy before it runs.
@@ -912,10 +912,7 @@ is a subset of ``bar, trade, quote, book`` (the ``data_type`` of ``Strategy.subs
 ``warmup`` is :class:`Bars` or :class:`Duration`; ``max_structure`` is :class:`Legs`, the
 option legs of the structure the strategy holds; ``max_position`` maps a role name to a
 :class:`MaxPosition`, the largest position the strategy takes in it; ``params`` is a
-``StrategyConfig`` subclass or a :class:`ParamSchema`; ``lookback`` is the most trailing rows
-of an instrument the strategy reads through ``ctx.series`` (``None``: it does not say, and a
-windowed run, :func:`~raptorbt.strategy.multi_runner.run_strategies_windowed`, keeps every row
-of what it reads).
+``StrategyConfig`` subclass or a :class:`ParamSchema`.
 
 Construction validates each part on its own; :meth:`issues` checks them against each other.
 
@@ -926,7 +923,6 @@ Construction validates each part on its own; :meth:`issues` checks them against 
 | `from_dict(d: 'Mapping[str, Any]') -> 'Requirements'` | The inverse of :meth:`to_dict`. ``params`` comes back as a :class:`ParamSchema`. |
 | `holding` | *No docstring.* |
 | `issues(self) -> 'list[Issue]'` | The declaration checked against itself: role references, role cycles, a chain on a chain, warm-up and timeframes. |
-| `lookback` | *No docstring.* |
 | `max_position` | *No docstring.* |
 | `max_structure` | *No docstring.* |
 | `params` | *No docstring.* |
@@ -1773,7 +1769,7 @@ depth) and the rest match it (``window_schema``). ``on_window`` is called with a
 ``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
 
 - ``"declared"`` (the default): what the strategies say they read. A strategy declares it
-  with ``Requirements(lookback=N)`` or ``ctx.keep_history(N)``; the engine adds what its
+  with ``ctx.keep_history(N)`` (per symbol); the engine adds what its
   indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
   without declaring how much keeps every row of its instruments, so its series are the
   batch run's, and its memory is the run's. It is found by reading the strategy's source for

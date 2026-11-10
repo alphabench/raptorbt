@@ -1146,7 +1146,7 @@ def run_strategies_windowed(
     ``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
 
     - ``"declared"`` (the default): what the strategies say they read. A strategy declares it
-      with ``Requirements(lookback=N)`` or ``ctx.keep_history(N)``; the engine adds what its
+      with ``ctx.keep_history(N)`` (per symbol); the engine adds what its
       indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
       without declaring how much keeps every row of its instruments, so its series are the
       batch run's, and its memory is the run's. It is found by reading the strategy's source for
@@ -1331,7 +1331,7 @@ def run_strategies_windowed(
     if history != "all":
         for strategy, _ in entries:
             req = _requirements_of(strategy)
-            rows = max(rows, _warmup_rows(req), req.lookback if req and req.lookback else 0)
+            rows = max(rows, _warmup_rows(req))
     market = MarketData.windowed(
         used,
         [stamps.offset(s) for s in used],
@@ -1378,7 +1378,7 @@ def run_strategies_windowed(
                 req = _requirements_of(strategy)
                 if history == "all":
                     group.rt.keep_all_rows(sid)
-                elif isinstance(history, int) or (req is not None and req.lookback):
+                elif isinstance(history, int):
                     group.rt.declare_history(sid)
                 elif _reads_series(strategy):
                     group.rt.keep_all_rows(sid)

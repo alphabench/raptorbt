@@ -2721,7 +2721,7 @@ depth) and the rest match it (``window_schema``). ``on_window`` is called with a
 ``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
 
 - ``"declared"`` (the default): what the strategies say they read. A strategy declares it
-  with ``Requirements(lookback=N)`` or ``ctx.keep_history(N)``; the engine adds what its
+  with ``ctx.keep_history(N)`` (per symbol); the engine adds what its
   indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
   without declaring how much keeps every row of its instruments, so its series are the
   batch run's, and its memory is the run's. It is found by reading the strategy's source for

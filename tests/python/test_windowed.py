@@ -32,7 +32,6 @@ from raptorbt import structures as st
 from raptorbt.errors import RaptorBTError
 from raptorbt.strategy import multi_runner
 from raptorbt.strategy._stamps import BarStamps
-from raptorbt.strategy.requirements import Bars, Requirements, RequirementsError
 
 from test_structures import make, notional_cut, universe
 
@@ -391,7 +390,10 @@ class Reader(Cross):
 class Keeper(Reader):
     """Reads at most the last 30 rows, and says so."""
 
-    requirements = Requirements(lookback=30)
+    def on_start(self, ctx):
+        super().on_start(ctx)
+        for symbol in ctx.symbols:
+            ctx.keep_history(30, symbol=symbol)
 
 
 def _same(strategy_cls, cut, **kw):
@@ -415,7 +417,7 @@ def test_an_undeclared_series_reader_sees_the_arrays_of_the_batch_run():
     assert windowed.seen == whole.seen
 
 
-def test_a_declared_lookback_holds_that_many_rows_and_the_trades_are_unchanged():
+def test_a_keep_history_holds_that_many_rows_and_the_trades_are_unchanged():
     keeper = Keeper()
     got = windowed_like([keeper], DATA, CONFIG, cut=("sessions", 1), **KW)[0]
     assert digest(got) == digest(run_strategies([Keeper()], DATA, CONFIG, **KW)[0])
@@ -698,20 +700,3 @@ def test_the_on_window_callback_hears_each_window():
     assert [d.index for d in heard] == list(range(len(ws)))
     assert [d.end_ns for d in heard] == [w.end_ns for w in ws]
     assert heard[-1].total_events == sum(d.events for d in heard) == 2 * len(DATA["A"]["close"])
-
-
-# -- the manifest ---------------------------------------------------------------------------------
-
-
-def test_lookback_is_a_checked_optional_part_of_the_manifest():
-    assert Requirements().lookback is None
-    assert "lookback" not in Requirements(warmup=Bars(5)).to_dict(), "a manifest that does not say keeps its fingerprint"
-    r = Requirements(lookback=40)
-    assert r.to_dict()["lookback"] == 40
-    assert Requirements.from_dict(r.to_dict()).lookback == 40
-    assert raptorbt.strategy.requirements.requirements_hash(r) != raptorbt.strategy.requirements.requirements_hash(
-        Requirements()
-    )
-    for bad in (0, -1, 2.5, True):
-        with pytest.raises(RequirementsError):
-            Requirements(lookback=bad)

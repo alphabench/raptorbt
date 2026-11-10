@@ -26,9 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer holds at least that many. ATR-based stops and targets and `adjustment_policy="adjusted"`
   with a split or bonus are refused (`invalid_config`, `invalid_adjustment_policy`): they need
   rows a window has not been given.
-- `Requirements(lookback=N)`: the most trailing rows of an instrument a strategy reads through
-  `ctx.series`, for a windowed run to hold. It is written to the manifest only when declared, so
-  a strategy that does not say keeps its fingerprint.
 - Engine: `Runtime.push_window` and `Runtime.drain_curve`, `MarketData.windowed`,
   `RuntimeCore::advance_window` (a cursor per window with whole-run rows and ordinals) and rings
   that can keep every row.
