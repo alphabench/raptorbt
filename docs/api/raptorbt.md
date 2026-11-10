@@ -546,6 +546,7 @@ from rate cards.
 
 | Member | What it is |
 | --- | --- |
+| `backdated(self, /, at)` | Every row group's earliest rates also in force from `at` (UTC ns), marked backdated in their source: a run over days before any published rate is priced on the earliest known. |
 | `charge(self, /, venue, segment, side, price, quantity, multiplier=1.0, underlying=None, at=None, order_turnover=0.0, day_fee_owed=False)` | Price one fill: pick the row and return the itemised charge as floats. `price * quantity * multiplier` is the turnover the rates apply to (the premium, for an option). `order_turnover` is what earlier fills of the same order traded (it matters when brokerage is per order); `day_fee_owed` says the instrument's per-day fee falls due here. |
 | `exchange_presets()` | The engine's built-in rows for NSE, BSE, NFO, BFO, MCX, CDS and BCD. |
 | `from_cards(cards)` | One schedule from several cards, their rows in order. |
