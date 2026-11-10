@@ -1537,10 +1537,12 @@ class MarketData:
         bars: list[bool],
         ticks: list[list[str] | None],
         depth: list[bool],
+        widths: list[int],
     ) -> MarketData:
         """The shell of a windowed run (``run_strategies_windowed``): no data, rings of
-        ``history`` rows per symbol, and what each symbol carries: whether it has ``bars``, the
-        tick columns it has (``None``: no ticks) and whether it has ``depth``."""
+        ``history`` rows per symbol, what each symbol carries (whether it has ``bars``, the tick
+        columns it has, ``None`` without ticks, whether it has ``depth``) and the width of its
+        primary bars in nanoseconds, ``0`` when not given."""
         ...
 
 class Runtime:
@@ -1609,15 +1611,16 @@ class Runtime:
         events delivered. A window that starts at or before the last event of the one before
         raises ``window_overlap``."""
         ...
-    def drain_curve(self, sid: int) -> tuple[_I64, _F64]:
-        """The equity samples a strategy's book took since the last call, ``(timestamps,
-        equity)``, the newest held back. The book keeps its curve."""
+    def declare_rows(self, sid: int, rows: int) -> None:
+        """The strategy reads at most ``rows`` trailing rows of each symbol it did not declare
+        with ``keep_history``: a windowed run shows it exactly those."""
         ...
-    def declare_history(self, sid: int) -> None:
-        """The strategy said how many trailing rows it reads: a windowed run holds those."""
+    def keep_all_rows(self, sid: int, force: bool = ...) -> None:
+        """Keep every row of the symbols a windowed strategy declared nothing for (all of them
+        with ``force``), so its ``ctx.series`` is a batch run's."""
         ...
-    def keep_all_rows(self, sid: int) -> None:
-        """Keep every row of every instrument of a strategy that reads ``ctx.series``."""
+    def history_plan(self, sid: int) -> list[tuple[str, int | None]]:
+        """By symbol, the rows a windowed run holds for the strategy, ``None`` for every row."""
         ...
     def set_curve_window(self, window: int | None) -> None: ...
     def adopt_position(

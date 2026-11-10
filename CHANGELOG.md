@@ -14,19 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged and stays cumulative over the whole array.
 - `raptorbt.run_strategies_windowed(strategies, windows, config, *, symbols, history, on_window)`:
   `run_strategies` over data fed a `raptorbt.Window` at a time (`bars`, `ticks`, `depth`,
-  `end_ns`), so what is held is bounded by the window and the history the strategies read, not by
-  the run. Trades, orders, equity curves, metrics, halts, `ctx.idx` and the full report are
-  `run_strategies`'s over the same data, bit for bit, whatever the cuts (one session, seven, the
-  whole run, anywhere). Windows ascend and never cut a timestamp: one that starts at or before the
-  last event of the one before it is refused, `window_overlap`; one that carries other data than
-  the first declared is `window_schema`. `history="declared"` (the default) holds what the
-  strategies say they read; a strategy that reads `ctx.series` without saying so keeps every row
-  of its symbols, so its series are the batch run's, and a read made after rows were released is
-  refused (`history_exhausted`), never shortened. `"all"` keeps every row of everything, an
-  integer holds at least that many. ATR-based stops and targets and `adjustment_policy="adjusted"`
-  with a split or bonus are refused (`invalid_config`, `invalid_adjustment_policy`): they need
-  rows a window has not been given.
-- Engine: `Runtime.push_window` and `Runtime.drain_curve`, `MarketData.windowed`,
+  `end_ns`), so what is held is bounded by the window and the history the strategies declare, not
+  by the run. For a strategy whose logic reads at most the rows it declared, trades, orders, equity
+  curves, metrics, halts, `ctx.idx` and the full report are `run_strategies`'s over the same data,
+  bit for bit, whatever the cuts. Windows ascend and never cut a timestamp: one that starts at or
+  before the last event of the one before it is refused (`window_overlap`); one that carries other
+  data than the first declared, or a symbol outside `symbols=`, is `window_schema`. A strategy
+  declares what it reads with `ctx.keep_history(N, symbol=)` and then sees exactly the last N rows
+  in `ctx.series`; for a symbol it declares nothing for, every row is kept, decided before the
+  first window, and `memory_report=True` lists under `"history"` what was kept whole. `"all"`
+  keeps every row for every strategy, an integer gives undeclared symbols that many. ATR-based
+  stops and targets, `adjustment_policy="adjusted"` with a split or bonus, and `at(...)`
+  expressions without `bar_ns` are refused: they need rows or a width a window has not been
+  given. `batch_size` does not lower the peak here (every batch is alive), and the memory report
+  adds the batches up.
+- Engine: `Runtime.push_window`, `MarketData.windowed`,
   `RuntimeCore::advance_window` (a cursor per window with whole-run rows and ordinals) and rings
   that can keep every row.
 - `FeeSchedule.backdated(at)`: every row group's earliest rates also in force

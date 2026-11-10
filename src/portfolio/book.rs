@@ -422,11 +422,6 @@ impl PortfolioBook {
         &self.equity_curve
     }
 
-    /// The timestamp of each sample of [`PortfolioBook::equity_curve`].
-    pub fn curve_timestamps(&self) -> &[i64] {
-        &self.timestamps
-    }
-
     /// Keep only the most recent samples of the equity, drawdown and returns
     /// curves, so a book that never stops does not grow with its event count.
     ///

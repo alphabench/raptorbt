@@ -418,14 +418,37 @@ def test_an_undeclared_series_reader_sees_the_arrays_of_the_batch_run():
     assert windowed.seen == whole.seen
 
 
-def test_a_keep_history_holds_that_many_rows_and_the_trades_are_unchanged():
+def _exact(strategy, rows):
+    """Every read of ``ctx.series`` showed exactly the last ``rows`` rows (fewer at the start)."""
+    assert strategy.seen
+    for _, idx, n, _, _ in strategy.seen:
+        assert n == min(idx + 1, rows), (idx, n)
+
+
+def test_a_keep_history_shows_exactly_that_many_rows_and_the_trades_are_unchanged():
     keeper = Keeper()
     got = windowed_like([keeper], DATA, CONFIG, cut=("sessions", 1), **KW)[0]
     assert digest(got) == digest(run_strategies([Keeper()], DATA, CONFIG, **KW)[0])
-    # the ring holds the declared rows or what the indicators read, whichever is more (20 here
-    # is the slow SMA), never every row
-    lengths = {n for _, _, n, _, _ in keeper.seen}
-    assert max(lengths) < len(DATA["A"]["close"]) and max(lengths) >= 30
+    _exact(keeper, 30)
+
+
+def test_two_strategies_on_one_instrument_each_see_their_own_rows():
+    class Ten(Reader):
+        def on_start(self, ctx):
+            super().on_start(ctx)
+            for symbol in ctx.symbols:
+                ctx.keep_history(10, symbol=symbol)
+
+    ten, thirty, whole = Ten(), Keeper(), Reader()
+    windowed_like([ten, thirty, whole], DATA, CONFIG, cut=("sessions", 1), **KW)
+    _exact(ten, 10)
+    _exact(thirty, 30)
+    # a third that declared nothing reads every row, as in the batch run
+    assert all(n == idx + 1 for _, idx, n, _, _ in whole.seen)
+    # and what is held for one does not change what another is shown, in batches or not
+    alone = Ten()
+    windowed_like([alone, Keeper()], DATA, CONFIG, cut=("sessions", 2), batch_size=1, **KW)
+    _exact(alone, 10)
 
 
 @pytest.mark.parametrize("history", ["all", 50, 5000])
@@ -435,30 +458,33 @@ def test_history_all_and_a_row_count_keep_the_trades(history):
     assert digest(got) == digest(want)
 
 
-def test_a_series_read_after_rows_were_released_is_refused_not_shortened():
-    class Late(Cross):
+def test_a_row_count_is_what_an_undeclared_reader_is_shown_and_all_overrides_a_declaration():
+    reader = Reader()
+    windowed_like([reader], DATA, CONFIG, cut=("sessions", 1), history=50, **KW)
+    _exact(reader, 50)
+    keeper = Keeper()
+    windowed_like([keeper], DATA, CONFIG, cut=("sessions", 1), history="all", **KW)
+    assert all(n == idx + 1 for _, idx, n, _, _ in keeper.seen)
+
+
+def test_what_nothing_declared_is_kept_whole_and_the_report_says_so():
+    class Quiet(Cross):
+        pass
+
+    _, report = windowed_like([Quiet(), Keeper()], DATA, CONFIG, cut=("sessions", 1), memory_report=True, **KW)
+    plan = report["history"]
+    assert plan["kept_whole"] == {"A": [0], "B": [0]}
+    assert plan["declared"] == {"A": {1: 30}, "B": {1: 30}}
+
+
+def test_a_hook_that_raises_stops_the_run_with_its_own_error():
+    class Boom(Cross):
         def on_bar(self, ctx):
-            # not named `series` in the source: the first read is what finds it
-            if ctx.idx >= 100:
-                getattr(ctx, "ser" + "ies")()
-            super().on_bar(ctx)
+            if ctx.idx == 120:
+                raise ZeroDivisionError("boom")
 
-    with pytest.raises(RaptorBTError) as e:
-        windowed_like([Late()], DATA, CONFIG, cut=("sessions", 1), **KW)
-    assert e.value.code == "history_exhausted"
-
-
-def test_keep_history_in_on_start_sizes_the_rings_and_declares_the_bound():
-    class Kept(Reader):
-        def on_start(self, ctx):
-            super().on_start(ctx)
-            for symbol in ctx.symbols:
-                ctx.keep_history(40, symbol=symbol)
-
-    strategy = Kept()
-    got = windowed_like([strategy], DATA, CONFIG, cut=("sessions", 1), **KW)[0]
-    assert digest(got) == digest(run_strategies([Kept()], DATA, CONFIG, **KW)[0])
-    assert max(n for _, _, n, _, _ in strategy.seen) < len(DATA["A"]["close"])
+    with pytest.raises(ZeroDivisionError):
+        windowed_like([Boom()], DATA, CONFIG, cut=("sessions", 1), **KW)
 
 
 # -- what is held ---------------------------------------------------------------------------------
@@ -466,37 +492,24 @@ def test_keep_history_in_on_start_sizes_the_rings_and_declares_the_bound():
 
 def test_a_windowed_run_holds_fewer_rows_than_the_whole_run():
     _, whole = run_strategies([Cross()], DATA, CONFIG, memory_report=True, **KW)
-    _, small = windowed_like([Cross()], DATA, CONFIG, cut=("sessions", 1), memory_report=True, **KW)
-    _, more = windowed_like(
-        [Cross()], {s: _bars(12, 7 if s == "A" else 11, start=100.0 if s == "A" else 60.0) for s in DATA},
-        CONFIG, cut=("sessions", 1), memory_report=True, **KW)
-    assert small["shared_store"] < whole["shared_store"] / 10
-    assert more["shared_store"] == small["shared_store"], "twice the tape, the same history"
+    more_data = {s: _bars(12, 7 if s == "A" else 11, start=100.0 if s == "A" else 60.0) for s in DATA}
+    _, small = windowed_like([Cross()], DATA, CONFIG, cut=("sessions", 1), history=30, memory_report=True, **KW)
+    _, more = windowed_like([Cross()], more_data, CONFIG, cut=("sessions", 1), history=30, memory_report=True, **KW)
+    assert whole["live_rings"] == 0 and whole["shared_store"] > 30_000
+    assert small["live_rings"] < whole["shared_store"] / 5 and small["total"] < whole["total"]
+    assert more["live_rings"] == small["live_rings"], "twice the tape, the same history"
+    # what no strategy declared is kept whole, and costs what the run costs
+    _, whole_kept = windowed_like([Cross()], DATA, CONFIG, cut=("sessions", 1), memory_report=True, **KW)
+    assert whole_kept["live_rings"] > 10 * small["live_rings"]
 
 
-# -- the curve a window hands out -----------------------------------------------------------------
-
-
-def test_drain_curve_hands_out_the_curve_a_window_at_a_time(monkeypatch):
-    pieces = []
-    real = multi_runner._feed_window
-
-    def spy(call, window, arrays, k, offsets, prev_end, index, groups):
-        out = real(call, window, arrays, k, offsets, prev_end, index, groups)
-        for _, group in groups:
-            for _, sid, _ in group.setups:
-                pieces.append(group.rt.drain_curve(sid))
-        return out
-
-    monkeypatch.setattr(multi_runner, "_feed_window", spy)
-    got = windowed_like([Cross()], DATA, CONFIG, cut=("sessions", 1), **KW)[0]
-    curve = got.result.equity_curve()
-    drained = np.concatenate([e for _, e in pieces])
-    stamps = np.concatenate([t for t, _ in pieces])
-    # the newest sample is held back until `finish` settles it
-    assert drained.tolist() == curve[:-1].tolist()
-    assert (np.diff(stamps) > 0).all()
-    assert len(pieces) == 6
+def test_the_report_adds_up_the_batches_that_are_all_alive():
+    _, one = windowed_like([Cross(), Cross()], DATA, CONFIG, cut=("sessions", 2), history=30, memory_report=True, **KW)
+    _, two = windowed_like([Cross(), Cross()], DATA, CONFIG, cut=("sessions", 2), history=30, memory_report=True,
+                           batch_size=1, **KW)
+    assert (one["batches"], two["batches"]) == (1, 2) and two["concurrent"]
+    assert two["live_rings"] >= one["live_rings"], "batch_size does not lower the peak here"
+    assert two["strategies"] == 2
 
 
 # -- expressions on a coarser clock ----------------------------------------------------------------
@@ -527,13 +540,18 @@ def test_an_expression_on_a_daily_clock_is_the_batch_run(stamp, cut):
             elif not ctx.is_flat and v is not None and ctx.bar.close < v:
                 self.close_position()
 
-    kw = dict(bar_stamp=stamp, **({"bar_ns": hour} if stamp == "open" else {}))
+    kw = dict(bar_stamp=stamp, bar_ns=hour)
     whole, windowed = Daily(), Daily()
     want = run_strategies([whole], data, CONFIG, **kw)
     got = windowed_like([windowed], data, CONFIG, cut=cut, **kw)
     assert any(v is not None for v in whole.seen)
     assert windowed.seen == whole.seen
     assert digests(got) == digests(want)
+    if stamp == "close":
+        no_width = dict(bar_stamp="close")
+        with pytest.raises(RaptorBTError) as refused:
+            windowed_like([Daily()], data, CONFIG, cut=cut, **no_width)
+        assert (refused.value.code, refused.value.parameter) == ("expr_unsupported_here", "expression")
 
 
 # -- the other drivers' options -------------------------------------------------------------------
@@ -692,6 +710,37 @@ def test_atr_stops_and_restating_adjustments_are_refused():
     _refused(lambda: run_strategies_windowed([Cross()], _windows(), CONFIG, symbols=["A", "B"],
                                              corporate_actions=[split], adjustment_policy="adjusted", **KW),
              "invalid_adjustment_policy", "adjustment_policy")
+
+
+def test_a_window_with_a_symbol_outside_symbols_is_refused_and_an_unused_one_is_ignored():
+    w = _windows(("sessions", 3))
+    stray = Window(bars={**w[0].bars, "ZZZ": w[0].bars["A"]})
+    _refused(lambda: run_strategies_windowed([Cross()], [stray], CONFIG, symbols=["A", "B"], **KW),
+             "window_schema", "bars")
+    # a symbol listed in symbols= that no strategy trades is not an error, and not run
+    got = run_strategies_windowed([({"strategy": Cross(), "symbols": ["A"]})], w, CONFIG, symbols=["A", "B"], **KW)
+    want = run_strategies([({"strategy": Cross(), "symbols": ["A"]})], {"A": DATA["A"]}, CONFIG, **KW)
+    assert digests(got) == digests(want)
+
+
+@pytest.mark.filterwarnings(r"ignore:register_indicator\(\) without symbol=:UserWarning")
+@pytest.mark.parametrize("cut", [("sessions", 1), ("random", 8)])
+def test_an_indicator_registered_without_an_instrument_sees_every_instruments_bars(cut):
+    """Such an indicator is private in a windowed run (the node's set could grow), shared in a
+    batch run: the values it reads must be the same."""
+
+    class Fleet(Strategy):
+        def on_start(self, ctx):
+            self.ind = self.register_indicator(Indicator.sma(3))
+            self.seen = []
+
+        def on_bar(self, ctx):
+            self.seen.append((ctx.symbol, ctx.idx, self.ind.value))
+
+    whole, windowed = Fleet(), Fleet()
+    run_strategies([whole], DATA, CONFIG, **KW)
+    windowed_like([windowed], DATA, CONFIG, cut=cut, **KW)
+    assert whole.seen and windowed.seen == whole.seen
 
 
 def test_the_on_window_callback_hears_each_window():

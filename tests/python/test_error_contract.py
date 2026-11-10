@@ -809,6 +809,28 @@ def _():
     run_strategies_windowed([Noop()], [Window(bars={})], symbols=["A"], bar_stamp="close")
 
 
+@case("window_state", None)
+def _():
+    from raptorbt.strategy import multi_runner
+
+    real = multi_runner._feed_window
+
+    def pushed_to(call, window, arrays, k, offsets, prev_end, index, groups):
+        out = real(call, window, arrays, k, offsets, prev_end, index, groups)
+        if k == 0:  # a bar pushed outside the driver: the next window cannot continue from it
+            groups[0][1].rt.push_bar(0, out[1], 1.0, 1.0, 1.0, 1.0, 1.0)
+        return out
+
+    first = bars(10)
+    second = {k: v + (10 * MIN if k == "timestamps" else 0) for k, v in bars(10).items()}
+    multi_runner._feed_window = pushed_to
+    try:
+        run_strategies_windowed([Noop()], [Window(bars={"A": first}), Window(bars={"A": second})],
+                                symbols=["A"], bar_stamp="close")
+    finally:
+        multi_runner._feed_window = real
+
+
 @case("no_instrument_spec", "symbol_or_role")
 def _():
     during_run(lambda s, ctx: ctx.instrument("A"))

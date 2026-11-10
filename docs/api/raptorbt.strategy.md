@@ -1751,48 +1751,47 @@ run_strategies_windowed(strategies: 'Iterable', windows: 'Iterable[Window]', con
 
 Run many strategies over market data fed in windows.
 
-The result is :func:`run_strategies`'s over the same data, joined: the trades, orders,
-equity curves, metrics and halts, ``on_*`` calls and ``ctx.idx`` of every strategy are what
-one call with all the data would give, bit for bit, whatever the cuts. What differs is what
-is held: one window of rows (a :class:`Window`, which ``windows`` yields one at a time and
-which is dropped once run) and, per instrument, the trailing rows the strategies read. The
-books, the indicators, the aggregated bars and the equity curves are the whole run's; the
-curves grow with the run (about 32 bytes per timestamp per strategy) as in a batch run.
+The same strategies over the same tape as :func:`run_strategies`, fed a window at a time:
+the books, indicators, aggregated bars, orders, fills and equity curves are the whole run's,
+and what is dropped is each window's rows once it is run. For a strategy whose logic reads
+at most the rows it declared (below), the trades, orders, curves, metrics, halts, ``on_*``
+calls and ``ctx.idx`` are those of one :func:`run_strategies` call with all the data, bit for
+bit, whatever the cuts. The curves grow with the run (about 32 bytes per timestamp per
+strategy), as in a batch run.
 
 ``windows`` yields :class:`Window` objects in ascending time, none cutting a timestamp (a
 window that does is refused, ``window_overlap``). ``symbols`` lists every symbol the windows
 carry, in the order of ``data`` in :func:`run_strategies` (a strategy that names none trades
-all of them); the first window says what each carries (bars, ticks with their columns,
-depth) and the rest match it (``window_schema``). ``on_window`` is called with a
+all of them); a window that carries a symbol outside it is refused (``window_schema``), a
+symbol of it that no strategy trades is ignored. The first window says what each carries
+(bars, ticks with their columns, depth) and the rest match it. ``on_window`` is called with a
 :class:`WindowDone` after each window.
 
-``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
+``history`` says which trailing rows of an instrument ``ctx.series`` shows a strategy:
 
-- ``"declared"`` (the default): what the strategies say they read. A strategy declares it
-  with ``ctx.keep_history(N)`` (per symbol); the engine adds what its
-  indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
-  without declaring how much keeps every row of its instruments, so its series are the
-  batch run's, and its memory is the run's. It is found by reading the strategy's source for
-  ``series``, and, if the source is not found or the read is made through code it does not
-  name (``ctx.data.bar`` and ``ctx.data.history``, structure exits and handles all read
-  ``ctx.series``), by the first read: when rows were already released by then the read is
-  refused (``history_exhausted``), never answered with a shorter series.
-- ``"all"``: every row of every instrument, for every strategy.
-- an integer ``N``: at least ``N`` rows, for every strategy; ``ctx.series`` shows what is
-  held, which is a tail of the batch run's.
+- ``"declared"`` (the default): a strategy declares how many rows it reads of a symbol with
+  ``ctx.keep_history(N, symbol=...)``, and ``ctx.series`` shows it exactly the last ``N``
+  (fewer at the start), whatever else is held. A strategy that declares nothing for a
+  symbol gets every row of it, so what it reads is the batch run's; that is decided before
+  the first window and costs the memory of the run for that symbol. ``ctx.data.bar``,
+  ``ctx.data.history`` and the structure exits read through ``ctx.series`` and so count as
+  readers. ``memory_report=True`` lists under ``"history"`` which symbols were kept whole,
+  for which strategies, and which were declared.
+- ``"all"``: every row of every symbol, for every strategy, whatever it declared.
+- an integer ``N``: every strategy that declared nothing for a symbol is given the last
+  ``N`` rows of it, which can differ from the batch run's series if it reads further back.
 
 ``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
 order decided before it is refused with the reason ``warmup``.
 
-What a windowed run does not take, because it needs rows it has not been given yet:
-``adjustment_policy="adjusted"`` with a split or a bonus (it restates the history before the
-ex-date), and ATR-based stops and targets (the ATR of the run is computed over all its bars)
-raise ``invalid_adjustment_policy`` and ``invalid_config``. A bar stamped at its close with
-expressions that use ``at(...)`` takes the bar width from its first two bars, as a live node
-does, where a batch run takes the most common gap of the stored bars.
+Not taken, because it needs rows the run has not been given yet: ATR-based stops and targets
+(``invalid_config``), ``adjustment_policy="adjusted"`` with a split or a bonus
+(``invalid_adjustment_policy``), and an expression that uses ``at(...)`` without the width
+of the primary bars, which no stored bars give here: pass ``bar_ns`` (``expr_unsupported_here``).
 
-The other keywords are those of :func:`run_strategies`; ``batch_size`` runs the strategies
-in batches whose runtimes are all fed every window.
+The other keywords are those of :func:`run_strategies`. ``batch_size`` runs the strategies
+in batches whose runtimes are all alive and fed every window, so it does not lower the peak
+memory here, and the memory report adds the batches up.
 
 ### `run_strategy_backtest`
 

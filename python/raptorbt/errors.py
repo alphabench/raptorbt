@@ -348,7 +348,7 @@ CODES: dict[str, Code] = {
     ),
     "history_exhausted": _c(
         StateError, "live-trading",
-        "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten. In a windowed run: ctx.series() was read for rows already released.",
+        "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten.",
         ["raise history= on the node", "ask the strategy to keep fewer rows (subscribe(..., history=))", "declare how many rows a windowed strategy reads ctx.keep_history(N) or run with history='all'"],
     ),
     "invalid_initial_positions": _c(
@@ -1032,6 +1032,11 @@ CODES: dict[str, Code] = {
         InvalidData, "backtesting",
         "A window carries bars, ticks or depth for a symbol that the first window did not declare it with, or ticks with other columns.",
         ["what the first window declared for each symbol", "every symbol of the run in the first window, with arrays that may be empty"],
+    ),
+    "window_state": _c(
+        StateError, "backtesting",
+        "A windowed runtime's history does not hold the rows its next window continues from: it was pushed to outside push_window, or every row cannot be kept any more.",
+        ["feed a windowed runtime only through run_strategies_windowed"],
     ),
     "run_finished": _c(
         StateError, "backtesting", "The strategy's run is finished.",

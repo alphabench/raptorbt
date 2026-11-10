@@ -371,12 +371,11 @@ struct Shared {
     live_history: Option<usize>,
     /// Set for a windowed run: what each instrument carries (see [`WindowShape`]).
     window: Option<WindowShape>,
-    /// The `(strategy, instrument)` pairs whose strategy said how many trailing rows it reads
-    /// (`ctx.keep_history`): a windowed run holds that many. A strategy
-    /// that reads `ctx.series` of an instrument it did not say so for gets every row of it.
-    history_declared: RefCell<std::collections::HashSet<(usize, usize)>>,
-    /// Curve samples `drain_curve` has handed out, by strategy.
-    drained: RefCell<Vec<usize>>,
+    /// The rows a strategy said it reads of an instrument (`ctx.keep_history`, or the run's
+    /// `history`), by `(strategy, instrument)`: in a windowed run its `ctx.series` shows exactly
+    /// that many trailing rows. What no strategy declared is kept whole, decided before the
+    /// first window.
+    history_declared: RefCell<HashMap<(usize, usize), usize>>,
     /// The live rings, built when the runtime is finalized.
     feed: RefCell<Option<LiveFeed>>,
     /// `keep_history` requests made before the rings exist.
@@ -803,7 +802,8 @@ impl Shared {
         now.or_else(|| self.with_book(sid, |b, _| Ok(b.last_bar(local))).ok().flatten())
     }
 
-    /// Keep every row of `global` from now on; see [`Shared::note_series_read`].
+    /// Keep every row of `global` from now on. Only before the first window, when none has been
+    /// released: later it is refused (`window_state`).
     fn keep_all_rows(&self, global: InstrumentId) -> PyResult<()> {
         let mut feed = self.feed.borrow_mut();
         let Some(feed) = feed.as_mut() else {
@@ -811,44 +811,27 @@ impl Shared {
         };
         feed.keep_all(global).map_err(|first| {
             Fail::new(
-                "history_exhausted",
+                "window_state",
                 format!(
-                    "{}: rows before {first} were already released",
+                    "{}: rows before {first} were already released, so every row cannot be kept",
                     self.symbol_text(global.index())
                 ),
             )
-            .param("history")
             .into()
         })
     }
 
-    /// A windowed run holds the trailing rows a strategy declared it reads and no more, so a
-    /// strategy that reads `ctx.series` of an instrument it declared nothing for needs every
-    /// row of it: from here on they are all kept. Rows already released cannot be brought back,
-    /// and that is refused, never answered with a shorter series.
-    fn note_series_read(&self, sid: StrategyId, global: InstrumentId) -> PyResult<()> {
-        if self.window.is_none()
-            || self.history_declared.borrow().contains(&(sid.index(), global.index()))
-        {
-            return Ok(());
-        }
-        // Before the rings exist (in `on_start`) there is nothing to read.
-        let mut feed = self.feed.borrow_mut();
-        let Some(feed) = feed.as_mut() else { return Ok(()) };
-        feed.keep_all(global).map_err(|first| {
-            Fail::new(
-                "history_exhausted",
-                format!(
-                    "{}: ctx.series() reads every row, but rows before {first} were already \
-                     released because nothing said they were needed. Say how many trailing rows \
-                     the strategy reads (ctx.keep_history(N)), or \
-                     run with history=\"all\"",
-                    self.symbol_text(global.index())
-                ),
-            )
-            .param("history")
-            .into()
-        })
+    /// The rows `sid` declared for `global`, in a windowed run.
+    fn declared_rows(&self, sid: StrategyId, global: InstrumentId) -> Option<usize> {
+        self.window.as_ref()?;
+        self.history_declared.borrow().get(&(sid.index(), global.index())).copied()
+    }
+
+    /// Say `sid` reads at most `rows` trailing rows of `global`; the largest said counts.
+    fn declare_rows_for(&self, sid: StrategyId, global: InstrumentId, rows: usize) {
+        let mut declared = self.history_declared.borrow_mut();
+        let slot = declared.entry((sid.index(), global.index())).or_insert(0);
+        *slot = (*slot).max(rows);
     }
 
     fn watermark(&self, instrument: InstrumentId) -> u64 {
@@ -921,9 +904,14 @@ impl Shared {
     /// latest bar reached, or, for an instrument without bars, its tick
     /// arrays up to the latest print or quote reached. A live node serves
     /// the rows its rings still hold.
-    fn series_of(&self, py: Python<'_>, global: InstrumentId) -> PyResult<Py<PyDict>> {
+    fn series_of(
+        &self,
+        py: Python<'_>,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> PyResult<Py<PyDict>> {
         if self.live_history.is_some() {
-            return self.live_series_of(py, global);
+            return self.live_series_of(py, global, limit);
         }
         let g = global.index();
         let (full, n, keys): (Bound<'_, PyDict>, u64, Vec<Bound<'_, PyAny>>) = {
@@ -968,7 +956,12 @@ impl Shared {
     /// The rows a live node still holds for an instrument, up to its
     /// watermark: bars once it has had any, else ticks. Copies out of the
     /// ring, once per watermark however many strategies ask.
-    fn live_series_of(&self, py: Python<'_>, global: InstrumentId) -> PyResult<Py<PyDict>> {
+    fn live_series_of(
+        &self,
+        py: Python<'_>,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> PyResult<Py<PyDict>> {
         let g = global.index();
         // Before the rings exist (in `on_start`) there is nothing to read.
         let feed = self.feed.borrow();
@@ -990,6 +983,9 @@ impl Shared {
             (0, 0)
         };
         let end = end.max(first);
+        // A strategy that declared how many rows it reads sees exactly the last of them, not
+        // what the ring happens to hold for the others.
+        let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
         if let Some((f, w, dict)) = &self.series.borrow()[g] {
             if (*f, *w) == (first, end) {
                 return Ok(dict.clone_ref(py));
@@ -1050,9 +1046,6 @@ impl Shared {
         Ok(out)
     }
 }
-
-/// `(timestamps, equity)` of a book's curve samples.
-type CurveSamples<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>);
 
 /// The columns of a live node's tick series, after `timestamps`.
 type TickColumn = (&'static str, fn(&TickRow) -> f64);
@@ -1236,7 +1229,7 @@ impl PyRuntimeContext {
             let g = self.shared.global_of(self.sid, self.local.get())?;
             if self.shared.blind.borrow().contains(&g) {
                 // The bar of this instant is not known yet: the last one that is.
-                let data = self.shared.series_of(py, g)?;
+                let data = self.shared.series_of(py, g, None)?;
                 let data = data.bind(py);
                 let timestamps = data.get_item("timestamps")?.ok_or_else(finished)?;
                 // No earlier bar: nothing could have been decided before this one, and no fill
@@ -1410,8 +1403,7 @@ impl PyRuntimeContext {
     fn series(&self, py: Python<'_>, symbol: Option<&str>) -> PyResult<Py<PyDict>> {
         let local = self.index_of(symbol)?;
         let g = self.shared.global_of(self.sid, local)?;
-        self.shared.note_series_read(self.sid, g)?;
-        self.shared.series_of(py, g)
+        self.shared.series_of(py, g, self.shared.declared_rows(self.sid, g))
     }
 
     /// Ask a live node to keep at least the last `rows` bars and ticks of a
@@ -1437,7 +1429,7 @@ impl PyRuntimeContext {
         }
         let windowed = self.shared.window.is_some();
         if windowed {
-            self.shared.history_declared.borrow_mut().insert((self.sid.index(), g.index()));
+            self.shared.declare_rows_for(self.sid, g, rows as usize);
         }
         match &mut *self.shared.feed.borrow_mut() {
             Some(feed) => {
@@ -2359,6 +2351,8 @@ struct WindowShape {
     ticks: Vec<Option<Vec<String>>>,
     /// Per instrument, whether it has depth.
     depth: Vec<bool>,
+    /// Per instrument, the width of its primary bars in nanoseconds, `0` when not given.
+    widths: Vec<i64>,
 }
 
 /// The market data of a run, built once and shared by every runtime over it:
@@ -2459,9 +2453,13 @@ impl PyMarketData {
         bars: Vec<bool>,
         ticks: Vec<Option<Vec<String>>>,
         depth: Vec<bool>,
+        widths: Vec<i64>,
     ) -> PyResult<Self> {
         let n = symbols.len();
-        if [offsets.len(), bars.len(), ticks.len(), depth.len()].iter().any(|&len| len != n) {
+        if [offsets.len(), bars.len(), ticks.len(), depth.len(), widths.len()]
+            .iter()
+            .any(|&len| len != n)
+        {
             return Err(
                 Fail::new("length_mismatch", "per-instrument lists must share one length").into()
             );
@@ -2478,7 +2476,7 @@ impl PyMarketData {
             }
         }
         let mut shell = Self::live(symbols, offsets, history)?;
-        shell.window = Some(WindowShape { bars, ticks, depth });
+        shell.window = Some(WindowShape { bars, ticks, depth, widths });
         Ok(shell)
     }
 }
@@ -2564,6 +2562,26 @@ impl PyRuntime {
                 config: inst_cfg,
             });
         }
+        if market.window.is_some() {
+            if let Some((i, period)) = params
+                .iter()
+                .enumerate()
+                .find_map(|(i, p)| (p.atr_period > 0).then_some((i, p.atr_period)))
+            {
+                return Err(Fail::new(
+                    "invalid_config",
+                    format!(
+                        "ATR-based stop/target (period {period}, symbol {:?}) in a windowed run: \
+                         the ATR of the run is computed over bars it has not been given yet. Use a \
+                         fixed stop or target, or run_strategies.",
+                        symbols[i]
+                    ),
+                )
+                .param("atr_period")
+                .value(period as i64)
+                .into());
+            }
+        }
         // The session length annualisation counts per day: the instruments' own schedule when the
         // config names none (the first instrument that has one), else the data's trading day.
         if rust_config.session_minutes.is_none() {
@@ -2616,7 +2634,6 @@ impl PyRuntime {
             live_history: market.live,
             window: market.window.clone(),
             history_declared: RefCell::new(Default::default()),
-            drained: RefCell::new(Vec::new()),
             feed: RefCell::new(None),
             pending_keeps: RefCell::new(Vec::new()),
             curve_window: Cell::new(None),
@@ -2992,6 +3009,19 @@ impl PyRuntime {
             .valid(valid)
             .into());
         }
+        if self.shared.window.is_some()
+            && policy == crate::instruments::AdjustmentPolicy::Adjusted
+            && actions.iter().any(|a| a.kind != crate::instruments::CorporateKind::Dividend)
+        {
+            return Err(Fail::new(
+                "invalid_adjustment_policy",
+                "adjustment_policy='adjusted' with a split or a bonus restates the bars before \
+                 its ex-date, which a windowed run has already run; use 'raw'",
+            )
+            .param("adjustment_policy")
+            .valid(["raw"])
+            .into());
+        }
         if !matches!(&*self.shared.inner.borrow(), Inner::Building(_)) {
             return Err(not_ready("corporate actions must be declared before finalize"));
         }
@@ -3057,8 +3087,16 @@ impl PyRuntime {
         // of different instruments into one stream, and the shared bank refuses it.
         let mut clocks: HashMap<(usize, usize), ClockCtx> = HashMap::new();
         // A stamped-at-open run knows its bar width: the offset that moved stamps to the close.
+        // A windowed run has no stored bars to read the width from: the caller gives it, and an
+        // expression that needs it without it is refused.
+        if self.shared.window.is_some() {
+            builder.require_bar_width();
+        }
         for g in 0..self.shared.symbols.get().len() {
-            let width = self.shared.offset_of(g);
+            let width = match (self.shared.offset_of(g), &self.shared.window) {
+                (0, Some(w)) => w.widths[g],
+                (offset, _) => offset,
+            };
             if width > 0 {
                 builder.set_bar_width(InstrumentId::new(g as u32), width);
             }
@@ -3983,38 +4021,14 @@ impl PyRuntime {
             Inner::Running(c) => MergeCursor::filtered(&store, |id| !c.subscribers(id).is_empty()),
             _ => return Err(finished()),
         };
-        let mut n: u64 = 0;
-        let mut group: Vec<GroupEvent> = Vec::new();
-        while let Some(key) = cursor.peek_group() {
-            let Some((event, payload)) = RuntimeCore::pull(&mut cursor).map_err(runtime_err)?
-            else {
-                break;
-            };
-            if cursor.peek_group() == Some(key) {
-                // Events that share a timestamp and a kind are one group: all
-                // are applied before any is decided or matched.
-                group.clear();
-                group.push(GroupEvent { event, payload, times: None });
-                while cursor.peek_group() == Some(key) {
-                    let Some((event, payload)) =
-                        RuntimeCore::pull(&mut cursor).map_err(runtime_err)?
-                    else {
-                        break;
-                    };
-                    group.push(GroupEvent { event, payload, times: None });
-                }
-                n += group.len() as u64;
-                run_group(py, sh, &mut ls, &group)?;
-            } else {
-                // A group of one: the event is applied, decided and matched.
-                run_one(py, sh, &mut ls, GroupEvent { event, payload, times: None })?;
-                n += 1;
-            }
-            if n >= SIGNAL_EVERY {
-                n = 0;
-                py.check_signals()?;
-            }
-        }
+        drain_tape(py, sh, &mut ls, &mut cursor, |_, raw, group| {
+            group.extend(raw.iter().map(|&(event, payload)| GroupEvent {
+                event,
+                payload,
+                times: None,
+            }));
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -4047,94 +4061,89 @@ impl PyRuntime {
             _ => return Err(finished()),
         }
         .map_err(window_err)?;
-        let mut next_tick = vec![0u64; store.len()];
-        let mut delivered: u64 = 0;
-        let mut since_signal: u64 = 0;
-        let mut raw: Vec<(EventRef, Pushed)> = Vec::new();
-        let mut group: Vec<GroupEvent> = Vec::new();
-        while let Some(key) = cursor.peek_group() {
-            // Events that share a timestamp and a kind are one group: all are applied before
-            // any is decided or matched.
-            raw.clear();
-            while cursor.peek_group() == Some(key) {
-                let Some(item) = cursor.pull().map_err(runtime_err)? else { break };
-                raw.push(item);
+        // From here the books and the rings move: whatever stops the window part way leaves
+        // them between two windows, and the node refuses every call after it.
+        let fed = (|| -> PyResult<u64> {
+            let mut next_tick = vec![0u64; store.len()];
+            let delivered = drain_tape(py, sh, ls, &mut cursor, |cursor, raw, group| {
+                reserve_for_group(sh, raw)?;
+                for &(event, payload) in raw {
+                    group.push(stage_window_event(sh, cursor, &mut next_tick, event, payload)?);
+                }
+                Ok(())
+            })?;
+            // Tick rows after the window's last event (a row with neither a trade nor a quote)
+            // are rows all the same: the next window's rows count from past them.
+            for (i, next) in next_tick.iter_mut().enumerate() {
+                let g = InstrumentId::new(i as u32);
+                let len = cursor.store().ticks(g).map_or(0, |t| t.len() as u64);
+                push_tick_rows(sh, &cursor, g, next, len)?;
             }
-            reserve_for_group(sh, &raw)?;
-            group.clear();
-            for &(event, payload) in &raw {
-                group.push(stage_window_event(sh, &cursor, &mut next_tick, event, payload)?);
+            Ok(delivered)
+        })();
+        let delivered = match fed {
+            Ok(n) => n,
+            Err(e) => {
+                sh.poisoned.set(true);
+                return Err(e);
             }
-            delivered += group.len() as u64;
-            since_signal += group.len() as u64;
-            run_group(py, sh, ls, &group)?;
-            if since_signal >= SIGNAL_EVERY {
-                since_signal = 0;
-                py.check_signals()?;
-            }
-        }
-        // Tick rows after the window's last event (a row with neither a trade nor a quote) are
-        // rows all the same: the next window's rows count from past them.
-        for (i, next) in next_tick.iter_mut().enumerate() {
-            let g = InstrumentId::new(i as u32);
-            let len = cursor.store().ticks(g).map_or(0, |t| t.len() as u64);
-            push_tick_rows(sh, &cursor, g, next, len)?;
-        }
+        };
         match &mut *sh.inner.borrow_mut() {
-            Inner::Running(core) => core.end_window(cursor).map_err(runtime_err)?,
+            Inner::Running(core) => core.end_window(cursor).map_err(|e| {
+                sh.poisoned.set(true);
+                runtime_err(e)
+            })?,
             _ => return Err(finished()),
         }
         Ok(delivered)
     }
 
-    /// The equity curve samples a strategy's book has taken since the last call, as
-    /// `(timestamps, equity)`, the newest sample held back: a later event may still restate it,
-    /// and `finish` settles the last one. The book keeps its curve, so what `finish` returns is
-    /// unchanged; calling this after every window and joining the pieces with the curve in the
-    /// result gives the whole curve.
-    fn drain_curve<'py>(&self, py: Python<'py>, sid: usize) -> PyResult<CurveSamples<'py>> {
-        let inner = self.shared.inner.borrow();
-        let Inner::Running(core) = &*inner else {
-            return Err(not_ready("finalize() before drain_curve()"));
-        };
-        let book = core.book(StrategyId::new(sid as u32)).ok_or_else(finished)?;
-        let (ts, equity) = (book.curve_timestamps(), book.equity_curve());
-        let mut drained = self.shared.drained.borrow_mut();
-        if drained.len() <= sid {
-            drained.resize(sid + 1, 0);
-        }
-        let from = drained[sid].min(ts.len());
-        let to = ts.len().saturating_sub(1).max(from);
-        drained[sid] = to;
-        Ok((PyArray1::from_slice(py, &ts[from..to]), PyArray1::from_slice(py, &equity[from..to])))
-    }
-
-    /// Say that a strategy declared how many trailing rows it reads (`ctx.keep_history`): a windowed run holds that many of every instrument of
-    /// it, and its `ctx.series()` shows them. Without this, a read of `ctx.series()` keeps every
-    /// row of the instrument from then on (and is refused if rows were already released).
-    fn declare_history(&self, sid: usize) -> PyResult<()> {
+    /// Say that a strategy reads at most `rows` trailing rows of every instrument it trades: a
+    /// windowed run holds that many, and its `ctx.series()` shows exactly that many. Rows
+    /// declared per symbol with `ctx.keep_history` stay as declared.
+    fn declare_rows(&self, sid: usize, rows: usize) -> PyResult<()> {
         let sid = StrategyId::new(sid as u32);
         for local in 0..self.shared.locals(sid) {
             let g = self.shared.global_of(sid, local)?;
-            self.shared.history_declared.borrow_mut().insert((sid.index(), g.index()));
+            if !self.shared.history_declared.borrow().contains_key(&(sid.index(), g.index())) {
+                self.shared.declare_rows_for(sid, g, rows);
+            }
         }
         Ok(())
     }
 
-    /// Keep every row of every instrument of a strategy that is known to read `ctx.series()`
-    /// without declaring how much: its series are then exactly a batch run's. An instrument the
-    /// strategy did declare (`ctx.keep_history` in `on_start`) is left to what it declared. Call
-    /// after `finalize()`, before the first window.
-    fn keep_all_rows(&self, sid: usize) -> PyResult<()> {
+    /// Keep every row of every instrument of a strategy that declared nothing for it, so its
+    /// `ctx.series` is exactly a batch run's. An instrument it did declare (`ctx.keep_history`,
+    /// `declare_rows`) is left to that, unless `force`, which drops the declaration and keeps
+    /// everything. Call after `finalize()`, before the first window.
+    #[pyo3(signature = (sid, force=false))]
+    fn keep_all_rows(&self, sid: usize, force: bool) -> PyResult<()> {
         let sid = StrategyId::new(sid as u32);
         for local in 0..self.shared.locals(sid) {
             let g = self.shared.global_of(sid, local)?;
-            if self.shared.history_declared.borrow().contains(&(sid.index(), g.index())) {
+            let key = (sid.index(), g.index());
+            if force {
+                self.shared.history_declared.borrow_mut().remove(&key);
+            } else if self.shared.history_declared.borrow().contains_key(&key) {
                 continue;
             }
             self.shared.keep_all_rows(g)?;
         }
         Ok(())
+    }
+
+    /// What a windowed run holds for a strategy, by symbol: the rows it declared, or `None` when
+    /// every row is kept.
+    fn history_plan(&self, sid: usize) -> PyResult<Vec<(String, Option<usize>)>> {
+        let sid = StrategyId::new(sid as u32);
+        let mut out = Vec::new();
+        for local in 0..self.shared.locals(sid) {
+            let g = self.shared.global_of(sid, local)?;
+            let rows =
+                self.shared.history_declared.borrow().get(&(sid.index(), g.index())).copied();
+            out.push((self.shared.symbol_text(g.index()), rows));
+        }
+        Ok(out)
     }
 
     /// Keep only the most recent `window` samples of every book's curves.
@@ -5627,6 +5636,66 @@ fn window_store(
     build_store(&symbols, &bar_dicts, &offsets, &tick_dicts, &depth_dicts, false)
 }
 
+/// A tape read group by group: the whole store of `run()`, or one window of `push_window`.
+trait Tape {
+    fn peek_group(&self) -> Option<(i64, u8)>;
+    fn pull_event(&mut self) -> PyResult<Option<(EventRef, Pushed)>>;
+}
+
+impl Tape for MergeCursor<'_> {
+    fn peek_group(&self) -> Option<(i64, u8)> {
+        MergeCursor::peek_group(self)
+    }
+
+    fn pull_event(&mut self) -> PyResult<Option<(EventRef, Pushed)>> {
+        RuntimeCore::pull(self).map_err(runtime_err)
+    }
+}
+
+impl Tape for crate::runtime::WindowCursor<'_> {
+    fn peek_group(&self) -> Option<(i64, u8)> {
+        crate::runtime::WindowCursor::peek_group(self)
+    }
+
+    fn pull_event(&mut self) -> PyResult<Option<(EventRef, Pushed)>> {
+        self.pull().map_err(runtime_err)
+    }
+}
+
+/// Deliver a tape: its events that share a timestamp and a kind are one group, all applied
+/// before any is decided or matched. `stage` turns the pulled events of a group into what the
+/// loop takes (a window stores its rows in the rings first). Returns the events delivered.
+fn drain_tape<T: Tape>(
+    py: Python<'_>,
+    sh: &Shared,
+    ls: &mut LoopState,
+    tape: &mut T,
+    mut stage: impl FnMut(&T, &[(EventRef, Pushed)], &mut Vec<GroupEvent>) -> PyResult<()>,
+) -> PyResult<u64> {
+    let mut delivered: u64 = 0;
+    let mut since_signal: u64 = 0;
+    let mut raw: Vec<(EventRef, Pushed)> = Vec::new();
+    let mut group: Vec<GroupEvent> = Vec::new();
+    while let Some(key) = tape.peek_group() {
+        raw.clear();
+        while tape.peek_group() == Some(key) {
+            let Some(item) = tape.pull_event()? else { break };
+            raw.push(item);
+        }
+        group.clear();
+        stage(tape, &raw, &mut group)?;
+        delivered += group.len() as u64;
+        since_signal += group.len() as u64;
+        // A group of one is applied, decided and matched on its own.
+        run_group(py, sh, ls, &group)?;
+        if since_signal >= SIGNAL_EVERY {
+            since_signal = 0;
+            py.check_signals()?;
+        }
+    }
+    Ok(delivered)
+}
+
 fn window_err(e: crate::runtime::WindowError) -> PyErr {
     match e {
         crate::runtime::WindowError::Overlap { .. } => {
@@ -5696,7 +5765,7 @@ fn push_tick_rows(
 
 fn window_state(sh: &Shared, g: InstrumentId, what: &str, got: u64, want: u64) -> PyErr {
     Fail::new(
-        "window_schema",
+        "window_state",
         format!(
             "{}: the history holds {what} row {got} where the window's row is {want}: the feed \
              was pushed to outside push_window",

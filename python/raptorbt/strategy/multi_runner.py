@@ -28,11 +28,7 @@ that what is held in memory is bounded by the window and not by the run, and giv
 
 from __future__ import annotations
 
-import ast
-import inspect
-import math
 import os
-import textwrap
 import traceback
 import warnings
 from dataclasses import dataclass
@@ -57,7 +53,6 @@ from raptorbt._raptorbt import (
     PortfolioResult,
     Runtime,
     adjust_history,
-    resolve_atr_period,
 )
 from raptorbt.strategy._commands import (
     CommandPath,
@@ -78,12 +73,11 @@ from raptorbt.strategy.accounts import (
     plan_batches,
     unpack_entries,
 )
-from raptorbt.strategy._stamps import BarStamps
+from raptorbt.strategy._stamps import BarStamps, _width
 from raptorbt.strategy._validate import ensure_prices_finite, ensure_sessions_cover
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
-from raptorbt.strategy.requirements import Bars, Duration, Requirements, _tf_key
 from raptorbt.strategy.context import (
     Bar,
     BookSnapshot,
@@ -660,6 +654,68 @@ def _merge_reports(reports, strategies, size):
     return merged
 
 
+def _check_trade_from(trade_from, call):
+    if trade_from is not None and (isinstance(trade_from, bool) or not isinstance(trade_from, int)):
+        raise InvalidParameter(
+            f"trade_from must be an event time in integer nanoseconds since the epoch or None, "
+            f"got {trade_from!r}",
+            code="invalid_trade_from",
+            operation=call,
+            parameter="trade_from",
+            value=trade_from,
+            valid=["integer nanoseconds since the epoch", None],
+        )
+
+
+def _check_batch_size(batch_size, call):
+    if batch_size is not None and (
+        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
+    ):
+        raise InvalidParameter(
+            f"batch_size must be a positive integer or None, got {batch_size!r}",
+            code="invalid_batch_size",
+            operation=call,
+            parameter="batch_size",
+            value=batch_size,
+            valid=["a positive integer", None],
+        )
+
+
+def _prepare(call, strategies, accounts, universe, primary_bars):
+    """What ``run_strategies`` and ``run_strategies_windowed`` check the same way before they
+    look at data: the accounts, the strategy entries over ``universe`` and the primary bars.
+    Returns ``(accounts, entries, names, primary_bars, used)``; ``used`` is the symbols of
+    ``universe`` some strategy trades, in its order."""
+    accounts = check_accounts(accounts, call)
+    strategies, names = unpack_entries(strategies, accounts, call)
+    check_group_sizes(names, call)
+    primary_bars = _primary_bars(primary_bars, call)
+    entries = _normalise(strategies, universe, call)
+    used = [s for s in universe if any(s in syms for _, syms in entries)]
+    return accounts, entries, names, primary_bars, used
+
+
+def _merge_concurrent(reports, strategies, size):
+    """One report for runtimes that are all alive at once (a windowed run feeds every batch each
+    window): what each holds adds up, so ``batch_size`` does not lower the peak here."""
+    merged: dict = {}
+    for r in reports:
+        for key, value in r.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                merged[key] = merged.get(key, 0) + value
+    merged["strategies"] = strategies
+    for key, base in (
+        ("engine_bytes_per_strategy", "engine_per_strategy"),
+        ("portfolio_bytes_per_strategy", "portfolio_per_strategy"),
+        ("curve_bytes_per_strategy", "curves"),
+    ):
+        merged[key] = merged[base] // max(strategies, 1)
+    merged["batches"] = len(reports)
+    merged["batch_size"] = max(r["strategies"] for r in reports)
+    merged["concurrent"] = True
+    return merged
+
+
 def run_strategies(
     strategies: Iterable,
     data: dict[str, dict] | None = None,
@@ -839,27 +895,8 @@ def run_strategies(
     # warning and error, and its extra frame is skipped when attributing them.
     call = _via or "run_strategies"
     extra = 1 if _via else 0
-    if trade_from is not None and (isinstance(trade_from, bool) or not isinstance(trade_from, int)):
-        raise InvalidParameter(
-            f"trade_from must be an event time in integer nanoseconds since the epoch or None, "
-            f"got {trade_from!r}",
-            code="invalid_trade_from",
-            operation=call,
-            parameter="trade_from",
-            value=trade_from,
-            valid=["integer nanoseconds since the epoch", None],
-        )
-    if batch_size is not None and (
-        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
-    ):
-        raise InvalidParameter(
-            f"batch_size must be a positive integer or None, got {batch_size!r}",
-            code="invalid_batch_size",
-            operation="run_strategies",
-            parameter="batch_size",
-            value=batch_size,
-            valid=["a positive integer", None],
-        )
+    _check_trade_from(trade_from, call)
+    _check_batch_size(batch_size, "run_strategies")
     for name, given in (("data", data), ("ticks", ticks), ("depth", depth)):
         if given is not None and not isinstance(given, dict):
             raise InvalidData(
@@ -878,9 +915,6 @@ def run_strategies(
             operation="run_strategies",
             parameter=which,
         )
-    accounts = check_accounts(accounts, call)
-    strategies, names = unpack_entries(strategies, accounts, call)
-    check_group_sizes(names, call)
     data, ticks, depth = data or {}, ticks or {}, depth or {}
     unknown = [s for s in depth if s not in ticks]
     if unknown:
@@ -893,8 +927,9 @@ def run_strategies(
             value=unknown,
             valid=list(ticks),
         )
-    primary_bars = _primary_bars(primary_bars, call)
     if primary_bars is not None and not ticks:
+        # checked once the primary bars themselves are
+        _primary_bars(primary_bars, call)
         raise InvalidSubscription(
             "primary_bars aggregates trade prints, but no ticks were given",
             code="primary_bars_without_ticks",
@@ -904,13 +939,14 @@ def run_strategies(
         )
     # Bar symbols first, in data order, then symbols that only have ticks.
     universe = {**dict.fromkeys(data), **dict.fromkeys(ticks)}
-    entries = _normalise(strategies, universe, call)
+    accounts, entries, names, primary_bars, used = _prepare(
+        call, strategies, accounts, universe, primary_bars
+    )
     if not entries:
         return ([], {}) if memory_report else []
-    used = [s for s in universe if any(s in syms for _, syms in entries)]
     tick_symbols = [s for s in used if s in ticks]
-    reject_atr_stops(config, instrument_configs, tick_symbols)
     bar_symbols = [s for s in used if s in data]
+    reject_atr_stops(config, instrument_configs, tick_symbols)
     reject_bar_only_settings(config, [s for s in bar_symbols if s not in ticks], call)
     stamps = BarStamps.resolve(
         bar_stamp, bar_ns, bar_symbols, call, require=bool(bar_symbols)
@@ -1036,45 +1072,6 @@ def _window_error(call, message, code="invalid_window", parameter="windows", val
     )
 
 
-def _reads_series(strategy) -> bool:
-    """Whether ``strategy`` may call ``ctx.series``: its class names ``series``, or its source
-    cannot be read (then it may)."""
-    for cls in type(strategy).__mro__:
-        if cls is object or cls.__module__.split(".")[0] == "raptorbt":
-            continue
-        try:
-            tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
-        except (OSError, TypeError, SyntaxError, IndentationError):
-            return True
-        if any(isinstance(n, ast.Attribute) and n.attr == "series" for n in ast.walk(tree)):
-            return True
-    return False
-
-
-def _requirements_of(strategy) -> Requirements | None:
-    r = getattr(strategy, "requirements", None)
-    return r if isinstance(r, Requirements) else None
-
-
-def _warmup_rows(req: Requirements | None) -> int:
-    """The rows of the primary bars a declared warm-up is, as far as the declaration says."""
-    if req is None or req.warmup is None:
-        return 0
-    feed = [_tf_key(tf)[1] for tf in req.timeframes if _tf_key(tf)[0] == 0]
-    finest = min(feed) if feed else None
-    w = req.warmup
-    if isinstance(w, Duration):
-        return math.ceil(w.seconds / finest) if finest else 0
-    if isinstance(w, Bars):
-        if w.timeframe is not None and finest:
-            tf = api.resolve_timeframe(w.timeframe)
-            key = _tf_key(tf)
-            if key[0] == 0:
-                return w.n * max(1, round(key[1] / finest))
-        return w.n
-    return 0
-
-
 def _event_span(arrays, offsets, ticks, depth):
     """The first and last event time a window's arrays hold, or ``(None, None)``."""
     first, last = [], []
@@ -1128,71 +1125,51 @@ def run_strategies_windowed(
 ):
     """Run many strategies over market data fed in windows.
 
-    The result is :func:`run_strategies`'s over the same data, joined: the trades, orders,
-    equity curves, metrics and halts, ``on_*`` calls and ``ctx.idx`` of every strategy are what
-    one call with all the data would give, bit for bit, whatever the cuts. What differs is what
-    is held: one window of rows (a :class:`Window`, which ``windows`` yields one at a time and
-    which is dropped once run) and, per instrument, the trailing rows the strategies read. The
-    books, the indicators, the aggregated bars and the equity curves are the whole run's; the
-    curves grow with the run (about 32 bytes per timestamp per strategy) as in a batch run.
+    The same strategies over the same tape as :func:`run_strategies`, fed a window at a time:
+    the books, indicators, aggregated bars, orders, fills and equity curves are the whole run's,
+    and what is dropped is each window's rows once it is run. For a strategy whose logic reads
+    at most the rows it declared (below), the trades, orders, curves, metrics, halts, ``on_*``
+    calls and ``ctx.idx`` are those of one :func:`run_strategies` call with all the data, bit for
+    bit, whatever the cuts. The curves grow with the run (about 32 bytes per timestamp per
+    strategy), as in a batch run.
 
     ``windows`` yields :class:`Window` objects in ascending time, none cutting a timestamp (a
     window that does is refused, ``window_overlap``). ``symbols`` lists every symbol the windows
     carry, in the order of ``data`` in :func:`run_strategies` (a strategy that names none trades
-    all of them); the first window says what each carries (bars, ticks with their columns,
-    depth) and the rest match it (``window_schema``). ``on_window`` is called with a
+    all of them); a window that carries a symbol outside it is refused (``window_schema``), a
+    symbol of it that no strategy trades is ignored. The first window says what each carries
+    (bars, ticks with their columns, depth) and the rest match it. ``on_window`` is called with a
     :class:`WindowDone` after each window.
 
-    ``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
+    ``history`` says which trailing rows of an instrument ``ctx.series`` shows a strategy:
 
-    - ``"declared"`` (the default): what the strategies say they read. A strategy declares it
-      with ``ctx.keep_history(N)`` (per symbol); the engine adds what its
-      indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
-      without declaring how much keeps every row of its instruments, so its series are the
-      batch run's, and its memory is the run's. It is found by reading the strategy's source for
-      ``series``, and, if the source is not found or the read is made through code it does not
-      name (``ctx.data.bar`` and ``ctx.data.history``, structure exits and handles all read
-      ``ctx.series``), by the first read: when rows were already released by then the read is
-      refused (``history_exhausted``), never answered with a shorter series.
-    - ``"all"``: every row of every instrument, for every strategy.
-    - an integer ``N``: at least ``N`` rows, for every strategy; ``ctx.series`` shows what is
-      held, which is a tail of the batch run's.
+    - ``"declared"`` (the default): a strategy declares how many rows it reads of a symbol with
+      ``ctx.keep_history(N, symbol=...)``, and ``ctx.series`` shows it exactly the last ``N``
+      (fewer at the start), whatever else is held. A strategy that declares nothing for a
+      symbol gets every row of it, so what it reads is the batch run's; that is decided before
+      the first window and costs the memory of the run for that symbol. ``ctx.data.bar``,
+      ``ctx.data.history`` and the structure exits read through ``ctx.series`` and so count as
+      readers. ``memory_report=True`` lists under ``"history"`` which symbols were kept whole,
+      for which strategies, and which were declared.
+    - ``"all"``: every row of every symbol, for every strategy, whatever it declared.
+    - an integer ``N``: every strategy that declared nothing for a symbol is given the last
+      ``N`` rows of it, which can differ from the batch run's series if it reads further back.
 
     ``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
     order decided before it is refused with the reason ``warmup``.
 
-    What a windowed run does not take, because it needs rows it has not been given yet:
-    ``adjustment_policy="adjusted"`` with a split or a bonus (it restates the history before the
-    ex-date), and ATR-based stops and targets (the ATR of the run is computed over all its bars)
-    raise ``invalid_adjustment_policy`` and ``invalid_config``. A bar stamped at its close with
-    expressions that use ``at(...)`` takes the bar width from its first two bars, as a live node
-    does, where a batch run takes the most common gap of the stored bars.
+    Not taken, because it needs rows the run has not been given yet: ATR-based stops and targets
+    (``invalid_config``), ``adjustment_policy="adjusted"`` with a split or a bonus
+    (``invalid_adjustment_policy``), and an expression that uses ``at(...)`` without the width
+    of the primary bars, which no stored bars give here: pass ``bar_ns`` (``expr_unsupported_here``).
 
-    The other keywords are those of :func:`run_strategies`; ``batch_size`` runs the strategies
-    in batches whose runtimes are all fed every window.
+    The other keywords are those of :func:`run_strategies`. ``batch_size`` runs the strategies
+    in batches whose runtimes are all alive and fed every window, so it does not lower the peak
+    memory here, and the memory report adds the batches up.
     """
     call = "run_strategies_windowed"
-    if trade_from is not None and (isinstance(trade_from, bool) or not isinstance(trade_from, int)):
-        raise InvalidParameter(
-            f"trade_from must be an event time in integer nanoseconds since the epoch or None, "
-            f"got {trade_from!r}",
-            code="invalid_trade_from",
-            operation=call,
-            parameter="trade_from",
-            value=trade_from,
-            valid=["integer nanoseconds since the epoch", None],
-        )
-    if batch_size is not None and (
-        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
-    ):
-        raise InvalidParameter(
-            f"batch_size must be a positive integer or None, got {batch_size!r}",
-            code="invalid_batch_size",
-            operation=call,
-            parameter="batch_size",
-            value=batch_size,
-            valid=["a positive integer", None],
-        )
+    _check_trade_from(trade_from, call)
+    _check_batch_size(batch_size, call)
     if not (
         history in ("declared", "all")
         or (isinstance(history, int) and not isinstance(history, bool) and history >= 1)
@@ -1220,15 +1197,12 @@ def run_strategies_windowed(
             valid=["a list of symbols, each once"],
         )
     symbols = list(symbols)
-    accounts = check_accounts(accounts, call)
-    strategies, names = unpack_entries(strategies, accounts, call)
-    check_group_sizes(names, call)
-    primary_bars = _primary_bars(primary_bars, call)
     universe = dict.fromkeys(symbols)
-    entries = _normalise(strategies, universe, call)
+    accounts, entries, names, primary_bars, used = _prepare(
+        call, strategies, accounts, universe, primary_bars
+    )
     if not entries:
         return ([], {}) if memory_report else []
-    used = [s for s in symbols if any(s in syms for _, syms in entries)]
 
     windows_iter = iter(windows)
     first = next(windows_iter, None)
@@ -1275,37 +1249,34 @@ def run_strategies_windowed(
         )
     reject_atr_stops(config, instrument_configs, tick_symbols)
     reject_bar_only_settings(config, [s for s in bar_symbols if s not in tick_symbols], call)
-    for sym in used:
-        period = resolve_atr_period(config, (instrument_configs or {}).get(sym))
-        if period:
-            raise InvalidParameter(
-                f"ATR-based stop/target configured (ATR period {period}, symbol {sym!r}), but a "
-                "windowed run computes ATR over bars it has not been given yet. Use a fixed stop "
-                "or target, or run_strategies.",
-                code="invalid_config",
-                operation=call,
-                parameter="atr_period",
-                value=period,
-                valid=["a fixed stop or target", "a whole-run call (run_strategies)"],
-            )
     stamps = BarStamps.resolve(bar_stamp, bar_ns, bar_symbols, call, require=bool(bar_symbols))
     corporate_actions, adjustment_policy = _lifecycle(
         corporate_actions, adjustment_policy, universe, tick_symbols, call
     )
-    if adjustment_policy == "adjusted" and any(a.ratio is not None for a in corporate_actions):
-        raise InvalidParameter(
-            f"{call}: adjustment_policy='adjusted' with a split or a bonus restates the bars "
-            "before its ex-date, which a windowed run has already run; use 'raw' (positions are "
-            "rescaled at the ex-date) or push history already adjusted",
-            code="invalid_adjustment_policy",
-            operation=call,
-            parameter="adjustment_policy",
-            value=adjustment_policy,
-            valid=["raw"],
-        )
     offsets = {s: stamps.offset(s) for s in bar_symbols}
+    # The width of the primary bars an expression on a coarser clock needs: the stamp's own, or
+    # the caller's for close-stamped bars (a windowed run has no stored bars to read it from).
+    widths = []
+    for s in used:
+        width = offsets.get(s, 0)
+        if not width and s in bar_symbols and bar_ns is not None:
+            given = bar_ns.get(s) if isinstance(bar_ns, dict) else bar_ns
+            width = _width(given, f"{call}: bar_ns") if given is not None else 0
+        widths.append(width)
+    known = set(symbols)
 
     def arrays_of(window):
+        for kind, given in (("bars", window.bars), ("ticks", window.ticks), ("depth", window.depth)):
+            stray = [s for s in (given or {}) if s not in known]
+            if stray:
+                raise _window_error(
+                    call,
+                    f"{kind} for {stray!r}, which are not in symbols",
+                    code="window_schema",
+                    parameter=kind,
+                    value=stray,
+                    valid=list(symbols),
+                )
         bars = {s: _as_arrays(a, s, call) for s, a in (window.bars or {}).items() if s in used}
         late = [s for s in bars if s not in bar_symbols]
         if late:
@@ -1326,19 +1297,18 @@ def run_strategies_windowed(
     tick_columns = {s: list(a) for s, a in first_arrays[1].items()}
     index = {s: i for i, s in enumerate(used)}
 
-    # What the rings hold: the most any strategy declared, and what the manifest's warm-up says.
-    rows = history if isinstance(history, int) else 1
-    if history != "all":
-        for strategy, _ in entries:
-            req = _requirements_of(strategy)
-            rows = max(rows, _warmup_rows(req))
+    # The ring is as long as the run's `history` says, or two rows; what a strategy declares with
+    # `ctx.keep_history` grows it, and what none declared is kept whole.
     market = MarketData.windowed(
         used,
         [stamps.offset(s) for s in used],
-        rows,
+        # at least two rows: a fill hook that is blind to its instant reads the instrument's
+        # previous bar, which is then still held
+        max(2, history) if isinstance(history, int) else 2,
         [s in bar_symbols for s in used],
         [tick_columns.get(s) for s in used],
         [s in depth_symbols for s in used],
+        widths,
     )
     kwargs = dict(
         directions=directions,
@@ -1361,6 +1331,7 @@ def run_strategies_windowed(
     )
     size = 1 if not share else (batch_size or _AUTO_BATCH)
     groups: list[tuple[list[int], _Group]] = []
+    plan: dict = {"mode": history, "kept_whole": {}, "declared": {}}
     try:
         for batch in plan_batches(names, size):
             group = _open_group(
@@ -1374,14 +1345,16 @@ def run_strategies_windowed(
                 **kwargs,
             )
             groups.append((batch, group))
-            for strategy, sid, _ in group.setups:
-                req = _requirements_of(strategy)
-                if history == "all":
-                    group.rt.keep_all_rows(sid)
-                elif isinstance(history, int):
-                    group.rt.declare_history(sid)
-                elif _reads_series(strategy):
-                    group.rt.keep_all_rows(sid)
+            for k, (_, sid, _) in enumerate(group.setups):
+                if isinstance(history, int):
+                    group.rt.declare_rows(sid, history)
+                group.rt.keep_all_rows(sid, history == "all")
+                for symbol, rows in group.rt.history_plan(sid):
+                    who = batch[k]
+                    if rows is None:
+                        plan["kept_whole"].setdefault(symbol, []).append(who)
+                    else:
+                        plan["declared"].setdefault(symbol, {})[who] = rows
 
         total, prev_end, k = 0, None, 0
         window, arrays = first, first_arrays
@@ -1400,6 +1373,8 @@ def run_strategies_windowed(
             arrays = arrays_of(window)
     except BaseException as exc:
         traceback.clear_frames(exc.__traceback__)
+        if isinstance(exc, errors.RaptorBTError) and str(exc.operation).startswith("Runtime."):
+            exc.operation = call  # the native method names itself; the caller called this
         for _, group in groups:
             group.close()
         raise
@@ -1422,7 +1397,9 @@ def run_strategies_windowed(
         raise
     out: tuple = (results,)
     if memory_report:
-        out += (_merge_reports(reports, len(entries), size),)
+        merged = _merge_concurrent(reports, len(entries), size)
+        merged["history"] = plan
+        out += (merged,)
     if accounts is not None:
         out += (account_results,)
     return out if len(out) > 1 else results

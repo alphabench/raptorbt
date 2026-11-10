@@ -120,6 +120,9 @@ pub struct RuntimeBuilder {
     clock: Option<(i64, BarStamp)>,
     /// Primary bar widths the caller knows (a live node told `bar_ns`), ahead of the stored bars.
     widths: HashMap<InstrumentId, i64>,
+    /// An expression that needs the width of a primary bar is refused when none was given (a
+    /// windowed run has no stored bars to work it out from).
+    require_width: bool,
 }
 
 impl RuntimeBuilder {
@@ -169,6 +172,7 @@ impl RuntimeBuilder {
             adopted: Vec::new(),
             clock: None,
             widths: HashMap::new(),
+            require_width: false,
         })
     }
 
@@ -180,6 +184,11 @@ impl RuntimeBuilder {
         if width_ns > 0 {
             self.widths.insert(inst, width_ns);
         }
+    }
+
+    /// Refuse, at build, an expression whose primary bar width is not known.
+    pub fn require_bar_width(&mut self) {
+        self.require_width = true;
     }
 
     pub fn set_clock(&mut self, tz_offset_ns: i64, stamp: BarStamp) {
@@ -235,6 +244,13 @@ impl RuntimeBuilder {
                 let (tz, stamp) = self.clock.ok_or(EvalError::NoClock)?;
                 let mut clock = ClockCtx::new(tz, stamp, session_of(inst));
                 clock.base_ns = self.primary_width_ns(inst);
+                if self.require_width && clock.base_ns.is_none() {
+                    return Err(EvalError::Unsupported(
+                        "an expression that uses at(...) needs the width of the primary bars, \
+                         which this run cannot read from stored bars: give bar_ns"
+                            .into(),
+                    ));
+                }
                 // Unknown (a live node with no bars and no width): the cell works it out from
                 // its first two bars and refuses before any hook reads a value.
                 clock.infer_width = clock.base_ns.is_none();
