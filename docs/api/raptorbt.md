@@ -2729,9 +2729,19 @@ symbol of it that no strategy trades is ignored. The first window says what each
   ``ctx.data.history`` and the structure exits read through ``ctx.series`` and so count as
   readers. ``memory_report=True`` lists under ``"history"`` which symbols were kept whole,
   for which strategies, and which were declared.
-- ``"all"``: every row of every symbol, for every strategy, whatever it declared.
+- ``"all"``: every row of every symbol, for every strategy, whatever it declared, and
+  whatever it declares later.
 - an integer ``N``: every strategy that declared nothing for a symbol is given the last
   ``N`` rows of it, which can differ from the batch run's series if it reads further back.
+
+What a strategy declared is its own contract: ``ctx.series`` shows it exactly the last ``N``
+rows, and ``ctx.data.history`` refuses a count above ``N`` (``invalid_history``), but code that
+reads further back through ``ctx.series`` itself gets the ``N`` rows and no error, and can
+decide differently from the batch run. Declare what the strategy reads. ``ctx.keep_history``
+called after the first window is refused (``window_state``) if it asks for more rows than are
+still held, since released rows do not come back; declare in ``on_start``. A declaration made
+with ``subscribe(symbol, data_type="quote"|"trade"|"book", history=N)`` is for that symbol's
+ticks and depth and does not cap its bars.
 
 ``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
 order decided before it is refused with the reason ``warmup``.
@@ -2740,10 +2750,14 @@ Not taken, because it needs rows the run has not been given yet: ATR-based stops
 (``invalid_config``), ``adjustment_policy="adjusted"`` with a split or a bonus
 (``invalid_adjustment_policy``), and an expression that uses ``at(...)`` without the width
 of the primary bars, which no stored bars give here: pass ``bar_ns`` (``expr_unsupported_here``).
+The width of the primary bars comes from the stamp (open), from
+``bar_ns`` (close, as in :func:`run_strategies`, which uses it too when given and else
+reads the most common gap of the stored bars) or from ``primary_bars`` (prints).
 
 The other keywords are those of :func:`run_strategies`. ``batch_size`` runs the strategies
 in batches whose runtimes are all alive and fed every window, so it does not lower the peak
-memory here, and the memory report adds the batches up.
+memory here: each batch holds its own history of every symbol it trades, and the memory report
+adds the batches up (``live_rings``).
 
 ### `run_strategy_backtest`
 

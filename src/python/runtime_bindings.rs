@@ -350,6 +350,22 @@ impl<T> Table<T> {
     }
 }
 
+/// The rows a strategy declared it reads of one instrument, for its bars and for its ticks and
+/// depth: a subscription to quotes must not cap the bar series.
+#[derive(Clone, Copy, Default)]
+struct Declared {
+    bars: Option<usize>,
+    ticks: Option<usize>,
+}
+
+/// Which of an instrument's series a declaration is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistKind {
+    Bars,
+    Ticks,
+    Both,
+}
+
 struct Shared {
     inner: RefCell<Inner>,
     /// The run's config, for the checks an instrument added later must pass.
@@ -365,6 +381,8 @@ struct Shared {
     /// Per instrument, the caller's tick arrays (`None` without ticks).
     tick_arrays: RefCell<Vec<Option<Py<PyDict>>>>,
     offsets: Table<i64>,
+    /// The primary bar width the caller gave per instrument (`0`: none), see [`PyMarketData`].
+    widths: Vec<i64>,
     /// Truncated series dicts by instrument, valid for one watermark.
     series: RefCell<Vec<Option<SeriesCache>>>,
     /// Rows each live ring holds; `None` for a batch run over a store.
@@ -375,7 +393,9 @@ struct Shared {
     /// `history`), by `(strategy, instrument)`: in a windowed run its `ctx.series` shows exactly
     /// that many trailing rows. What no strategy declared is kept whole, decided before the
     /// first window.
-    history_declared: RefCell<HashMap<(usize, usize), usize>>,
+    history_declared: RefCell<HashMap<(usize, usize), Declared>>,
+    /// `history="all"`: every declaration is ignored, at any time, and every row is kept.
+    keep_whole: Cell<bool>,
     /// The live rings, built when the runtime is finalized.
     feed: RefCell<Option<LiveFeed>>,
     /// `keep_history` requests made before the rings exist.
@@ -821,17 +841,67 @@ impl Shared {
         })
     }
 
-    /// The rows `sid` declared for `global`, in a windowed run.
+    /// A declaration made after the first window cannot bring released rows back: refused when
+    /// it asks for more than the history still holds.
+    fn check_declaration_fits(
+        &self,
+        global: InstrumentId,
+        rows: usize,
+        kind: HistKind,
+    ) -> PyResult<()> {
+        let windows = match &*self.inner.borrow() {
+            Inner::Running(c) => c.window_base().windows(),
+            _ => 0,
+        };
+        if windows == 0 {
+            return Ok(());
+        }
+        let feed = self.feed.borrow();
+        let Some(feed) = feed.as_ref() else { return Ok(()) };
+        let shape = self.window.as_ref().expect("windowed");
+        let held = if shape.bars[global.index()] && kind != HistKind::Ticks {
+            feed.bars(global).map(|b| (b.first_row(), b.end_row()))
+        } else {
+            feed.ticks(global).map(|t| (t.first_row(), t.end_row()))
+        };
+        match held {
+            Some((first, end)) if first > 0 && ((end - first) as usize) < rows => Err(Fail::new(
+                "window_state",
+                format!(
+                    "{}: ctx.keep_history({rows}) came after rows were released: only {} are \
+                     held and released rows do not come back. Declare it in on_start",
+                    self.symbol_text(global.index()),
+                    end - first
+                ),
+            )
+            .into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The rows `sid` declared for the series `ctx.series` shows of `global` (its bars, or its
+    /// ticks when it has none), in a windowed run.
     fn declared_rows(&self, sid: StrategyId, global: InstrumentId) -> Option<usize> {
-        self.window.as_ref()?;
-        self.history_declared.borrow().get(&(sid.index(), global.index())).copied()
+        let shape = self.window.as_ref()?;
+        let d = self.history_declared.borrow().get(&(sid.index(), global.index())).copied()?;
+        if shape.bars[global.index()] {
+            d.bars
+        } else {
+            d.ticks
+        }
     }
 
     /// Say `sid` reads at most `rows` trailing rows of `global`; the largest said counts.
-    fn declare_rows_for(&self, sid: StrategyId, global: InstrumentId, rows: usize) {
+    fn declare_rows_for(&self, sid: StrategyId, global: InstrumentId, rows: usize, kind: HistKind) {
         let mut declared = self.history_declared.borrow_mut();
-        let slot = declared.entry((sid.index(), global.index())).or_insert(0);
-        *slot = (*slot).max(rows);
+        let slot = declared.entry((sid.index(), global.index())).or_default();
+        let raise = |v: &mut Option<usize>| *v = Some(v.map_or(rows, |old| old.max(rows)));
+        if kind != HistKind::Ticks {
+            raise(&mut slot.bars);
+        }
+        if kind != HistKind::Bars {
+            raise(&mut slot.ticks);
+        }
     }
 
     fn watermark(&self, instrument: InstrumentId) -> u64 {
@@ -1414,8 +1484,10 @@ impl PyRuntimeContext {
     /// overwritten: if keeping them would need more than the node can hold,
     /// the push that would drop one raises ``RuntimeError`` instead. A batch
     /// run holds all its data, so there the call changes nothing.
-    #[pyo3(signature = (rows, symbol=None))]
-    fn keep_history(&self, rows: u64, symbol: Option<&str>) -> PyResult<()> {
+    /// `kind` says which series the rows are for in a windowed run: `"bars"`, `"ticks"` (ticks
+    /// and depth) or `"all"`, the default.
+    #[pyo3(signature = (rows, symbol=None, kind="all"))]
+    fn keep_history(&self, rows: u64, symbol: Option<&str>, kind: &str) -> PyResult<()> {
         if rows == 0 {
             return Err(Fail::new("invalid_history", "keep_history needs at least one row")
                 .op("keep_history")
@@ -1423,13 +1495,31 @@ impl PyRuntimeContext {
                 .value(0_i64)
                 .into());
         }
+        let kind = match kind {
+            "bars" => HistKind::Bars,
+            "ticks" => HistKind::Ticks,
+            "all" => HistKind::Both,
+            other => {
+                return Err(Fail::new("invalid_history", "kind is bars, ticks or all")
+                    .op("keep_history")
+                    .param("kind")
+                    .value(other)
+                    .valid(["bars", "ticks", "all"])
+                    .into())
+            }
+        };
         let g = self.shared.global_of(self.sid, self.index_of(symbol)?)?;
         if self.shared.live_history.is_none() {
             return Ok(());
         }
         let windowed = self.shared.window.is_some();
         if windowed {
-            self.shared.declare_rows_for(self.sid, g, rows as usize);
+            // history="all" keeps every row whatever a strategy says, at any time.
+            if self.shared.keep_whole.get() {
+                return Ok(());
+            }
+            self.shared.check_declaration_fits(g, rows as usize, kind)?;
+            self.shared.declare_rows_for(self.sid, g, rows as usize, kind);
         }
         match &mut *self.shared.feed.borrow_mut() {
             Some(feed) => {
@@ -1443,6 +1533,14 @@ impl PyRuntimeContext {
             None => self.shared.pending_keeps.borrow_mut().push((self.sid, g, rows)),
         }
         Ok(())
+    }
+
+    /// The rows this strategy declared for a symbol in a windowed run, `None` when it declared
+    /// none (every row is shown) or the run is not windowed.
+    #[pyo3(signature = (symbol=None))]
+    fn declared_history(&self, symbol: Option<&str>) -> PyResult<Option<usize>> {
+        let g = self.shared.global_of(self.sid, self.index_of(symbol)?)?;
+        Ok(self.shared.declared_rows(self.sid, g))
     }
 
     /// Earliest open position of the current symbol, or ``None``.
@@ -2369,6 +2467,9 @@ pub struct PyMarketData {
     arrays: Vec<Option<Py<PyDict>>>,
     ticks: Vec<Option<Py<PyDict>>>,
     offsets: Vec<i64>,
+    /// Per instrument, the width of its primary bars the caller gave when its stamps are not
+    /// opens (`bar_ns` of close-stamped bars), `0` when not given.
+    widths: Vec<i64>,
 }
 
 #[pymethods]
@@ -2380,19 +2481,24 @@ impl PyMarketData {
     /// `None`. Every instrument needs bars or ticks. Each column is copied
     /// once.
     #[new]
-    #[pyo3(signature = (symbols, arrays, offsets, ticks=None, depth=None))]
+    #[pyo3(signature = (symbols, arrays, offsets, ticks=None, depth=None, widths=None))]
     fn new(
         symbols: Vec<String>,
         arrays: Vec<MaybeDict<'_>>,
         offsets: Vec<i64>,
         ticks: Option<Vec<MaybeDict<'_>>>,
         depth: Option<Vec<MaybeDict<'_>>>,
+        widths: Option<Vec<i64>>,
     ) -> PyResult<Self> {
         let n = symbols.len();
+        let widths = widths.unwrap_or_else(|| vec![0; n]);
         let none = || (0..n).map(|_| None).collect::<Vec<MaybeDict<'_>>>();
         let ticks = ticks.unwrap_or_else(none);
         let depth = depth.unwrap_or_else(none);
-        if [arrays.len(), offsets.len(), ticks.len(), depth.len()].iter().any(|&len| len != n) {
+        if [arrays.len(), offsets.len(), ticks.len(), depth.len(), widths.len()]
+            .iter()
+            .any(|&len| len != n)
+        {
             return Err(
                 Fail::new("length_mismatch", "per-instrument lists must share one length").into()
             );
@@ -2406,6 +2512,7 @@ impl PyMarketData {
             arrays: arrays.into_iter().map(|a| a.map(Bound::unbind)).collect(),
             ticks: ticks.into_iter().map(|a| a.map(Bound::unbind)).collect(),
             offsets,
+            widths,
         })
     }
 
@@ -2437,6 +2544,7 @@ impl PyMarketData {
             arrays: (0..n).map(|_| None).collect(),
             ticks: (0..n).map(|_| None).collect(),
             offsets,
+            widths: Vec::new(),
         })
     }
 
@@ -2630,10 +2738,12 @@ impl PyRuntime {
                 market.ticks.iter().map(|a| a.as_ref().map(|a| a.clone_ref(py))).collect(),
             ),
             offsets: Table::new(market.offsets.clone()),
+            widths: market.widths.clone(),
             series: RefCell::new((0..n).map(|_| None).collect()),
             live_history: market.live,
             window: market.window.clone(),
             history_declared: RefCell::new(Default::default()),
+            keep_whole: Cell::new(false),
             feed: RefCell::new(None),
             pending_keeps: RefCell::new(Vec::new()),
             curve_window: Cell::new(None),
@@ -3095,6 +3205,7 @@ impl PyRuntime {
         for g in 0..self.shared.symbols.get().len() {
             let width = match (self.shared.offset_of(g), &self.shared.window) {
                 (0, Some(w)) => w.widths[g],
+                (0, None) => self.shared.widths.get(g).copied().unwrap_or(0),
                 (offset, _) => offset,
             };
             if width > 0 {
@@ -4105,8 +4216,8 @@ impl PyRuntime {
         let sid = StrategyId::new(sid as u32);
         for local in 0..self.shared.locals(sid) {
             let g = self.shared.global_of(sid, local)?;
-            if !self.shared.history_declared.borrow().contains_key(&(sid.index(), g.index())) {
-                self.shared.declare_rows_for(sid, g, rows);
+            if self.shared.declared_rows(sid, g).is_none() {
+                self.shared.declare_rows_for(sid, g, rows, HistKind::Both);
             }
         }
         Ok(())
@@ -4114,17 +4225,20 @@ impl PyRuntime {
 
     /// Keep every row of every instrument of a strategy that declared nothing for it, so its
     /// `ctx.series` is exactly a batch run's. An instrument it did declare (`ctx.keep_history`,
-    /// `declare_rows`) is left to that, unless `force`, which drops the declaration and keeps
-    /// everything. Call after `finalize()`, before the first window.
+    /// `declare_rows`) is left to that, unless `force` (`history="all"`), which drops every
+    /// declaration, now and later, and keeps everything. Call after `finalize()`, before the
+    /// first window.
     #[pyo3(signature = (sid, force=false))]
     fn keep_all_rows(&self, sid: usize, force: bool) -> PyResult<()> {
         let sid = StrategyId::new(sid as u32);
+        if force {
+            self.shared.keep_whole.set(true);
+        }
         for local in 0..self.shared.locals(sid) {
             let g = self.shared.global_of(sid, local)?;
-            let key = (sid.index(), g.index());
             if force {
-                self.shared.history_declared.borrow_mut().remove(&key);
-            } else if self.shared.history_declared.borrow().contains_key(&key) {
+                self.shared.history_declared.borrow_mut().remove(&(sid.index(), g.index()));
+            } else if self.shared.declared_rows(sid, g).is_some() {
                 continue;
             }
             self.shared.keep_all_rows(g)?;
@@ -4139,9 +4253,7 @@ impl PyRuntime {
         let mut out = Vec::new();
         for local in 0..self.shared.locals(sid) {
             let g = self.shared.global_of(sid, local)?;
-            let rows =
-                self.shared.history_declared.borrow().get(&(sid.index(), g.index())).copied();
-            out.push((self.shared.symbol_text(g.index()), rows));
+            out.push((self.shared.symbol_text(g.index()), self.shared.declared_rows(sid, g)));
         }
         Ok(out)
     }

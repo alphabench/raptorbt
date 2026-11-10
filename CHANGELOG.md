@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `bar_ns` is honoured for close-stamped bars too, where `run_strategies` ignored it: it is
+  the width of the primary bars an expression on a coarser clock (`at(...)`) uses, in place of
+  the most common gap of the stored bars, so an illiquid symbol's sparse bars are no longer
+  mis-sized. Only a run that passed `bar_ns` with `bar_stamp="close"` and used such an expression
+  can differ (it was refused or mis-sized before). An invalid `bar_ns` is now refused with
+  `close` as well.
+
 ### Added
 
 - `raptorbt.vwap_session(high, low, close, volume, session_starts)`: the

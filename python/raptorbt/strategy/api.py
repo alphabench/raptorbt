@@ -378,10 +378,12 @@ class _Run:
         if old is None or (old.maxlen or 0) < size:
             info.buffers[symbol] = deque(old or (), maxlen=size)
 
-    def keep(self, symbol: str, rows: int | None) -> None:
+    def keep(self, symbol: str, rows: int | None, kind: str = "all") -> None:
+        """Ask the runtime to hold ``rows`` rows of ``symbol``: its bars (``kind="bars"``), its
+        ticks and depth (``"ticks"``), or both. A subscription to quotes must not cap the bars."""
         keep = getattr(self.ctx, "keep_history", None)
         if rows is not None and keep is not None:
-            keep(rows, symbol)
+            keep(rows, symbol, kind)
 
     def symbol_of(self, ctx) -> str | None:
         symbol = getattr(ctx, "symbol", None)
@@ -605,10 +607,10 @@ def subscribe(strategy, instrument, data_type, timeframe, history):
     run.explicit = True
     if data_type != "bar":
         run.types[data_type].add(symbol)
-        run.keep(symbol, history)
+        run.keep(symbol, history, "ticks")
         return None
     if tf is None:
-        run.keep(symbol, history)
+        run.keep(symbol, history, "bars")
         return None
     info = run.stream(tf)
     info.deliver.add(symbol)
@@ -730,6 +732,18 @@ class DataView:
             return BarHistory(
                 timestamps=np.array([b.timestamp for b in bars], dtype=np.int64),
                 **{k: np.array([getattr(b, k) for b in bars], dtype=np.float64) for k in _SERIES[1:]},
+            )
+        declared = getattr(self._run.ctx, "declared_history", None)
+        held = declared(symbol) if declared is not None else None
+        if held is not None and (count is None or count > held):
+            # A windowed run shows a strategy exactly the rows it declared: more than that is
+            # not there, and a shorter answer than the batch run's must not pass for it.
+            _invalid(
+                "Invalid history request.",
+                "count",
+                count,
+                [f"a count of at most {held}, the rows declared with ctx.keep_history"],
+                code="invalid_history",
             )
         data = self._series(symbol)
         if data is None:

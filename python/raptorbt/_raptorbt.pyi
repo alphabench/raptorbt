@@ -1524,6 +1524,7 @@ class MarketData:
         offsets: list[int],
         ticks: list[dict[str, Any] | None] | None = ...,
         depth: list[dict[str, Any] | None] | None = ...,
+        widths: list[int] | None = ...,
     ) -> None: ...
     @staticmethod
     def live(symbols: list[str], offsets: list[int], history: int) -> MarketData:

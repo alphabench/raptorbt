@@ -68,10 +68,11 @@ def _width(value, where: str) -> int:
 class BarStamps:
     """The resolved stamp contract of one run."""
 
-    def __init__(self, bar_stamp: str | None, offsets: dict, call: str):
+    def __init__(self, bar_stamp: str | None, offsets: dict, call: str, widths: dict | None = None):
         self.bar_stamp = bar_stamp
         self._offsets = offsets
         self._call = call
+        self._widths = widths or {}
 
     @classmethod
     def resolve(
@@ -86,7 +87,9 @@ class BarStamps:
 
         ``bar_stamp`` is required when ``require`` (the call takes bars); a call that
         may take none passes ``require=False`` and :meth:`require_given` fires at the
-        first bar. ``bar_ns`` is read only when ``bar_stamp == "open"``.
+        first bar. ``bar_ns`` moves the stamps when ``bar_stamp == "open"``; with
+        ``"close"`` it is the width of the bars, used where the engine needs it (an
+        expression on a coarser clock) in place of the most common gap of the bars.
         """
         if bar_stamp is None and require:
             raise _missing(call)
@@ -127,7 +130,17 @@ class BarStamps:
             else:
                 width = _width(bar_ns, f"{call}: bar_ns")
                 offsets = {symbol: width for symbol in symbols}
-        return cls(bar_stamp, offsets, call)
+        widths: dict = {}
+        if bar_stamp == "close" and bar_ns is not None:
+            for symbol in symbols:
+                given = bar_ns.get(symbol) if isinstance(bar_ns, dict) else bar_ns
+                if given is not None:
+                    widths[symbol] = _width(given, f"{call}: bar_ns")
+        return cls(bar_stamp, offsets, call, widths)
+
+    def width(self, symbol: str | None) -> int:
+        """The width of a close-stamped symbol's bars the caller gave (``bar_ns``), else ``0``."""
+        return self._widths.get(symbol, 0)
 
     def require_given(self, call: str | None = None) -> None:
         """Raise ``missing_bar_stamp`` if a bar arrives and no ``bar_stamp`` was given."""

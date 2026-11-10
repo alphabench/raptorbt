@@ -73,7 +73,7 @@ from raptorbt.strategy.accounts import (
     plan_batches,
     unpack_entries,
 )
-from raptorbt.strategy._stamps import BarStamps, _width
+from raptorbt.strategy._stamps import BarStamps
 from raptorbt.strategy._validate import ensure_prices_finite, ensure_sessions_cover
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.cache import Cache
@@ -967,6 +967,7 @@ def run_strategies(
         [stamps.offset(s) for s in used],
         [tick_arrays.get(s) for s in used],
         [depth_arrays.get(s) for s in used],
+        [stamps.width(s) for s in used],
     )
     kwargs = dict(
         directions=directions,
@@ -1072,6 +1073,30 @@ def _window_error(call, message, code="invalid_window", parameter="windows", val
     )
 
 
+_UNIT_NS = {"ms": 10**6, "s": 10**9, "m": 60 * 10**9, "h": 3600 * 10**9, "d": 86_400 * 10**9}
+
+
+def _primary_widths(used, bar_symbols, tick_symbols, offsets, stamps, primary_bars):
+    """The width of the primary bars of each symbol, in nanoseconds (``0`` unknown), for an
+    expression on a coarser clock. A windowed run has no stored bars to read it from:
+
+    - bars stamped at their open: the stamp's own width;
+    - bars stamped at their close: ``bar_ns``, which is required for such an expression;
+    - prints cut into ``primary_bars=(step, unit)``: that span.
+    """
+    span = 0
+    if primary_bars is not None:
+        step, unit = primary_bars
+        span = step * _UNIT_NS.get(unit, 0)
+    widths = []
+    for s in used:
+        width = offsets.get(s, 0) or stamps.width(s)
+        if not width and s in tick_symbols and s not in bar_symbols:
+            width = span
+        widths.append(width)
+    return widths
+
+
 def _event_span(arrays, offsets, ticks, depth):
     """The first and last event time a window's arrays hold, or ``(None, None)``."""
     first, last = [], []
@@ -1151,9 +1176,19 @@ def run_strategies_windowed(
       ``ctx.data.history`` and the structure exits read through ``ctx.series`` and so count as
       readers. ``memory_report=True`` lists under ``"history"`` which symbols were kept whole,
       for which strategies, and which were declared.
-    - ``"all"``: every row of every symbol, for every strategy, whatever it declared.
+    - ``"all"``: every row of every symbol, for every strategy, whatever it declared, and
+      whatever it declares later.
     - an integer ``N``: every strategy that declared nothing for a symbol is given the last
       ``N`` rows of it, which can differ from the batch run's series if it reads further back.
+
+    What a strategy declared is its own contract: ``ctx.series`` shows it exactly the last ``N``
+    rows, and ``ctx.data.history`` refuses a count above ``N`` (``invalid_history``), but code that
+    reads further back through ``ctx.series`` itself gets the ``N`` rows and no error, and can
+    decide differently from the batch run. Declare what the strategy reads. ``ctx.keep_history``
+    called after the first window is refused (``window_state``) if it asks for more rows than are
+    still held, since released rows do not come back; declare in ``on_start``. A declaration made
+    with ``subscribe(symbol, data_type="quote"|"trade"|"book", history=N)`` is for that symbol's
+    ticks and depth and does not cap its bars.
 
     ``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
     order decided before it is refused with the reason ``warmup``.
@@ -1162,10 +1197,14 @@ def run_strategies_windowed(
     (``invalid_config``), ``adjustment_policy="adjusted"`` with a split or a bonus
     (``invalid_adjustment_policy``), and an expression that uses ``at(...)`` without the width
     of the primary bars, which no stored bars give here: pass ``bar_ns`` (``expr_unsupported_here``).
+    The width of the primary bars comes from the stamp (open), from
+    ``bar_ns`` (close, as in :func:`run_strategies`, which uses it too when given and else
+    reads the most common gap of the stored bars) or from ``primary_bars`` (prints).
 
     The other keywords are those of :func:`run_strategies`. ``batch_size`` runs the strategies
     in batches whose runtimes are all alive and fed every window, so it does not lower the peak
-    memory here, and the memory report adds the batches up.
+    memory here: each batch holds its own history of every symbol it trades, and the memory report
+    adds the batches up (``live_rings``).
     """
     call = "run_strategies_windowed"
     _check_trade_from(trade_from, call)
@@ -1254,15 +1293,6 @@ def run_strategies_windowed(
         corporate_actions, adjustment_policy, universe, tick_symbols, call
     )
     offsets = {s: stamps.offset(s) for s in bar_symbols}
-    # The width of the primary bars an expression on a coarser clock needs: the stamp's own, or
-    # the caller's for close-stamped bars (a windowed run has no stored bars to read it from).
-    widths = []
-    for s in used:
-        width = offsets.get(s, 0)
-        if not width and s in bar_symbols and bar_ns is not None:
-            given = bar_ns.get(s) if isinstance(bar_ns, dict) else bar_ns
-            width = _width(given, f"{call}: bar_ns") if given is not None else 0
-        widths.append(width)
     known = set(symbols)
 
     def arrays_of(window):
@@ -1295,6 +1325,7 @@ def run_strategies_windowed(
 
     first_arrays = arrays_of(first)
     tick_columns = {s: list(a) for s, a in first_arrays[1].items()}
+    widths = _primary_widths(used, bar_symbols, tick_symbols, offsets, stamps, primary_bars)
     index = {s: i for i, s in enumerate(used)}
 
     # The ring is as long as the run's `history` says, or two rows; what a strategy declares with

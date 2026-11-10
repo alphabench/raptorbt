@@ -113,7 +113,7 @@ state is as it was before the call.
 | `depth_without_ticks` | `InvalidData` | `depth` names a symbol with no `ticks`. |
 | `invalid_data` | `InvalidData` | `adjust_history` or a resample was given a field it cannot use; the message and `parameter` name it. |
 | `invalid_trade_from` | `InvalidParameter` | `trade_from` must be an event time in integer nanoseconds since the epoch (or `None`). |
-| `window_state` | `StateError` | A windowed runtime was pushed to outside `run_strategies_windowed`, so its next window cannot continue from its history. |
+| `window_state` | `StateError` | A windowed runtime was pushed to outside `run_strategies_windowed`, so its next window cannot continue from its history, or `ctx.keep_history` after the first window asked for rows already released (declare it in `on_start`). |
 | `invalid_window`, `window_overlap`, `window_schema` | `InvalidParameter` / `InvalidData` | `run_strategies_windowed` takes `Window` objects in ascending time. A window must start after the last event of the one before it (it may not cut a timestamp or overlap), end at or after its own rows, and carry bars, ticks and depth, for symbols of `symbols=` only, as the first window declared them. |
 | `invalid_adjust`, `no_continuous_bars` | `InvalidParameter` / `InvalidData` | `continuous_series` needs `adjust` of `raw`, `back` or `ratio`, and bars for each contract inside its own window. |
 
