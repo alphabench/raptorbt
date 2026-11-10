@@ -70,7 +70,10 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`Timeframe`](#timeframe) | class | A bar spec for the timeframes a string cannot name. |
 | [`run_portfolio_strategy`](#run_portfolio_strategy) | function | Run one strategy over N instruments sharing a capital pool. |
 | [`run_strategies`](#run_strategies) | function | Run many strategies over shared market data. |
+| [`run_strategies_windowed`](#run_strategies_windowed) | function | Run many strategies over market data fed in windows. |
 | [`run_strategy_backtest`](#run_strategy_backtest) | function | Run a class-based strategy over OHLCV arrays. |
+| [`Window`](#window) | class | One piece of the tape of :func:`run_strategies_windowed`. |
+| [`WindowDone`](#windowdone) | class | What ``on_window`` is told once a window has been run. |
 
 ### `AccountSpec`
 
@@ -898,7 +901,7 @@ stops, or mark equity. The next trade print does all three.
 
 ```python
 class Requirements
-Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None, max_position: 'Mapping[str, MaxPosition] | None' = None) -> None
+Requirements(roles: 'Mapping[str, Role]' = <factory>, timeframes: 'Sequence[str | Timeframe]' = (), holding: 'Holding | None' = None, data: 'Sequence[str]' = ('bar',), warmup: 'Bars | Duration | None' = None, max_structure: 'Legs | None' = None, params: 'Any' = None, max_position: 'Mapping[str, MaxPosition] | None' = None, lookback: 'int | None' = None) -> None
 ```
 
 Everything a deployer must know about a strategy before it runs.
@@ -909,7 +912,10 @@ is a subset of ``bar, trade, quote, book`` (the ``data_type`` of ``Strategy.subs
 ``warmup`` is :class:`Bars` or :class:`Duration`; ``max_structure`` is :class:`Legs`, the
 option legs of the structure the strategy holds; ``max_position`` maps a role name to a
 :class:`MaxPosition`, the largest position the strategy takes in it; ``params`` is a
-``StrategyConfig`` subclass or a :class:`ParamSchema`.
+``StrategyConfig`` subclass or a :class:`ParamSchema`; ``lookback`` is the most trailing rows
+of an instrument the strategy reads through ``ctx.series`` (``None``: it does not say, and a
+windowed run, :func:`~raptorbt.strategy.multi_runner.run_strategies_windowed`, keeps every row
+of what it reads).
 
 Construction validates each part on its own; :meth:`issues` checks them against each other.
 
@@ -920,6 +926,7 @@ Construction validates each part on its own; :meth:`issues` checks them against 
 | `from_dict(d: 'Mapping[str, Any]') -> 'Requirements'` | The inverse of :meth:`to_dict`. ``params`` comes back as a :class:`ParamSchema`. |
 | `holding` | *No docstring.* |
 | `issues(self) -> 'list[Issue]'` | The declaration checked against itself: role references, role cycles, a chain on a chain, warm-up and timeframes. |
+| `lookback` | *No docstring.* |
 | `max_position` | *No docstring.* |
 | `max_structure` | *No docstring.* |
 | `params` | *No docstring.* |
@@ -1345,6 +1352,52 @@ member needs (a subset of the manifest's ``data``). A host binds it to a list of
 | `refs(self) -> 'tuple[str, ...]'` | *No docstring.* |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
 
+### `Window`
+
+*class*
+
+```python
+class Window
+Window(bars: 'Mapping[str, dict] | None' = None, ticks: 'Mapping[str, dict] | None' = None, depth: 'Mapping[str, dict] | None' = None, end_ns: 'int | None' = None) -> None
+```
+
+One piece of the tape of :func:`run_strategies_windowed`.
+
+``bars``, ``ticks`` and ``depth`` map a symbol to the arrays :func:`run_strategies` takes for
+it (``data``, ``ticks`` and ``depth``), holding the rows of the window only. The first window
+names every symbol, with arrays that may be empty; that declares what each carries (bars,
+ticks with their columns, depth), and every later window carries the same. ``end_ns`` is the
+last event time the window covers (event time: a bar stamped at its open counts at its
+close); every row of the window is stamped at or before it. Left out, it is the time of the
+window's last event.
+
+Windows come in ascending order and never cut a timestamp: every event of a window is
+stamped strictly after the last event of the one before it, and a window that does not is
+refused with ``window_overlap``.
+
+| Member | What it is |
+| --- | --- |
+| `bars` | *No docstring.* |
+| `depth` | *No docstring.* |
+| `end_ns` | *No docstring.* |
+| `ticks` | *No docstring.* |
+
+### `WindowDone`
+
+*class*
+
+```python
+class WindowDone
+WindowDone(index: 'int', end_ns: 'int | None', events: 'int', total_events: 'int') -> None
+```
+
+What ``on_window`` is told once a window has been run.
+
+``index`` counts windows from 0. ``end_ns`` is the window's ``end_ns``, or the time of its
+last event (the end of the window before, for a window with no event). ``events`` is how many
+events the window delivered, summed over the runtimes of the call (one, unless
+``batch_size`` splits the strategies); ``total_events`` the same since the first window.
+
 ### `check_requirements`
 
 *function*
@@ -1691,6 +1744,59 @@ the batch with the most live state (the peak), measured after its last
 event and before its results are built, so ``total`` is the peak
 footprint; ``strategies`` is the number of strategies in the call, and
 ``batches`` and ``batch_size`` (the largest batch) describe the tiling.
+
+### `run_strategies_windowed`
+
+*function*
+
+```python
+run_strategies_windowed(strategies: 'Iterable', windows: 'Iterable[Window]', config: 'BacktestConfig | None' = None, *, symbols: 'Sequence[str]', history: "int | Literal['declared', 'all']" = 'declared', on_window: 'Callable[[WindowDone], None] | None' = None, primary_bars: 'tuple[int, str] | None' = None, directions: 'dict[str, int] | None' = None, instruments: 'dict | None' = None, instrument_configs: 'dict[str, InstrumentConfig] | None' = None, oms_type: 'str' = 'netting', account_type: 'str' = 'cash', leverage: 'float' = 1.0, accounts: 'dict[str, AccountSpec] | None' = None, bar_stamp: "Literal['open', 'close'] | None" = None, bar_ns: 'int | dict[str, int] | None' = None, keep_curves: 'bool' = True, share: 'bool' = True, batch_size: 'int | None' = None, memory_report: 'bool' = False, corporate_actions: 'Iterable[CorporateAction] | None' = None, adjustment_policy: "Literal['raw', 'adjusted'] | None" = None, order_check=None, order_check_scope: "Literal['all', 'typed']" = 'all', bindings: 'dict[str, str | Sequence[str]] | None' = None, trade_from: 'int | None' = None) -> 'list[PortfolioResult] | tuple[list[PortfolioResult], dict] | tuple[list[PortfolioResult], dict[str, AccountResult]] | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]'
+```
+
+Run many strategies over market data fed in windows.
+
+The result is :func:`run_strategies`'s over the same data, joined: the trades, orders,
+equity curves, metrics and halts, ``on_*`` calls and ``ctx.idx`` of every strategy are what
+one call with all the data would give, bit for bit, whatever the cuts. What differs is what
+is held: one window of rows (a :class:`Window`, which ``windows`` yields one at a time and
+which is dropped once run) and, per instrument, the trailing rows the strategies read. The
+books, the indicators, the aggregated bars and the equity curves are the whole run's; the
+curves grow with the run (about 32 bytes per timestamp per strategy) as in a batch run.
+
+``windows`` yields :class:`Window` objects in ascending time, none cutting a timestamp (a
+window that does is refused, ``window_overlap``). ``symbols`` lists every symbol the windows
+carry, in the order of ``data`` in :func:`run_strategies` (a strategy that names none trades
+all of them); the first window says what each carries (bars, ticks with their columns,
+depth) and the rest match it (``window_schema``). ``on_window`` is called with a
+:class:`WindowDone` after each window.
+
+``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
+
+- ``"declared"`` (the default): what the strategies say they read. A strategy declares it
+  with ``Requirements(lookback=N)`` or ``ctx.keep_history(N)``; the engine adds what its
+  indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
+  without declaring how much keeps every row of its instruments, so its series are the
+  batch run's, and its memory is the run's. It is found by reading the strategy's source for
+  ``series``, and, if the source is not found or the read is made through code it does not
+  name (``ctx.data.bar`` and ``ctx.data.history``, structure exits and handles all read
+  ``ctx.series``), by the first read: when rows were already released by then the read is
+  refused (``history_exhausted``), never answered with a shorter series.
+- ``"all"``: every row of every instrument, for every strategy.
+- an integer ``N``: at least ``N`` rows, for every strategy; ``ctx.series`` shows what is
+  held, which is a tail of the batch run's.
+
+``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
+order decided before it is refused with the reason ``warmup``.
+
+What a windowed run does not take, because it needs rows it has not been given yet:
+``adjustment_policy="adjusted"`` with a split or a bonus (it restates the history before the
+ex-date), and ATR-based stops and targets (the ATR of the run is computed over all its bars)
+raise ``invalid_adjustment_policy`` and ``invalid_config``. A bar stamped at its close with
+expressions that use ``at(...)`` takes the bar width from its first two bars, as a live node
+does, where a batch run takes the most common gap of the stored bars.
+
+The other keywords are those of :func:`run_strategies`; ``batch_size`` runs the strategies
+in batches whose runtimes are all fed every window.
 
 ### `run_strategy_backtest`
 

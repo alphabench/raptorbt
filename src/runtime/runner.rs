@@ -585,6 +585,7 @@ impl RuntimeBuilder {
             carried: Vec::new(),
             selected: 0,
             spare: Vec::new(),
+            window: Default::default(),
         })
     }
 }
@@ -751,6 +752,8 @@ pub struct RuntimeCore {
     selected: usize,
     /// Slots of finished groups, kept with their buffers for the next group.
     spare: Vec<GroupSlot>,
+    /// What the windows of a windowed run delivered so far (see [`crate::runtime::window`]).
+    pub(crate) window: crate::runtime::window::WindowBase,
 }
 
 /// One event of a timestamp group: ingested, waiting to be decided and matched.

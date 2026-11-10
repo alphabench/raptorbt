@@ -797,7 +797,10 @@ class Requirements:
     ``warmup`` is :class:`Bars` or :class:`Duration`; ``max_structure`` is :class:`Legs`, the
     option legs of the structure the strategy holds; ``max_position`` maps a role name to a
     :class:`MaxPosition`, the largest position the strategy takes in it; ``params`` is a
-    ``StrategyConfig`` subclass or a :class:`ParamSchema`.
+    ``StrategyConfig`` subclass or a :class:`ParamSchema`; ``lookback`` is the most trailing rows
+    of an instrument the strategy reads through ``ctx.series`` (``None``: it does not say, and a
+    windowed run, :func:`~raptorbt.strategy.multi_runner.run_strategies_windowed`, keeps every row
+    of what it reads).
 
     Construction validates each part on its own; :meth:`issues` checks them against each other.
     """
@@ -810,6 +813,7 @@ class Requirements:
     max_structure: Legs | None = None
     params: Any = None
     max_position: Mapping[str, MaxPosition] | None = None
+    lookback: int | None = None
 
     def __post_init__(self) -> None:
         set_ = lambda k, v: object.__setattr__(self, k, v)  # noqa: E731
@@ -846,6 +850,8 @@ class Requirements:
             set_("max_position", types.MappingProxyType(hints))
         if self.params is not None and not isinstance(self.params, ParamSchema):
             set_("params", params_schema(self.params))
+        if self.lookback is not None:
+            _positive_int(self.lookback, "lookback", "lookback")
 
     def issues(self) -> list[Issue]:
         """The declaration checked against itself: role references, role cycles, a chain on
@@ -949,6 +955,9 @@ class Requirements:
             "max_structure": self.max_structure.to_dict() if self.max_structure else None,
             "params": self.params.to_dict() if self.params else None,
             "max_position": {n: h.to_dict() for n, h in self.max_position.items()} if self.max_position else None,
+            # Written only when declared, so the fingerprint of a manifest that does not say is
+            # what it was before the field existed.
+            **({"lookback": self.lookback} if self.lookback is not None else {}),
         }
 
     @staticmethod
@@ -975,6 +984,7 @@ class Requirements:
             max_structure=Legs.from_dict(m) if m else None,
             params=ParamSchema.from_dict(p) if p is not None else None,
             max_position={n: MaxPosition.from_dict(h) for n, h in d["max_position"].items()} if d.get("max_position") else None,
+            lookback=d.get("lookback"),
         )
 
 

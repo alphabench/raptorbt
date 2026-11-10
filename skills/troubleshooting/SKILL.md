@@ -113,6 +113,7 @@ state is as it was before the call.
 | `depth_without_ticks` | `InvalidData` | `depth` names a symbol with no `ticks`. |
 | `invalid_data` | `InvalidData` | `adjust_history` or a resample was given a field it cannot use; the message and `parameter` name it. |
 | `invalid_trade_from` | `InvalidParameter` | `trade_from` must be an event time in integer nanoseconds since the epoch (or `None`). |
+| `invalid_window`, `window_overlap`, `window_schema` | `InvalidParameter` / `InvalidData` | `run_strategies_windowed` takes `Window` objects in ascending time. A window must start after the last event of the one before it (it may not cut a timestamp or overlap), end at or after its own rows, and carry bars, ticks and depth as the first window declared them. |
 | `invalid_adjust`, `no_continuous_bars` | `InvalidParameter` / `InvalidData` | `continuous_series` needs `adjust` of `raw`, `back` or `ratio`, and bars for each contract inside its own window. |
 
 *Orders.*
@@ -145,7 +146,7 @@ state is as it was before the call.
 | Code | Class | What happened and what to do |
 | --- | --- | --- |
 | `adoption_refused`, `invalid_initial_positions` | `InvalidParameter` | A seeded position does not fit the account (a short or a posted margin on a cash account, a cost basis on a margin one) or names a strategy or symbol the node lacks. |
-| `history_exhausted` | `StateError` | The history ring is full of rows a strategy asked to keep, or a depth row was overwritten. Raise `history`, or keep fewer rows. |
+| `history_exhausted` | `StateError` | The history ring is full of rows a strategy asked to keep, or a depth row was overwritten. Raise `history`, or keep fewer rows. In a windowed run, `ctx.series()` was read for rows already released: declare `Requirements(lookback=N)` or `ctx.keep_history(N)`, or pass `history="all"`. |
 | `group_open`, `group_timestamp_mismatch`, `duplicate_bar`, `conflicting_bar` | `StateError` | A timestamp group is open (`flush()` it first), a bar was pushed into a group at another time, or a bar was pushed again (identical: a retry, refused; different: a delivered bar is not revised). |
 | `stale_epoch`, `epoch_required`, `fence_unsupported` | `StateError` / `InvalidParameter` | `restore()` needs an `epoch` newer than the journal's; an `epoch` was given with an adapter whose `can_fence` is not true. |
 | `adapter_cannot_adopt`, `adapter_namespace_missing`, `adapter_namespace_mismatch`, `hedging_unsupported_by_venue` | `StateError` / `InvalidParameter` | The adapter cannot account for the orders the node holds (`restore_orders` or `keeps_own_records`), has no `namespace`, is not the namespace the journal was written for, or nets positions under a hedging node. |

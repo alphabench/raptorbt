@@ -70,6 +70,21 @@ instrument's own clock. Under `next_bar_open` it fills at the open of the
 target's first bar stamped strictly after the decision, never at a bar that
 closed at or before it, whichever event at `t` was applied first.
 
+## A run fed in windows
+
+`run_strategies_windowed` cuts the tape into windows, each read with a cursor of its own
+(`RuntimeCore::advance_window`), and delivers the events the whole tape's cursor would: the same
+order, the same timestamp groups, the same payloads. The rows and ordinals an event carries
+(`EventRef::row`, `local_idx`, hence `ctx.idx`, `entry_idx` and `exit_idx`) are whole-run numbers:
+the core keeps, per instrument, how many bar rows, tick rows (every row, whether or not it yielded
+an event), depth rows and events the windows before it held, and a window's events are shifted by
+them. A window never cuts a timestamp group, because a group is applied before any of it is
+decided: every event of a window is stamped strictly after the last event of the one before, and
+a window that is not is refused (`window_overlap`) before anything changes. Books, the indicator
+bank, the aggregators and the equity curves are the run's and carry over; what a window frees is
+its rows, and `ctx.series` is served from rings that hold the trailing rows the strategies
+declared (or every row, for a strategy that reads `ctx.series` and says nothing).
+
 ## Equal timestamps: the two-phase rule
 
 The fix for "a result depends on the order the

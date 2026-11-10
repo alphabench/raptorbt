@@ -15,6 +15,7 @@
 //! * [`router`]: CSR subscription indexes.
 //! * [`groups`]: several strategies on one account.
 //! * [`runner`]: the core that drives many strategy books over one store.
+//! * [`window`]: the same run fed in windows, each its own store and cursor.
 
 pub mod aggregators;
 pub mod atr_cache;
@@ -30,6 +31,7 @@ pub mod ring;
 pub mod router;
 pub mod runner;
 pub mod store;
+pub mod window;
 
 #[cfg(test)]
 mod aggregators_tests;
@@ -61,3 +63,4 @@ pub use runner::{
     Current, InstrumentParams, MemoryReport, Pushed, RuntimeBuilder, RuntimeCore, StrategySlot,
 };
 pub use store::{BarColumns, DepthColumns, MarketStore, TickColumns, TickSlices};
+pub use window::{WindowBase, WindowCursor, WindowError};

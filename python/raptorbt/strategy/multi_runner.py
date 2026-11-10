@@ -20,14 +20,23 @@ symbol with ticks and no bars, the latest print or quote) the run has reached,
 not the full arrays, so a strategy cannot read data from its own future.
 ``run_portfolio_strategy``, ``run_tick_strategy`` and ``TickStrategyStream``
 are thin wrappers over this runtime and behave the same.
+
+:func:`run_strategies_windowed` runs the same strategies over the same tape fed in windows, so
+that what is held in memory is bounded by the window and not by the run, and gives the results
+:func:`run_strategies` gives.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
+import math
 import os
+import textwrap
 import traceback
 import warnings
-from typing import Any, Iterable, Literal, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 
 import numpy as np
 
@@ -48,6 +57,7 @@ from raptorbt._raptorbt import (
     PortfolioResult,
     Runtime,
     adjust_history,
+    resolve_atr_period,
 )
 from raptorbt.strategy._commands import (
     CommandPath,
@@ -73,6 +83,7 @@ from raptorbt.strategy._validate import ensure_prices_finite, ensure_sessions_co
 from raptorbt.strategy.base import Strategy
 from raptorbt.strategy.cache import Cache
 from raptorbt.strategy.clock import Clock
+from raptorbt.strategy.requirements import Bars, Duration, Requirements, _tf_key
 from raptorbt.strategy.context import (
     Bar,
     BookSnapshot,
@@ -419,7 +430,7 @@ def _add_strategy(rt, strategy, symbols, adopt=None, stacklevel=4, account=None,
     return sid, ctx, view
 
 
-def _run_group(
+def _open_group(
     entries,
     market,
     used,
@@ -434,7 +445,6 @@ def _run_group(
     leverage,
     keep_curves,
     share,
-    want_report,
     primary_bars=None,
     stacklevel=4,
     names=None,
@@ -445,16 +455,17 @@ def _run_group(
     order_check_scope="all",
     host=None,
     trade_from=None,
+    call="run_strategies",
 ):
-    """One runtime over ``entries``; returns ``(results, report, account_results)``.
+    """One runtime over ``entries``, set up (every ``on_start`` has run) and not yet fed;
+    returns a :class:`_Group`.
 
     ``names`` holds the account of each entry (or ``None``) and ``accounts``
-    the specs; every strategy of an account is in ``entries``. The
-    ``strategies`` of an account result are positions in ``entries``.
+    the specs; every strategy of an account is in ``entries``.
     """
-    config = config_for_holding(config, [strategy for strategy, _ in entries], "run_strategies")
+    config = config_for_holding(config, [strategy for strategy, _ in entries], call)
     rt = errors.call_as(
-        "run_strategies",
+        call,
         Runtime,
         market,
         [(directions or {}).get(s, 1) for s in used],
@@ -476,17 +487,16 @@ def _run_group(
         QuoteTick,
         BookSnapshot,
     )
-    setups: list[tuple[Any, int, Any]] = []
+    group = _Group(rt)
     try:
-        order_check_mod.install(rt, order_check, "run_strategies", order_check_scope)
+        order_check_mod.install(rt, order_check, call, order_check_scope)
         if trade_from is not None:
             rt.set_trade_from(trade_from)
         if primary_bars is not None:
             rt.set_primary_bars(*primary_bars)
-        gids = {}
         for name in dict.fromkeys(n for n in names or () if n is not None):
             spec = accounts[name]
-            gids[name] = rt.add_account(
+            group.gids[name] = rt.add_account(
                 spec.initial_capital,
                 spec.account_type,
                 spec.leverage,
@@ -498,33 +508,74 @@ def _run_group(
                 max_positions=spec.max_positions,
             )
         for k, (strategy, symbols) in enumerate(entries):
-            gid = gids.get(names[k]) if names else None
+            gid = group.gids.get(names[k]) if names else None
             sid, ctx, view = _add_strategy(
                 rt, strategy, symbols, stacklevel=stacklevel, account=gid, host=host
             )
-            setups.append((strategy, sid, ctx))
+            group.setups.append((strategy, sid, ctx))
         if adjustment_policy is not None:
             rt.set_corporate_actions(list(corporate_actions), adjustment_policy)
         rt.finalize()
-        rt.run()
-        report = rt.memory_report() if want_report else None
-        results = []
-        for strategy, sid, ctx in setups:
-            strategy.on_stop(ctx)
-            results.append(rt.finish(sid))
-        account_results = {name: rt.finish_account(gid, name) for name, gid in gids.items()}
-        return results, report, account_results
+        return group
     except BaseException as exc:
         # the frames the exception carries hold contexts: keep the lines, drop the locals
         traceback.clear_frames(exc.__traceback__)
+        group.close()
         raise
-    finally:
-        rt.close()
-        for strategy, _, _ in setups:
+
+
+class _Group:
+    """One runtime and the strategies on it: what a run feeds and then finishes."""
+
+    def __init__(self, rt):
+        self.rt = rt
+        self.setups: list[tuple[Any, int, Any]] = []
+        self.gids: dict = {}
+
+    def finish(self, want_report):
+        """``(results, report, account_results)``; the runtime is closed either way."""
+        try:
+            rt = self.rt
+            report = rt.memory_report() if want_report else None
+            results = []
+            for strategy, sid, ctx in self.setups:
+                strategy.on_stop(ctx)
+                results.append(rt.finish(sid))
+            account_results = {
+                name: rt.finish_account(gid, name) for name, gid in self.gids.items()
+            }
+            return results, report, account_results
+        except BaseException as exc:
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            self.close()
+
+    def close(self):
+        """Release the runtime and the strategies' contexts, which would otherwise wait for the
+        collector, on any thread."""
+        self.rt.close()
+        for strategy, _, _ in self.setups:
             api.release(strategy)
         # this frame outlives the call in an exception's traceback
-        setups.clear()
-        rt = ctx = view = None
+        self.setups.clear()
+
+
+def _run_group(entries, market, used, stamps, config, *, want_report, **kwargs):
+    """One runtime over ``entries``; returns ``(results, report, account_results)``.
+
+    ``names`` holds the account of each entry (or ``None``) and ``accounts``
+    the specs; every strategy of an account is in ``entries``. The
+    ``strategies`` of an account result are positions in ``entries``.
+    """
+    group = _open_group(entries, market, used, stamps, config, **kwargs)
+    try:
+        group.rt.run()
+    except BaseException as exc:
+        traceback.clear_frames(exc.__traceback__)
+        group.close()
+        raise
+    return group.finish(want_report)
 
 
 def _lifecycle(actions, policy, universe, tick_symbols, call, live=False):
@@ -927,3 +978,513 @@ def run_strategies(
     if accounts is not None:
         out += (account_results,)
     return out if len(out) > 1 else results
+
+
+# ---------------------------------------------------------------------------
+# A run fed in windows
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Window:
+    """One piece of the tape of :func:`run_strategies_windowed`.
+
+    ``bars``, ``ticks`` and ``depth`` map a symbol to the arrays :func:`run_strategies` takes for
+    it (``data``, ``ticks`` and ``depth``), holding the rows of the window only. The first window
+    names every symbol, with arrays that may be empty; that declares what each carries (bars,
+    ticks with their columns, depth), and every later window carries the same. ``end_ns`` is the
+    last event time the window covers (event time: a bar stamped at its open counts at its
+    close); every row of the window is stamped at or before it. Left out, it is the time of the
+    window's last event.
+
+    Windows come in ascending order and never cut a timestamp: every event of a window is
+    stamped strictly after the last event of the one before it, and a window that does not is
+    refused with ``window_overlap``.
+    """
+
+    bars: Mapping[str, dict] | None = None
+    ticks: Mapping[str, dict] | None = None
+    depth: Mapping[str, dict] | None = None
+    end_ns: int | None = None
+
+
+@dataclass(frozen=True)
+class WindowDone:
+    """What ``on_window`` is told once a window has been run.
+
+    ``index`` counts windows from 0. ``end_ns`` is the window's ``end_ns``, or the time of its
+    last event (the end of the window before, for a window with no event). ``events`` is how many
+    events the window delivered, summed over the runtimes of the call (one, unless
+    ``batch_size`` splits the strategies); ``total_events`` the same since the first window.
+    """
+
+    index: int
+    end_ns: int | None
+    events: int
+    total_events: int
+
+
+def _window_error(call, message, code="invalid_window", parameter="windows", value=None, valid=None):
+    cls = InvalidParameter if code == "invalid_window" else InvalidData
+    return cls(
+        message,
+        code=code,
+        operation=call,
+        parameter=parameter,
+        value=value,
+        valid=valid or ["a Window with the arrays of run_strategies, in ascending time"],
+    )
+
+
+def _reads_series(strategy) -> bool:
+    """Whether ``strategy`` may call ``ctx.series``: its class names ``series``, or its source
+    cannot be read (then it may)."""
+    for cls in type(strategy).__mro__:
+        if cls is object or cls.__module__.split(".")[0] == "raptorbt":
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+        except (OSError, TypeError, SyntaxError, IndentationError):
+            return True
+        if any(isinstance(n, ast.Attribute) and n.attr == "series" for n in ast.walk(tree)):
+            return True
+    return False
+
+
+def _requirements_of(strategy) -> Requirements | None:
+    r = getattr(strategy, "requirements", None)
+    return r if isinstance(r, Requirements) else None
+
+
+def _warmup_rows(req: Requirements | None) -> int:
+    """The rows of the primary bars a declared warm-up is, as far as the declaration says."""
+    if req is None or req.warmup is None:
+        return 0
+    feed = [_tf_key(tf)[1] for tf in req.timeframes if _tf_key(tf)[0] == 0]
+    finest = min(feed) if feed else None
+    w = req.warmup
+    if isinstance(w, Duration):
+        return math.ceil(w.seconds / finest) if finest else 0
+    if isinstance(w, Bars):
+        if w.timeframe is not None and finest:
+            tf = api.resolve_timeframe(w.timeframe)
+            key = _tf_key(tf)
+            if key[0] == 0:
+                return w.n * max(1, round(key[1] / finest))
+        return w.n
+    return 0
+
+
+def _event_span(arrays, offsets, ticks, depth):
+    """The first and last event time a window's arrays hold, or ``(None, None)``."""
+    first, last = [], []
+    for sym, a in arrays.items():
+        ts = a["timestamps"]
+        if len(ts):
+            first.append(int(ts[0]) + offsets.get(sym, 0))
+            last.append(int(ts[-1]) + offsets.get(sym, 0))
+    for group in (ticks, depth):
+        for a in group.values():
+            ts = a["timestamps"]
+            if len(ts):
+                first.append(int(ts[0]))
+                last.append(int(ts[-1]))
+    return (min(first), max(last)) if first else (None, None)
+
+
+def run_strategies_windowed(
+    strategies: Iterable,
+    windows: Iterable[Window],
+    config: BacktestConfig | None = None,
+    *,
+    symbols: Sequence[str],
+    history: int | Literal["declared", "all"] = "declared",
+    on_window: Callable[[WindowDone], None] | None = None,
+    primary_bars: tuple[int, str] | None = None,
+    directions: dict[str, int] | None = None,
+    instruments: dict | None = None,
+    instrument_configs: dict[str, InstrumentConfig] | None = None,
+    oms_type: str = "netting",
+    account_type: str = "cash",
+    leverage: float = 1.0,
+    accounts: dict[str, AccountSpec] | None = None,
+    bar_stamp: Literal["open", "close"] | None = None,
+    bar_ns: int | dict[str, int] | None = None,
+    keep_curves: bool = True,
+    share: bool = True,
+    batch_size: int | None = None,
+    memory_report: bool = False,
+    corporate_actions: Iterable[CorporateAction] | None = None,
+    adjustment_policy: Literal["raw", "adjusted"] | None = None,
+    order_check=None,
+    order_check_scope: Literal["all", "typed"] = "all",
+    bindings: dict[str, str | Sequence[str]] | None = None,
+    trade_from: int | None = None,
+) -> (
+    list[PortfolioResult]
+    | tuple[list[PortfolioResult], dict]
+    | tuple[list[PortfolioResult], dict[str, AccountResult]]
+    | tuple[list[PortfolioResult], dict, dict[str, AccountResult]]
+):
+    """Run many strategies over market data fed in windows.
+
+    The result is :func:`run_strategies`'s over the same data, joined: the trades, orders,
+    equity curves, metrics and halts, ``on_*`` calls and ``ctx.idx`` of every strategy are what
+    one call with all the data would give, bit for bit, whatever the cuts. What differs is what
+    is held: one window of rows (a :class:`Window`, which ``windows`` yields one at a time and
+    which is dropped once run) and, per instrument, the trailing rows the strategies read. The
+    books, the indicators, the aggregated bars and the equity curves are the whole run's; the
+    curves grow with the run (about 32 bytes per timestamp per strategy) as in a batch run.
+
+    ``windows`` yields :class:`Window` objects in ascending time, none cutting a timestamp (a
+    window that does is refused, ``window_overlap``). ``symbols`` lists every symbol the windows
+    carry, in the order of ``data`` in :func:`run_strategies` (a strategy that names none trades
+    all of them); the first window says what each carries (bars, ticks with their columns,
+    depth) and the rest match it (``window_schema``). ``on_window`` is called with a
+    :class:`WindowDone` after each window.
+
+    ``history`` says how many trailing rows of each instrument are held for ``ctx.series``:
+
+    - ``"declared"`` (the default): what the strategies say they read. A strategy declares it
+      with ``Requirements(lookback=N)`` or ``ctx.keep_history(N)``; the engine adds what its
+      indicators read and the warm-up the manifest declares. A strategy that reads ``ctx.series``
+      without declaring how much keeps every row of its instruments, so its series are the
+      batch run's, and its memory is the run's. It is found by reading the strategy's source for
+      ``series``, and, if the source is not found or the read is made through code it does not
+      name (``ctx.data.bar`` and ``ctx.data.history``, structure exits and handles all read
+      ``ctx.series``), by the first read: when rows were already released by then the read is
+      refused (``history_exhausted``), never answered with a shorter series.
+    - ``"all"``: every row of every instrument, for every strategy.
+    - an integer ``N``: at least ``N`` rows, for every strategy; ``ctx.series`` shows what is
+      held, which is a tail of the batch run's.
+
+    ``trade_from`` is as in :func:`run_strategies`: the bars before it are run in full and every
+    order decided before it is refused with the reason ``warmup``.
+
+    What a windowed run does not take, because it needs rows it has not been given yet:
+    ``adjustment_policy="adjusted"`` with a split or a bonus (it restates the history before the
+    ex-date), and ATR-based stops and targets (the ATR of the run is computed over all its bars)
+    raise ``invalid_adjustment_policy`` and ``invalid_config``. A bar stamped at its close with
+    expressions that use ``at(...)`` takes the bar width from its first two bars, as a live node
+    does, where a batch run takes the most common gap of the stored bars.
+
+    The other keywords are those of :func:`run_strategies`; ``batch_size`` runs the strategies
+    in batches whose runtimes are all fed every window.
+    """
+    call = "run_strategies_windowed"
+    if trade_from is not None and (isinstance(trade_from, bool) or not isinstance(trade_from, int)):
+        raise InvalidParameter(
+            f"trade_from must be an event time in integer nanoseconds since the epoch or None, "
+            f"got {trade_from!r}",
+            code="invalid_trade_from",
+            operation=call,
+            parameter="trade_from",
+            value=trade_from,
+            valid=["integer nanoseconds since the epoch", None],
+        )
+    if batch_size is not None and (
+        isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1
+    ):
+        raise InvalidParameter(
+            f"batch_size must be a positive integer or None, got {batch_size!r}",
+            code="invalid_batch_size",
+            operation=call,
+            parameter="batch_size",
+            value=batch_size,
+            valid=["a positive integer", None],
+        )
+    if not (
+        history in ("declared", "all")
+        or (isinstance(history, int) and not isinstance(history, bool) and history >= 1)
+    ):
+        raise InvalidParameter(
+            f"history must be 'declared', 'all' or a positive number of rows, got {history!r}",
+            code="invalid_history",
+            operation=call,
+            parameter="history",
+            value=history,
+            valid=["a positive integer", "declared", "all"],
+        )
+    if on_window is not None and not callable(on_window):
+        raise _window_error(
+            call, f"on_window must be a callable or None, got {type(on_window).__name__}",
+            parameter="on_window", value=type(on_window).__name__, valid=["a callable", None],
+        )
+    if isinstance(symbols, str) or not symbols or len(set(symbols)) != len(list(symbols)):
+        raise InvalidParameter(
+            f"{call}: symbols lists each symbol the windows carry once",
+            code="no_symbols",
+            operation=call,
+            parameter="symbols",
+            value=symbols if isinstance(symbols, str) else list(symbols or ()),
+            valid=["a list of symbols, each once"],
+        )
+    symbols = list(symbols)
+    accounts = check_accounts(accounts, call)
+    strategies, names = unpack_entries(strategies, accounts, call)
+    check_group_sizes(names, call)
+    primary_bars = _primary_bars(primary_bars, call)
+    universe = dict.fromkeys(symbols)
+    entries = _normalise(strategies, universe, call)
+    if not entries:
+        return ([], {}) if memory_report else []
+    used = [s for s in symbols if any(s in syms for _, syms in entries)]
+
+    windows_iter = iter(windows)
+    first = next(windows_iter, None)
+    if first is None:
+        raise _window_error(
+            call, "windows is empty: a run needs at least one window", parameter="windows", value=[]
+        )
+    first = _checked_window(first, 0, call)
+
+    # What each symbol carries is what the first window says.
+    bar_symbols = [s for s in used if s in (first.bars or {})]
+    tick_symbols = [s for s in used if s in (first.ticks or {})]
+    depth_symbols = [s for s in used if s in (first.depth or {})]
+    bare = [s for s in used if s not in bar_symbols and s not in tick_symbols]
+    if bare:
+        raise _window_error(
+            call,
+            "the first window names no bars or ticks for "
+            + ", ".join(repr(s) for s in bare)
+            + ": it declares what each symbol carries, and an empty array will do",
+            code="window_schema",
+            parameter="windows",
+            value=bare,
+            valid=["every symbol of the run in the first window, with arrays that may be empty"],
+        )
+    nodepth = [s for s in depth_symbols if s not in tick_symbols]
+    if nodepth:
+        raise InvalidData(
+            "depth needs ticks for the same symbol: "
+            + ", ".join(f"depth[{s!r}] has no ticks[{s!r}]" for s in nodepth),
+            code="depth_without_ticks",
+            operation=call,
+            parameter="depth",
+            value=nodepth,
+            valid=tick_symbols,
+        )
+    if primary_bars is not None and not tick_symbols:
+        raise InvalidSubscription(
+            "primary_bars aggregates trade prints, but no ticks were given",
+            code="primary_bars_without_ticks",
+            operation=call,
+            parameter="primary_bars",
+            value=primary_bars,
+        )
+    reject_atr_stops(config, instrument_configs, tick_symbols)
+    reject_bar_only_settings(config, [s for s in bar_symbols if s not in tick_symbols], call)
+    for sym in used:
+        period = resolve_atr_period(config, (instrument_configs or {}).get(sym))
+        if period:
+            raise InvalidParameter(
+                f"ATR-based stop/target configured (ATR period {period}, symbol {sym!r}), but a "
+                "windowed run computes ATR over bars it has not been given yet. Use a fixed stop "
+                "or target, or run_strategies.",
+                code="invalid_config",
+                operation=call,
+                parameter="atr_period",
+                value=period,
+                valid=["a fixed stop or target", "a whole-run call (run_strategies)"],
+            )
+    stamps = BarStamps.resolve(bar_stamp, bar_ns, bar_symbols, call, require=bool(bar_symbols))
+    corporate_actions, adjustment_policy = _lifecycle(
+        corporate_actions, adjustment_policy, universe, tick_symbols, call
+    )
+    if adjustment_policy == "adjusted" and any(a.ratio is not None for a in corporate_actions):
+        raise InvalidParameter(
+            f"{call}: adjustment_policy='adjusted' with a split or a bonus restates the bars "
+            "before its ex-date, which a windowed run has already run; use 'raw' (positions are "
+            "rescaled at the ex-date) or push history already adjusted",
+            code="invalid_adjustment_policy",
+            operation=call,
+            parameter="adjustment_policy",
+            value=adjustment_policy,
+            valid=["raw"],
+        )
+    offsets = {s: stamps.offset(s) for s in bar_symbols}
+
+    def arrays_of(window):
+        bars = {s: _as_arrays(a, s, call) for s, a in (window.bars or {}).items() if s in used}
+        late = [s for s in bars if s not in bar_symbols]
+        if late:
+            raise _window_error(
+                call,
+                f"bars for {late!r}, which the first window declared without bars",
+                code="window_schema",
+                parameter="bars",
+                value=late,
+                valid=["what the first window declared for each symbol"],
+            )
+        ensure_sessions_cover(bars, instruments, call)
+        ticks = {s: _tick_arrays(s, a) for s, a in (window.ticks or {}).items() if s in used}
+        depth = {s: _depth_arrays(s, a) for s, a in (window.depth or {}).items() if s in used}
+        return bars, ticks, depth
+
+    first_arrays = arrays_of(first)
+    tick_columns = {s: list(a) for s, a in first_arrays[1].items()}
+    index = {s: i for i, s in enumerate(used)}
+
+    # What the rings hold: the most any strategy declared, and what the manifest's warm-up says.
+    rows = history if isinstance(history, int) else 1
+    if history != "all":
+        for strategy, _ in entries:
+            req = _requirements_of(strategy)
+            rows = max(rows, _warmup_rows(req), req.lookback if req and req.lookback else 0)
+    market = MarketData.windowed(
+        used,
+        [stamps.offset(s) for s in used],
+        rows,
+        [s in bar_symbols for s in used],
+        [tick_columns.get(s) for s in used],
+        [s in depth_symbols for s in used],
+    )
+    kwargs = dict(
+        directions=directions,
+        instruments=instruments,
+        instrument_configs=instrument_configs,
+        oms_type=oms_type,
+        account_type=account_type,
+        leverage=leverage,
+        keep_curves=keep_curves,
+        share=share,
+        primary_bars=primary_bars,
+        stacklevel=4,
+        corporate_actions=corporate_actions,
+        adjustment_policy=adjustment_policy,
+        order_check=order_check,
+        order_check_scope=order_check_scope,
+        host=context_host.build(instruments, bindings, entries, universe, call),
+        trade_from=trade_from,
+        call=call,
+    )
+    size = 1 if not share else (batch_size or _AUTO_BATCH)
+    groups: list[tuple[list[int], _Group]] = []
+    try:
+        for batch in plan_batches(names, size):
+            group = _open_group(
+                [entries[i] for i in batch],
+                market,
+                used,
+                stamps,
+                config,
+                names=[names[i] for i in batch],
+                accounts=accounts,
+                **kwargs,
+            )
+            groups.append((batch, group))
+            for strategy, sid, _ in group.setups:
+                req = _requirements_of(strategy)
+                if history == "all":
+                    group.rt.keep_all_rows(sid)
+                elif isinstance(history, int) or (req is not None and req.lookback):
+                    group.rt.declare_history(sid)
+                elif _reads_series(strategy):
+                    group.rt.keep_all_rows(sid)
+
+        total, prev_end, k = 0, None, 0
+        window, arrays = first, first_arrays
+        first = first_arrays = None  # what a window holds is freed once it is run
+        while True:
+            done, prev_end = _feed_window(call, window, arrays, k, offsets, prev_end, index, groups)
+            total += done
+            if on_window is not None:
+                on_window(WindowDone(k, prev_end, done, total))
+            window = arrays = None
+            window = next(windows_iter, None)
+            if window is None:
+                break
+            k += 1
+            window = _checked_window(window, k, call)
+            arrays = arrays_of(window)
+    except BaseException as exc:
+        traceback.clear_frames(exc.__traceback__)
+        for _, group in groups:
+            group.close()
+        raise
+
+    results: list = [None] * len(entries)
+    reports, account_results = [], {}
+    try:
+        for batch, group in groups:
+            done, report, owned = group.finish(memory_report)
+            for i, result in zip(batch, done):
+                results[i] = result
+            for name, account in owned.items():
+                account.strategies = [batch[k] for k in account.strategies]
+                account_results[name] = account
+            if report is not None:
+                reports.append(report)
+    except BaseException:
+        for _, group in groups:
+            group.close()
+        raise
+    out: tuple = (results,)
+    if memory_report:
+        out += (_merge_reports(reports, len(entries), size),)
+    if accounts is not None:
+        out += (account_results,)
+    return out if len(out) > 1 else results
+
+
+def _checked_window(window, k, call):
+    if not isinstance(window, Window):
+        raise _window_error(
+            call,
+            f"windows yields Window objects, got {type(window).__name__} at index {k}",
+            value=type(window).__name__,
+        )
+    if window.end_ns is not None and (
+        isinstance(window.end_ns, bool) or not isinstance(window.end_ns, int)
+    ):
+        raise _window_error(
+            call,
+            f"window {k}: end_ns is an event time in integer nanoseconds, got {window.end_ns!r}",
+            parameter="end_ns",
+            value=window.end_ns,
+            valid=["integer nanoseconds since the epoch", None],
+        )
+    return window
+
+
+def _feed_window(call, window, arrays, k, offsets, prev_end, index, groups):
+    """Check one window against the one before it and feed it to every runtime; returns
+    ``(events delivered, the window's end: its end_ns, else its last event time)``."""
+    bars, ticks, depth = arrays
+    first_ts, last_ts = _event_span(bars, offsets, ticks, depth)
+    end = window.end_ns if window.end_ns is not None else last_ts
+    if prev_end is not None and (
+        (first_ts is not None and first_ts <= prev_end) or (end is not None and end <= prev_end)
+    ):
+        raise _window_error(
+            call,
+            f"window {k} starts at {first_ts} and ends at {end}, but the window before it ended "
+            f"at {prev_end}: a window may not cut a timestamp or overlap the one before it",
+            code="window_overlap",
+            parameter="windows",
+            value=k,
+            valid=["windows in ascending time, each starting after the end of the one before"],
+        )
+    if window.end_ns is not None and last_ts is not None and last_ts > window.end_ns:
+        raise _window_error(
+            call,
+            f"window {k} holds an event at {last_ts}, after its end_ns {window.end_ns}",
+            code="window_overlap",
+            parameter="end_ns",
+            value=window.end_ns,
+            valid=["an end_ns at or after every event of the window"],
+        )
+    delivered = 0
+    for _, group in groups:
+        try:
+            delivered += group.rt.push_window(
+                {index[s]: a for s, a in bars.items()},
+                {index[s]: a for s, a in ticks.items()},
+                {index[s]: a for s, a in depth.items()},
+            )
+        except errors.RaptorBTError as error:
+            # the native method names itself; the caller called this
+            error.operation = call
+            raise
+    return delivered, end if end is not None else prev_end

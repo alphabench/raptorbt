@@ -209,6 +209,18 @@ impl<'a> MergeCursor<'a> {
         self.heap.peek().map(|Reverse(k)| (k.ts, k.phase))
     }
 
+    /// Events yielded so far for `instrument`, across all its streams.
+    #[inline]
+    pub fn delivered(&self, instrument: InstrumentId) -> u64 {
+        self.local_next.get(instrument.index()).copied().unwrap_or(0)
+    }
+
+    /// Whether every stream has been read to its end.
+    #[inline]
+    pub fn is_drained(&self) -> bool {
+        self.heap.is_empty()
+    }
+
     /// Last row of the instrument's bar stream already yielded.
     #[inline]
     pub fn visible_row(&self, instrument: InstrumentId) -> Option<u32> {

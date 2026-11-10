@@ -348,8 +348,8 @@ CODES: dict[str, Code] = {
     ),
     "history_exhausted": _c(
         StateError, "live-trading",
-        "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten.",
-        ["raise history= on the node", "ask the strategy to keep fewer rows (subscribe(..., history=))"],
+        "A live node's history cannot hold a row: the ring is full of rows a strategy asked to keep, or the row was overwritten. In a windowed run: ctx.series() was read for rows already released.",
+        ["raise history= on the node", "ask the strategy to keep fewer rows (subscribe(..., history=))", "declare how many rows a windowed strategy reads (Requirements(lookback=N), ctx.keep_history(N)) or run with history='all'"],
     ),
     "invalid_initial_positions": _c(
         InvalidParameter, "live-trading", "initial_positions names a strategy or position that does not fit the node.",
@@ -1017,6 +1017,21 @@ CODES: dict[str, Code] = {
     "runtime_busy": _c(
         StateError, "backtesting", "The runtime is in use; a call re-entered it from a hook.",
         ["queue the push and make it after the hook returns"],
+    ),
+    "invalid_window": _c(
+        InvalidParameter, "backtesting",
+        "A windowed run was given a window that is not a Window, or arrays keyed by anything but a symbol of the run.",
+        ["a Window with the arrays of run_strategies, in ascending time"],
+    ),
+    "window_overlap": _c(
+        InvalidData, "backtesting",
+        "A window starts at or before the last event of the one before it, so it cuts a timestamp or overlaps it, or it holds an event after its end_ns.",
+        ["windows in ascending time, each starting after the end of the one before"],
+    ),
+    "window_schema": _c(
+        InvalidData, "backtesting",
+        "A window carries bars, ticks or depth for a symbol that the first window did not declare it with, or ticks with other columns.",
+        ["what the first window declared for each symbol", "every symbol of the run in the first window, with arrays that may be empty"],
     ),
     "run_finished": _c(
         StateError, "backtesting", "The strategy's run is finished.",

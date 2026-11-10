@@ -25,7 +25,9 @@ from raptorbt import (
     PortfolioSession,
     Strategy,
     errors,
+    Window,
     run_strategies,
+    run_strategies_windowed,
     run_strategy_backtest,
 )
 from raptorbt.errors import CODES, SKILLS, RaptorBTError
@@ -789,6 +791,22 @@ def _():
 @case("invalid_trade_from", "trade_from")
 def _():
     run(trade_from="09:30")
+
+
+@case("invalid_window", "windows")
+def _():
+    run_strategies_windowed([Noop()], [{"A": {}}], symbols=["A"], bar_stamp="close")
+
+
+@case("window_overlap", "windows")
+def _():
+    window = Window(bars={"A": bars()})
+    run_strategies_windowed([Noop()], [window, window], symbols=["A"], bar_stamp="close")
+
+
+@case("window_schema", "windows")
+def _():
+    run_strategies_windowed([Noop()], [Window(bars={})], symbols=["A"], bar_stamp="close")
 
 
 @case("no_instrument_spec", "symbol_or_role")

@@ -74,6 +74,8 @@ pub struct LiveFeed {
     last_ts: Vec<i64>,
     /// Next per-instrument event ordinal.
     local_next: Vec<u64>,
+    /// Instruments whose rings double when full instead of overwriting: every row is kept.
+    keep_every_row: Vec<bool>,
 }
 
 impl LiveFeed {
@@ -88,6 +90,7 @@ impl LiveFeed {
             rings: (0..n).map(|_| Rings::default()).collect(),
             last_ts: vec![i64::MIN; n],
             local_next: vec![0; n],
+            keep_every_row: vec![false; n],
         }
     }
 
@@ -109,6 +112,7 @@ impl LiveFeed {
         self.rings.push(Rings::default());
         self.last_ts.push(i64::MIN);
         self.local_next.push(0);
+        self.keep_every_row.push(false);
     }
 
     /// Free `instrument`'s rings. Its id stays, so the other instruments keep theirs; a later
@@ -173,6 +177,52 @@ impl LiveFeed {
         r.keeps.push(Keep { owner, rows, bars, ticks });
     }
 
+    /// Keep every row of `instrument` from now on: its rings double when full instead of
+    /// overwriting the oldest. Refused with the oldest row still held when a row was already
+    /// overwritten, since the rows before it cannot be brought back. Calling it again is a no-op.
+    pub fn keep_all(&mut self, instrument: InstrumentId) -> std::result::Result<(), u64> {
+        let i = instrument.index();
+        let r = &self.rings[i];
+        let lost = [
+            r.bars.as_ref().map(|b| b.first_row()),
+            r.ticks.as_ref().map(|t| t.first_row()),
+            r.depth.as_ref().map(|d| d.first_row()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|&first| first > 0);
+        if let Some(first) = lost {
+            return Err(first);
+        }
+        self.keep_every_row[i] = true;
+        Ok(())
+    }
+
+    /// Whether `keep_all` was asked for `instrument`.
+    pub fn keeps_every_row(&self, instrument: InstrumentId) -> bool {
+        self.keep_every_row[instrument.index()]
+    }
+
+    /// Make the rings of `instrument` hold at least `rows` rows, now and when they are first
+    /// allocated. A ring never shrinks.
+    pub fn reserve(&mut self, instrument: InstrumentId, rows: usize) {
+        let i = instrument.index();
+        let rows = rows.max(1);
+        if self.capacity_of(instrument) < rows {
+            self.own_capacity[i] = Some(rows);
+        }
+        let r = &mut self.rings[i];
+        if let Some(b) = r.bars.as_mut() {
+            b.grow(rows);
+        }
+        if let Some(t) = r.ticks.as_mut() {
+            t.grow(rows);
+        }
+        if let Some(d) = r.depth.as_mut() {
+            d.grow(rows);
+        }
+    }
+
     fn release(r: &mut Rings, kind: RingKind) {
         // What each keeper needs after the coming push: the last `rows`
         // rows including the new one.
@@ -205,9 +255,13 @@ impl LiveFeed {
         bar: KernelBar,
     ) -> std::result::Result<EventRef, RingError> {
         let capacity = self.capacity_of(instrument);
+        let all = self.keep_every_row[instrument.index()];
         let r = &mut self.rings[instrument.index()];
         Self::release(r, RingKind::Bars);
         let ring = r.bars.get_or_insert_with(|| RingColumns::new(capacity, 0));
+        if all {
+            ring.grow_if_full();
+        }
         let row = ring.end_row();
         ring.push(row, bar)?;
         Ok(self.event(instrument, EventKind::Bar, event_ts, row))
@@ -221,9 +275,13 @@ impl LiveFeed {
         row: TickRow,
     ) -> std::result::Result<u64, RingError> {
         let capacity = self.capacity_of(instrument);
+        let all = self.keep_every_row[instrument.index()];
         let r = &mut self.rings[instrument.index()];
         Self::release(r, RingKind::Ticks);
         let ring = r.ticks.get_or_insert_with(|| RowRing::new(capacity, 0, TickRow::default()));
+        if all {
+            ring.grow_if_full();
+        }
         let seq = ring.end_row();
         ring.push(seq, row)?;
         Ok(seq)
@@ -237,10 +295,14 @@ impl LiveFeed {
     ) -> std::result::Result<EventRef, RingError> {
         let capacity = self.capacity_of(instrument);
         let ts = snapshot.timestamp;
+        let all = self.keep_every_row[instrument.index()];
         let r = &mut self.rings[instrument.index()];
         let ring = r
             .depth
             .get_or_insert_with(|| RowRing::new(capacity, 0, DepthTick::from_levels(0, &[], &[])));
+        if all {
+            ring.grow_if_full();
+        }
         let row = ring.end_row();
         ring.push(row, snapshot)?;
         Ok(self.event(instrument, EventKind::Depth, ts, row))
@@ -319,6 +381,7 @@ impl HeapSize for LiveFeed {
             + self.retired.capacity()
             + self.last_ts.capacity() * size_of::<i64>()
             + self.local_next.capacity() * size_of::<u64>()
+            + self.keep_every_row.capacity()
     }
 }
 
@@ -421,6 +484,45 @@ mod tests {
         let err = feed.check_timestamp(b, 100).unwrap_err().to_string();
         assert!(err.contains("B was retired"), "{err}");
         assert!(feed.check_timestamp(id(0), 0).is_ok(), "the others are untouched");
+    }
+
+    #[test]
+    fn an_instrument_that_keeps_every_row_loses_none_and_one_that_lost_a_row_cannot() {
+        let mut feed = LiveFeed::new(vec!["A".into(), "B".into()], 2);
+        feed.keep_all(id(0)).unwrap();
+        for t in 0..100 {
+            feed.push_bar(id(0), t, bar(t)).unwrap();
+            feed.push_tick(id(0), row(t)).unwrap();
+        }
+        let bars = feed.bars(id(0)).unwrap();
+        assert_eq!((bars.first_row(), bars.end_row()), (0, 100));
+        assert_eq!(feed.ticks(id(0)).unwrap().first_row(), 0);
+        assert!(feed.keeps_every_row(id(0)) && !feed.keeps_every_row(id(1)));
+        for t in 0..5 {
+            feed.push_bar(id(1), t, bar(t)).unwrap();
+        }
+        assert_eq!(feed.keep_all(id(1)), Err(3), "rows 0..3 are gone");
+        assert!(!feed.keeps_every_row(id(1)));
+    }
+
+    #[test]
+    fn reserve_raises_what_a_ring_holds_now_and_when_it_is_first_made() {
+        let mut feed = LiveFeed::new(vec!["A".into(), "B".into()], 2);
+        feed.reserve(id(1), 10);
+        for t in 0..10 {
+            feed.push_bar(id(1), t, bar(t)).unwrap();
+        }
+        assert_eq!(feed.bars(id(1)).unwrap().first_row(), 0, "made at the reserved size");
+        for t in 0..2 {
+            feed.push_bar(id(0), t, bar(t)).unwrap();
+        }
+        feed.reserve(id(0), 6);
+        for t in 2..6 {
+            feed.push_bar(id(0), t, bar(t)).unwrap();
+        }
+        assert_eq!(feed.bars(id(0)).unwrap().first_row(), 0, "an existing ring grew in place");
+        feed.reserve(id(0), 1);
+        assert_eq!(feed.capacity_of(id(0)), 6, "never smaller");
     }
 
     #[test]

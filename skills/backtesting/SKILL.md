@@ -31,6 +31,7 @@ runner wraps it as `PortfolioResult.result`).
 | --- | --- | --- |
 | `run_strategy_backtest` | A `Strategy`, one instrument's bars | One class-based strategy. |
 | `run_strategies` | Many strategies, `{symbol: bars}` | Many strategies or instruments over shared data; accounts, ticks, corporate actions. |
+| `run_strategies_windowed` | Many strategies, an iterable of `Window` | `run_strategies` over data fed a window at a time, with the same results and memory bounded by the window. |
 | `run_single_backtest` | Bars and boolean `entries`, `exits` | A vectorised idea on one instrument; `position_sizes` and `instrument_config` size it. |
 | `run_basket_backtest`, `run_portfolio_backtest` | A list of `(timestamps, open, high, low, close, volume, entries, exits, direction, weight, symbol)` | Several instruments from precomputed signals. |
 | `run_multi_backtest` | Bars and a list of `(entries, exits, direction, weight, symbol)` | Several signal sets on one instrument, combined (`combine_mode`: `any`, `all`, `majority`, `independent`, `weighted`). |

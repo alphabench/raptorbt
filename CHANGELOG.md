@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `raptorbt.vwap_session(high, low, close, volume, session_starts)`: the
   typical-price VWAP restarting where `session_starts` is true. `vwap` is
   unchanged and stays cumulative over the whole array.
+- `raptorbt.run_strategies_windowed(strategies, windows, config, *, symbols, history, on_window)`:
+  `run_strategies` over data fed a `raptorbt.Window` at a time (`bars`, `ticks`, `depth`,
+  `end_ns`), so what is held is bounded by the window and the history the strategies read, not by
+  the run. Trades, orders, equity curves, metrics, halts, `ctx.idx` and the full report are
+  `run_strategies`'s over the same data, bit for bit, whatever the cuts (one session, seven, the
+  whole run, anywhere). Windows ascend and never cut a timestamp: one that starts at or before the
+  last event of the one before it is refused, `window_overlap`; one that carries other data than
+  the first declared is `window_schema`. `history="declared"` (the default) holds what the
+  strategies say they read; a strategy that reads `ctx.series` without saying so keeps every row
+  of its symbols, so its series are the batch run's, and a read made after rows were released is
+  refused (`history_exhausted`), never shortened. `"all"` keeps every row of everything, an
+  integer holds at least that many. ATR-based stops and targets and `adjustment_policy="adjusted"`
+  with a split or bonus are refused (`invalid_config`, `invalid_adjustment_policy`): they need
+  rows a window has not been given.
+- `Requirements(lookback=N)`: the most trailing rows of an instrument a strategy reads through
+  `ctx.series`, for a windowed run to hold. It is written to the manifest only when declared, so
+  a strategy that does not say keeps its fingerprint.
+- Engine: `Runtime.push_window` and `Runtime.drain_curve`, `MarketData.windowed`,
+  `RuntimeCore::advance_window` (a cursor per window with whole-run rows and ordinals) and rings
+  that can keep every row.
 - `FeeSchedule.backdated(at)`: every row group's earliest rates also in force
   from `at`, each such row's source saying it is backdated and from when. A run
   over days before any published rate can be priced on the earliest known

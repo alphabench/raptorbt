@@ -27,7 +27,7 @@ from raptorbt.strategy.context import (
     TradeTick,
 )
 from raptorbt.strategy.orders import ClosePosition, MarketOrder
-from raptorbt.strategy.multi_runner import run_strategies
+from raptorbt.strategy.multi_runner import Window, WindowDone, run_strategies, run_strategies_windowed
 from raptorbt.strategy.portfolio_runner import run_portfolio_strategy
 from raptorbt.strategy.requirements import (
     Bars,
@@ -121,7 +121,10 @@ __all__ = [
     "Timeframe",
     "run_portfolio_strategy",
     "run_strategies",
+    "run_strategies_windowed",
     "run_strategy_backtest",
+    "Window",
+    "WindowDone",
 ]
 
 

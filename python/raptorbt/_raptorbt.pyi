@@ -1529,6 +1529,19 @@ class MarketData:
     def live(symbols: list[str], offsets: list[int], history: int) -> MarketData:
         """The shell of a live node: no data, rings of ``history`` rows per symbol."""
         ...
+    @staticmethod
+    def windowed(
+        symbols: list[str],
+        offsets: list[int],
+        history: int,
+        bars: list[bool],
+        ticks: list[list[str] | None],
+        depth: list[bool],
+    ) -> MarketData:
+        """The shell of a windowed run (``run_strategies_windowed``): no data, rings of
+        ``history`` rows per symbol, and what each symbol carries: whether it has ``bars``, the
+        tick columns it has (``None``: no ticks) and whether it has ``depth``."""
+        ...
 
 class Runtime:
     def __init__(
@@ -1585,6 +1598,27 @@ class Runtime:
     def set_corporate_actions(self, actions: list[CorporateAction], policy: str) -> None: ...
     def finalize(self) -> None: ...
     def run(self) -> None: ...
+    def push_window(
+        self,
+        bars: dict[int, dict[str, Any]],
+        ticks: dict[int, dict[str, Any]] | None = ...,
+        depth: dict[int, dict[str, Any]] | None = ...,
+    ) -> int:
+        """Run the next window of a windowed runtime (built from ``MarketData.windowed``) as
+        ``run`` runs a tape: the arrays are keyed by the symbol's index in the run. Returns the
+        events delivered. A window that starts at or before the last event of the one before
+        raises ``window_overlap``."""
+        ...
+    def drain_curve(self, sid: int) -> tuple[_I64, _F64]:
+        """The equity samples a strategy's book took since the last call, ``(timestamps,
+        equity)``, the newest held back. The book keeps its curve."""
+        ...
+    def declare_history(self, sid: int) -> None:
+        """The strategy said how many trailing rows it reads: a windowed run holds those."""
+        ...
+    def keep_all_rows(self, sid: int) -> None:
+        """Keep every row of every instrument of a strategy that reads ``ctx.series``."""
+        ...
     def set_curve_window(self, window: int | None) -> None: ...
     def adopt_position(
         self,

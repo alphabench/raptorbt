@@ -174,6 +174,23 @@ impl Window {
         Ok(slot)
     }
 
+    /// Whether the ring holds as many rows as it can.
+    fn full(&self) -> bool {
+        self.len() == self.capacity
+    }
+
+    /// Raise the capacity. The caller moves the held rows to their slots under the new one,
+    /// with [`Window::relocate`].
+    fn set_capacity(&mut self, capacity: usize) {
+        debug_assert!(capacity >= self.capacity);
+        self.capacity = capacity;
+    }
+
+    /// The slot of a held row under `capacity`.
+    fn slot_under(abs_row: u64, capacity: usize) -> usize {
+        (abs_row % capacity as u64) as usize
+    }
+
     /// The slot of a held row, or why it is not held.
     fn locate(&self, abs_row: u64) -> Result<usize, RowMiss> {
         if abs_row < self.first {
@@ -255,6 +272,38 @@ impl RingColumns {
     /// Release every row below `to` for `id`.
     pub fn advance(&mut self, id: ConsumerId, to: u64) -> Result<(), RingError> {
         self.window.advance(id, to)
+    }
+
+    /// Hold at least `capacity` rows from now on. Every held row stays where a read finds it; a
+    /// ring already that large is left alone.
+    pub fn grow(&mut self, capacity: usize) {
+        let old = self.window.capacity;
+        if capacity <= old {
+            return;
+        }
+        fn moved<T: Copy + Default>(w: &Window, from: &[T], capacity: usize) -> Box<[T]> {
+            let mut to = vec![T::default(); capacity];
+            for abs in w.first..w.next {
+                to[Window::slot_under(abs, capacity)] = from[w.slot(abs)];
+            }
+            to.into()
+        }
+        self.ts = moved(&self.window, &self.ts, capacity);
+        self.open = moved(&self.window, &self.open, capacity);
+        self.high = moved(&self.window, &self.high, capacity);
+        self.low = moved(&self.window, &self.low, capacity);
+        self.close = moved(&self.window, &self.close, capacity);
+        self.volume = moved(&self.window, &self.volume, capacity);
+        self.window.set_capacity(capacity);
+    }
+
+    /// Make room for the next push by doubling when the ring is full: a ring that keeps every
+    /// row (see [`LiveFeed::keep_all`](crate::runtime::live::LiveFeed::keep_all)) calls this
+    /// before each push.
+    pub fn grow_if_full(&mut self) {
+        if self.window.full() {
+            self.grow(self.window.capacity.saturating_mul(2));
+        }
     }
 
     /// Append the bar with sequence number `seq`, which must be the next one.
@@ -381,6 +430,27 @@ impl<T: Copy> RowRing<T> {
 
     pub fn advance(&mut self, id: ConsumerId, to: u64) -> Result<(), RingError> {
         self.window.advance(id, to)
+    }
+
+    /// Hold at least `capacity` rows from now on; see [`RingColumns::grow`].
+    pub fn grow(&mut self, capacity: usize) {
+        if capacity <= self.window.capacity {
+            return;
+        }
+        let blank = self.rows[0];
+        let mut to = vec![blank; capacity];
+        for abs in self.window.first..self.window.next {
+            to[Window::slot_under(abs, capacity)] = self.rows[self.window.slot(abs)];
+        }
+        self.rows = to.into();
+        self.window.set_capacity(capacity);
+    }
+
+    /// Double when full; see [`RingColumns::grow_if_full`].
+    pub fn grow_if_full(&mut self) {
+        if self.window.full() {
+            self.grow(self.window.capacity.saturating_mul(2));
+        }
     }
 
     /// Append the row with sequence number `seq`, which must be the next one.
@@ -540,6 +610,43 @@ mod tests {
         }
         assert_eq!(ring.heap_bytes(), fixed);
         assert_eq!(fixed, 10 * std::mem::size_of::<TickRow>());
+    }
+
+    #[test]
+    fn growing_keeps_every_held_row_where_a_read_finds_it() {
+        let mut ring = RingColumns::new(3, 0);
+        fill(&mut ring, 0..5);
+        assert_eq!((ring.first_row(), ring.end_row()), (2, 5));
+        ring.grow(8);
+        assert_eq!(ring.capacity(), 8);
+        assert_eq!((ring.first_row(), ring.end_row()), (2, 5), "growing drops and adds nothing");
+        for row in 2..5 {
+            assert_eq!(ring.get(row).unwrap().timestamp, row as i64);
+        }
+        assert_eq!(ring.get(1).unwrap_err(), RowMiss::Evicted { oldest: 2 });
+        fill(&mut ring, 5..12);
+        assert_eq!((ring.first_row(), ring.end_row()), (4, 12));
+        ring.grow(2);
+        assert_eq!(ring.capacity(), 8, "a ring never shrinks");
+    }
+
+    #[test]
+    fn a_ring_that_doubles_when_full_never_evicts() {
+        let mut ring = RingColumns::new(1, 0);
+        for seq in 0..1000 {
+            ring.grow_if_full();
+            ring.push(seq, bar(seq as i64)).unwrap();
+        }
+        assert_eq!((ring.first_row(), ring.end_row()), (0, 1000));
+        assert_eq!(ring.get(0).unwrap().timestamp, 0);
+        assert_eq!(ring.get(999).unwrap().timestamp, 999);
+        let mut rows = RowRing::new(1, 0, TickRow::default());
+        for seq in 0..1000 {
+            rows.grow_if_full();
+            rows.push(seq, TickRow { timestamp: seq as i64, ..TickRow::default() }).unwrap();
+        }
+        assert_eq!((rows.first_row(), rows.end_row()), (0, 1000));
+        assert_eq!(rows.get(417).unwrap().timestamp, 417);
     }
 
     #[test]
