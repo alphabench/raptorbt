@@ -264,6 +264,7 @@ def recorded():
 
 
 @pytest.mark.parametrize("cut", CUTS, ids=CUT_IDS)
+@pytest.mark.filterwarnings(r"ignore:register_indicator\(\) without symbol=:UserWarning")  # replayed one-instrument examples
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_every_example_gives_the_same_results_in_windows(script, cut, recorded, monkeypatch):
     whole = recorded(script, monkeypatch)
@@ -582,7 +583,7 @@ def test_ticks_depth_and_primary_bars_are_the_batch_run():
     class Ticker(Strategy):
         def on_start(self, ctx):
             self.n = 0
-            self.sma = self.register_indicator(Indicator.sma(3))
+            self.sma = self.register_indicator(Indicator.sma(3), symbol="X")
 
         def on_trade(self, ctx, tick):
             self.n += 1
