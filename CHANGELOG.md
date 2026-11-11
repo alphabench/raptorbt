@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `auto_roll` with `roll_sizing="notional"` (the default) no longer raises a bare `KeyError` when
+  the next contract is so dear that the notional keeps no whole lot of it: the roll fails as
+  `on_roll_failed(..., "zero_size", ...)` naming the open that was not sent, which raises
+  `roll_open_failed` unless overridden.
+- A roll due on an instant the market takes no orders (the bar stamped at the session's close)
+  is no longer failed with `roll_close_failed` (`market_closed`): the close is sent again at the
+  next event, and the open follows its fill as usual.
+
 ### Changed
 
 - `bar_ns` is honoured for close-stamped bars too, where `run_strategies` ignored it: it is

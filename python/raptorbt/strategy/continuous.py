@@ -126,7 +126,9 @@ class RollEvents:
 
     def on_roll_failed(self, ctx, roll: RollEvent, close_id: str, status: str, reason) -> None:
         """A step of the roll ended without filling (``status`` is ``rejected``, ``canceled`` or
-        ``expired``). ``close_id`` names the order: a close of a position in the old contract
+        ``expired``; ``zero_size`` for an open the new contract's price sizes to no lot, which
+        names the open that was not sent). A close refused ``market_closed`` is not a failure: it
+        is sent again at the next event. ``close_id`` names the order: a close of a position in the old contract
         (the open in the new contract was not sent, and the position is still in the old one),
         or, when its id ends in ``:o{k}``, the open in the new contract (the position is closed
         and not open in the new contract). Raises by default."""
@@ -201,6 +203,7 @@ class RollEvents:
             return
         _, seen, seq, _, deferred = self._roll_state()
         host = ctx._raptorbt_host
+        self._resend_closes(ctx)
         if deferred:
             for event in [e for e in deferred if e.to_symbol in ctx.symbols]:
                 deferred.remove(event)
@@ -400,8 +403,13 @@ class RollEvents:
             else:
                 sizing = self._notional_sizing(ctx, job, event, qty, lots_old, from_lot, to_lot)
                 if sizing is None:
-                    del pending[cid]
-                    self.on_roll_failed(ctx, roll, cid, "zero_size", "the new contract's notional is below one lot of it")
+                    # The close has filled: the position is flat and no open follows, so the failed
+                    # step is the open (its id), and the job is gone (a later fill of the close
+                    # finds nothing and reports nothing more). The close's own filled-in-full branch
+                    # above may already have removed it.
+                    pending.pop(cid, None)
+                    open_id = job["open_id"] if part == 0 else f"{job['open_id']}.{part}"
+                    self.on_roll_failed(ctx, roll, open_id, "zero_size", "the new contract's notional is below one lot of it")
                     return
                 open_qty = sizing["lots_new"] * to_lot
                 tags.update(
@@ -424,9 +432,35 @@ class RollEvents:
                 Market(side=job["side"], quantity=open_qty, instrument=job["to"], tags=tags),
                 client_id=open_id,
             )
+        elif kind == "order_rejected" and getattr(event, "reject_reason", None) == "market_closed":
+            # The rule's time fell on an instant the market takes no orders (the bar stamped at the
+            # session's close is the first event at or after a roll that is due at the close). The
+            # roll is due, not failed: the close is sent again at the next event, ``_resend_closes``.
+            job["retry_after"] = int(ctx.event_ns)
         elif kind in ("order_rejected", "order_canceled", "order_expired"):
             del pending[cid]
             self.on_roll_failed(ctx, roll, cid, kind.removeprefix("order_"), getattr(event, "reject_reason", None))
+
+    def _resend_closes(self, ctx) -> None:
+        """Send again the close of a roll the market refused as closed, on the first event after
+        the refusal: a close the market keeps refusing is retried at every later event until it is
+        taken, and any other refusal fails the roll as before."""
+        _, _, _, pending, _ = self._roll_state()
+        now = ctx.event_ns
+        for cid, job in sorted(pending.items()):
+            if job.get("retry_after") is None or now is None or now <= job["retry_after"]:
+                continue
+            del pending[cid]
+            job.pop("retry_after")
+            tries = job["tries"] = job.get("tries", 0) + 1
+            new_id = f"{cid.partition('.r')[0]}.r{tries}"
+            pending[new_id] = job
+            closing = "sell" if job["side"] == "buy" else "buy"
+            tags = {"roll": job["role"], "from": job["from"], "to": job["to"]}
+            self.submit_order(
+                Market(side=closing, quantity=job["left"], instrument=job["from"], reduce_only=True, tags=tags),
+                client_id=new_id,
+            )
 
 
 def _then_roll(hook):
