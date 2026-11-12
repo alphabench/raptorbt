@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a `LiveNode` with a venue (`PaperExecution` or an adapter), the orders the engine builds
+  itself (the entry of `enter()`, the close of `close_position()` and of an exit signal, the
+  stop and target legs, schedule slices and the square-off) were sent `tif="gtc"`, which a
+  segment that holds only day orders refuses: on NFO, BFO, CDS, BCD, BSE and MCX the entry
+  raised `order_validity_unsupported` and a position could not be closed. They are now sent
+  gtc only where the segment holds it (NSE cash, NSE commodity, a venue the engine does not
+  know, unchanged) and the instrument's default (`"day"`) elsewhere. A backtest builds no order
+  for these and was never refused.
 - `auto_roll` with `roll_sizing="notional"` (the default) no longer raises a bare `KeyError` when
   the next contract is so dear that the notional keeps no whole lot of it: the roll fails as
   `on_roll_failed(..., "zero_size", ...)` naming the open that was not sent, which raises

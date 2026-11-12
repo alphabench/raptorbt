@@ -70,6 +70,19 @@ impl EngineKernel {
         }
     }
 
+    /// The time in force of an order the engine builds itself (an `enter()`, a
+    /// `close_position()`, a protective leg, a slice, a square-off): `"gtc"`
+    /// where the instrument's segment holds it, as on NSE equity, and the
+    /// instrument's default (`"day"`) where it does not, as on NFO and MCX. A
+    /// hard-coded `"gtc"` was refused there and faulted the strategy.
+    pub fn engine_tif(&self) -> &'static str {
+        if self.check_validity("gtc", None).is_ok() {
+            "gtc"
+        } else {
+            self.default_tif()
+        }
+    }
+
     /// Refuse a validity the instrument's exchange segment does not hold: a
     /// `gtc` or `gtd` where only day orders are established, or a `gtd` dated
     /// past the contract's maturity where the segment holds them. The message
