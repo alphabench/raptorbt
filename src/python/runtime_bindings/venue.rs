@@ -59,6 +59,12 @@ struct Placed {
 /// again after its order was dropped is a new order.
 const RETAINED_ENDED: usize = 4096;
 
+/// The `tif` of an order the engine builds (entry, close, protective leg, slice): resolved
+/// when it is sent to the instrument's [`EngineKernel::engine_tif`].
+///
+/// [`EngineKernel::engine_tif`]: crate::portfolio::EngineKernel::engine_tif
+const TIF_ENGINE: &str = "engine";
+
 #[derive(Default)]
 struct Ledger {
     /// Venue ids of ended orders, oldest first.
@@ -402,15 +408,21 @@ impl VenueRoute {
         let global = sh.global_of(sid, local)?;
         let symbol = sh.symbol_text(global.index());
         let tick = sh.with_book(sid, |b, _| Ok(b.kernel(local).price_increment()))?;
-        // An order that names no time in force takes its instrument's default.
+        // An order that names no time in force takes its instrument's default; one the engine
+        // built takes gtc only where the instrument's segment holds it.
         let resolved;
-        let spec = if spec.tif == super::super::strategy_bindings::TIF_AUTO {
-            let tif = sh.with_book(sid, |b, _| Ok(b.kernel(local).default_tif()))?;
-            resolved = OrderSpec { tif: tif.to_string(), ..spec.clone() };
-            &resolved
-        } else {
-            spec
-        };
+        let spec =
+            if spec.tif == super::super::strategy_bindings::TIF_AUTO || spec.tif == TIF_ENGINE {
+                let engine = spec.tif == TIF_ENGINE;
+                let tif = sh.with_book(sid, |b, _| {
+                    let k = b.kernel(local);
+                    Ok(if engine { k.engine_tif() } else { k.default_tif() })
+                })?;
+                resolved = OrderSpec { tif: tif.to_string(), ..spec.clone() };
+                &resolved
+            } else {
+                spec
+            };
         if let Err(why) =
             sh.with_book(sid, |b, _| Ok(b.kernel(local).check_validity(&spec.tif, spec.expire_ns)))?
         {
@@ -974,7 +986,7 @@ impl VenueRoute {
             size_frac: None,
             limit_price: None,
             trigger_price: None,
-            tif: "gtc".to_string(),
+            tif: TIF_ENGINE.to_string(),
             expire_ns: None,
             stop_price: None,
             target_price: None,
@@ -1356,7 +1368,7 @@ impl VenueRoute {
             size_frac: None,
             limit_price: None,
             trigger_price: None,
-            tif: "gtc".to_string(),
+            tif: TIF_ENGINE.to_string(),
             expire_ns: None,
             stop_price: None,
             target_price: None,

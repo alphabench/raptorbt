@@ -7,7 +7,8 @@ Pins the session rules with hand-computed times:
   and a dated calendar document (``c1``'s anchoring, ``s2``'s zone);
 * intraday composite bars start at the session open and end at its close (``c1``);
 * ``squareoff_time`` is read in the instrument's session zone, and refused with none (``s2``);
-* an order defaults to DAY validity on an instrument with a session (``gap``, ``ml2``);
+* an order defaults to DAY validity on an instrument with a session (``gap``, ``ml2``), and one the
+  engine builds (``enter()``, ``close_position()``, their legs) is gtc only where the segment holds it;
 * a strategy is squared off only if its requirements say it holds intraday, or the run says so.
 """
 
@@ -487,3 +488,45 @@ def test_a_gtd_on_nse_commodity_cannot_outlive_the_contract():
 def test_the_default_on_a_day_only_segment_is_day_even_without_a_session():
     for path, (strategy, _) in _validity_run("NFO").items():
         assert strategy.events[:1] == ["order_accepted"], path
+
+
+# -- the orders the engine builds take a validity the segment holds -------------------------------------------------
+
+
+def _intent_run(venue, kind):
+    """``enter()`` with a stop and a target on bar 1, ``close_position()`` on bar 3, flat at 100:
+    a backtest builds no order for either, and a venue run built them gtc, which a day-only
+    segment refuses (``order_validity_unsupported`` on the entry)."""
+    start, expiry = ist(2026, 11, 2, 10, 0), ist(2026, 11, 26, 15, 30)
+    if kind == "option":
+        spec = rb.InstrumentSpec.option("F", 25000.0, "call", expiry, 75.0, venue=venue)
+    elif kind == "future":
+        spec = rb.InstrumentSpec.futures_contract(
+            "F", expiry, 1.0, venue=venue, session=rb.SessionSchedule.mcx() if venue == "MCX" else None
+        )
+    else:
+        spec = rb.InstrumentSpec.equity("F", venue=venue)
+    script = {
+        1: lambda s, c: s.enter(size_frac=0.1, stop_price=90.0, target_price=110.0),
+        3: lambda s, c: s.close_position(),
+    }
+    return run_paths(
+        script, {"F": bars([(100,) * 4] * 6, start)}, lambda: BacktestConfig(initial_capital=1e6, fees=0.0),
+        instruments={"F": spec}, account_type="margin",
+    )
+
+
+@pytest.mark.parametrize(
+    "venue, kind, tif",
+    [("NFO", "option", "day"), ("NFO", "future", "day"), ("MCX", "future", "day"), ("NSE", "cash", "gtc")],
+)
+def test_enter_and_close_position_send_the_validity_the_segment_holds_and_trade_as_a_backtest(venue, kind, tif):
+    out = _intent_run(venue, kind)
+    trades = {p: [(t.entry_idx, t.exit_idx, t.size) for t in r.result.trades()] for p, (_, r) in out.items()}
+    assert len(trades["batch"]) == 1 and trades["batch"][0][2] > 0, trades
+    assert trades["node"] == trades["batch"] and trades["paper"] == trades["batch"], trades
+    orders = out["paper"][1].result.orders()
+    # the entry, its stop and target legs and the close: day where the segment holds no gtc (NFO,
+    # MCX), gtc where it does (NSE cash, as before)
+    assert {o.client_id.split("-")[0] for o in orders} >= {"enter", "prot", "close"}, orders
+    assert {o.tif for o in orders} == {tif}, [(o.client_id, o.tif) for o in orders]
