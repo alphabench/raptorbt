@@ -127,6 +127,10 @@ pub struct SessionOutcome {
     /// interleaves N streams, so this is not a bar index (the array runner's
     /// `halted_at` is).
     pub halted_at: Option<usize>,
+    /// Dividend cash credited over the run (a short's debit is negative). It
+    /// is in the equity curve and in no trade's P&L, so the end equity less
+    /// the start is the trades' P&L plus this.
+    pub dividends: f64,
 }
 
 /// Multi-instrument session over merged bar streams: the market tape plus

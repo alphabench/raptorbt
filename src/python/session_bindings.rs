@@ -135,6 +135,7 @@ pub(crate) fn convert_outcome(
         unfunded_entries: outcome.unfunded_entries,
         halted: outcome.halted,
         halted_at: outcome.halted_at,
+        dividends: outcome.dividends,
     }
 }
 

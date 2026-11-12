@@ -270,6 +270,30 @@ fn a_dividend_is_credited_on_its_pay_date_to_the_holder_at_the_ex_date() {
 }
 
 #[test]
+fn the_outcome_names_the_dividends_the_trades_do_not_carry() {
+    // 10 held across a 3.0 ex-date, the price flat at 100, open at the end: the trades made
+    // nothing, the equity rose by the 30 the dividend paid, and the outcome says so
+    let mut rig = Rig::new(AccountMode::Cash, 2);
+    let a = rig.add("A", share("A"));
+    rig.book
+        .set_corporate_actions(
+            &[CorporateAction::dividend("A", MIN, 3.0, None)],
+            AdjustmentPolicy::Raw,
+        )
+        .unwrap();
+    rig.order(a, 0, true, 10.0);
+    rig.step(a, bar(0, 100.0));
+    rig.step(a, bar(MIN, 100.0));
+    rig.step(a, bar(2 * MIN, 100.0));
+    let out = rig.book.finish();
+    let trades: f64 = out.result.trades.iter().map(|t| t.pnl).sum();
+    let end = *out.result.equity_curve.last().unwrap();
+    assert_eq!(trades, 0.0);
+    assert_eq!(out.dividends, 30.0);
+    assert_eq!(end - INITIAL, trades + out.dividends);
+}
+
+#[test]
 fn an_order_on_an_expired_contract_is_rejected() {
     let mut rig = Rig::new(AccountMode::Cash, 2);
     let f = rig.add("F", future("F", 2 * MIN));

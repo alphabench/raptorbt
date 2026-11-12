@@ -381,6 +381,9 @@ class PortfolioResult:
     # Bar index in array runs; a schedule-event ordinal in session runs
     # (``run_portfolio_strategy``), which interleaves N instrument streams.
     halted_at: int | None
+    # Dividend cash credited over the run (a short's debit is negative): in the
+    # equity curve, in no trade's P&L.
+    dividends: float
     metrics: BacktestMetrics
 
 class AccountResult:

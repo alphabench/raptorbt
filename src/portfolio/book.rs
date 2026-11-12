@@ -1552,6 +1552,7 @@ impl PortfolioBook {
         let unfunded_entries: usize = self.unfunded.iter().sum();
         let halted = self.account.is_halted() || self.kernels.iter().any(|k| k.risk_halted());
         let halted_at = self.account.halted_at();
+        let dividends = self.dividends_received();
 
         // Submission order across instruments: by submission time, ties by
         // instrument registration order (the sort is stable).
@@ -1585,6 +1586,7 @@ impl PortfolioBook {
             unfunded_entries,
             halted,
             halted_at,
+            dividends,
         }
     }
 }

@@ -304,7 +304,9 @@ The holder at the ex-date (before any trading at the ex-date) is entitled to
 `amount * signed units * multiplier`; a short pays. The cash is credited on
 `pay_ts` (default the ex-date), booked once in minor units, and
 `on_corporate_action` hears `dividend` then. It is cash, not P&L of a trade:
-it moves the equity curve and `session.dividends_received`, not the trade list.
+it moves the equity curve and `session.dividends_received`, not the trade list,
+and a finished run names it as `PortfolioResult.dividends`: its end equity less
+its start is the trades' P&L plus that.
 
 ## Where each runner stands
 

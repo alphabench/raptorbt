@@ -1550,6 +1550,10 @@ pub struct PyPortfolioResult {
     /// Bar index at which the kill-switch tripped.
     #[pyo3(get)]
     pub halted_at: Option<usize>,
+    /// Dividend cash credited over the run (a short's debit is negative): in
+    /// the equity curve, in no trade's P&L.
+    #[pyo3(get)]
+    pub dividends: f64,
 }
 
 #[pymethods]
@@ -1704,6 +1708,8 @@ pub fn run_portfolio_backtest<'py>(
         unfunded_entries: out.unfunded_entries,
         halted: out.halted,
         halted_at: out.halted_at,
+        // the array portfolio backtest takes no corporate actions
+        dividends: 0.0,
     })
 }
 

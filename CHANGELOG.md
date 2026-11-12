@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `PortfolioResult.dividends`: the dividend cash credited over the run (a short's debit is
+  negative). A dividend moves the equity curve and no trade's P&L, so a run's end equity less its
+  start is the trades' P&L plus `dividends`; a reader can now reconcile the two without the
+  session. `0.0` from `run_portfolio_backtest`, which takes no corporate actions.
 - `full_report`'s `trades` rows carry `open_at_end`: true on the row of a position still open
   when the data ended (`exit_reason == "EndOfData"`, closed by the run at the last mark), the
   one the trade statistics already leave out. A reader can now tell the open position's result

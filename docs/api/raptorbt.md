@@ -1186,6 +1186,7 @@ Result of a shared-capital portfolio backtest.
 
 | Member | What it is |
 | --- | --- |
+| `dividends` | Dividend cash credited over the run (a short's debit is negative): in the equity curve, in no trade's P&L. |
 | `full_report(self: 'PortfolioResult', equity_ts: 'Sequence[int]', **kwargs: 'Any') -> 'dict[str, Any]'` | ``BacktestResult.full_report`` over the portfolio's combined result. |
 | `halted` | Whether the drawdown kill-switch tripped. |
 | `halted_at` | Bar index at which the kill-switch tripped. |
