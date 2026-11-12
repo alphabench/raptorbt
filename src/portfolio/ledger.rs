@@ -50,6 +50,10 @@ pub struct ManagedPosition {
     /// Booked entry costs of the open quantity; `position.entry_fees` is its
     /// `f64` view.
     pub entry_fees_money: Money,
+    /// Slices of the entry already squared the same day it was bought: their entry parts on the
+    /// intraday row, and what their entries were booked at, so the entry is charged as one order
+    /// rounded once (`FeeModel::same_day_charges`).
+    pub same_day_squared: Option<(FeeBreakdown, Money)>,
     /// The target was attached or moved since a bar last looked at it. A resting order meets the
     /// market once, on the first bar that examines it: if that bar opens through the level it
     /// trades at the open, as the order matcher does for a limit on its first bar. The bar that
@@ -257,6 +261,7 @@ impl PositionLedger {
             entry_order_id: None,
             cost,
             entry_fees_money,
+            same_day_squared: None,
             target_fresh: target_price.is_some(),
             stop_explicit: false,
             target_explicit: false,

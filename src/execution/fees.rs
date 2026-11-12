@@ -217,6 +217,33 @@ pub struct SameDayBrokerage {
     pub exit: f64,
 }
 
+/// The rest of a same-day round trip's entry order (see [`FeeModel::same_day_charges`]): what
+/// earlier slices of it squared that day, and what is still open.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SameDayOrder {
+    /// The parts ([`FeeRates::part_keeping_brokerage`], added up) of the entry quantity earlier
+    /// slices squared the same day, on the intraday row.
+    pub squared: Option<FeeBreakdown>,
+    /// The entry quantity still open, as `(value, booked total)`: it stays delivery.
+    pub open: Option<(f64, f64)>,
+}
+
+/// A same-day round trip restated (see [`FeeModel::same_day_charges`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SameDayCharges {
+    /// This slice's entry parts on the intraday row, to add to [`SameDayOrder::squared`].
+    pub entry_parts: FeeBreakdown,
+    /// This slice's entry parts rounded on their own, as its breakdown shows them.
+    pub entry: FeeBreakdown,
+    /// The entry order's charge, rounded once on the sum of its parts: what earlier slices
+    /// squared, this slice, and the open rest as delivery.
+    pub order_entry: f64,
+    /// The open rest's delivery charge on its own (0.0 with nothing open), which it keeps.
+    pub open_entry: f64,
+    /// The exit's charge on the intraday row.
+    pub exit: FeeBreakdown,
+}
+
 impl DatedFees {
     /// The brokerage an entry booked at `booked_total` on the delivery row paid: the total less
     /// what the row charges on `value` with no brokerage, over what one rupee of brokerage adds
@@ -731,17 +758,21 @@ impl FeeModel {
     }
 
     /// The charges of a round trip of cash equity opened and closed on one trading date (the
-    /// venue's own, by its session time zone), repriced on the intraday row of that date:
-    /// `(entry, exit)` for `entry_value` and `exit_value` traded by a `direction` line. `None`
-    /// when the model does not classify by day (not a dated schedule, a row family the run
-    /// fixed, an instrument that is not cash equity, a schedule without an intraday row) or
-    /// the legs fall on different dates, in which case the delivery charges stand.
+    /// venue's own, by its session time zone), repriced on the intraday row of that date, for
+    /// `entry_value` and `exit_value` traded by a `direction` line. `None` when the model does not
+    /// classify by day (not a dated schedule, a row family the run fixed, an instrument that is
+    /// not cash equity, a schedule without an intraday row) or the legs fall on different dates,
+    /// in which case the delivery charges stand.
     ///
     /// The kernel prices an entry as delivery because it cannot know the exit; this is the
     /// correction when the exit lands the same day. Only what differs between the two rows is
-    /// restated: the brokerage stays as it was booked (`entry_brokerage`, `exit_brokerage`), so an
-    /// order a card charges per order is not charged again on each slice of a partly closed
-    /// position.
+    /// restated: the brokerage stays as it was booked (`brokerage`), so an order a card charges
+    /// per order is not charged again on each slice of a partly closed position.
+    ///
+    /// An entry order partly squared the same day is one order on the contract note, priced in
+    /// parts: the squared quantity on the intraday row, the rest (`order.open`) on delivery. Its
+    /// charge is rounded once, on the sum of the parts (`order_entry`), not part by part.
+    #[allow(clippy::too_many_arguments)]
     pub fn same_day_charges(
         &self,
         entry_value: f64,
@@ -750,7 +781,8 @@ impl FeeModel {
         entry_ts: i64,
         exit_ts: i64,
         brokerage: SameDayBrokerage,
-    ) -> Option<(FeeBreakdown, FeeBreakdown)> {
+        order: SameDayOrder,
+    ) -> Option<SameDayCharges> {
         let FeeModel::Dated(d) = self else { return None };
         if !d.classify_by_day || d.unresolved.is_some() {
             return None;
@@ -770,6 +802,7 @@ impl FeeModel {
             Err(why) => fee_gap_fault(why),
         };
         d.note_used(row);
+        let rates = &row.rates;
         let entry_buy = is_buy(direction, true);
         let entry_brokerage = match brokerage.entry {
             Some(b) => b,
@@ -777,14 +810,40 @@ impl FeeModel {
                 d.booked_entry_brokerage(day, entry_buy, entry_value.abs(), brokerage.entry_total)
             }
         };
-        Some((
-            row.rates.charge_keeping_brokerage(entry_buy, entry_value, entry_brokerage),
-            row.rates.charge_keeping_brokerage(
+        let entry_parts = rates.part_keeping_brokerage(entry_buy, entry_value, entry_brokerage);
+        let mut order_parts = entry_parts;
+        if let Some(squared) = order.squared {
+            order_parts.add(&squared);
+        }
+        let mut open_entry = 0.0;
+        if let Some((value, booked)) = order.open {
+            // The rest was booked on the delivery row of the same day (see booked_entry_brokerage).
+            let delivery = match d.schedule.row_for(
+                &d.venue,
+                d.segment,
+                d.underlying.as_deref(),
+                day,
+                false,
+            ) {
+                Ok(row) => &row.rates,
+                Err(why) => fee_gap_fault(why),
+            };
+            let kept = d.booked_entry_brokerage(day, entry_buy, value.abs(), booked);
+            let open = delivery.part_keeping_brokerage(entry_buy, value, kept);
+            open_entry = delivery.round_parts(open).total();
+            order_parts.add(&open);
+        }
+        Some(SameDayCharges {
+            entry_parts,
+            entry: rates.round_parts(entry_parts),
+            order_entry: rates.round_parts(order_parts).total(),
+            open_entry,
+            exit: rates.charge_keeping_brokerage(
                 is_buy(direction, false),
                 exit_value,
                 brokerage.exit,
             ),
-        ))
+        })
     }
 
     /// The charge on settling `size` contracts at `price` per contract
@@ -1106,5 +1165,93 @@ mod tests {
         model.set_time(DAY_NS);
         model.set_time(11 * DAY_NS);
         assert!(model.breakdown(100.0, 1.0, Direction::Short, false).is_some());
+    }
+
+    /// An NSE cash card on contract-note rounding: the delivery and intraday rows of one day.
+    fn cash_card() -> FeeModel {
+        use crate::execution::costs::{FeeRow, Rounding, TaxKind};
+        let row = |segment, tax_buy_rate, tax_sell_rate, stamp_buy_rate| FeeRow {
+            venue: "NSE".into(),
+            segment,
+            underlying: None,
+            settlement: false,
+            effective_from: i64::MIN,
+            rates: FeeRates {
+                tax_kind: TaxKind::Stt,
+                tax_buy_rate,
+                tax_sell_rate,
+                exchange_rate: 0.0000307,
+                regulatory_rate: 0.000001,
+                stamp_buy_rate,
+                gst_rate: 0.18,
+                rounding: Rounding::ContractNote,
+                ..FeeRates::ZERO
+            },
+            meta: Default::default(),
+        };
+        let schedule = Arc::new(FeeSchedule::new(
+            "t",
+            "t",
+            vec![
+                row(FeeSegment::Delivery, 0.001, 0.001, 0.00015),
+                row(FeeSegment::Intraday, 0.0, 0.00025, 0.00003),
+            ],
+        ));
+        let mut dated = DatedFees::new(schedule, "NSE".into(), FeeSegment::Delivery, 0).unwrap();
+        dated.classify_by_day = true;
+        FeeModel::Dated(Box::new(dated))
+    }
+
+    /// Buy 2 @284.65 on delivery, sell 1 the same day and keep 1: the buy is one order priced in
+    /// parts, 1 intraday (exchange 0.00873876, SEBI 0.00028465, stamp 0.0085395, GST 0.00162421)
+    /// and 1 delivery (STT 0.28465, the same exchange and SEBI, stamp 0.0426975, the same GST).
+    /// Rounded once: stamp 0.051237 is 0 whole rupees and the total 0.30594524 is 0.31. The open
+    /// unit keeps its own delivery charge, 0.29529762 = 0.30, and the squared unit's own is 0.01.
+    #[test]
+    fn a_partly_squared_entry_is_one_order_rounded_once_on_its_parts() {
+        let model = cash_card();
+        let brokerage = SameDayBrokerage { entry: None, entry_total: 0.30, exit: 0.0 };
+        let c = model
+            .same_day_charges(
+                284.65,
+                285.10,
+                Direction::Long,
+                1_000,
+                2_000,
+                brokerage,
+                SameDayOrder { squared: None, open: Some((284.65, 0.29)) },
+            )
+            .unwrap();
+        assert_eq!(c.order_entry, 0.31);
+        assert_eq!(c.open_entry, 0.30);
+        assert_eq!(c.entry.total(), 0.01);
+        // the other unit squared later the same day: the whole order is intraday, 0.02
+        let c2 = model
+            .same_day_charges(
+                284.65,
+                285.10,
+                Direction::Long,
+                1_000,
+                3_000,
+                brokerage,
+                SameDayOrder { squared: Some(c.entry_parts), open: None },
+            )
+            .unwrap();
+        assert_eq!(c2.order_entry, 0.02);
+        assert_eq!(c2.open_entry, 0.0);
+        // with nothing else squared or open, the restated entry is the slice's own charge
+        let whole = model
+            .same_day_charges(
+                569.30,
+                570.20,
+                Direction::Long,
+                1_000,
+                2_000,
+                SameDayBrokerage { entry: Some(0.0), entry_total: 0.59, exit: 0.0 },
+                SameDayOrder::default(),
+            )
+            .unwrap();
+        assert_eq!(whole.order_entry, whole.entry.total());
+        assert_eq!(whole.order_entry, 0.02);
     }
 }

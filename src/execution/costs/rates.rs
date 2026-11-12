@@ -254,6 +254,68 @@ impl FeeRates {
         self.charge_inner(is_buy, value.abs(), 0.0, false, Some(brokerage))
     }
 
+    /// One part of an order priced in parts (some of its quantity on one row, the rest on
+    /// another), with the brokerage given, as [`Self::round_parts`] sums them: unrounded where the
+    /// row rounds the order's total once (a contract note: stamp duty and the total are rounded on
+    /// the sum of the parts), each component already to the paisa where the row rounds each one.
+    pub fn part_keeping_brokerage(&self, is_buy: bool, value: f64, brokerage: f64) -> FeeBreakdown {
+        let rates = match self.rounding {
+            Rounding::ContractNote => FeeRates { rounding: Rounding::None, ..*self },
+            Rounding::None | Rounding::PaiseEach => *self,
+        };
+        rates.charge_keeping_brokerage(is_buy, value, brokerage)
+    }
+
+    /// The charge of an order whose parts ([`Self::part_keeping_brokerage`], added up) are
+    /// `parts`, rounded once as this row rounds a charge: a contract note's stamp duty in whole
+    /// rupees on the summed stamp duty and its total the rounded sum of the unrounded parts.
+    pub fn round_parts(&self, parts: FeeBreakdown) -> FeeBreakdown {
+        let p = FeeBreakdown { exact_total: None, ..parts };
+        match self.rounding {
+            Rounding::None => p,
+            Rounding::PaiseEach => {
+                let r = |x: f64| paise(x, Round::HalfUp);
+                let mut b = FeeBreakdown {
+                    brokerage: r(p.brokerage),
+                    stt: r(p.stt),
+                    exchange_txn: r(p.exchange_txn),
+                    sebi_fee: r(p.sebi_fee),
+                    stamp_duty: r(p.stamp_duty),
+                    gst: r(p.gst),
+                    ipft: r(p.ipft),
+                    dp_charge: r(p.dp_charge),
+                    exact_total: None,
+                };
+                b.exact_total = Some(r(b.sum()));
+                b
+            }
+            Rounding::ContractNote => {
+                let r = |x: f64| paise(x, Round::HalfEven);
+                let stamp = whole_rupees(p.stamp_duty);
+                // In charge_inner's order, so a charge of one part rounds to the same figure.
+                let total = p.brokerage
+                    + p.stt
+                    + p.exchange_txn
+                    + p.sebi_fee
+                    + p.ipft
+                    + stamp
+                    + p.gst
+                    + p.dp_charge;
+                FeeBreakdown {
+                    brokerage: r(p.brokerage),
+                    stt: r(p.stt),
+                    exchange_txn: r(p.exchange_txn),
+                    sebi_fee: r(p.sebi_fee),
+                    stamp_duty: r(stamp),
+                    gst: r(p.gst),
+                    ipft: r(p.ipft),
+                    dp_charge: r(p.dp_charge),
+                    exact_total: Some(r(total)),
+                }
+            }
+        }
+    }
+
     fn charge_inner(
         &self,
         is_buy: bool,
@@ -504,6 +566,24 @@ mod tests {
         let want = a.total() + b.total();
         a.add(&b);
         assert_eq!(a.total(), want);
+    }
+
+    /// An order priced in parts is rounded once on their sum: two parts each owing 0.30 of stamp
+    /// duty owe 1 rupee together (0.60, half up), where each part rounded alone owes 0.
+    #[test]
+    fn parts_of_one_order_are_rounded_once_on_their_sum() {
+        let r = FeeRates { stamp_buy_rate: 0.00003, ..note() };
+        let part = r.part_keeping_brokerage(true, 10_000.0, 0.0);
+        assert!((part.stamp_duty - 0.3).abs() < 1e-12);
+        assert_eq!(r.round_parts(part).stamp_duty, 0.0);
+        let mut both = part;
+        both.add(&part);
+        let once = r.round_parts(both);
+        assert_eq!(once.stamp_duty, 1.0);
+        // exchange 0.614 and SEBI 0.02 with GST 0.11412 on them: 1.74812, to the paisa
+        assert_eq!(once.total(), 1.75);
+        // one part rounded alone is the row's own charge of it
+        assert_eq!(r.round_parts(part), r.charge_keeping_brokerage(true, 10_000.0, 0.0));
     }
 
     #[test]

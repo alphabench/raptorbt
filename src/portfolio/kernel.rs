@@ -2877,6 +2877,7 @@ impl EngineKernel {
         let size = managed.position.size;
         let entry_ts = managed.entry_timestamp;
         let entry_breakdown = managed.entry_breakdown;
+        let squared = managed.same_day_squared;
         match self.guard_hedge_close(idx, position_id, size, reason) {
             HedgeGuard::Go => {}
             HedgeGuard::Refuse(refusal) => return Some(refusal),
@@ -2922,7 +2923,8 @@ impl EngineKernel {
             },
         )?;
 
-        let refund = self.restate_same_day(&mut trade, entry_breakdown, exit_breakdown);
+        let refund =
+            self.restate_same_day(&mut trade, entry_breakdown, exit_breakdown, squared, None);
         self.credit_close(position_id, &trade);
         self.move_cash(refund);
 
@@ -2935,11 +2937,19 @@ impl EngineKernel {
     /// P&L are restated, and the entry charge already debited above the restated one is
     /// returned (the amount this gives back, to be moved to cash after the close is
     /// credited). A trade the model does not classify by day is left as it was.
+    ///
+    /// `squared` is what earlier slices of the same entry squared that day, and `open` the
+    /// position still open after this slice (a partial close). The entry is one order, charged
+    /// rounded once on the sum of its parts: this slice takes that charge less what the earlier
+    /// slices were booked at and what the open rest keeps (its own delivery charge), so the
+    /// slices of the entry add up to the order's charge to the paisa.
     fn restate_same_day(
-        &self,
+        &mut self,
         trade: &mut Trade,
         entry_breakdown: Option<crate::execution::costs::FeeBreakdown>,
         exit_breakdown: Option<crate::execution::costs::FeeBreakdown>,
+        squared: Option<(crate::execution::costs::FeeBreakdown, Money)>,
+        open: Option<u64>,
     ) -> Money {
         let multiplier = self.multiplier();
         let Some(m) = trade.money.as_ref() else { return Money::from_minor(0) };
@@ -2949,20 +2959,33 @@ impl EngineKernel {
             entry_total: scale.to_f64(Money::from_minor(m.entry_fees)),
             exit: exit_breakdown.map_or(0.0, |b| b.brokerage),
         };
-        let Some((entry, exit)) = self.fee_model.same_day_charges(
+        let rest = open.and_then(|id| self.ledger.get(id)).map(|r| {
+            let value = r.position.entry_price * r.position.size * multiplier;
+            (value, r.entry_fees_money)
+        });
+        let order = crate::execution::fees::SameDayOrder {
+            squared: squared.map(|(parts, _)| parts),
+            open: rest.map(|(value, booked)| (value, scale.to_f64(booked))),
+        };
+        let Some(c) = self.fee_model.same_day_charges(
             trade.entry_price * trade.size * multiplier,
             trade.exit_price * trade.size * multiplier,
             trade.direction,
             trade.entry_time,
             trade.exit_time,
             brokerage,
+            order,
         ) else {
             return Money::from_minor(0);
         };
         let Some(m) = trade.money.as_mut() else { return Money::from_minor(0) };
-        let scale = self.money_scale;
-        let (new_entry, new_exit) =
-            (self.ledger.book(entry.total()), self.ledger.book(exit.total()));
+        let squared_booked = squared.map_or(Money::from_minor(0), |(_, booked)| booked);
+        let (old_open, new_open) = match rest {
+            Some((_, booked)) => (booked, self.ledger.book(c.open_entry)),
+            None => (Money::from_minor(0), Money::from_minor(0)),
+        };
+        let new_entry = self.ledger.book(c.order_entry) - squared_booked - new_open;
+        let new_exit = self.ledger.book(c.exit.total());
         let (old_entry, old_exit) =
             (Money::from_minor(m.entry_fees), Money::from_minor(m.exit_fees));
         let pnl = Money::from_minor(m.pnl) + old_entry + old_exit - new_entry - new_exit;
@@ -2973,11 +2996,20 @@ impl EngineKernel {
         trade.pnl = scale.to_f64(pnl);
         let cost_basis = trade.entry_price * trade.size * multiplier;
         trade.return_pct = if cost_basis > 0.0 { trade.pnl / cost_basis * 100.0 } else { 0.0 };
-        let mut combined = entry;
-        combined.add(&exit);
+        let mut combined = c.entry;
+        combined.add(&c.exit);
         combined.exact_total = Some(trade.fees);
         trade.fee_breakdown = Some(combined);
-        old_entry - new_entry
+        if let Some(r) = open.and_then(|id| self.ledger.get_mut(id)) {
+            let mut parts = c.entry_parts;
+            if let Some((earlier, _)) = squared {
+                parts.add(&earlier);
+            }
+            r.same_day_squared = Some((parts, squared_booked + new_entry));
+            r.entry_fees_money = new_open;
+            r.position.entry_fees = scale.to_f64(new_open);
+        }
+        old_entry + old_open - new_entry - new_open
     }
 
     /// Credit a closed position back to the account, in booked minor units.
@@ -3504,7 +3536,9 @@ impl EngineKernel {
         }
         // The slice's cash movement is the whole-close arithmetic on the
         // slice's booked amounts; the lock was released above, not here.
-        let refund = self.restate_same_day(&mut trade, None, exit_breakdown);
+        let squared = self.ledger.get(position_id).and_then(|m| m.same_day_squared);
+        let refund =
+            self.restate_same_day(&mut trade, None, exit_breakdown, squared, Some(position_id));
         self.credit_slice(&trade);
         self.move_cash(refund);
         Some(EngineEvent::Exited { idx, trade: Box::new(trade) })
