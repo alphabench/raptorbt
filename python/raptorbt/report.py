@@ -12,7 +12,9 @@
     the run against a benchmark, and counts.
 ``attribution`` and ``trades``
     (with ``attribution=True``, which ``result.full_report`` sets) who made the money, by
-    rule when ``rule_metrics`` is given and by instrument, and one row per closed trade.
+    rule when ``rule_metrics`` is given and by instrument, and one row per closed trade;
+    ``open_at_end`` is true on the row of a position still open when the data ended (closed
+    by the run at the last mark), which the trade statistics leave out.
 
 The figures are computed once, in Rust (``metrics::report``), from the same
 ``StreamingMetrics`` and ``DrawdownTracker`` that fill ``BacktestMetrics``; nothing is

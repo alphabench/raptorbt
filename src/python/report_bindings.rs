@@ -171,6 +171,8 @@ fn attr_trade_from(item: &Bound<'_, PyAny>) -> PyResult<AttrTrade> {
         tag: tag_of(item)?,
         settlement: optional::<String>(item, "exit_reason")?
             .is_some_and(|r| r.eq_ignore_ascii_case("settlement")),
+        open_at_end: optional::<String>(item, "exit_reason")?
+            .is_some_and(|r| r.eq_ignore_ascii_case("endofdata")),
     })
 }
 
@@ -517,6 +519,7 @@ fn full_report<'py>(
             d.set_item("rule", t.rule)?;
             d.set_item("kind", t.kind)?;
             d.set_item("holding_minutes", t.holding_minutes)?;
+            d.set_item("open_at_end", t.open_at_end)?;
             rows.append(d)?;
         }
         out.set_item("trades", rows)?;

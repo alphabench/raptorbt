@@ -42,6 +42,9 @@ pub struct AttrTrade {
     pub fee_parts: BTreeMap<String, f64>,
     pub tag: String,
     pub settlement: bool,
+    /// The position was still open when the data ended and the run closed it at the last
+    /// mark (`ExitReason::EndOfData`): a round trip, not a closed trade.
+    pub open_at_end: bool,
 }
 
 /// One order, as the attribution reads it.
@@ -209,6 +212,9 @@ pub struct TradeRow {
     /// "fill" or "settlement".
     pub kind: &'static str,
     pub holding_minutes: Option<f64>,
+    /// The run closed it at the end of the data, not a decision: its `net` is the open
+    /// position's result at the last mark, and the trade statistics leave it out.
+    pub open_at_end: bool,
 }
 
 /// The `trades` rows, with each trade's closing origin as its `rule`.
@@ -237,6 +243,7 @@ pub fn trade_rows(trades: &[AttrTrade], origins: &[Option<String>]) -> Vec<Trade
             holding_minutes: t
                 .opened_at
                 .map(|o| ((t.closed_at - o) as f64 / 60e9 * 1000.0).round() / 1000.0),
+            open_at_end: t.open_at_end,
         })
         .collect()
 }
@@ -263,6 +270,7 @@ mod tests {
             fee_parts: BTreeMap::from([("brokerage".into(), 1.5), ("total".into(), 2.0)]),
             tag: "a".into(),
             settlement: false,
+            open_at_end: false,
         }
     }
 
@@ -321,5 +329,20 @@ mod tests {
         assert_eq!((rows[0].kind, rows[0].side, rows[0].net), ("settlement", "LONG", -7.0));
         assert_eq!(rows[0].holding_minutes, Some(1.5));
         assert_eq!(rows[0].rule.as_deref(), Some("lifecycle"));
+    }
+
+    // The line the run closed at the end of the data is marked on its row, so a reader can
+    // tell the open position's result from the closed trades' (the report's trade statistics
+    // already leave it out).
+    #[test]
+    fn a_line_closed_at_the_end_of_the_data_is_marked_on_its_row() {
+        let closed = trade(1, "X", 1, 50.0, 3);
+        let mut open = trade(2, "X", -1, -20.0, 9);
+        open.open_at_end = true;
+        let trades = [closed, open];
+        let a = attribution(&trades, &[], None);
+        let rows = trade_rows(&trades, &a.trade_origins);
+        assert_eq!(rows.iter().map(|r| r.open_at_end).collect::<Vec<_>>(), [false, true]);
+        assert_eq!((rows[1].kind, rows[1].side, rows[1].net), ("fill", "SHORT", -22.0));
     }
 }

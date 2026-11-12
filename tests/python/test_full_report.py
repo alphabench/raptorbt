@@ -47,3 +47,16 @@ def test_unavailable_figures_are_named_not_nan():
     assert rep["report"]["sharpe"] is None
     assert rep["report_unavailable"]["sharpe"].startswith("ZERO_VARIANCE")
     assert all(not (isinstance(v, float) and math.isnan(v)) for v in rep["report"].values())
+
+
+def test_a_trade_row_marks_the_line_closed_at_the_end_of_the_data():
+    # one closed trade (+40 net) and the line still open when the data ended (-12 net at the
+    # last mark): the rows say which is which, and the trade statistics count the closed one
+    trades = [
+        {"symbol": "AAA", "entry_time": 0, "exit_time": 1, "pnl": 40.0, "fees": 2.0, "exit_reason": "Signal"},
+        {"symbol": "AAA", "entry_time": 1, "exit_time": 2, "pnl": -12.0, "fees": 1.0, "exit_reason": "EndOfData"},
+    ]
+    rep = r.full_report([0, 1, 2], [1000.0, 1040.0, 1028.0], trades, [], attribution=True)
+    assert [t["open_at_end"] for t in rep["trades"]] == [False, True]
+    assert [t["net"] for t in rep["trades"]] == [40.0, -12.0]
+    assert rep["report"]["trade_count"] == 1

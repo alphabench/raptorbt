@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `full_report`'s `trades` rows carry `open_at_end`: true on the row of a position still open
+  when the data ended (`exit_reason == "EndOfData"`, closed by the run at the last mark), the
+  one the trade statistics already leave out. A reader can now tell the open position's result
+  from the closed trades' without the trade objects.
 - `raptorbt.vwap_session(high, low, close, volume, session_starts)`: the
   typical-price VWAP restarting where `session_starts` is true. `vwap` is
   unchanged and stays cumulative over the whole array.

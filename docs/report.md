@@ -40,7 +40,8 @@ fees by component, a benchmark, exposure, attribution, and the short, flat and r
 
 `attribution=True` (the default on `result.full_report`) adds `attribution` (by instrument, and by
 rule when `rule_metrics={"rule_fires": ..., "noops_by_source": ...}` is given) and `trades` (one
-row per closed trade). A trade belongs to the origin of the order that closed it: the filled order
-on the trade's instrument, on the closing side, whose last fill is the trade's exit bar. Fees go
-whole to the closing origin; fills and turnover to each order's own origin. Slippage is inside the
-fill price and is not split out.
+row per closed trade, with `open_at_end` true on the row of a position still open when the data
+ended, which the run closed at the last mark and the trade statistics leave out). A trade belongs
+to the origin of the order that closed it: the filled order on the trade's instrument, on the
+closing side, whose last fill is the trade's exit bar. Fees go whole to the closing origin; fills
+and turnover to each order's own origin. Slippage is inside the fill price and is not split out.
