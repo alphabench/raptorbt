@@ -61,10 +61,9 @@ def test_the_example_says_what_it_shows_and_which_skills_it_uses(script):
     assert skills and skills <= known, (_id(script), skills - known)
 
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=_id)
+# a tick-only run takes no bars, so it has no stamp to declare
+@pytest.mark.parametrize("script", [s for s in SCRIPTS if s.parent.name != "tick-level"], ids=_id)
 def test_the_example_passes_the_bar_stamp_it_means(script):
-    if script.parent.name == "tick-level":
-        pytest.skip("a tick-only run takes no bars, so it has no stamp to declare")
     assert "bar_stamp=" in script.read_text(), f"{_id(script)} must pass bar_stamp explicitly"
 
 
