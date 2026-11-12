@@ -1238,10 +1238,14 @@ impl PyRuntimeContext {
     }
 
     /// Whether the event being handled is history replayed to prime the
-    /// strategy (see `LiveNode`'s `warmup`), not the live feed.
+    /// strategy (see `LiveNode`'s `warmup`), not the live feed; in a backtest
+    /// with a `trade_from`, whether the event is before it, where every order
+    /// is refused (`warmup`). One flag in both, so a strategy that checks it
+    /// sends no order the run will refuse.
     #[getter]
     fn is_warmup(&self) -> bool {
         self.shared.warmup.get()
+            || self.times().is_some_and(|t| t.event < self.shared.trade_from.get())
     }
 
     /// The symbol whose bar is being processed.

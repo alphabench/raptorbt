@@ -1084,6 +1084,7 @@ class InstrumentSpec:
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
         scrip_group: str | None = ...,
+        size_increment: float = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def perpetual(
@@ -1124,6 +1125,7 @@ class InstrumentSpec:
         currency: str | None = ...,
         session: SessionSchedule | None = ...,
         scrip_group: str | None = ...,
+        size_increment: float = ...,
     ) -> InstrumentSpec: ...
     @staticmethod
     def currency_pair(
@@ -1296,7 +1298,8 @@ class RuntimeContext:
     last_price: float | None
     def series(self, symbol: str | None = ...) -> dict[str, _F64 | _I64]: ...
     def keep_history(self, rows: int, symbol: str | None = ...) -> None: ...
-    #: True while a warm-up bar is handled (see LiveNode's ``warmup``).
+    #: True while a warm-up bar is handled (see LiveNode's ``warmup``), and in a backtest
+    #: while the event is before its ``trade_from``, where every order is refused.
     is_warmup: bool
     def instrument(self, key: str | None = ...) -> InstrumentSpec: ...
     def option_chain(self, underlying: str | None = ...) -> OptionChain: ...

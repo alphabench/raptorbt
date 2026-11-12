@@ -542,9 +542,11 @@ assert run("index").exit_reason == "Signal"       # the strategy closed the cont
 - `size_frac` is resolved against *available* capital at fill time, so two
   orders queued on one bar size one after the other: the second gets its
   fraction of what the first left.
-- Explicit quantities are floored to the instrument's lot and size step, then
-  refused, not shrunk, if they exceed available funds. Capital-fraction orders
-  that round to zero are rejected as `zero_size`.
+- Explicit quantities must be whole lots and size steps of the instrument
+  (`off_lot_quantity` otherwise; round them yourself, or size with
+  `raptorbt.sizing`, which returns whole lots), and are refused, not shrunk,
+  if they exceed available funds. Capital-fraction sizes are floored to the lot
+  and size step; one that rounds to zero is rejected as `zero_size`.
 - Order ids are deterministic (`"{order_id_tag}-{n}"`, counted per strategy), so
   two identical runs produce identical ids.
 

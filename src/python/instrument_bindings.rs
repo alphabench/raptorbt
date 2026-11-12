@@ -161,6 +161,12 @@ impl PyInstrumentSpec {
     }
 
     /// A cash equity / spot instrument.
+    ///
+    /// A `lot_size` of 1.0 is the neutral default, not a lot: sizes are then
+    /// unquantized unless `size_increment` is set. For an instrument traded in
+    /// whole units (a share, a contract) pass `size_increment=1.0`: a
+    /// capital-fraction order is then floored to whole units and an explicit
+    /// quantity off that grid is refused (`off_lot_quantity`).
     #[staticmethod]
     #[pyo3(signature = (symbol, price_increment=0.0, lot_size=1.0, size_increment=0.0,
                         margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None))]
@@ -204,10 +210,17 @@ impl PyInstrumentSpec {
     }
 
     /// A dated futures contract.
+    ///
+    /// A `lot_size` of 1.0 is the neutral default, not a lot: sizes are then
+    /// unquantized unless `size_increment` is set. For an instrument traded in
+    /// whole units (a share, a contract) pass `size_increment=1.0`: a
+    /// capital-fraction order is then floored to whole units and an explicit
+    /// quantity off that grid is refused (`off_lot_quantity`).
     #[staticmethod]
     #[pyo3(signature = (symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0,
                         underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0,
-                        maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None))]
+                        maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None,
+                        size_increment=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn futures_contract(
         symbol: &str,
@@ -225,6 +238,7 @@ impl PyInstrumentSpec {
         currency: Option<String>,
         session: Option<&PySessionSchedule>,
         scrip_group: Option<String>,
+        size_increment: f64,
     ) -> PyResult<Self> {
         let spec = InstrumentSpec::new(symbol, InstrumentKind::Contract { underlying });
         Ok(Self {
@@ -232,7 +246,7 @@ impl PyInstrumentSpec {
                 apply_common(
                     spec,
                     price_increment,
-                    0.0,
+                    size_increment,
                     lot_size,
                     multiplier,
                     margin_init,
@@ -296,7 +310,14 @@ impl PyInstrumentSpec {
         })
     }
 
-    /// A vanilla or binary option contract.    ///
+    /// A vanilla or binary option contract.
+    ///
+    /// A `lot_size` of 1.0 is the neutral default, not a lot: sizes are then
+    /// unquantized unless `size_increment` is set. For an instrument traded in
+    /// whole units (a share, a contract) pass `size_increment=1.0`: a
+    /// capital-fraction order is then floored to whole units and an explicit
+    /// quantity off that grid is refused (`off_lot_quantity`).
+    ///
     /// `span_pct` and `exposure_pct` model the deposit an exchange blocks
     /// against a SOLD option, each as a fraction of the underlying notional
     /// at the strike. Both default to `0.0`, which leaves a short option
@@ -306,7 +327,8 @@ impl PyInstrumentSpec {
     #[pyo3(signature = (symbol, strike, right, expiration_ns, lot_size, multiplier=1.0,
                         price_increment=0.0, underlying=None, binary=false, activation_ns=None,
                         margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0,
-                        span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None, scrip_group=None))]
+                        span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None, scrip_group=None,
+                        size_increment=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn option(
         symbol: &str,
@@ -329,6 +351,7 @@ impl PyInstrumentSpec {
         currency: Option<String>,
         session: Option<&PySessionSchedule>,
         scrip_group: Option<String>,
+        size_increment: f64,
     ) -> PyResult<Self> {
         if span_pct < 0.0 || exposure_pct < 0.0 {
             return Err(refuse(
@@ -373,7 +396,7 @@ impl PyInstrumentSpec {
                 apply_common(
                     spec,
                     price_increment,
-                    0.0,
+                    size_increment,
                     lot_size,
                     multiplier,
                     margin_init,

@@ -71,7 +71,8 @@ discards every order and intent, holds no position, and sends nothing to a
 venue. `warmup="live"` replays bars as ordinary bars (orders match). The default
 is muted for your own `ExecutionAdapter`, live otherwise; a live warm-up that
 makes an order against a real venue raises `unsupported_in_venue_run`.
-`ctx.is_warmup` is true in every hook on a warm-up bar.
+`ctx.is_warmup` is true in every hook on a warm-up bar (and, in a backtest, at every
+event before `run_strategies(trade_from=)`).
 
 **Adopted positions.** `initial_positions={strategy: {symbol: seed}}`, with
 `seed = {"quantity", "avg_price", "timestamp_ns"?, "margin_minor"?,

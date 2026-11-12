@@ -3,7 +3,7 @@
 * An index is accepted among a run's instruments, with a fee schedule, as data: its bars feed
   the strategy, an order on it is refused (`not_tradable`), and no fee row is asked for it.
 * `run_strategies(trade_from=)` runs the bars before it in full but refuses every order decided
-  before it, `warmup`.
+  before it, `warmup`, and `ctx.is_warmup` is true at those events, as on a live node's warm-up.
 * `InstrumentSpec` factories take `scrip_group`, so BSE equity runs under a fee schedule.
 """
 
@@ -164,6 +164,50 @@ def test_trade_from_at_the_first_decision_changes_nothing():
     c = run(Script(plan), symbols=("A",), trade_from=None)
     key = lambda r: [(t.entry_idx, t.exit_idx, t.size, t.pnl) for t in r.result.trades()]
     assert key(a) == key(b) == key(c) and a.result.metrics.total_trades == b.result.metrics.total_trades
+
+
+class Guarded(Strategy):
+    """Buys one unit on every bar it is not warming up, and records what each bar said."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+        self.rejected = []
+
+    def on_bar(self, ctx, bar=None):
+        self.seen.append((ctx.event_ns, ctx.is_warmup))
+        if not ctx.is_warmup and len(self.seen) % 5 == 0:
+            self.submit_order(orders.Market(side="buy", units=1.0), client_id=f"g{len(self.seen)}")
+
+    def on_order_rejected(self, ctx, event):
+        self.rejected.append(event.reject_reason)
+
+
+def test_is_warmup_is_true_at_the_events_before_trade_from_and_only_there():
+    """As on a live node's warm-up: the bars at 10:01..10:05 are before a cut at 10:06."""
+    cut = OPEN + 6 * MIN
+    s = Guarded()
+    run(s, symbols=("A",), trade_from=cut)
+    assert len(s.seen) == 30
+    assert [w for _, w in s.seen] == [True] * 5 + [False] * 25
+    assert all(w == (ts < cut) for ts, w in s.seen)
+
+
+def test_a_strategy_that_checks_is_warmup_sends_no_order_refused_warmup():
+    """The 5th bar (10:05) is before the cut: without the flag it would buy and be refused."""
+    s = Guarded()
+    result = run(s, symbols=("A",), trade_from=OPEN + 6 * MIN)
+    assert s.rejected == []
+    by_id = {o.client_id: (o.status, o.reject_reason) for o in result.result.orders()}
+    assert sorted(by_id) == ["g10", "g15", "g20", "g25", "g30"]
+    assert all(by_id[f"g{n}"][0] == "filled" for n in (10, 15, 20, 25)), by_id
+    assert all(status != "rejected" for status, _ in by_id.values()), by_id
+
+
+def test_without_trade_from_no_event_is_warmup():
+    s = Guarded()
+    run(s, symbols=("A",))
+    assert [w for _, w in s.seen] == [False] * 30
 
 
 @pytest.mark.parametrize("bad", ["09:30", 1.5, True, [1]])

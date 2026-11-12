@@ -162,7 +162,7 @@ state is as it was before the call.
 | `insufficient_capital`, `insufficient_margin`, `margin_unpriced` | Not enough cash or margin, or the margin model has no price for the instrument. |
 | `reduce_only`, `post_only` | The order would not reduce, or would have crossed the book. |
 | `not_tradable` | The order (or an `enter()`) was for an index, a data-only reference: trade the instrument it tracks. |
-| `warmup` | The order was decided before the run's `trade_from`: the bars before it only warm the strategy up. |
+| `warmup` | The order was decided before the run's `trade_from`: the bars before it only warm the strategy up. Return early while `ctx.is_warmup` is true. |
 | `expired`, `inactive`, `market_closed`, `squareoff` | Time in force, an inactive instrument, outside the session, or after the cutoff. |
 | `order_size`, `max_position`, `max_exposure`, `max_positions`, `daily_loss`, `killed`, `drawdown_halt`, `margin_call` | A risk limit ([risk](../risk/SKILL.md)). |
 | `no_mark` | A market order bound for a real venue under `max_order_notional` or `max_gross_exposure` had no price to be checked at: its instrument has had no print. Send it after the instrument's first bar or tick, or give the order a limit price. |

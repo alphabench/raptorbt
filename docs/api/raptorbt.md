@@ -647,7 +647,7 @@ Python-exposed instrument market definition.
 | `expiration_ns` | *No docstring.* |
 | `exposure_pct` | Exposure margin fraction for a sold option (0.0 = not modelled). |
 | `from_json(text)` | Rebuild a spec from the text `to_json` wrote. |
-| `futures_contract(symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A dated futures contract. |
+| `futures_contract(symbol, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None, size_increment=0.0)` | A dated futures contract. |
 | `index(symbol, price_increment=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A non-tradable reference index. |
 | `kind` | Instrument family: "cash", "currency_pair", "contract", "option", "index". |
 | `lot_size` | *No docstring.* |
@@ -655,7 +655,7 @@ Python-exposed instrument market definition.
 | `margin_init` | *No docstring.* |
 | `margin_maint` | *No docstring.* |
 | `multiplier` | *No docstring.* |
-| `option(symbol, strike, right, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, binary=False, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A vanilla or binary option contract.    /// `span_pct` and `exposure_pct` model the deposit an exchange blocks against a SOLD option, each as a fraction of the underlying notional at the strike. Both default to `0.0`, which leaves a short option funded at its premium as in earlier releases. Bought options are unaffected: a buyer can lose only the premium. |
+| `option(symbol, strike, right, expiration_ns, lot_size, multiplier=1.0, price_increment=0.0, underlying=None, binary=False, activation_ns=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, span_pct=0.0, exposure_pct=0.0, venue=None, currency=None, session=None, scrip_group=None, size_increment=0.0)` | A vanilla or binary option contract. |
 | `perpetual(symbol, lot_size=1.0, multiplier=1.0, price_increment=0.0, size_increment=0.0, underlying=None, margin_init=0.0, margin_maint=0.0, maker_fee=0.0, taker_fee=0.0, venue=None, currency=None, session=None, scrip_group=None)` | A perpetual contract (dated future without expiry). |
 | `price_increment` | *No docstring.* |
 | `right` | "call"/"put" for options, None otherwise. |
@@ -2673,10 +2673,11 @@ trade. The bars before it are run in full, so the strategies' hooks and indicato
 them, but every order decided at an event before it is refused with the reason ``warmup``:
 a typed order is recorded as rejected (the strategy hears ``on_order_rejected`` with
 ``reject_reason == "warmup"``), an ``enter()`` intent is a refused entry, and the refusal is
-journaled and counted like any other. Orders decided at ``trade_from`` or later are not
-affected. ``None`` (the default) trades from the first bar. A host that wants the history
-without the trades uses this instead of an ``order_check`` that also refuses ``enter()``
-and ``close_position()``.
+journaled and counted like any other. ``ctx.is_warmup`` is true at those events, as on a
+:class:`~raptorbt.LiveNode` warming up, so a strategy that checks it sends none of them.
+Orders decided at ``trade_from`` or later are not affected. ``None`` (the default) trades
+from the first bar. A host that wants the history without the trades uses this instead of an
+``order_check`` that also refuses ``enter()`` and ``close_position()``.
 
 ``keep_curves=False`` drops the equity, drawdown and returns curves from
 the results (the final equity value stays as a one-element curve); trades,

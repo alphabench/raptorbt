@@ -410,6 +410,52 @@ def test_capital_fraction_sizing_is_a_whole_number_of_lots(path):
     assert trades(none[path]) == []
 
 
+def whole_units(size_increment):
+    """A cash equity and a contract quoted in lots (an MCX future: lot 1), both lot 1.0, with
+    the size step given. A lot of 1.0 is the neutral default: only the step makes units whole."""
+    return {
+        "equity": {"F": rb.InstrumentSpec.equity("F", price_increment=0.05, size_increment=size_increment)},
+        "future": {
+            "F": rb.InstrumentSpec.futures_contract(
+                "F", FUT_EXP, lot_size=1.0, price_increment=0.05, size_increment=size_increment
+            )
+        },
+    }
+
+
+@pytest.mark.parametrize("kind", ["equity", "future"])
+@pytest.mark.parametrize("path", PATHS)
+def test_a_size_step_of_one_sizes_a_capital_fraction_in_whole_units(kind, path):
+    """20000 of capital at 100.03 is 199.94 units: 199 whole units with a size step of 1.0, and
+    the fraction itself (a fractional share no account holds) with the neutral lot alone."""
+    data = {"F": bars(LOT_ROWS, T0)}
+    script = {1: lambda s, c: s.enter(size_frac=1.0), 3: lambda s, c: s.close_position()}
+    def cfg():
+        return BacktestConfig(initial_capital=20000.0, fees=0.0)
+
+    whole = run(script, data, cfg, paths=(path,), instruments=whole_units(1.0)[kind])
+    assert [t[3] for t in trades(whole[path])] == [199.0]
+    (neutral,) = [t[3] for t in trades(run(script, data, cfg, paths=(path,), instruments=whole_units(0.0)[kind])[path])]
+    assert 199.0 < neutral < 200.0
+
+
+@pytest.mark.parametrize("kind", ["equity", "future"])
+@pytest.mark.parametrize("path", PATHS)
+def test_a_fractional_quantity_off_a_size_step_of_one_is_refused(kind, path):
+    with pytest.raises(InvalidOrder) as e:
+        run({1: lambda s, c: s.submit_order(O.Market(side="buy", units=2.5))}, {"F": bars(LOT_ROWS, T0)},
+            lambda: BacktestConfig(initial_capital=10000.0, fees=0.0), paths=(path,),
+            instruments=whole_units(1.0)[kind])
+    assert (e.value.code, e.value.parameter) == ("off_lot_quantity", "units")
+    assert [float(v) for v in e.value.valid] == [2.0, 3.0]
+
+
+def test_the_option_factory_takes_a_size_step():
+    spec = rb.InstrumentSpec.option("O", 100.0, "call", 10**18, 1.0, size_increment=1.0)
+    assert (spec.lot_size, spec.size_increment) == (1.0, 1.0)
+    assert rb.InstrumentSpec.option("O", 100.0, "call", 10**18, 1.0).size_increment == 0.0
+
+
 # ---------------------------------------------------------------------------
 # one rule for the entry bar's protective legs
 # ---------------------------------------------------------------------------

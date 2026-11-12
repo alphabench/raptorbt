@@ -28,7 +28,11 @@ increment, contract multiplier, expiry, margin and fee fields, and an optional
 `instruments={symbol: spec}` for many). With no spec a symbol trades at any
 timestamp, one unit at a time, and never expires. A spec turns on, per symbol:
 
-- **Lot floor.** Order size is rounded down to a whole number of lots.
+- **Lot floor.** A capital-fraction size is rounded down to a whole number of
+  lots and size steps; an explicit quantity off them is refused
+  (`off_lot_quantity`). A `lot_size` of 1.0 is the neutral default and floors
+  nothing: an instrument traded in whole units (a share, a contract quoted in
+  lots) needs `size_increment=1.0`.
 - **Multiplier.** Notional is `price * units * multiplier`.
 - **Tick grid.** Stops and targets derived from a percentage land on the
   `price_increment` grid. The tick comes from the spec, which the host loads from

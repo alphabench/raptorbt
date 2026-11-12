@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A roll due on an instant the market takes no orders (the bar stamped at the session's close)
   is no longer failed with `roll_close_failed` (`market_closed`): the close is sent again at the
   next event, and the open follows its fill as usual.
+- `ctx.is_warmup` is true at every event before `run_strategies(trade_from=)` (and
+  `run_strategies_windowed`), where every order is refused `warmup`, as it is on a `LiveNode`'s
+  warm-up bars. A strategy that returned on it still sent those orders, which the run refused.
 
 ### Changed
 
@@ -28,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `InstrumentSpec.futures_contract` and `InstrumentSpec.option` take `size_increment`, as
+  `equity`, `perpetual` and `currency_pair` do. A `lot_size` of 1.0 is the neutral default and
+  quantizes nothing, so a contract quoted in lots (lot 1) is traded in whole contracts only with
+  `size_increment=1.0`: capital-fraction sizing floors to it and a fractional quantity is refused
+  `off_lot_quantity`. The docs and skills that said every spec floors to whole lots now say so.
 - `PortfolioResult.dividends`: the dividend cash credited over the run (a short's debit is
   negative). A dividend moves the equity curve and no trade's P&L, so a run's end equity less its
   start is the trades' P&L plus `dividends`; a reader can now reconcile the two without the

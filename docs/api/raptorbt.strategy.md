@@ -1720,10 +1720,11 @@ trade. The bars before it are run in full, so the strategies' hooks and indicato
 them, but every order decided at an event before it is refused with the reason ``warmup``:
 a typed order is recorded as rejected (the strategy hears ``on_order_rejected`` with
 ``reject_reason == "warmup"``), an ``enter()`` intent is a refused entry, and the refusal is
-journaled and counted like any other. Orders decided at ``trade_from`` or later are not
-affected. ``None`` (the default) trades from the first bar. A host that wants the history
-without the trades uses this instead of an ``order_check`` that also refuses ``enter()``
-and ``close_position()``.
+journaled and counted like any other. ``ctx.is_warmup`` is true at those events, as on a
+:class:`~raptorbt.LiveNode` warming up, so a strategy that checks it sends none of them.
+Orders decided at ``trade_from`` or later are not affected. ``None`` (the default) trades
+from the first bar. A host that wants the history without the trades uses this instead of an
+``order_check`` that also refuses ``enter()`` and ``close_position()``.
 
 ``keep_curves=False`` drops the equity, drawdown and returns curves from
 the results (the final equity value stays as a one-element curve); trades,

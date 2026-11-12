@@ -66,7 +66,9 @@ pub struct InstrumentSpec {
     pub price_increment: f64,
     /// Minimum size step; `0.0` leaves sizes unquantized beyond lot rounding.
     pub size_increment: f64,
-    /// Contract lot size; sizing floors to a whole number of lots.
+    /// Contract lot size; sizing floors to a whole number of lots. `1.0` is
+    /// the neutral default and floors nothing: whole units are
+    /// `size_increment = 1.0`.
     pub lot_size: f64,
     /// Contract point value: notional = price * size * multiplier.
     pub multiplier: f64,
