@@ -251,8 +251,10 @@ Python-exposed backtest configuration.
 | `set_trailing_stop(self, /, percent)` | Set trailing stop-loss. |
 | `slippage` | *No docstring.* |
 | `squareoff_time_minutes` | Squareoff time as minutes from local midnight; `None` disables. |
+| `squareoff_times` | Square-off minutes of single instruments, by symbol: each such symbol is squared off at its own time, every other at `squareoff_time`. |
 | `upon_bar_close` | Deprecated in favor of `fill_timing`: `True` maps to `"same_bar_close"`, `False` to `"next_bar_open"`. An explicit `fill_timing` wins over this flag. |
 | `with_squareoff_time(self, /, hhmm)` | A copy whose `squareoff_time` is `hhmm` (`None` disables it): how a runner applies the flatten time a strategy's requirements declare without changing the caller's config. |
+| `with_squareoff_times(self, /, times)` | A copy that squares off each symbol of `times` at its own "HH:MM" and every other at `squareoff_time`: an instrument whose session closes before the run's square-off (an MCX agricultural contract beside a bullion one) is closed before its own close. It replaces the times a previous call gave; an empty mapping clears them. |
 
 ### `BacktestMetrics`
 

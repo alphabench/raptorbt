@@ -149,6 +149,7 @@ impl SpreadBacktest {
         // square off a second time from the same setting.
         let mut book_config = base.clone();
         book_config.squareoff_time_minutes = None;
+        book_config.squareoff_time_by_symbol.clear(); // a spread's legs square off together
         let mut book = PortfolioBook::new(book_config, account_mode(base));
         for (k, leg) in legs.iter().enumerate() {
             book.add_instrument(

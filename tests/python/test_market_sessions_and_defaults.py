@@ -289,6 +289,41 @@ def test_squareoff_time_uses_the_instruments_session_zone_when_the_config_names_
     assert rows[0] == (10.0, "11-02 15:17", "11-02 15:20", "Squareoff")
 
 
+def _two_sessions(config):
+    """A bullion-like and an agricultural MCX contract (17:00 close), each bought at its first
+    bar on 2026-11-02 (MCX closes 23:55 that day); their exits."""
+    agri = [ist(2026, 11, 2, 16, m) for m in range(30, 60)]
+    crude = agri + [ist(2026, 11, 2, 17, 0)] + [ist(2026, 11, 2, 23, m) for m in range(0, 11)]
+    data = {
+        "AGRI": bars([(100, 101, 99, 100)] * len(agri), agri),
+        "CRUDE": bars([(100, 101, 99, 100)] * len(crude), crude),
+    }
+    instruments = {
+        "AGRI": rb.InstrumentSpec.equity("AGRI", session=SessionSchedule.mcx_other_agri()),
+        "CRUDE": rb.InstrumentSpec.equity("CRUDE", session=SessionSchedule.mcx()),
+    }
+    buy = lambda s, c: s.submit_order(O.Market(side="buy", quantity=1.0))  # noqa: E731
+    strategy = Script({("AGRI", 0): buy, ("CRUDE", 0): buy})
+    (result,) = run_strategies([strategy], data, config, bar_stamp="close", instruments=instruments)
+    return sorted((t.symbol, fmt(t.exit_time), str(t.exit_reason)) for t in result.result.trades())
+
+
+def test_an_instrument_named_in_squareoff_times_is_squared_off_at_its_own_time():
+    run = BacktestConfig(initial_capital=1e5, fees=0.0, squareoff_time="23:05")
+    assert _two_sessions(run.with_squareoff_times({"AGRI": "16:35"})) == [
+        ("AGRI", "11-02 16:35", "Squareoff"),
+        ("CRUDE", "11-02 23:05", "Squareoff"),
+    ]
+    # without it the run's one time never comes inside the agricultural session
+    agri, crude = _two_sessions(run)
+    assert agri[0] == "AGRI" and agri[2] != "Squareoff"
+    assert crude == ("CRUDE", "11-02 23:05", "Squareoff")
+    assert run.with_squareoff_times({"AGRI": "16:35"}).squareoff_times == {"AGRI": 995}
+    assert run.with_squareoff_times({"AGRI": "16:35"}).with_squareoff_times({}).squareoff_times == {}
+    with pytest.raises(InvalidParameter):
+        run.with_squareoff_times({"AGRI": "4:35pm"})
+
+
 # -- M16: square-off only when the strategy says it holds intraday ----------------------------------------
 
 

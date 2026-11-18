@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An MCX contract named by an `EXCHANGE:NAME` key (`underlying="MCX:CRUDEOIL"`,
+  `"MCX:CRUDEOIL26DECFUT"`) takes the session of its class, as the bare name does; it was refused
+  `mcx_session_unknown`.
+
 - On a `LiveNode` with a venue (`PaperExecution` or an adapter), the orders the engine builds
   itself (the entry of `enter()`, the close of `close_position()` and of an exit signal, the
   stop and target legs, schedule slices and the square-off) were sent `tif="gtc"`, which a
@@ -39,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `BacktestConfig.with_squareoff_times({symbol: "HH:MM"})` (read back as `squareoff_times`,
+  minutes by symbol): each named symbol is squared off at its own time and every other at
+  `squareoff_time`, so an instrument whose session closes before the run's square-off (an MCX
+  agricultural contract, 17:00, beside a bullion one) is closed before its own close instead of
+  carried. Every runner but the spread runner, whose legs square off together. Without it nothing
+  changes.
 - `InstrumentSpec.futures_contract` and `InstrumentSpec.option` take `size_increment`, as
   `equity`, `perpetual` and `currency_pair` do. A `lot_size` of 1.0 is the neutral default and
   quantizes nothing, so a contract quoted in lots (lot 1) is traded in whole contracts only with

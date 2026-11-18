@@ -152,3 +152,20 @@ fn a_windowed_book_holds_flat_memory_and_still_refuses_late_adoption() {
         "samples were taken, however few remain"
     );
 }
+
+#[test]
+fn an_instrument_named_in_squareoff_time_by_symbol_squares_off_at_its_own_minute() {
+    let mut config = config();
+    config.squareoff_time_minutes = Some(23 * 60 + 5);
+    config.squareoff_time_by_symbol.insert("AGRI".into(), 16 * 60 + 35);
+    let mut book = PortfolioBook::new(config.clone(), AccountMode::Cash);
+    book.add_instrument("CRUDE".into(), Direction::Long, None, None, PositionPolicy::Net);
+    book.add_instrument("AGRI".into(), Direction::Long, None, None, PositionPolicy::Net);
+    let minutes: Vec<Option<u32>> =
+        book.kernels.iter().map(|k| k.config.squareoff_time_minutes).collect();
+    assert_eq!(minutes, [Some(23 * 60 + 5), Some(16 * 60 + 35)]);
+    // without a run-wide time only the named symbol is squared off
+    config.squareoff_time_minutes = None;
+    assert_eq!(config.squareoff_minutes_for("CRUDE"), None);
+    assert_eq!(config.squareoff_minutes_for("AGRI"), Some(16 * 60 + 35));
+}

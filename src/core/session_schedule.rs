@@ -132,8 +132,9 @@ impl std::fmt::Display for UnknownMcxClass {
     }
 }
 
-/// Which class an MCX contract name (an underlying or a symbol such as `COTTON26DECFUT`)
-/// belongs to, or `None` for a name the table does not list.
+/// Which class an MCX contract name (an underlying or a symbol such as `COTTON26DECFUT`, or
+/// either as an `EXCHANGE:NAME` key, `MCX:COTTON26DECFUT`) belongs to, or `None` for a name the
+/// table does not list.
 pub fn mcx_class(name: &str) -> Option<McxClass> {
     const SELECT: [&str; 3] = ["COTTON", "KAPAS", "COTWASOIL"];
     const OTHER: [&str; 19] = [
@@ -179,6 +180,7 @@ pub fn mcx_class(name: &str) -> Option<McxClass> {
         "GOLDPETAL",
     ];
     let upper = name.trim().to_ascii_uppercase();
+    let upper = upper.rsplit(':').next().unwrap_or_default(); // a key names its exchange first
     let upper = upper.trim_start_matches(|c: char| !c.is_ascii_alphabetic());
     let starts = |table: &[&str]| table.iter().any(|p| upper.starts_with(p));
     if starts(&SELECT) {
@@ -1070,6 +1072,9 @@ mod tests {
         assert_eq!(close(&at(&["RBDPMOLEIN"])), Some(17 * 60));
         assert_eq!(close(&at(&["KAPAS"])), Some(21 * 60));
         assert_eq!(close(&at(&["MENTHAOIL26DECFUT"])), Some(17 * 60));
+        // A platform key names the exchange first: the class is the contract's.
+        assert_eq!(close(&at(&["MCX:MENTHAOIL", "MCX:MENTHAOIL26DECFUT"])), Some(17 * 60));
+        assert_eq!(close(&at(&["MCX:CRUDEOIL", "MCX:CRUDEOIL26DECFUT"])), Some(23 * 60 + 55));
         // A name in no class is not guessed, whatever its first letters look like.
         let err = SessionSchedule::for_instrument("MCX", &["X", "F"]).unwrap_err();
         assert!(err.to_string().contains("COTWASOIL") && err.to_string().contains("09:00-17:00"));

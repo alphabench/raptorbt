@@ -530,6 +530,15 @@ pub struct BacktestConfig {
     /// real trade-out, not a free settlement.
     pub squareoff_time_minutes: Option<u32>,
 
+    /// Square-off times of single instruments, by symbol, in minutes from
+    /// local midnight: a symbol named here is force-closed at its own time
+    /// each session and every other one at `squareoff_time_minutes`. For an
+    /// instrument whose session closes before the run's square-off (an MCX
+    /// agricultural contract beside a bullion one), which the broker squares
+    /// off before its own close. Empty (the default) changes nothing.
+    #[serde(default)]
+    pub squareoff_time_by_symbol: std::collections::BTreeMap<String, u32>,
+
     /// Reproduce pre-0.5.0 annualization.
     ///
     /// Through 0.4.1 the single-instrument path annualized at 365 while the
@@ -698,6 +707,7 @@ impl Default for BacktestConfig {
             risk_free_rate: 0.0,
             session_minutes: None,
             squareoff_time_minutes: None,
+            squareoff_time_by_symbol: std::collections::BTreeMap::new(),
             fee_segment: None,
             fee_rates: None,
             fee_binding: None,
@@ -757,11 +767,17 @@ impl BacktestConfig {
         })
     }
 
+    /// The square-off minute of `symbol`: its own (`squareoff_time_by_symbol`),
+    /// else the run's (`squareoff_time_minutes`).
+    pub fn squareoff_minutes_for(&self, symbol: &str) -> Option<u32> {
+        self.squareoff_time_by_symbol.get(symbol).copied().or(self.squareoff_time_minutes)
+    }
+
     /// Whether `spec`'s positions are squared off the same day: the run asks
     /// for a `squareoff_time`, or the instrument's session has a square-off
     /// minute. Cash equity is then priced on the intraday fee row.
     pub fn intraday_for(&self, spec: &crate::instruments::InstrumentSpec) -> bool {
-        self.squareoff_time_minutes.is_some()
+        self.squareoff_minutes_for(&spec.symbol).is_some()
             || spec.session.as_ref().is_some_and(|s| s.squareoff_minute().is_some())
     }
 
@@ -882,7 +898,7 @@ impl BacktestConfig {
         let zone_known = self.session_tz_set
             || self.session_tz_offset_ns != 0
             || spec.is_some_and(|s| s.session.is_some());
-        if self.squareoff_time_minutes.is_some() && !zone_known {
+        if self.squareoff_minutes_for(symbol).is_some() && !zone_known {
             return Err(MarketSettingError {
                 code: "squareoff_needs_timezone",
                 param: "squareoff_time",

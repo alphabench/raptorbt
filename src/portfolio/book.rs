@@ -291,8 +291,11 @@ impl PortfolioBook {
         slippage_model: crate::execution::SlippageModel,
         fill_price: crate::execution::FillPrice,
     ) -> usize {
+        // The kernel squares off at its own instrument's time where the run names one.
+        let mut config = self.config.clone();
+        config.squareoff_time_minutes = config.squareoff_minutes_for(&symbol);
         let mut kernel = EngineKernel::new(
-            self.config.clone(),
+            config,
             fee_model,
             slippage_model,
             fill_price,

@@ -226,7 +226,8 @@ host's business and not the exchange's validity. The segment comes from
 
 A position is squared off only when the run asks (`squareoff_time`, read in the
 instrument's session zone, else `session_tz_offset_ns`; refused with neither) or
-the strategy's `requirements.holding` is `Holding.intraday(flatten_before=...)`.
+the strategy's `requirements.holding` is `Holding.intraday(flatten_before=...)`;
+a symbol named in `BacktestConfig.with_squareoff_times` is squared off at its own time.
 
 Annualisation counts trading periods, one rule everywhere (`full_report`, the
 metrics of every runner, the tick path): an explicit `periods_per_year` wins;

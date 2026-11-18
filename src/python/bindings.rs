@@ -146,6 +146,12 @@ pub struct PyBacktestConfig {
     /// Set through the `squareoff_time` "HH:MM" argument, not directly.
     #[pyo3(get)]
     pub squareoff_time_minutes: Option<u32>,
+    /// Square-off minutes of single instruments, by symbol: each such symbol
+    /// is squared off at its own time, every other at `squareoff_time`.
+    ///
+    /// Set through `with_squareoff_times`, not directly.
+    #[pyo3(get)]
+    pub squareoff_times: std::collections::BTreeMap<String, u32>,
     /// Adverse adjustment on limit fills, as a fraction of the limit price.
     #[pyo3(get, set)]
     pub limit_slippage: f64,
@@ -315,6 +321,7 @@ impl PyBacktestConfig {
                 stop_config: StopConfig::None,
                 target_config: TargetConfig::None,
                 squareoff_time_minutes,
+                squareoff_times: std::collections::BTreeMap::new(),
                 fill_timing,
             })
         })()
@@ -328,6 +335,23 @@ impl PyBacktestConfig {
     fn with_squareoff_time(&self, hhmm: Option<&str>) -> PyResult<Self> {
         let mut copy = self.clone();
         copy.squareoff_time_minutes = parse_squareoff_time(hhmm)?;
+        Ok(copy)
+    }
+
+    /// A copy that squares off each symbol of `times` at its own "HH:MM" and
+    /// every other at `squareoff_time`: an instrument whose session closes
+    /// before the run's square-off (an MCX agricultural contract beside a
+    /// bullion one) is closed before its own close. It replaces the times a
+    /// previous call gave; an empty mapping clears them.
+    #[pyo3(signature = (times))]
+    fn with_squareoff_times(&self, times: HashMap<String, String>) -> PyResult<Self> {
+        let mut copy = self.clone();
+        copy.squareoff_times.clear();
+        for (symbol, hhmm) in times {
+            if let Some(m) = parse_squareoff_time(Some(&hhmm))? {
+                copy.squareoff_times.insert(symbol, m);
+            }
+        }
         Ok(copy)
     }
 
@@ -593,6 +617,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             risk_free_rate: py_config.risk_free_rate,
             session_minutes: py_config.session_minutes,
             squareoff_time_minutes: py_config.squareoff_time_minutes,
+            squareoff_time_by_symbol: py_config.squareoff_times.clone(),
             fee_segment: py_config.fee_segment.clone(),
             fee_rates: py_config.fee_rates,
             fee_binding: py_config.fee_binding(),

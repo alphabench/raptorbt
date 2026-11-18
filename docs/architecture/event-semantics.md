@@ -378,7 +378,7 @@ Scope:
   instrument with no `SessionSchedule`: the first event at or after the
   cutoff closes every position (`Squareoff`), and entries are refused with
   `squareoff` until that local day ends. An instrument's own
-  `SessionSchedule.squareoff_minute` is the default minute for that instrument (the presets set none); the run's own `squareoff_time` beats it, read in the schedule's zone.
+  `SessionSchedule.squareoff_minute` is the default minute for that instrument (the presets set none); the run's own `squareoff_time` beats it, read in the schedule's zone, and a symbol's own time in `BacktestConfig.with_squareoff_times` beats the run's for that symbol.
 
 ## Three times of an event
 
