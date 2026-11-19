@@ -3756,6 +3756,15 @@ impl PyRuntime {
         Ok(out)
     }
 
+    /// Protective legs whose day order lapsed with a session, waiting for the next one's first
+    /// event to be sent again: `(strategy index, local instrument, position id, leg, level)`.
+    fn pending_rearms(&self) -> Vec<(usize, usize, u64, String, f64)> {
+        match self.shared.venue.borrow().clone() {
+            Some(venue) => venue.lapsed_legs(),
+            None => Vec::new(),
+        }
+    }
+
     /// Adapter calls a replay answered "unavailable" for, since last asked.
     fn take_replay_errors(&self) -> u32 {
         self.shared.control.replay_errors.replace(0)
@@ -5483,7 +5492,8 @@ fn rest_phase(
                     })?;
                 }
                 let Some(out) = venue.poll_rest(sh, st, &ev, local)? else { continue };
-                let (venue_heard, venue_held) = venue.poll_book(py, sh, st, &ev, out)?;
+                let (venue_heard, venue_held) =
+                    venue.poll_book_rest(py, sh, st, &ev, out, local)?;
                 Matched { events: Vec::new(), venue_held, venue_heard }
             } else {
                 let events = match &mut *sh.inner.borrow_mut() {

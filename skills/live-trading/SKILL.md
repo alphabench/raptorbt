@@ -876,6 +876,50 @@ silently):
 | client id field | `tag` (20, letters and digits) | `tag` (40) | `correlationId` (30) |
 | writes need | a valid token | the registered static IP | the registered static IP |
 
+**The engine's own orders on a broker adapter.** The orders the engine builds (the entry of
+`enter()`, `close_position()` and exit-signal closes, the `prot-` stop and target legs, `Twap`
+slices, the square-off) carry `gtc` where the segment holds it (NSE cash, NSE commodity, a venue
+the engine does not know) and `day` on NFO, BFO, CDS, BCD, BSE and MCX. The adapters hold no
+`gtc` order, so with the default `gtc="refuse"` an engine-built entry or close on NSE cash is
+rejected (`unsupported: ...`, heard in `on_order_rejected`) and a protective leg there falls back
+to a level the engine watches. Build the adapter with `gtc="day"` to send them as day orders.
+Closes and legs are reduce-only, so the same holds for `reduce_only="best_effort"` (with
+`"refuse"` a close is rejected and a leg is watched by the engine).
+
+A protective leg sent as a day order (every leg on a day-only segment, and a `gtc` leg under
+`gtc="day"`) ends at the session's close. When the venue reports it ended so (`expired`, or a
+cancel nobody asked for between the close and the next open, which is how Kite reports a lapse)
+with the position still open, the engine journals `engine_exit` `lapsed_day_order` and sends the
+leg again at the first event of the next session, sized to the position then. Each outcome is an
+`engine_exit` record naming the leg it replaces:
+
+- `rearmed`: sent (the new `order` and `client_id`).
+- `rearm_level_crossed`: on a broker venue the leg is sent at the first bar's close; when that bar
+  has already traded through the level (a long's stop at or above its low, its target at or below
+  its high) the engine closes the position at market on that bar instead (`bar` holds its prices).
+  On `PaperExecution` the leg meets the first bar before the strategy's hooks, so a bar that
+  opened through the level fills it at the open, as in a backtest.
+- `rearm_rejected` (`why`: the refusal; `client_id` even when the order never reached the venue):
+  refused by the host, the book's checks or the venue, at sending or by a later report; the level
+  is then watched by the engine (`watching: true`), which closes at market when it is reached.
+- `rearm_refused_watching`: the venue cannot hold the order; the engine watches the level.
+- `rearm_deferred` (once): the venue could not be reached; the unsent order is sent again under
+  its own id on each event, and `rearm_abandoned` once the session it was first deferred in has
+  closed. The node does not raise for it.
+- `rearm_skipped` (`position_closed`, `covered`, `level_crossed_closing`).
+
+It is not sent again for a position closed in between, a leg the strategy cancelled, or while a
+close is working. A node restored from its journal rebuilds the lapsed legs from the replayed
+reports and re-arms them the same way; a journal written by an earlier engine that holds such a
+report does not replay (`replay_diverged`): restart that node after the session. A trailing leg
+on a venue that holds trailing orders starts again from that venue's own reference (on
+`PaperExecution`, from the extreme the lapsed order had reached).
+
+Limits: a lapse the engine learns of only late is not re-armed. A cancel stamped after the next
+session's open is read as the venue's own cancel, not a lapse; an order the venue let lapse
+without any report shows only as `missing_order` in `reconcile()`. In both cases protect the
+position yourself (a new stop, or `close_position()`).
+
 The mappings were written from the brokers' public documentation and tested on
 synthetic payloads in those shapes only. Field names the pages do not state are
 marked in each module's docstring; confirm them against a paper or small live

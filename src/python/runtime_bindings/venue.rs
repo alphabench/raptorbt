@@ -91,6 +91,173 @@ struct Ledger {
     held_exits: std::collections::HashSet<(usize, usize)>,
     /// Exits of hedge legs the engine holds until the sold legs of their group are closed.
     covers: Vec<HeldCover>,
+    /// Protective legs whose day order lapsed at a session's close with their position still
+    /// open: sent again at the first event of the next session ([`VenueRoute::rearm`]).
+    lapsed: Vec<Lapsed>,
+    /// Re-armed legs the venue still works, by `(strategy, local instrument, engine order id)`:
+    /// a later rejection of one leaves its level to the engine ([`VenueRoute::note_rearm_end`]).
+    rearmed: HashMap<(usize, usize, u64), Lapsed>,
+}
+
+/// A protective leg the venue let lapse with its session (a day order on a segment that holds no
+/// good-till-cancelled one), waiting to be sent again.
+#[derive(Clone)]
+struct Lapsed {
+    sid: usize,
+    local: usize,
+    /// The ledger id of the position the leg protected (under netting too: a position closed and
+    /// opened again is another position, with its own protection).
+    position: u64,
+    /// The side of the order that closes the position.
+    exit: OrderSide,
+    leg: LapsedLeg,
+    /// The lapsed order's venue id and the engine's client id for it, for the record.
+    venue_id: String,
+    client_id: String,
+    /// The session close the order lapsed at: it is sent again at the first event after it that
+    /// the instrument's session holds.
+    after_ns: i64,
+    /// The venue was unavailable when the leg was sent again: the event it first failed on, and
+    /// the engine's id of the order that was not sent, which is sent again under the same id.
+    deferred: Option<(i64, u64)>,
+}
+
+#[derive(Clone, Copy)]
+enum LapsedLeg {
+    Stop(f64),
+    Target(f64),
+    /// A trailing stop, with the extreme it had trailed from when it lapsed.
+    Trail {
+        offset: crate::execution::orders::TrailOffset,
+        watermark: Option<f64>,
+    },
+}
+
+impl LapsedLeg {
+    fn name(&self) -> &'static str {
+        match self {
+            LapsedLeg::Stop(_) => "stop",
+            LapsedLeg::Target(_) => "target",
+            LapsedLeg::Trail { .. } => "trail",
+        }
+    }
+
+    fn is_stop(&self) -> bool {
+        !matches!(self, LapsedLeg::Target(_))
+    }
+
+    /// The price the leg stood at: a trailing stop's at its watermark, or `None` before it has one.
+    fn level(&self, exit: OrderSide) -> Option<f64> {
+        match *self {
+            LapsedLeg::Stop(p) | LapsedLeg::Target(p) => Some(p),
+            LapsedLeg::Trail { offset, watermark } => watermark.map(|w| match exit {
+                OrderSide::Sell => w - offset.at(w),
+                OrderSide::Buy => w + offset.at(w),
+            }),
+        }
+    }
+}
+
+/// Whether a protective leg that has just ended lapsed with its session rather than being taken
+/// off: it expired, or (a venue with no expiry status reports a lapsed day order as cancelled)
+/// it was cancelled without the engine asking, between the close of the order's session and the
+/// next open. A leg the engine or the strategy asked to cancel (`PendingCancel` before the
+/// report) never lapsed.
+fn lapsed_by_session(
+    before: OrderStatus,
+    after: OrderStatus,
+    report_ts: i64,
+    day_close: Option<i64>,
+    next_open: Option<i64>,
+) -> bool {
+    if before == OrderStatus::PendingCancel || before.is_terminal() {
+        return false;
+    }
+    match after {
+        OrderStatus::Expired => true,
+        OrderStatus::Canceled => day_close.is_some_and(|close| {
+            report_ts >= close && next_open.is_none_or(|open| report_ts <= open)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a lapsed leg is sent again on an event at `ts`: the first event after the close it
+/// lapsed at that the instrument's session holds (`in_session`).
+fn rearm_due(after_ns: i64, ts: i64, in_session: bool) -> bool {
+    ts > after_ns && in_session
+}
+
+/// What a journal record of a lapsed leg says about it (see [`VenueRoute::journal_rearm`]).
+struct Rearm {
+    reason: &'static str,
+    why: Option<String>,
+    qty: f64,
+    /// The engine's id of the order the leg was sent as, when one was made.
+    order_id: Option<u64>,
+    /// The venue id of that order, when known without the engine's id.
+    venue: Option<String>,
+    /// The engine watches the leg's level.
+    watching: bool,
+    /// The bar that traded through the level: open, high, low, close.
+    bar: Option<(f64, f64, f64, f64)>,
+}
+
+impl Rearm {
+    fn new(reason: &'static str) -> Self {
+        Rearm {
+            reason,
+            why: None,
+            qty: 0.0,
+            order_id: None,
+            venue: None,
+            watching: false,
+            bar: None,
+        }
+    }
+    fn why(mut self, why: &str) -> Self {
+        self.why = Some(why.to_string());
+        self
+    }
+    fn qty(mut self, qty: f64) -> Self {
+        self.qty = qty;
+        self
+    }
+    fn order_id(mut self, id: u64) -> Self {
+        self.order_id = Some(id);
+        self
+    }
+    fn venue(mut self, venue_id: &str) -> Self {
+        self.venue = Some(venue_id.to_string());
+        self
+    }
+    fn watching(mut self) -> Self {
+        self.watching = true;
+        self
+    }
+    fn bar(mut self, bar: &KernelBar) -> Self {
+        self.bar = Some((bar.open, bar.high, bar.low, bar.close));
+        self
+    }
+}
+
+impl Lapsed {
+    /// Whether `bar` traded through the leg's level: a long's stop at or below its low, its target
+    /// at or above its high; the other way round for a short.
+    fn crossed_by(&self, bar: &KernelBar) -> bool {
+        let Some(level) = self.leg.level(self.exit) else { return false };
+        leg_crossed(self.leg.is_stop(), self.exit, level, bar.high, bar.low)
+    }
+}
+
+/// Whether a bar of `high` and `low` traded through a protective level (see
+/// [`Lapsed::crossed_by`]). `exit` is the side of the order that closes the position.
+fn leg_crossed(stop: bool, exit: OrderSide, level: f64, high: f64, low: f64) -> bool {
+    let sell = exit == OrderSide::Sell;
+    match (stop, sell) {
+        (true, true) | (false, false) => low <= level,
+        (true, false) | (false, true) => high >= level,
+    }
 }
 
 /// The exit of a hedge leg waiting for the sold legs of its group to close.
@@ -146,6 +313,10 @@ pub(super) struct VenueRoute {
     protective_local: bool,
     /// The adapter said it cannot take the last order sent.
     unsupported_sent: std::cell::Cell<bool>,
+    /// The engine's id of the last order the adapter was unavailable for (it is marked unsent).
+    unavailable_sent: std::cell::Cell<Option<u64>>,
+    /// The engine's id and the reason of the last order refused before or at sending.
+    last_refusal: RefCell<Option<(u64, String)>>,
     /// Reports are being booked for a step that matches before any hook hears: the events they
     /// made are kept in `held` instead of reaching the strategy's hooks.
     hold: std::cell::Cell<bool>,
@@ -196,6 +367,8 @@ impl VenueRoute {
             }),
             protective_local,
             unsupported_sent: std::cell::Cell::new(false),
+            unavailable_sent: std::cell::Cell::new(None),
+            last_refusal: RefCell::new(None),
             hold: std::cell::Cell::new(false),
             held: RefCell::new(Vec::new()),
         }
@@ -325,6 +498,768 @@ impl VenueRoute {
             })?;
         }
         Ok(())
+    }
+
+    /// A protective leg whose day order lapsed with its session while its position is still open
+    /// (on a segment that holds no good-till-cancelled order the engine's own orders are day
+    /// orders): its level is kept against the position and journaled, and the leg is sent again
+    /// at the first event of the next session ([`VenueRoute::rearm`]). A backtest holds the level
+    /// across sessions; without this the position would be left unprotected.
+    #[allow(clippy::too_many_arguments)]
+    fn note_lapse(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        placed: &Placed,
+        venue_id: &str,
+        before: OrderStatus,
+        report_ts: i64,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        use crate::core::types::Direction;
+        use crate::execution::orders::OrderKind;
+        // (leg, side, quantity left, position, status, client id, session close)
+        type Seen = (LapsedLeg, OrderSide, f64, u64, OrderStatus, String, i64);
+        let seen: Option<Seen> = sh.with_book(sid, |b, _| {
+            let k = b.kernel(placed.local);
+            let Some(o) = k.order(placed.order_id) else { return Ok(None) };
+            if !o.client_id.starts_with("prot-") || !o.reduce_only || !o.status.is_terminal() {
+                return Ok(None);
+            }
+            let schedule = k.schedule();
+            let close = schedule.and_then(|s| s.day_order_expiry_ns(o.submitted_ts));
+            let next_open = close.and_then(|c| schedule.and_then(|s| s.next_open_ns(c)));
+            if !lapsed_by_session(before, o.status, report_ts, close, next_open) {
+                return Ok(None);
+            }
+            let leg = match o.kind {
+                OrderKind::StopMarket { trigger } => LapsedLeg::Stop(trigger),
+                OrderKind::Limit { price } => LapsedLeg::Target(price),
+                OrderKind::TrailingStopMarket { offset } => {
+                    LapsedLeg::Trail { offset, watermark: None }
+                }
+                // A market answer to a level is not a level: nothing to hold across sessions.
+                _ => return Ok(None),
+            };
+            let closes_long = o.side == OrderSide::Sell;
+            let Some(p) = k.position_snapshots().into_iter().find(|p| {
+                o.position_id.is_none_or(|id| id == p.position_id)
+                    && (p.direction == Direction::Long) == closes_long
+            }) else {
+                return Ok(None);
+            };
+            let left = match o.qty {
+                crate::execution::orders::QtySpec::Units(q) => (q - o.filled_qty).max(0.0),
+                _ => p.size,
+            };
+            // A venue without a session schedule says when the order lapsed by reporting it.
+            let after = close.unwrap_or(report_ts);
+            Ok(Some((leg, o.side, left, p.position_id, o.status, o.client_id.clone(), after)))
+        })?;
+        let Some((mut leg, exit, left, position, status, client, after_ns)) = seen else {
+            return Ok(());
+        };
+        if let LapsedLeg::Trail { offset, .. } = leg {
+            // The extreme the venue had trailed from: a simulated venue's own, else the one the
+            // position has reached since its entry, as a backtest trails it.
+            let simulated = if self.simulated {
+                self.adapter.borrow_mut().as_simulation().and_then(|v| v.trail_watermark(venue_id))
+            } else {
+                None
+            };
+            let reached = sh.with_book(sid, |b, _| {
+                Ok(b.kernel(placed.local).ledger.get(position).map(|m| {
+                    if exit == OrderSide::Sell {
+                        m.position.highest_since_entry
+                    } else {
+                        m.position.lowest_since_entry
+                    }
+                }))
+            })?;
+            leg = LapsedLeg::Trail { offset, watermark: simulated.or(reached) };
+        }
+        let level = leg.level(exit);
+        sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, Some(venue_id), || {
+            JV::map([
+                ("strategy", JV::Int(sid.index() as i64)),
+                ("reason", JV::str("lapsed_day_order")),
+                ("position", JV::Int(position as i64)),
+                ("leg", JV::str(leg.name())),
+                ("level", level.map_or(JV::Null, JV::Float)),
+                ("qty", JV::Float(left)),
+                ("order", JV::str(venue_id)),
+                ("client_id", JV::str(client.as_str())),
+                ("status", JV::str(format!("{status:?}").to_lowercase())),
+                ("rearm_after_ns", JV::Int(after_ns)),
+                ("idx", JV::Int(idx as i64)),
+                ("event_ts", JV::Int(ts)),
+                ("venue", JV::Bool(true)),
+            ])
+        })?;
+        self.ledger.borrow_mut().lapsed.push(Lapsed {
+            sid: sid.index(),
+            local: placed.local,
+            position,
+            exit,
+            leg,
+            venue_id: venue_id.to_string(),
+            client_id: client,
+            after_ns,
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    /// Send again, at the first event of the next session, the protective legs whose day orders
+    /// lapsed with the last one ([`VenueRoute::note_lapse`]), each for what the position holds
+    /// now and not covered by a leg still working. Each outcome is journaled:
+    ///
+    /// * the position was closed since: dropped (`rearm_skipped`, `position_closed`); a working
+    ///   close of it holds the legs back until its outcome is known;
+    /// * on a venue that is not a simulation, the event's bar already traded through a level: the
+    ///   engine watches the levels, which closes the position at market on this event
+    ///   (`rearm_level_crossed`) as a level the engine watches does. A simulated venue meets the
+    ///   leg with the bar instead ([`EngineKernel::match_rearmed`]);
+    /// * sent (`rearmed`); refused by the host, the book or the venue (`rearm_rejected`, with the
+    ///   reason): its level is watched by the engine; held by the engine because the venue cannot
+    ///   hold it (`rearm_refused_watching`);
+    /// * the venue unavailable: the leg stays waiting and the order that was not sent is sent
+    ///   again, under the same id, on the next event (`rearm_deferred`, once); a leg still not sent
+    ///   at the close of the session it was first deferred in is given up (`rearm_abandoned`), and
+    ///   its unsent order is ended in the book.
+    ///
+    /// A leg leaves the waiting list only once it has one of these outcomes.
+    ///
+    /// [`EngineKernel::match_rearmed`]: crate::portfolio::EngineKernel::match_rearmed
+    fn rearm(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        let mine = |l: &Lapsed| l.sid == sid.index() && l.local == local;
+        if !self.ledger.borrow().lapsed.iter().any(mine) {
+            return Ok(());
+        }
+        let in_session = sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local).schedule().is_none_or(|s| s.is_open(ts.saturating_sub(1))))
+        })?;
+        let mut positions: Vec<u64> = Vec::new();
+        for l in self.ledger.borrow().lapsed.iter() {
+            if mine(l) && rearm_due(l.after_ns, ts, in_session) && !positions.contains(&l.position)
+            {
+                positions.push(l.position);
+            }
+        }
+        if positions.is_empty() {
+            return Ok(());
+        }
+        let hedging = sh.with_book(sid, |b, _| Ok(b.kernel(local).is_hedging()))?;
+        // The bar a real venue's leg would be sent after: what traded through a level in it is
+        // already past the leg.
+        let bar = if self.simulated { None } else { sh.current_bar(sid, local) };
+        for position in positions {
+            let held = sh.with_book(sid, |b, _| {
+                let k = b.kernel(local);
+                Ok(k.position_snapshots()
+                    .into_iter()
+                    .find(|p| p.position_id == position)
+                    .map(|p| (p.size, p.entry_price)))
+            })?;
+            let waiting = held.is_some()
+                && (self.close_working(sh, sid, local, position)?
+                    || self.ledger.borrow().covers.iter().any(|c| {
+                        (c.sid, c.local, c.position_id) == (sid.index(), local, position)
+                    }));
+            if waiting {
+                continue;
+            }
+            let legs: Vec<Lapsed> = self
+                .ledger
+                .borrow()
+                .lapsed
+                .iter()
+                .filter(|l| mine(l) && l.position == position)
+                .cloned()
+                .collect();
+            let Some((size, entry_price)) = held else {
+                self.drop_lapsed(sid, local, position, None);
+                for l in &legs {
+                    self.forget_unsent(sh, sid, local, l, idx, ts)?;
+                    let rec = Rearm::new("rearm_skipped").why("position_closed");
+                    self.journal_rearm(sh, sid, l, rec, idx, ts)?;
+                }
+                continue;
+            };
+            let named = if hedging { Some(position) } else { None };
+            if let Some(bar) = bar {
+                let crossed: Vec<&Lapsed> = legs.iter().filter(|l| l.crossed_by(&bar)).collect();
+                if !crossed.is_empty() {
+                    self.drop_lapsed(sid, local, position, None);
+                    let exit = legs[0].exit;
+                    let level_of = |stop: bool| {
+                        legs.iter()
+                            .rev()
+                            .find(|l| l.leg.is_stop() == stop)
+                            .and_then(|l| l.leg.level(l.exit))
+                    };
+                    // `watch` answers the levels on this same event with a market close.
+                    self.ledger.borrow_mut().watchers.push(Watch {
+                        sid: sid.index(),
+                        local,
+                        exit,
+                        qty: size,
+                        stop: level_of(true),
+                        target: level_of(false),
+                        position_id: named,
+                        trail: None,
+                    });
+                    for l in &legs {
+                        self.forget_unsent(sh, sid, local, l, idx, ts)?;
+                        let rec = if crossed.iter().any(|c| std::ptr::eq(*c, l)) {
+                            Rearm::new("rearm_level_crossed").qty(size).bar(&bar)
+                        } else {
+                            Rearm::new("rearm_skipped").why("level_crossed_closing")
+                        };
+                        self.journal_rearm(sh, sid, l, rec, idx, ts)?;
+                    }
+                    continue;
+                }
+            }
+            let mut placed: Vec<(u64, f64)> = Vec::new();
+            for want_stop in [true, false] {
+                // The newest lapsed leg of the kind; earlier ones of it are replaced by it.
+                let Some(l) = legs.iter().rev().find(|l| l.leg.is_stop() == want_stop) else {
+                    continue;
+                };
+                // A leg first deferred in a session that has closed since is given up.
+                if let Some((since, order_id)) = l.deferred {
+                    let close = sh.with_book(sid, |b, _| {
+                        Ok(b.kernel(local).schedule().and_then(|s| s.day_order_expiry_ns(since)))
+                    })?;
+                    if close.is_some_and(|close| ts > close) {
+                        self.drop_lapsed(sid, local, position, Some(want_stop));
+                        self.end_unsent(sh, sid, local, order_id, idx, ts, "rearm_abandoned")?;
+                        let rec = Rearm::new("rearm_abandoned").why("venue_unavailable");
+                        self.journal_rearm(sh, sid, l, rec.order_id(order_id), idx, ts)?;
+                        continue;
+                    }
+                }
+                let bare = match l.deferred {
+                    // The order that was not sent is the leg: it is sent again as it was.
+                    Some((_, order_id)) => self.unsent_qty(sid, local, order_id).unwrap_or(0.0),
+                    None => {
+                        let (covered, any) =
+                            self.working_cover(sh, sid, local, named, want_stop)?;
+                        // Where resting protection counts against the line, legs of a kind add
+                        // up to the position; elsewhere each leg is resized to the whole position.
+                        if self.exits_hold_line {
+                            size - covered
+                        } else if any {
+                            0.0
+                        } else {
+                            size
+                        }
+                    }
+                };
+                if bare <= 1e-9 {
+                    self.drop_lapsed(sid, local, position, Some(want_stop));
+                    self.journal_rearm(
+                        sh,
+                        sid,
+                        l,
+                        Rearm::new("rearm_skipped").why("covered"),
+                        idx,
+                        ts,
+                    )?;
+                    continue;
+                }
+                self.unavailable_sent.set(None);
+                *self.last_refusal.borrow_mut() = None;
+                let sent = match l.deferred {
+                    Some((_, order_id)) => self.send_unsent(sh, sid, local, order_id, ts),
+                    None => match l.leg {
+                        LapsedLeg::Stop(level) | LapsedLeg::Target(level) => self.place_leg_tagged(
+                            sh, sid, local, idx, ts, l.exit, want_stop, bare, level, named, true,
+                        ),
+                        LapsedLeg::Trail { offset, watermark } => self.place_trail(
+                            sh,
+                            sid,
+                            local,
+                            idx,
+                            ts,
+                            l.exit,
+                            bare,
+                            offset,
+                            watermark,
+                            entry_price,
+                            named,
+                        ),
+                    },
+                };
+                let sent = match sent {
+                    Ok(sent) => sent,
+                    Err(e) => match self.unavailable_sent.take() {
+                        // The venue could not be reached: the leg waits for the next event, with
+                        // the order that was not sent. The error is on the record, not raised:
+                        // the protection is retried, and the strategy is not stopped for it.
+                        Some(order_id) => {
+                            let code = Python::attach(|py| {
+                                e.value(py)
+                                    .getattr("code")
+                                    .ok()
+                                    .and_then(|c| c.extract::<String>().ok())
+                                    .unwrap_or_else(|| "venue_unavailable".to_string())
+                            });
+                            let first = l.deferred.is_none();
+                            self.defer_lapsed(sid, local, position, want_stop, ts, order_id);
+                            if first {
+                                let rec = Rearm::new("rearm_deferred").why(&code).qty(bare);
+                                self.journal_rearm(sh, sid, l, rec.order_id(order_id), idx, ts)?;
+                            }
+                            continue;
+                        }
+                        None => return Err(e),
+                    },
+                };
+                self.drop_lapsed(sid, local, position, Some(want_stop));
+                match sent {
+                    Some(order_id) => {
+                        let rejected = sh.with_book(sid, |b, _| {
+                            Ok(b.kernel(local)
+                                .order(order_id)
+                                .is_some_and(|o| o.status == OrderStatus::Rejected))
+                        })?;
+                        if rejected {
+                            let why = self
+                                .last_refusal
+                                .borrow()
+                                .clone()
+                                .filter(|(id, _)| *id == order_id)
+                                .map(|(_, why)| why)
+                                .unwrap_or_default();
+                            self.watch_leg(sid, local, l, bare, named, entry_price);
+                            let rec = Rearm::new("rearm_rejected").why(&why).qty(bare).watching();
+                            self.journal_rearm(sh, sid, l, rec.order_id(order_id), idx, ts)?;
+                        } else {
+                            self.ledger
+                                .borrow_mut()
+                                .rearmed
+                                .insert((sid.index(), local, order_id), l.clone());
+                            let rec = Rearm::new("rearmed").qty(bare).order_id(order_id);
+                            self.journal_rearm(sh, sid, l, rec, idx, ts)?;
+                            placed.push((order_id, bare));
+                        }
+                    }
+                    None => {
+                        let rec = Rearm::new("rearm_refused_watching").qty(bare);
+                        self.journal_rearm(sh, sid, l, rec, idx, ts)?
+                    }
+                }
+            }
+            // A stop and a target sent again for the same quantity cancel each other, as they did.
+            if let [(a, qa), (b, qb)] = placed[..] {
+                if (qa - qb).abs() < 1e-9 {
+                    self.link_oco(sid, local, &[a, b])?;
+                }
+            }
+        }
+        self.resize_protection(sh, sid, local, idx)
+    }
+
+    /// Take the lapsed legs of a position off the waiting list: all, or those of one kind (`stop`).
+    fn drop_lapsed(&self, sid: StrategyId, local: usize, position: u64, stop: Option<bool>) {
+        self.ledger.borrow_mut().lapsed.retain(|l| {
+            !(l.sid == sid.index()
+                && l.local == local
+                && l.position == position
+                && stop.is_none_or(|s| l.leg.is_stop() == s))
+        });
+    }
+
+    /// Note on the waiting legs of a kind that the venue was unavailable for `order_id`, the order
+    /// that carries them now, keeping the event it was first deferred on.
+    fn defer_lapsed(
+        &self,
+        sid: StrategyId,
+        local: usize,
+        position: u64,
+        stop: bool,
+        ts: i64,
+        order_id: u64,
+    ) {
+        for l in self.ledger.borrow_mut().lapsed.iter_mut() {
+            if l.sid == sid.index()
+                && l.local == local
+                && l.position == position
+                && l.leg.is_stop() == stop
+            {
+                let since = l.deferred.map_or(ts, |(since, _)| since);
+                l.deferred = Some((since, order_id));
+            }
+        }
+    }
+
+    /// The quantity of an order that was never sent (the venue was unavailable), while it is.
+    fn unsent_qty(&self, sid: StrategyId, local: usize, order_id: u64) -> Option<f64> {
+        let ledger = self.ledger.borrow();
+        let venue_id = ledger.by_engine.get(&(sid.index(), local, order_id))?;
+        ledger.by_venue.get(venue_id).filter(|p| p.unsent).map(|p| p.request.quantity)
+    }
+
+    /// Send again, under its own id, an order the venue was unavailable for. `Some(order_id)` once
+    /// the venue has it (or it was sent since), `None` never: a leg the venue cannot hold was
+    /// already watched when it was first sent.
+    fn send_unsent(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        order_id: u64,
+        ts: i64,
+    ) -> PyResult<Option<u64>> {
+        let placed = {
+            let ledger = self.ledger.borrow();
+            ledger
+                .by_engine
+                .get(&(sid.index(), local, order_id))
+                .and_then(|v| ledger.by_venue.get(v))
+                .cloned()
+        };
+        if let Some(p) = placed.filter(|p| p.unsent) {
+            self.send(sh, sid, local, order_id, ts, p.request.submitted_idx, &p.request)?;
+        }
+        Ok(Some(order_id))
+    }
+
+    /// End in the book an order the venue was never sent (unavailable), so it is not counted as
+    /// protection: it is rejected with `reason`, as the venue never took it.
+    #[allow(clippy::too_many_arguments)]
+    fn end_unsent(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        order_id: u64,
+        idx: usize,
+        ts: i64,
+        reason: &str,
+    ) -> PyResult<()> {
+        if self.unsent_qty(sid, local, order_id).is_none() {
+            return Ok(());
+        }
+        let working = sh.with_book(sid, |b, _| {
+            Ok(b.kernel(local).order(order_id).is_some_and(|o| !o.status.is_terminal()))
+        })?;
+        if !working {
+            return Ok(());
+        }
+        self.book_silently(
+            sh,
+            sid,
+            local,
+            order_id,
+            idx,
+            ts,
+            &ExecutionReport::Rejected {
+                reason: format!("{reason}: the venue was unavailable"),
+                ts_ns: ts,
+            },
+        )
+    }
+
+    /// End the unsent order a deferred leg carries, when it has one.
+    fn forget_unsent(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        l: &Lapsed,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        match l.deferred {
+            Some((_, order_id)) => {
+                self.end_unsent(sh, sid, local, order_id, idx, ts, "rearm_dropped")
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Leave a lapsed leg's level to the engine, which watches it for `qty` (a trailing stop from
+    /// the extreme it had reached) and closes at market when it is reached.
+    fn watch_leg(
+        &self,
+        sid: StrategyId,
+        local: usize,
+        l: &Lapsed,
+        qty: f64,
+        named: Option<u64>,
+        entry_price: f64,
+    ) {
+        use crate::execution::orders::TrailOffset;
+        let mut watch = Watch {
+            sid: sid.index(),
+            local,
+            exit: l.exit,
+            qty,
+            stop: None,
+            target: None,
+            position_id: named,
+            trail: None,
+        };
+        match l.leg {
+            LapsedLeg::Stop(level) => watch.stop = Some(level),
+            LapsedLeg::Target(level) => watch.target = Some(level),
+            LapsedLeg::Trail { offset, watermark } => {
+                let high = watermark.unwrap_or(entry_price);
+                let fraction = match offset {
+                    TrailOffset::Bps(bps) => bps / 10_000.0,
+                    TrailOffset::Price(price) if entry_price > 0.0 => price / entry_price,
+                    TrailOffset::Price(_) => 0.0,
+                };
+                watch.stop = LapsedLeg::Trail { offset, watermark: Some(high) }.level(l.exit);
+                watch.trail =
+                    (fraction > 0.0).then_some(Trail { fraction, entry: entry_price, high });
+            }
+        }
+        self.ledger.borrow_mut().watchers.push(watch);
+    }
+
+    /// A re-armed leg ended. A rejection the venue reported after taking it (a broker refuses a
+    /// stop whose trigger the market has already passed) leaves its level to the engine, which
+    /// watches it and, the level being passed, closes at market on the next event; journaled
+    /// `rearm_rejected` with the venue's reason.
+    #[allow(clippy::too_many_arguments)]
+    fn note_rearm_end(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        placed: &Placed,
+        venue_id: &str,
+        before: OrderStatus,
+        report: &ExecutionReport,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        let key = (sid.index(), placed.local, placed.order_id);
+        if !self.ledger.borrow().rearmed.contains_key(&key) {
+            return Ok(());
+        }
+        let ended = sh.with_book(sid, |b, _| {
+            Ok(b.kernel(placed.local).order(placed.order_id).map(|o| {
+                let left = match o.qty {
+                    crate::execution::orders::QtySpec::Units(q) => (q - o.filled_qty).max(0.0),
+                    _ => 0.0,
+                };
+                (o.status, left)
+            }))
+        })?;
+        let Some((status, left)) = ended else { return Ok(()) };
+        if !status.is_terminal() {
+            return Ok(());
+        }
+        let Some(l) = self.ledger.borrow_mut().rearmed.remove(&key) else { return Ok(()) };
+        let ExecutionReport::Rejected { reason, .. } = report else { return Ok(()) };
+        if status != OrderStatus::Rejected || before.is_terminal() {
+            return Ok(());
+        }
+        let held = sh.with_book(sid, |b, _| {
+            let k = b.kernel(placed.local);
+            Ok(k.position_snapshots()
+                .into_iter()
+                .find(|p| p.position_id == l.position)
+                .map(|p| (p.size, p.entry_price, k.is_hedging())))
+        })?;
+        let Some((size, entry_price, hedging)) = held else { return Ok(()) };
+        let named = if hedging { Some(l.position) } else { None };
+        let qty = if self.exits_hold_line { left.min(size) } else { size };
+        self.watch_leg(sid, placed.local, &l, qty, named, entry_price);
+        let rec = Rearm::new("rearm_rejected").why(reason).qty(qty).watching();
+        self.journal_rearm(sh, sid, &l, rec.venue(venue_id), idx, ts)
+    }
+
+    /// The quantity the working protective legs of a kind (stops, trailing ones included, or
+    /// targets) still have to close for a position (`named` under hedging), and whether any works.
+    fn working_cover(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        named: Option<u64>,
+        stop: bool,
+    ) -> PyResult<(f64, bool)> {
+        use crate::execution::orders::OrderKind;
+        sh.with_book(sid, |b, _| {
+            let mut left = 0.0;
+            let mut any = false;
+            for o in b.kernel(local).open_orders() {
+                let kind_stop = match o.kind {
+                    OrderKind::StopMarket { .. } | OrderKind::TrailingStopMarket { .. } => true,
+                    OrderKind::Limit { .. } => false,
+                    _ => continue,
+                };
+                if !o.client_id.starts_with("prot-")
+                    || !o.reduce_only
+                    || kind_stop != stop
+                    || o.status == OrderStatus::PendingCancel
+                    || named.is_some_and(|p| o.position_id.is_some_and(|q| q != p))
+                {
+                    continue;
+                }
+                any = true;
+                if let crate::execution::orders::QtySpec::Units(q) = o.qty {
+                    left += (q - o.filled_qty).max(0.0);
+                }
+            }
+            Ok((left, any))
+        })
+    }
+
+    /// Send a lapsed trailing stop again: a trailing order of the same offset, which a simulated
+    /// venue starts from the extreme the lapsed one had reached. A venue that cannot hold it
+    /// leaves the level to the engine, which trails it from that extreme. The id of the order
+    /// when the venue holds it.
+    #[allow(clippy::too_many_arguments)]
+    fn place_trail(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+        ts: i64,
+        exit: OrderSide,
+        qty: f64,
+        offset: crate::execution::orders::TrailOffset,
+        watermark: Option<f64>,
+        entry_price: f64,
+        position_id: Option<u64>,
+    ) -> PyResult<Option<u64>> {
+        use crate::execution::orders::TrailOffset;
+        let mut spec = Self::spec(exit, "trailing_stop_market", Some(qty), true);
+        match offset {
+            TrailOffset::Bps(bps) => {
+                spec.offset = Some(bps);
+                spec.offset_kind = "bps".to_string();
+            }
+            TrailOffset::Price(price) => spec.offset = Some(price),
+        }
+        spec.position_id = position_id;
+        spec.tags.insert(crate::execution::adapter::REARM_TAG.to_string(), "1".to_string());
+        if let Some(w) = watermark {
+            spec.tags.insert(crate::execution::adapter::TRAIL_FROM_TAG.to_string(), w.to_string());
+        }
+        let n = self.next_prot(sid);
+        self.unsupported_sent.set(false);
+        let id = self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
+        if !self.unsupported_sent.replace(false) {
+            return Ok(Some(id));
+        }
+        let high = watermark.unwrap_or(entry_price);
+        let fraction = match offset {
+            TrailOffset::Bps(bps) => bps / 10_000.0,
+            TrailOffset::Price(price) if entry_price > 0.0 => price / entry_price,
+            TrailOffset::Price(_) => 0.0,
+        };
+        let level = match exit {
+            OrderSide::Sell => high - offset.at(high),
+            OrderSide::Buy => high + offset.at(high),
+        };
+        self.ledger.borrow_mut().watchers.push(Watch {
+            sid: sid.index(),
+            local,
+            exit,
+            qty,
+            stop: Some(level),
+            target: None,
+            position_id,
+            trail: (fraction > 0.0).then_some(Trail { fraction, entry: entry_price, high }),
+        });
+        Ok(None)
+    }
+
+    /// The journal record of what became of a lapsed leg (see [`VenueRoute::rearm`]): the leg it
+    /// replaces, its level, and the new order (its venue id when it was entered with the venue, and
+    /// the engine's client id even when it was refused before that).
+    fn journal_rearm(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        l: &Lapsed,
+        rec: Rearm,
+        idx: usize,
+        ts: i64,
+    ) -> PyResult<()> {
+        let venue_id = rec
+            .venue
+            .clone()
+            .or_else(|| rec.order_id.and_then(|id| self.venue_id_of(sid, l.local, id)));
+        let client = match rec.order_id {
+            Some(id) => sh.with_book(sid, |b, _| {
+                Ok(b.kernel(l.local).order(id).map(|o| o.client_id.clone()))
+            })?,
+            None => venue_id
+                .as_deref()
+                .and_then(|v| self.placed(v))
+                .and_then(|p| p.request.tags.get("client_id").cloned()),
+        };
+        sh.jlog_now(jk::ENGINE_EXIT, jsrc::ENGINE, venue_id.as_deref(), || {
+            let mut v = JV::map([
+                ("strategy", JV::Int(sid.index() as i64)),
+                ("reason", JV::str(rec.reason)),
+                ("why", rec.why.map_or(JV::Null, JV::str)),
+                ("position", JV::Int(l.position as i64)),
+                ("leg", JV::str(l.leg.name())),
+                ("level", l.leg.level(l.exit).map_or(JV::Null, JV::Float)),
+                ("qty", JV::Float(rec.qty)),
+                ("order", venue_id.clone().map_or(JV::Null, JV::str)),
+                ("client_id", client.map_or(JV::Null, JV::str)),
+                ("replaces", JV::str(l.venue_id.as_str())),
+                ("replaces_client_id", JV::str(l.client_id.as_str())),
+                ("idx", JV::Int(idx as i64)),
+                ("event_ts", JV::Int(ts)),
+                ("venue", JV::Bool(true)),
+            ]);
+            if let JV::Map(m) = &mut v {
+                if rec.watching {
+                    m.insert("watching".to_string(), JV::Bool(true));
+                }
+                if let Some((o, h, lo, c)) = rec.bar {
+                    m.insert(
+                        "bar".to_string(),
+                        JV::map([
+                            ("open", JV::Float(o)),
+                            ("high", JV::Float(h)),
+                            ("low", JV::Float(lo)),
+                            ("close", JV::Float(c)),
+                        ]),
+                    );
+                }
+            }
+            v
+        })
+    }
+
+    /// The protective legs waiting to be sent again after their day order lapsed:
+    /// `(strategy, local instrument, position id, leg, level)`, for the node's state digest.
+    pub(super) fn lapsed_legs(&self) -> Vec<(usize, usize, u64, String, f64)> {
+        self.ledger
+            .borrow()
+            .lapsed
+            .iter()
+            .map(|l| {
+                (
+                    l.sid,
+                    l.local,
+                    l.position,
+                    l.leg.name().to_string(),
+                    l.leg.level(l.exit).unwrap_or(0.0),
+                )
+            })
+            .collect()
     }
 
     // -- requests --------------------------------------------------------
@@ -657,6 +1592,8 @@ impl VenueRoute {
         // real broker decides its own timing and is not sent the engine's internal tag.
         if !self.simulated {
             tags.remove(super::FOLLOW_UP_TAG);
+            tags.remove(crate::execution::adapter::REARM_TAG);
+            tags.remove(crate::execution::adapter::TRAIL_FROM_TAG);
         }
         tags.insert("client_id".to_string(), client_id.to_string());
 
@@ -734,7 +1671,10 @@ impl VenueRoute {
                 self.unsupported_sent.set(true);
                 self.refuse(sh, sid, local, order_id, ts, sub_idx, format!("unsupported: {why}"))
             }
-            Err(AdapterError::Unavailable(why)) => Err(self.unavailable(why)),
+            Err(AdapterError::Unavailable(why)) => {
+                self.unavailable_sent.set(Some(order_id));
+                Err(self.unavailable(why))
+            }
             Err(e @ (AdapterError::Fenced(_) | AdapterError::Journal(_))) => Err(self.stopped(e)),
         }
     }
@@ -775,6 +1715,9 @@ impl VenueRoute {
         ts: i64,
         report: &ExecutionReport,
     ) -> PyResult<()> {
+        if let ExecutionReport::Rejected { reason, .. } = report {
+            *self.last_refusal.borrow_mut() = Some((order_id, reason.clone()));
+        }
         sh.with_book_mut(sid, |book, _| {
             let (_, events) =
                 book.apply_venue_report(local, idx, ts, order_id, report).map_err(venue_err)?;
@@ -1177,6 +2120,37 @@ impl VenueRoute {
         Ok((heard?, held))
     }
 
+    /// [`VenueRoute::poll_book`] for what a simulated venue reported while the bar formed, before
+    /// the strategy decides on it: a protective leg that lapsed with the last session is sent
+    /// again here, and meets this bar as the backtest's level does, so its fill is booked before
+    /// the strategy's hooks for the bar run, as the batch's is.
+    pub(super) fn poll_book_rest(
+        &self,
+        py: Python<'_>,
+        sh: &Shared,
+        st: &Strat,
+        ev: &Ev<'_, '_>,
+        out: VenueReports,
+        local: usize,
+    ) -> PyResult<(bool, HeldEvents)> {
+        self.hold.set(true);
+        let heard = (|| -> PyResult<bool> {
+            let mut heard = self.poll_deliver(py, sh, st, ev, out)?;
+            self.rearm(sh, st.sid, local, ev.event.local_idx as usize, ev.event.ts)?;
+            let more = {
+                let mut adapter = self.adapter.borrow_mut();
+                adapter.as_simulation().map(|v| v.take_same_event()).unwrap_or_default()
+            };
+            if !more.is_empty() {
+                heard |= self.poll_deliver(py, sh, st, ev, more)?;
+            }
+            Ok(heard)
+        })();
+        self.hold.set(false);
+        let held = std::mem::take(&mut *self.held.borrow_mut());
+        Ok((heard?, held))
+    }
+
     /// Tell the strategy the events a report made, which were booked earlier in the step.
     pub(super) fn hear_held(
         &self,
@@ -1286,6 +2260,11 @@ impl VenueRoute {
                 })?;
             }
         }
+        // What the order was before the report, to tell a leg that lapsed with its session from
+        // one the engine or the strategy took off.
+        let status_before = sh.with_book(st.sid, |b, _| {
+            Ok(b.kernel(placed.local).order(placed.order_id).map(|o| o.status))
+        })?;
         let halted_before = sh.halted(st.sid);
         let (outcome, events) = sh.with_book_mut(st.sid, |book, _| {
             book.apply_venue_report(placed.local, idx, ts, placed.order_id, report)
@@ -1328,6 +2307,11 @@ impl VenueRoute {
         }
         self.after_booking(sh, st.sid, placed.local, idx, ts)?;
         self.note_if_ended(sh, st.sid, placed.local, placed.order_id)?;
+        if let Some(before) = status_before {
+            let report_ts = crate::python::execution_bindings::report_ts(report);
+            self.note_lapse(sh, st.sid, &placed, venue_id, before, report_ts, idx, ts)?;
+            self.note_rearm_end(sh, st.sid, &placed, venue_id, before, report, idx, ts)?;
+        }
         if !events.is_empty() && self.hold.get() {
             self.held.borrow_mut().push((placed.local, events));
         } else if !events.is_empty() {
@@ -1505,6 +2489,9 @@ impl VenueRoute {
             // A hedge leg's square-off closes the sold legs of its group first.
             self.flatten(sh, sid, &[(local, idx)], ts, true)?;
         }
+        // A protective leg that lapsed with the last session is sent again on the first event of
+        // this one, after the strategy's decisions and the square-off: a close they sent holds it.
+        self.rearm(sh, sid, local, idx, ts)?;
         self.watch(sh, sid, local, idx, ts)
     }
 
@@ -2041,6 +3028,38 @@ impl VenueRoute {
         level: f64,
         position_id: Option<u64>,
     ) -> PyResult<Option<u64>> {
+        self.place_leg_tagged(
+            sh,
+            sid,
+            local,
+            idx,
+            ts,
+            exit,
+            is_stop,
+            qty,
+            level,
+            position_id,
+            false,
+        )
+    }
+
+    /// [`VenueRoute::place_leg`]; `rearm` marks a leg sent again after its day order lapsed,
+    /// which a simulated venue meets with the bar of the event it is sent on.
+    #[allow(clippy::too_many_arguments)]
+    fn place_leg_tagged(
+        &self,
+        sh: &Shared,
+        sid: StrategyId,
+        local: usize,
+        idx: usize,
+        ts: i64,
+        exit: OrderSide,
+        is_stop: bool,
+        qty: f64,
+        level: f64,
+        position_id: Option<u64>,
+        rearm: bool,
+    ) -> PyResult<Option<u64>> {
         let mut spec =
             Self::spec(exit, if is_stop { "stop_market" } else { "limit" }, Some(qty), true);
         if is_stop {
@@ -2049,6 +3068,9 @@ impl VenueRoute {
             spec.limit_price = Some(level);
         }
         spec.position_id = position_id;
+        if rearm {
+            spec.tags.insert(crate::execution::adapter::REARM_TAG.to_string(), "1".to_string());
+        }
         let n = self.next_prot(sid);
         self.unsupported_sent.set(false);
         let id = self.submit(sh, sid, local, &spec, idx, ts, &format!("prot-{n}"), None)?;
@@ -2900,5 +3922,98 @@ impl VenueRoute {
 
     pub(super) fn lookup(&self, venue_id: &str) -> Option<(usize, usize)> {
         self.placed(venue_id).map(|p| (p.sid, p.local))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLOSE: i64 = 1_000;
+    const NEXT_OPEN: i64 = 5_000;
+
+    #[test]
+    fn an_expired_leg_lapsed_unless_it_was_being_cancelled() {
+        let lapsed = |before| {
+            lapsed_by_session(before, OrderStatus::Expired, CLOSE, Some(CLOSE), Some(NEXT_OPEN))
+        };
+        assert!(lapsed(OrderStatus::Accepted));
+        assert!(lapsed(OrderStatus::PartiallyFilled));
+        // the engine or the strategy asked for it to go: it was taken off, not lapsed
+        assert!(!lapsed(OrderStatus::PendingCancel));
+        // a repeated report of an order already over changes nothing
+        assert!(!lapsed(OrderStatus::Expired));
+    }
+
+    #[test]
+    fn a_cancel_nobody_asked_for_lapsed_only_between_the_close_and_the_next_open() {
+        let at = |ts| {
+            lapsed_by_session(
+                OrderStatus::Accepted,
+                OrderStatus::Canceled,
+                ts,
+                Some(CLOSE),
+                Some(NEXT_OPEN),
+            )
+        };
+        assert!(!at(CLOSE - 1), "inside the session: the venue's own cancel, not a lapse");
+        assert!(at(CLOSE));
+        assert!(at(NEXT_OPEN));
+        assert!(!at(NEXT_OPEN + 1), "in the next session: not the close's doing");
+        // asked for, it is a cancel whatever the time
+        assert!(!lapsed_by_session(
+            OrderStatus::PendingCancel,
+            OrderStatus::Canceled,
+            CLOSE,
+            Some(CLOSE),
+            Some(NEXT_OPEN)
+        ));
+        // without a session there is no close to lapse at: a cancel is a cancel
+        assert!(!lapsed_by_session(
+            OrderStatus::Accepted,
+            OrderStatus::Canceled,
+            CLOSE,
+            None,
+            None
+        ));
+        // a fill or a rejection is not a lapse
+        for after in [OrderStatus::Filled, OrderStatus::Rejected] {
+            assert!(!lapsed_by_session(OrderStatus::Accepted, after, CLOSE, Some(CLOSE), None));
+        }
+    }
+
+    #[test]
+    fn a_lapsed_leg_is_due_at_the_first_event_in_session_after_its_close() {
+        assert!(!rearm_due(CLOSE, CLOSE, true), "the close itself is the old session");
+        assert!(!rearm_due(CLOSE, CLOSE + 1, false), "after the close, before the open");
+        assert!(rearm_due(CLOSE, NEXT_OPEN + 1, true));
+    }
+
+    #[test]
+    fn a_bar_crosses_a_level_on_the_side_the_level_closes_from() {
+        // a long's stop at 90 (exit a sell): a bar with low 84 is through it, one with low 91 not
+        assert!(leg_crossed(true, OrderSide::Sell, 90.0, 86.0, 84.0));
+        assert!(!leg_crossed(true, OrderSide::Sell, 90.0, 95.0, 91.0));
+        // a long's target at 110: through it at a high of 112, not at 109
+        assert!(leg_crossed(false, OrderSide::Sell, 110.0, 112.0, 100.0));
+        assert!(!leg_crossed(false, OrderSide::Sell, 110.0, 109.0, 100.0));
+        // a short's stop at 110 (exit a buy): through at a high of 110; its target at 90 at a low
+        // of 90
+        assert!(leg_crossed(true, OrderSide::Buy, 110.0, 110.0, 100.0));
+        assert!(leg_crossed(false, OrderSide::Buy, 90.0, 100.0, 90.0));
+        assert!(!leg_crossed(false, OrderSide::Buy, 90.0, 100.0, 91.0));
+    }
+
+    #[test]
+    fn a_trailing_legs_level_stands_its_offset_from_the_watermark() {
+        use crate::execution::orders::TrailOffset;
+        // 500 bps of a watermark of 120 is 6: a sell stop at 120 - 6 = 114, a buy stop at 126
+        let leg = LapsedLeg::Trail { offset: TrailOffset::Bps(500.0), watermark: Some(120.0) };
+        assert_eq!(leg.level(OrderSide::Sell), Some(114.0));
+        assert_eq!(leg.level(OrderSide::Buy), Some(126.0));
+        let none = LapsedLeg::Trail { offset: TrailOffset::Price(2.0), watermark: None };
+        assert_eq!(none.level(OrderSide::Sell), None);
+        assert_eq!(LapsedLeg::Stop(90.0).level(OrderSide::Sell), Some(90.0));
+        assert!(LapsedLeg::Stop(90.0).is_stop() && !LapsedLeg::Target(110.0).is_stop());
     }
 }

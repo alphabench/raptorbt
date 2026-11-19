@@ -264,6 +264,19 @@ synthetic servers in `tests/python/adapters/`.
 | order limits used | 10/s, 400/min | 50/s, 500/min, 2000/30 min | 25/s, 250/min, 1000/h |
 | notes | 25 modifications per order | writes from the registered static IP; closed 00:00-05:30 IST | writes from the registered static IP; modification cap per order |
 
+The orders the engine builds itself (an `enter()` entry, a close, the `prot-` stop
+and target legs, slices, the square-off) carry `gtc` where the segment holds it (NSE
+cash, NSE commodity, a venue the engine does not know) and `day` on NFO, BFO, CDS, BCD,
+BSE and MCX. With the default `gtc="refuse"` a `gtc` entry or close is rejected
+(`unsupported: ...`) and a `gtc` leg is left to a level the engine watches; give the
+adapter `gtc="day"` to send them as day orders (and `reduce_only="best_effort"`, since
+closes and legs are reduce-only). A leg sent as a day order ends at the close: the
+broker reports it `expired` (Dhan) or cancelled (Kite, Upstox). The engine takes either,
+a cancel only when it did not ask for one and it falls between the close and the next
+open, as a lapse while the position is open, journals it, and sends the leg again at
+the first event of the next session (see `docs/architecture/execution-adapters.md`,
+protective orders).
+
 The mappings were written from the brokers' public documentation (URLs in each
 module docstring) and are tested on synthetic payloads in those shapes only.
 Field names that the pages do not state (Upstox status strings and stream

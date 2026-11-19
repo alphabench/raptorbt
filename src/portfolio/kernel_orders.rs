@@ -408,6 +408,38 @@ impl EngineKernel {
         events
     }
 
+    /// Match a protective leg sent again after its day order lapsed (a venue's re-arm at the
+    /// first event of the next session) against the bar stamped `ts` that this kernel has already
+    /// met, rested or stepped, and return the events it and the acknowledgements queued before it
+    /// produced. The position held its level through that bar in a backtest: a bar that opened
+    /// through the level fills the leg at the open, one that only traded through it at the level.
+    /// A trailing leg starts from `watermark`, the extreme its lapsed order had reached, when
+    /// one is given. Nothing is matched when no bar of `ts` has been met.
+    pub fn match_rearmed(
+        &mut self,
+        order_id: u64,
+        ts: i64,
+        watermark: Option<f64>,
+    ) -> Vec<EngineEvent> {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            if watermark.is_some() {
+                order.trail_watermark = watermark;
+            }
+        }
+        let mut events = std::mem::take(&mut self.pending_events);
+        let met = self
+            .rest_step
+            .filter(|(_, b)| b.timestamp == ts)
+            .or(self.last_step.filter(|(_, b)| b.timestamp == ts));
+        let Some((idx, bar)) = met else { return events };
+        let ohlcv = bar.to_ohlcv_bar();
+        let outcomes = self.orders.match_bar_among(idx, &ohlcv, &self.fill_model, &[order_id]);
+        for outcome in outcomes {
+            self.apply_match_outcome(idx, &bar, outcome, &mut events);
+        }
+        events
+    }
+
     /// Whether this kernel already stepped the bar stamped `ts` and fills market orders decided
     /// at a bar on that bar's close: an order decided at `ts` and sent only now (by another
     /// instrument's event) has missed it, and a batch run would have met it there.

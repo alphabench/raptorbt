@@ -31,7 +31,7 @@ mod paper;
 
 use std::collections::BTreeMap;
 
-pub use paper::PaperVenue;
+pub use paper::{PaperVenue, REARM_TAG, TRAIL_FROM_TAG};
 
 use crate::execution::orders::{OrderKind, OrderSide, TimeInForce};
 

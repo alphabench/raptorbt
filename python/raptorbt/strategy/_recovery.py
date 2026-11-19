@@ -82,6 +82,11 @@ def state_summary(node) -> dict:
     if covers:
         # Only a node mid-way through the exit of a hedge leg says so: other digests stay valid.
         out["covers"] = [list(c) for c in covers]
+    rearms = rt.pending_rearms()
+    if rearms:
+        # Only a node holding a protective leg that lapsed with a session says so: other digests
+        # stay valid.
+        out["rearms"] = [list(r) for r in rearms]
     out["venue_orders"] = [list(o) for o in rt.venue_orders()]
     out["unconfirmed"] = sorted(rt.unconfirmed())
     return out

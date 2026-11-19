@@ -430,3 +430,73 @@ fn the_venue_holds_a_bounded_number_of_ended_orders() {
     }
     assert!(venue.held() <= RETAINED_ENDED, "{} orders held", venue.held());
 }
+
+/// A protective leg sent again after its day order lapsed meets the bar of the event it is sent
+/// on, as the position's stop did in a backtest: a bar that opened through the level fills it at
+/// the open. An ordinary protective leg sent on that bar waits for the next one.
+#[test]
+fn a_rearmed_stop_sent_on_a_bar_that_opened_through_it_fills_at_that_open() {
+    use std::collections::BTreeMap;
+
+    let config = fees(0.0);
+    let flat = KernelBar {
+        timestamp: MIN,
+        open: 100.0,
+        high: 100.0,
+        low: 100.0,
+        close: 100.0,
+        volume: 1_000.0,
+    };
+    // opens at 85, below the stop at 90
+    let gap =
+        KernelBar { timestamp: 2 * MIN, open: 85.0, high: 86.0, low: 84.0, close: 85.0, ..flat };
+    let fills_on_the_gap = |rearm: bool| -> Vec<f64> {
+        let mut venue = PaperVenue::new(vec![(
+            vec!["A".to_string()],
+            book(&config, AccountMode::Cash, PositionPolicy::Net),
+        )]);
+        venue
+            .submit(&OrderRequest {
+                client_order_id: "s0-0".into(),
+                kind: OrderKind::Market,
+                quantity: 10.0,
+                ..sample_request()
+            })
+            .unwrap();
+        let mut out = Vec::new();
+        venue.on_market_event(0, &entry(0, flat), None, 0.0, &mut out).unwrap();
+        assert!(out.iter().any(|(_, r)| matches!(r, ExecutionReport::Fill { .. })), "{out:?}");
+        out.clear();
+        venue.on_market_event(0, &entry(1, gap), None, 0.0, &mut out).unwrap();
+        let mut tags: BTreeMap<String, String> =
+            [("client_id".to_string(), "prot-0".to_string())].into_iter().collect();
+        if rearm {
+            tags.insert(REARM_TAG.to_string(), "1".to_string());
+        }
+        venue
+            .submit(&OrderRequest {
+                client_order_id: "s0-1".into(),
+                side: OrderSide::Sell,
+                kind: OrderKind::StopMarket { trigger: 90.0 },
+                quantity: 10.0,
+                tif: TimeInForce::Day,
+                reduce_only: true,
+                tags,
+                submitted_ns: gap.timestamp,
+                submitted_idx: 1,
+                ..sample_request()
+            })
+            .unwrap();
+        venue
+            .take_same_event()
+            .into_iter()
+            .filter_map(|(_, r)| match r {
+                ExecutionReport::Fill { price, .. } => Some(price),
+                _ => None,
+            })
+            .collect()
+    };
+    // the bar opened at 85, through the stop at 90: a sell stop fills at the open
+    assert_eq!(fills_on_the_gap(true), vec![85.0]);
+    assert_eq!(fills_on_the_gap(false), Vec::<f64>::new());
+}

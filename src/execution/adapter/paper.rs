@@ -68,6 +68,13 @@ pub enum PaperError {
 /// How many ended orders the venue keeps entries for.
 pub const RETAINED_ENDED: usize = 1024;
 
+/// Tag of a protective leg the engine sends again after its day order lapsed. Only a simulated
+/// venue is sent it.
+pub const REARM_TAG: &str = "rearm";
+/// Tag of a re-armed trailing leg: the extreme its lapsed order had trailed from. Only a
+/// simulated venue is sent it.
+pub const TRAIL_FROM_TAG: &str = "trail_from";
+
 /// See the module docs.
 pub struct PaperVenue {
     shadows: Vec<Option<Shadow>>,
@@ -454,6 +461,13 @@ impl PaperVenue {
         }
     }
 
+    /// The extreme a trailing order had trailed from, while the venue still keeps the order.
+    pub fn trail_watermark(&self, client_order_id: &str) -> Option<f64> {
+        let p = self.placed.get(client_order_id)?;
+        let shadow = self.shadows.get(p.strategy)?.as_ref()?;
+        shadow.book.kernel(p.instrument).order(p.order_id)?.trail_watermark
+    }
+
     /// The entries held for orders, for tests of the bound.
     #[cfg(test)]
     fn held(&self) -> usize {
@@ -527,7 +541,14 @@ impl ExecutionAdapter for PaperVenue {
         }
         if req.reduce_only && protective {
             let kernel = self.shadow(strategy)?.book.kernel_mut(instrument);
-            let events = kernel.match_arrived(order_id, req.submitted_ns);
+            // A leg sent again after its day order lapsed meets the bar of the event it was sent
+            // on, as the position's level did in a backtest (see `EngineKernel::match_rearmed`).
+            let events = if req.tags.contains_key(REARM_TAG) {
+                let watermark = req.tags.get(TRAIL_FROM_TAG).and_then(|w| w.parse::<f64>().ok());
+                kernel.match_rearmed(order_id, req.submitted_ns, watermark)
+            } else {
+                kernel.match_arrived(order_id, req.submitted_ns)
+            };
             let mut reports = Vec::new();
             self.report(strategy, instrument, &events, req.submitted_ns, &mut reports)
                 .map_err(|e| AdapterError::Refused(e.to_string()))?;

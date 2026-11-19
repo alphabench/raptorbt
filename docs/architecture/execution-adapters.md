@@ -118,6 +118,30 @@ the stops and targets:
   ratchet is the order engine's; only the first fill slice of a partly filled
   entry is protected; protection is cancelled when the instrument is flat, not
   when one of several hedged positions closes.
+
+  **Day-only segments.** The engine's own orders (entries, closes, legs,
+  slices, the square-off) carry `gtc` only where the segment holds it (NSE
+  cash, NSE commodity, a venue the engine does not know) and `day` elsewhere
+  (NFO, BFO, CDS, BCD, BSE, MCX). A `day` leg ends at the session's close, while
+  a backtest keeps the level across sessions. When the venue reports a leg
+  ended that way (`expired`, or `cancel_ack` without the engine having asked,
+  between the close and the next open: a venue such as Kite has no expiry
+  status) with its position still open, the engine journals the lapse and, at
+  the first event of the next session the instrument's schedule holds, sends
+  the leg again for what the position then holds and not already covered by a
+  working leg (a trailing stop from the extreme it had reached), linked
+  one-cancels-other with its partner as before. On `PaperExecution` the new
+  leg meets that bar before the strategy's hooks for it, so a bar that opened
+  through the level fills it at the open, as in a backtest. On a broker venue
+  it is sent at the bar's close; when the bar has already traded through the
+  level the engine closes at market there instead. A re-armed leg rejected (at
+  sending or by a later report) is watched by the engine; one the venue could
+  not be reached for is sent again each event, and given up when the session
+  closes. A leg is not sent again for a
+  position closed meanwhile, one the strategy or the engine cancelled, or while
+  a close of the position is working (it waits for the close's outcome). A
+  venue that cannot hold it leaves the level watched by the engine. The same
+  holds for a `gtc` leg an adapter sends as a day order (`gtc="day"`).
 * **`"local"`.** The engine watches the levels on each bar or print and, when
   one is reached, sends a reduce-only market order. It reacts on the event, so
   the exit fills at that event's market price, not at the stop level: the same
