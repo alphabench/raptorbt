@@ -47,7 +47,7 @@ pub mod ops {
     use crate::quant::lang::BinOp;
 
     #[inline(always)]
-    fn finite_or_nan(x: f64) -> f64 {
+    pub fn finite_or_nan(x: f64) -> f64 {
         if x.is_infinite() {
             f64::NAN
         } else {

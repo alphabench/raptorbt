@@ -162,6 +162,20 @@ pub fn read_file(path: &Path) -> Result<FileContents, String> {
     parse_file(&data)
 }
 
+/// Whether some whole, checksummed, non-empty frame starts anywhere in `bytes`. Payloads are
+/// canonical JSON text, so a stray offset reads a length no file of this kind reaches and is
+/// skipped without hashing anything.
+fn whole_frame_in(bytes: &[u8]) -> bool {
+    (0..bytes.len().saturating_sub(FRAME_HEAD)).any(|i| {
+        let rest = &bytes[i..];
+        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+        let crc = u32::from_le_bytes(rest[4..8].try_into().unwrap());
+        len > 0
+            && rest.len() >= FRAME_HEAD + len
+            && crc32fast::hash(&rest[FRAME_HEAD..FRAME_HEAD + len]) == crc
+    })
+}
+
 pub fn parse_file(data: &[u8]) -> Result<FileContents, String> {
     if data.len() < MAGIC.len() || &data[..MAGIC.len()] != MAGIC {
         return Err("not a raptorbt journal (bad magic)".into());
@@ -178,6 +192,14 @@ pub fn parse_file(data: &[u8]) -> Result<FileContents, String> {
         let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
         let crc = u32::from_le_bytes(rest[4..8].try_into().unwrap());
         if rest.len() < FRAME_HEAD + len {
+            // A crash leaves a short last frame with nothing after it. A length field that
+            // overruns the file while whole frames sit behind it is damage, not a crash: refuse
+            // it rather than cut the records away.
+            if whole_frame_in(&rest[FRAME_HEAD.min(rest.len())..]) {
+                return Err(format!(
+                    "corrupt record at byte {pos}: its length overruns the file but whole frames follow"
+                ));
+            }
             torn = rest.len() as u64;
             break;
         }

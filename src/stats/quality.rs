@@ -152,6 +152,15 @@ pub fn audit_bars(
     if [o.len(), h.len(), low.len(), c.len(), v.len()].iter().any(|l| *l != n) {
         return Err(StatsError::Invalid("the columns of the bars differ in length".into()));
     }
+    if rules.min_bars == 0 {
+        return Err(StatsError::Invalid("min_bars must be at least 1".into()));
+    }
+    // a gap of fewer than one bar is no gap: it would count a negative number of missing bars
+    if !(rules.intraday_gap_bars >= 1.0 && rules.intraday_gap_bars.is_finite()) {
+        return Err(StatsError::Invalid(
+            "intraday_gap_bars must be a finite number, at least 1".into(),
+        ));
+    }
     if n < rules.min_bars {
         return Err(StatsError::InsufficientObservations {
             what: "bars to audit".into(),

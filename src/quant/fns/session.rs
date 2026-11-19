@@ -27,6 +27,7 @@
 
 use std::sync::Arc;
 
+use super::math::fin;
 use crate::core::session_schedule::SessionSchedule;
 use crate::data::{AggregationUnit, BarStamp};
 use crate::quant::eval::{ClockCtx, EvalError};
@@ -158,7 +159,7 @@ impl Kernel<2, 1> for Open {
             Slot::Outside => [f64::NAN],
             Slot::Start => {
                 self.started = true;
-                self.held = x[0];
+                self.held = fin(x[0]);
                 [self.held]
             }
             Slot::Inside => [if self.started { self.held } else { f64::NAN }],
@@ -184,7 +185,7 @@ impl Kernel<2, 1> for Extreme {
 
     #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
-        let v = x[0];
+        let v = fin(x[0]);
         match slot(x[1]) {
             Slot::Outside => return [f64::NAN],
             _ if v.is_nan() => {
@@ -234,7 +235,7 @@ impl Kernel<2, 1> for Sum {
 
     #[inline(always)]
     fn step<H: Hist<2>>(&mut self, x: [f64; 2], _h: &H) -> [f64; 1] {
-        let v = x[0];
+        let v = fin(x[0]);
         match slot(x[1]) {
             Slot::Outside => [f64::NAN],
             _ if v.is_nan() => {
@@ -253,7 +254,7 @@ impl Kernel<2, 1> for Sum {
                 if !self.started {
                     return [f64::NAN];
                 }
-                self.total += v;
+                self.total = fin(self.total + v);
                 [self.total]
             }
         }
@@ -278,7 +279,7 @@ impl Kernel<5, 1> for Vwap {
 
     #[inline(always)]
     fn step<H: Hist<5>>(&mut self, x: [f64; 5], _h: &H) -> [f64; 1] {
-        let (high, low, close, volume) = (x[0], x[1], x[2], x[3]);
+        let (high, low, close, volume) = (fin(x[0]), fin(x[1]), fin(x[2]), fin(x[3]));
         let at = slot(x[4]);
         if matches!(at, Slot::Outside) {
             return [f64::NAN];
@@ -294,7 +295,7 @@ impl Kernel<5, 1> for Vwap {
         self.price_volume += (high + low + close) / 3.0 * volume;
         self.volume += volume;
         if self.volume > 0.0 {
-            [self.price_volume / self.volume]
+            [fin(self.price_volume / self.volume)]
         } else {
             [f64::NAN]
         }
@@ -322,7 +323,7 @@ impl Kernel<3, 1> for Return {
             Slot::Outside => return [f64::NAN],
             Slot::Start => {
                 self.started = true;
-                self.first = x[0];
+                self.first = fin(x[0]);
             }
             Slot::Inside => {}
         }
@@ -360,7 +361,7 @@ impl Kernel<2, 1> for First {
             Slot::Inside => {}
         }
         if self.started && x[1] == self.at {
-            self.held = x[0];
+            self.held = fin(x[0]);
         }
         [self.held]
     }

@@ -33,7 +33,8 @@ registered functions. There are no variables, assignments, loops or user functio
 stands for a constant given in `params`.
 
 Every value is a number or NaN (unknown). A boolean is `1.0`, `0.0` or NaN. Division by zero,
-`ln` of a non-positive number and overflow give NaN, never an infinity.
+`ln` of a non-positive number and overflow give NaN, never an infinity; so does an infinite input, even in a bare field (`close` with an
+infinity in it gives NaN there).
 
 Compile once, evaluate many times: `raptorbt.expr(text)` checks the text against the function
 registry and returns an `Expr` with a canonical text and a hash. `Expr.eval` runs it over
@@ -373,7 +374,7 @@ within its trading session (NaN outside one); `session_open()`, `session_high()`
 running extremes, volume and volume-weighted price so far; `session_return()` is the close over
 the session's open, minus 1; `session_gap()` is today's open over the previous session's last
 close, minus 1; and `session_first(x, n)` is `x` at the session's n-th bar, unknown before that bar
-and held until the session ends. They read the bar and the session's earlier bars only. The
+and held until the session ends. They read the bar and the session's earlier bars only. A bar must be stamped inside its session: daily bars stamped at 00:00 (a vendor's open-stamped candles) are outside every session, so every session function is NaN on them, with no refusal; stamp a daily bar at its session close and pass `bar_stamp="close"`. The
 schedule decides what a session is, so a half day, a Muhurat evening or a holiday needs no special
 case, and they need the timestamps, `bar_stamp` and a `session=` schedule, as `at` needs its clock:
 

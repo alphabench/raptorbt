@@ -462,7 +462,7 @@ pub fn predictive_test(
             }
             // the first bar of the session whose signal is known, entered `lag` bars later
             if let Some(t) = (start..=end).find(|t| signal[*t].is_finite()) {
-                let entry = t + lag;
+                let entry = t.saturating_add(lag);
                 if entry < end {
                     obs.push(Obs { t, x: signal[t], y: prices[end] / prices[entry] - 1.0 });
                 }
@@ -479,7 +479,7 @@ pub fn predictive_test(
         horizons.push(analyse("session".into(), None, &obs, n, params));
     } else {
         for &h in &params.horizons {
-            let obs: Vec<Obs> = (0..n.saturating_sub(lag + h))
+            let obs: Vec<Obs> = (0..n.saturating_sub(lag.saturating_add(h)))
                 .filter(|t| signal[*t].is_finite())
                 .map(|t| Obs { t, x: signal[t], y: prices[t + lag + h] / prices[t + lag] - 1.0 })
                 .collect();

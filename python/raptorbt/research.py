@@ -347,7 +347,8 @@ def row_from(result: Any) -> dict[str, Any]:
         "fees": m.total_fees_paid,
         "samples": len(result.returns()),
         "skew": m.return_skew if m.return_skew is not None else 0.0,
-        "kurtosis": m.return_kurtosis if m.return_kurtosis is not None else 3.0,
+        # `return_kurtosis` is excess (a normal series is 0); the deflated Sharpe takes raw.
+        "kurtosis": m.return_kurtosis + 3.0 if m.return_kurtosis is not None else 3.0,
     }
 
 

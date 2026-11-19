@@ -356,3 +356,42 @@ def test_cointegration_carries_the_eigenvalues_and_max_eigenvalue_statistics():
     t = jo["effective_observations"]
     assert lr2[0] == pytest.approx(-t * np.log(1.0 - eig[0]), rel=1e-12)
     assert lr2[1] == pytest.approx(-t * np.log(1.0 - eig[1]), rel=1e-12)
+
+
+# ------------------------------------------------------- user parameters that used to panic
+
+
+def test_audit_bars_refuses_zero_min_bars_and_a_gap_below_one_bar():
+    x = np.array([100.0])
+    args = (np.array([0.0]), x, x, x, x, np.array([1.0]))
+    assert refusal(stats.audit_bars, *args, interval_seconds=60, min_bars=0) == "invalid_input"
+    t = np.arange(10) * 60.0
+    c = np.linspace(100.0, 101.0, 10)
+    v = np.ones(10)
+    for bad in (0.0, 0.5, float("nan"), float("inf")):
+        code = refusal(stats.audit_bars, t, c, c, c, c, v, interval_seconds=60, intraday_gap_bars=bad)
+        assert code == "invalid_input"
+
+
+def test_predictive_test_refuses_a_lag_or_horizon_past_the_bars():
+    signal = np.arange(50.0) - 25
+    prices = np.linspace(100, 110, 50)
+    for lag in (2**64 - 1, 50, 60):
+        assert (
+            refusal(stats.predictive_test, signal, prices, horizons=[1], lag=lag)
+            == "insufficient_observations"
+        )
+    assert (
+        refusal(stats.predictive_test, signal, prices, horizons=[2**64 - 1], lag=1)
+        == "insufficient_observations"
+    )
+
+
+def test_factor_report_refuses_a_huge_lag():
+    from raptorbt import expressions as ex
+
+    rng = np.random.default_rng(3)
+    prices = 100.0 * np.cumprod(1.0 + rng.normal(0, 0.01, (60, 12)), axis=0)
+    factor = rng.normal(size=(60, 12))
+    for lag in (2**64 - 1, 2**63):
+        assert refusal(ex.factor_report, factor, prices, horizons=[1], lag=lag) == "insufficient_observations"

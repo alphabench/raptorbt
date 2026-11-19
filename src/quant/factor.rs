@@ -327,7 +327,7 @@ pub fn factor_report(
         });
     }
     let h_max = *horizons.iter().max().unwrap_or(&1);
-    let need_dates = lag + h_max + MIN_HAC_OBS;
+    let need_dates = lag.saturating_add(h_max).saturating_add(MIN_HAC_OBS);
     if n < need_dates {
         return Err(StatsError::InsufficientObservations {
             what: "dates".into(),

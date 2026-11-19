@@ -174,7 +174,7 @@ impl Stream {
             }
         }
         for (o, r) in self.out.iter_mut().zip(&d.out_regs) {
-            *o = self.regs.get(*r);
+            *o = ops::finite_or_nan(self.regs.get(*r));
         }
         self.bars += 1;
         Ok(&self.out)

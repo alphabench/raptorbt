@@ -186,7 +186,8 @@ pub fn eval(plan: &Plan, inputs: &Inputs) -> Result<Columns, EvalError> {
     Ok(d.out_regs
         .iter()
         .map(|r| match d.locs[*r] {
-            Loc::Input(k) => cols[k].to_vec(),
+            // a bare field is a series value too: an infinite input is NaN, as after any operator
+            Loc::Input(k) => cols[k].iter().map(|x| ops::finite_or_nan(*x)).collect(),
             Loc::Slot(s) => mem::take(&mut pool[s]),
         })
         .collect())

@@ -410,6 +410,54 @@ def test_a_file_journal_reads_back_and_a_torn_tail_is_cut(tmp_path):
         rj.read(str(path))
 
 
+def frame_offsets(data):
+    """Byte offsets of each frame (u32 length, u32 crc32, payload) after the 8-byte magic."""
+    pos, out = 8, []
+    while pos < len(data):
+        out.append(pos)
+        pos += 8 + int.from_bytes(data[pos : pos + 4], "little")
+    assert pos == len(data)
+    return out
+
+
+def test_a_corrupt_length_with_whole_frames_after_it_is_refused_and_the_file_kept(tmp_path):
+    path = tmp_path / "run.journal"
+    venue = MockVenue()
+    j = rj.Journal(HEADER, file=str(path), fsync="every", memory=True)
+    node = build(venue, j)
+    for step in script(10):
+        run_step(node, venue, step)
+    j.sync()
+    data = path.read_bytes()
+    offsets = frame_offsets(data)
+    assert len(offsets) > 6
+    bad = bytearray(data)
+    bad[offsets[3] : offsets[3] + 4] = (2**31 - 1).to_bytes(4, "little")  # mid-journal, huge
+    path.write_bytes(bytes(bad))
+    with pytest.raises(Exception, match="whole frames follow"):
+        rj.read(str(path))
+    with pytest.raises(Exception, match="whole frames follow"):
+        rj.Journal(HEADER, file=str(path))
+    assert path.read_bytes() == bytes(bad)  # nothing was truncated
+
+
+def test_a_short_last_frame_is_still_cut_on_reopen(tmp_path):
+    path = tmp_path / "run.journal"
+    venue = MockVenue()
+    j = rj.Journal(HEADER, file=str(path), fsync="every", memory=True)
+    node = build(venue, j)
+    for step in script(10):
+        run_step(node, venue, step)
+    j.sync()
+    data = path.read_bytes()
+    last = frame_offsets(data)[-1]
+    path.write_bytes(data[:-3])  # the last frame's length is intact, its payload short
+    _, _, _, records, torn = rj.read(str(path))
+    assert torn == len(data) - 3 - last
+    rj.Journal(HEADER, file=str(path))
+    assert path.read_bytes() == data[:last]  # cut to the last whole frame, as before
+
+
 def test_a_sink_callback_is_the_durable_store_and_its_failure_stops_the_node():
     stored = []
     venue = MockVenue()

@@ -408,7 +408,7 @@ impl SweepPlan {
             let rest = left.get_mut(r).expect("counted above");
             *rest -= 1;
             flat.push(match d.locs[*r] {
-                Loc::Input(k) => cols[k].to_vec(),
+                Loc::Input(k) => cols[k].iter().map(|x| ops::finite_or_nan(*x)).collect(),
                 Loc::Slot(_) if *rest == 0 => mem::take(&mut pool[self.sched.slot[*r]]),
                 Loc::Slot(_) => pool[self.sched.slot[*r]].clone(),
             });

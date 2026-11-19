@@ -109,6 +109,13 @@ def test_full_report_matches_the_old_engine(case):
             assert figure is None, key
         else:
             assert math.isclose(figure, expected[key], rel_tol=REL, abs_tol=1e-9), (key, figure)
+    # `open_at_end` is new on the trade rows (the reference had no such key): true for the line the
+    # run closed at the end of the data. Check it against the fixture's own exit reasons, then
+    # compare every other key of the row as before.
+    rows = got.get("trades", [])
+    assert len(rows) == (len(case["trades"]) if "trades" in want else 0)
+    for row, trade in zip(rows, case["trades"]):
+        assert row.pop("open_at_end") == (trade["exit_reason"].lower() == "endofdata")
     got_sortino, want_sortino = got["report"].pop("sortino"), want["report"].pop("sortino")
     if want_sortino is None:
         assert got_sortino is None
