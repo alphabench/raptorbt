@@ -19,6 +19,10 @@ flag, because the old numbers were wrong.
 - **A strategy declares what it needs.** `requirements` is data (roles,
   timeframes, holding, warm-up, parameters) that a host can check, fingerprint
   and bind before a run starts.
+- **A basket whose members change.** A `Universe` role can be bound to
+  `PointInTime(symbols, steps)`: the union of every member and the members
+  from each change on. `ctx.role(name)` returns the members at the event's
+  time; the manifest is unchanged.
 - **Live trading.** `LiveNode` runs the same `Strategy` class on a pushed feed.
   It keeps a hash-chained journal, rebuilds from it after a crash, reconciles
   with the venue, fences a restored node with an epoch, and adds and retires
