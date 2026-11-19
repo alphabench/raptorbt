@@ -433,4 +433,5 @@ the skills it names, then copy the script.
 | Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
 | A basket strategy over instruments the deployer picks (a `Universe` role), with a warm-up session before `trade_from` | `examples/portfolio/top_n_basket.py` |
 | A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |
+| A running flow factor over several instruments, updated on every trade and read with a coarser bar, trading one | `examples/tick-level/cross_instrument_factor.py` |
 | The same strategy on a paper `LiveNode`, matching the batch run, with a journal checkpoint and restore | `examples/live-trading/paper_node.py` |

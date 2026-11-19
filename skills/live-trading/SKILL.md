@@ -44,6 +44,12 @@ latest `history` rows per symbol; `curve_samples` bounds the equity curves).
 `push_report(...)`. Timestamps must not decrease per symbol. A pushed bar is
 stamped as the node's `bar_stamp` says (`"open"` or `"close"`); it is required.
 
+**Ticks and bars.** A strategy that reads ticks is fed ticks only: build the node
+with `primary_bars=(1, "m")` (its smallest bar width) and `push_tick`, and the
+engine builds the bars the strategy reads from the prints, exactly as
+`run_tick_strategy` does. Do not push bars of a symbol beside its ticks: pushed bars
+execute and are counted again beside the ones the engine built (every bar twice).
+
 **Groups.** By default each push is delivered on arrival, alone. To deliver the
 bars of several symbols for one timestamp the way a batch run does, use
 `push_group(ts, {symbol: (o, h, l, c, v)})` or `begin_group()`, the pushes,
