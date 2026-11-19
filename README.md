@@ -380,14 +380,19 @@ Things to know before relying on a value:
 ## Speed
 
 Measured, not claimed: [docs/quantitative-correctness/speed.md](docs/quantitative-correctness/speed.md) holds the
-tables and `benches/python/talib_compare.py` reproduces them. They come from one run on a busy arm64 machine; x86 has
-not been measured. Single-series parity with TA-Lib is not met for most functions: on one series and one thread,
-30 of 158 functions are within 1.1x of TA-Lib, 57 within 1.5x, and MAVP is over 10x (by design, one core per period);
-the other slow ones are 2-7x. Accuracy and zero `unsafe` were kept over speed on purpose.
+tables and `benches/python/talib_compare.py` reproduces them. They come from two process runs on an Apple M4
+(arm64, 10 cores, TA-Lib 0.6.4, raptorbt 1.0.0 wheel, 2026-11-20), not a quiet machine; x86 has not been measured.
+Single-series parity with TA-Lib is not met for most functions: on one series and one thread, 35 of 158 functions
+are within 1.1x of TA-Lib, 56 within 1.5x, and MAVP is 15.5x (by design, one core per period); the other slow ones
+are up to 6.4x (WMA 6.4x, VAR 6.2x, CDLDOJI 5.9x, CORREL 4.5x). Accuracy and zero `unsafe` were kept over speed on
+purpose.
 
-Where raptorbt is faster is shared work: 20 shared expressions take 0.3-0.4x of TA-Lib's time, and a 100-combination
-sweep takes 0.27x of independent evaluation on one thread and 0.15x on ten. `rolling_max` at period 200 is 0.15x of
-TA-Lib on 10M bars and 2.5x on 1M; both are stated in the tables.
+Where raptorbt is faster is shared work: 20 shared expressions take 0.26-0.30x of TA-Lib's time, and a 100-combination
+sweep takes 0.25x of independent evaluation on one thread and 0.10x on ten. `rolling_max` at period 200 is 0.14x of
+TA-Lib on 10M bars and 2.3x on 1M; both are stated in the tables. `sma(close, 20)` over 500 instruments is 1.6x of
+TA-Lib on one thread at 1M bars each (1.35x at 10M); on ten threads it is 1.6-1.7x at 1M and 0.45-0.46x at 10M.
+
+Engine timings (bars, ticks, spreads, sweeps) are in [benches/python/README.md](benches/python/README.md).
 
 ## What you can rely on
 

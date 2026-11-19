@@ -54,7 +54,7 @@ flag, because the old numbers were wrong.
   is compiled in Rust, typechecked with a position and a did-you-mean, and evaluated in
   batch or one bar at a time from the same kernel, so the two give the same bits. Python
   operators on `rb.col` build the same expression. `raptorbt.expressions.functions` and
-  `describe` list the registry (215 functions: every TA-Lib function, the candlestick
+  `describe` list the registry (224 functions: every TA-Lib function, the candlestick
   patterns and the Hilbert functions among them, plus regressions, beta, correlation,
   range volatilities and fractional differencing). Cross-sectional operators (`rank`
   and the like) and `at("1d", ...)` for a coarser timeframe are part of it.
@@ -119,11 +119,12 @@ flag, because the old numbers were wrong.
   rates instead of being refused with `fee_schedule_gap`; the rows that were in
   force keep pricing their own days.
 
-- **Speed, measured.** Single-series parity with TA-Lib is not met for most functions (30 of
-  158 within 1.1x, 57 within 1.5x, MAVP over 10x by design) because accuracy and zero `unsafe`
-  were kept over speed. Shared work is faster: 20 shared expressions 0.3-0.4x of TA-Lib's time,
-  a 100-combination sweep 0.27x of independent evaluation on one thread and 0.15x on ten.
-  One busy arm64 run, x86 not measured; see `docs/quantitative-correctness/speed.md`.
+- **Speed, measured.** Single-series parity with TA-Lib is not met for most functions (35 of
+  158 within 1.1x, 56 within 1.5x, MAVP 15.5x by design, WMA 6.4x, VAR 6.2x) because accuracy
+  and zero `unsafe` were kept over speed. Shared work is faster: 20 shared expressions 0.26-0.30x
+  of TA-Lib's time, a 100-combination sweep 0.25x of independent evaluation on one thread and
+  0.10x on ten. Apple M4 (arm64), TA-Lib 0.6.4, raptorbt 1.0.0 wheel; x86 not measured; see
+  `docs/quantitative-correctness/speed.md`.
 
 #### Behaviours decided
 
@@ -180,6 +181,9 @@ flag, because the old numbers were wrong.
   Using the attribute itself as a list still works and warns.
 - `raptorbt.PortfolioContext` and `raptorbt.strategy.PortfolioContext` are deprecated aliases that
   now return `RuntimeContext`, the context a portfolio strategy receives; using either warns.
+- The bar and tick paths are slower than in 0.13.x. On the same harness and machine (Apple M4),
+  a 1,000-bar backtest takes 137.5 µs against 72.6 µs on the published 0.13.4 wheel, and a
+  100,000-tick run goes through about 6.8M ticks/s against about 183M. See `benches/python/README.md`.
 
 ### Results change
 
@@ -222,6 +226,11 @@ flag, because the old numbers were wrong.
   one delivery, and its charges are summed before rounding once, 0.3059452 = 0.31. Each part had
   been rounded on its own (0.01 + 0.29 = 0.30). Trade charges and P&L move by paise on such
   entries; a fully squared same-day round trip, and a position that is only held, are unchanged.
+- **A `Twap` in the portfolio and tick runners is released slice by slice.** In 0.13.4 those
+  runners turned it into one market order for the whole size on the first bar or tick (30 units
+  became one fill of 30, not three of 10); only the single-instrument runner sliced it. Every
+  runner now releases the slices, so trades, fills and costs of a strategy that used `Twap` there
+  differ from 0.13.x.
 
 ### Breaking
 
@@ -236,8 +245,6 @@ flag, because the old numbers were wrong.
   net at the average price.
 - `reduce_only` on the same side as the position, or with no position, is
   rejected.
-- `Twap` in the portfolio and tick runners raises instead of becoming one
-  market order.
 - Bare `ValueError`, `TypeError` and `KeyError` raises on public calls became
   `RaptorBTError` subclasses.
 - Rust library: the `raptorbt::stops` module, `core::TimeSeries` and

@@ -420,15 +420,15 @@ def run_report(args) -> None:
 
 
 PREFACE = (
-    'The figures below come from one run on a busy machine (arm64), reproduced by `benches/pyth'
-    'on/talib_compare.py` (the steps are in its header). They are not a quiet-machine benchmark'
-    '. x86 has not been measured; there `mul_add` without FMA target features may be slower. Th'
-    'e single-series bar (within 1.1x of TA-Lib for 90% of functions, 1.5x for all) is not met:'
-    ' 30 of 158 functions are within 1.1x and 57 within 1.5x. MAVP is over 10x by design (one c'
-    'ore per period); the rest of the slow ones are 2-7x, from branch misprediction (candlestic'
-    'ks, STOCH, AROON), accuracy bookkeeping at short windows (WMA, VAR, STDDEV, CORREL) and TA'
-    "-Lib's rescan rule (MAXINDEX). Accuracy and zero `unsafe` were kept by decision over speed"
-    '.'
+    'The figures below come from one run on a busy machine (arm64), reproduced by '
+    '`benches/python/talib_compare.py` (the steps are in its header). They are not a quiet-'
+    'machine benchmark. x86 has not been measured; there `mul_add` without FMA target '
+    'features may be slower. The single-series bar (within 1.1x of TA-Lib for 90% of '
+    'functions, 1.5x for all) is not met: 35 of 158 functions are within 1.1x and 56 within '
+    '1.5x. MAVP is 15.5x by design (one core per period); the rest of the slow ones are up to'
+    ' 6.4x, from branch misprediction (candlesticks, STOCH, AROON), accuracy bookkeeping at '
+    "short windows (WMA, VAR, STDDEV, CORREL) and TA-Lib's rescan rule (MAXINDEX). Accuracy "
+    'and zero `unsafe` were kept by decision over speed.'
 )
 
 
