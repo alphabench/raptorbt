@@ -23,7 +23,10 @@ strategy's context.
   members at the context's event time). Resolved at the context's time with
   :func:`~raptorbt.strategy.requirements.resolve` from the instruments and last
   prices the strategy can see. A role that cannot be resolved raises
-  ``unresolved_role`` naming why.
+  ``unresolved_role`` naming why. A ``Future`` (and a ``Chain`` on one) is the contract that is
+  front *now*, so it is read in a hook that has an event (``on_bar``); before the first event
+  the context has no time and the read is refused ``role_before_event``, not answered for some
+  other instant.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from raptorbt.errors import InvalidParameter, UnknownSymbol
 from raptorbt.strategy.membership import PointInTime
 from raptorbt.strategy.requirements import (
     Chain,
+    Future,
     Requirements,
     Universe,
     resolve,
@@ -187,6 +191,16 @@ class ContextHost:
                 valid=list(requirements.roles),
             )
         now = ctx.event_ns
+        if now is None and _follows_front(requirements.roles, name):
+            raise InvalidParameter(
+                f"ctx.role({name!r}) names the futures contract that is front at the event's time, "
+                "and before the first event (on_init, on_start) the context has no time: read "
+                "ctx.role in a hook that has an event (on_bar), not in on_start",
+                code="role_before_event",
+                operation="ctx.role",
+                parameter="name",
+                value=name,
+            )
         has_chain = any(isinstance(r, Chain) for r in requirements.roles.values())
         plan = resolve(
             requirements,
@@ -240,6 +254,13 @@ class ContextHost:
             if column is not None and len(column):
                 out[symbol] = float(column[-1])
         return out
+
+
+def _follows_front(roles: Mapping[str, object], name: str) -> bool:
+    """Whether role ``name`` is a ``Future`` or a ``Chain`` on one: the roles whose symbol depends on
+    the time of the read."""
+    role = roles.get(name)
+    return isinstance(role, Future) or (isinstance(role, Chain) and _follows_front(roles, role.of))
 
 
 def build(instruments, bindings, entries, universe, call: str) -> ContextHost:
