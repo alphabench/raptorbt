@@ -868,7 +868,7 @@ mod tests {
     #[test]
     fn digamma_known_values() {
         // psi(1) = -gamma, psi(1/2) = -gamma - 2 ln 2, psi(x + 1) = psi(x) + 1/x
-        let euler = 0.577_215_664_901_532_9;
+        let euler = std::f64::consts::EULER_GAMMA;
         assert!((digamma(1.0) + euler).abs() < 1e-13);
         assert!((digamma(0.5) + euler + 2.0 * 2.0f64.ln()).abs() < 1e-13);
         for x in [0.3, 1.7, 9.99, 10.0, 55.5, 250.0] {

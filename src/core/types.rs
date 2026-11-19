@@ -1483,12 +1483,17 @@ impl Position {
         let excursion = |price: Price| (price - self.entry_price) * self.size * multiplier;
         // Clamped so the documented invariants hold even when a single bar's
         // high/low straddles the entry fill: MAE is never positive, MFE never
-        // negative.
+        // negative. A zero excursion is always +0.0: a short's zero move is
+        // -0.0, and `f64::min`/`max` may return either zero (aarch64 kept
+        // -0.0, x86_64 +0.0; an optimised build may lower a compare-select
+        // clamp to the same instruction). Adding +0.0 turns -0.0 into +0.0
+        // (IEEE 754, round to nearest) and leaves every other value alone;
+        // the compiler may not drop it without the no-signed-zeros flag.
         (
             adverse_price,
             favourable_price,
-            excursion(adverse_price).min(0.0),
-            excursion(favourable_price).max(0.0),
+            excursion(adverse_price).min(0.0) + 0.0,
+            excursion(favourable_price).max(0.0) + 0.0,
         )
     }
 }

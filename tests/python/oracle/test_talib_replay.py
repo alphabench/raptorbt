@@ -118,6 +118,34 @@ def test_exact_comparison_detects_a_small_change():
     assert replay.check_exact(ours, ref), "a NaN where TA-Lib has a value went unnoticed"
 
 
+def test_exact_comparison_floors_noise_near_zero_but_not_more():
+    # A histogram value near zero is a difference of two outputs of order 1: its last digits
+    # are libm noise (macOS and Linux disagree by 9.4e-15 here), so the relative error is taken
+    # against NOISE_FLOOR of the case's scale there; 1e-12 off is still a failure.
+    ref = np.array([1.0, -2.7, -4.643472073628807e-06, 0.5])
+    ours = ref.copy()
+    ours[2] = -4.643472083065703e-06
+    assert replay.check_exact(ours, ref) == []
+    ours[2] = ref[2] + 1e-12
+    assert replay.check_exact(ours, ref), "a 1e-12 change near zero went unnoticed"
+
+
+def test_a_pin_holds_through_libm_noise_and_fails_on_a_real_change():
+    # Pins of a defined difference are compared to PIN_REL of the pinned magnitude, floored at
+    # NOISE_FLOOR of the case's scale, because exact hex equality failed on Linux's libm
+    # (HT_SINE lead sine moved 8.0e-14 -> 7.3e-14 on a series of scale 1). Counts and bars stay
+    # exact.
+    noise = {"first_valid_ours": 63, "first_valid_ref": 63, "n_compared": 437,
+             "max_abs": "0x1.6a20000000000p-44"}
+    assert replay.same_pin(noise, {**noise, "max_abs": "0x1.4720000000000p-44"}, 1.0)
+    assert not replay.same_pin(noise, {**noise, "max_abs": (3e-13).hex()}, 1.0)
+    assert not replay.same_pin(noise, {**noise, "n_compared": 436}, 1.0)
+    assert not replay.same_pin(noise, {**noise, "first_valid_ours": 64}, 1.0)
+    real = {**noise, "max_abs": (0.4864682203212638).hex()}
+    assert replay.same_pin(real, dict(real), 100.0)
+    assert not replay.same_pin(real, {**real, "max_abs": (0.4864692203212638).hex()}, 100.0)
+
+
 def test_converges_comparison_detects_a_small_change_after_k():
     case, ref = _fixture_series("EMA", "real")
     k = 20

@@ -819,7 +819,7 @@ def build_hurst(ctx):
     ns = list(range(2, 70)) + [100, 150, 200, 250, 300, 339, 340, 341, 400, 500, 1000, 2000]
     expected = np.array([R.expected_rs(k) for k in ns])
     tables = {"expected_rs_n": np.array(ns), "expected_rs": expected}
-    # the scale grid for lengths where floor(logspace) lands on an edge
+    # the scale grid, including lengths whose logspace end point pow misses by an ulp
     scale_lens = list(range(256, 300)) + [341, 400, 512, 1000, 1024, 2048, 5000, 10000]
     scales = {str(k): np.array(R.hurst_scales(k)) for k in scale_lens}
     tables["scales"] = scales

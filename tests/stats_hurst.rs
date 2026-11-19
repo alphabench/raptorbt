@@ -1,6 +1,6 @@
 //! The Hurst exponent against the reference at 1e-10 with the scales exact (`oracle/stats_hurst_extract
-//! .json`). The scales are `floor(logspace(...))`, so they are also compared with numpy's for
-//! every length in `scale_sweep`.
+//! .json`). The scales are numpy's `logspace` floored with the end-point tie rule
+//! (`hurst::SCALE_TIE`), compared with the reference's for every length in `scale_sweep`.
 
 use raptorbt::stats::hurst::{expected_rs, hurst, scales};
 use serde_json::Value;
@@ -78,8 +78,10 @@ fn expected_rs_matches_scipy_gamma_form_and_peters() {
     }
 }
 
+/// A log-spaced scale within a relative 1e-12 below an integer is that integer, so the largest
+/// scale is n / 4 whichever way the platform's `pow` rounds `10 ** log10(n / 4)`.
 #[test]
-fn scales_are_numpys_floor_of_logspace() {
+fn scales_are_logspace_floored_with_ties_to_the_integer() {
     let doc = extract();
     let table = doc["tables"]["scales"].as_object().unwrap();
     assert!(table.len() > 40);
@@ -89,6 +91,10 @@ fn scales_are_numpys_floor_of_logspace() {
     let sweep = doc["scale_sweep"].as_object().unwrap();
     assert!(sweep.len() > 1500);
     for (n, v) in sweep {
-        assert_eq!(scales(n.parse().unwrap()), ints(v), "scales({n})");
+        let n: usize = n.parse().unwrap();
+        let got = scales(n);
+        assert_eq!(got, ints(v), "scales({n})");
+        assert_eq!(got.first(), Some(&16), "smallest scale of {n}");
+        assert_eq!(got.last(), Some(&(n / 4)), "largest scale of {n}");
     }
 }

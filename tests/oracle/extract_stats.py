@@ -148,12 +148,14 @@ def slim(family, case):
 
 
 def scale_sweep():
-    """floor(logspace(log10(16), log10(n // 4), 12)), unique, as numpy computes it, for many n."""
+    """unique(floor(logspace(log10(16), log10(n // 4), 12) * (1 + 1e-12))), as numpy computes
+    it, for many n: `stats_reference.hurst_scales` (not imported here, it needs scipy)."""
     out = {}
     for n in list(range(256, 1500)) + list(range(1500, 60001, 97)):
         top = n // 4
-        s = np.unique(np.floor(np.logspace(math.log10(16), math.log10(top), 12)))
-        out[str(n)] = [int(v) for v in s]
+        v = np.logspace(math.log10(16), math.log10(top), 12)
+        s = np.unique(np.floor(v * (1.0 + 1e-12)))
+        out[str(n)] = [int(x) for x in s]
     return out
 
 

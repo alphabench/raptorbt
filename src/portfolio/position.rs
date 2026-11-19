@@ -364,6 +364,29 @@ mod tests {
         assert_eq!(trade.mfe_pnl, Some(0.0));
     }
 
+    /// A short's zero move is -0.0 before the clamp; the reported excursions
+    /// are +0.0 on every platform (`f64::min` kept -0.0 on aarch64 only).
+    #[test]
+    fn test_excursions_flat_short_are_positive_zero() {
+        let mut pm = PositionManager::new("TEST".to_string());
+        assert!(pm.open_position(0, 1000, 100.0, 10.0, Direction::Short, None, None, 0.0));
+
+        let trade = pm
+            .close_position(ExitDetails {
+                idx: 1,
+                timestamp: 1001,
+                price: 100.0,
+                entry_timestamp: 1000,
+                reason: ExitReason::Signal,
+                fees: 0.0,
+                fee_breakdown: None,
+            })
+            .unwrap();
+
+        assert_eq!(trade.mae_pnl.map(f64::to_bits), Some(0.0f64.to_bits()));
+        assert_eq!(trade.mfe_pnl.map(f64::to_bits), Some(0.0f64.to_bits()));
+    }
+
     /// The contract multiplier scales excursions exactly as it scales pnl, so
     /// a derivative's MAE is in the same money as its P&L.
     #[test]

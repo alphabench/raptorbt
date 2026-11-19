@@ -18,6 +18,8 @@ it -- and no finer claim is made anywhere.
 leg), never a zero excursion.
 """
 
+import math
+
 import numpy as np
 
 from raptorbt import Strategy, run_strategy_backtest
@@ -116,3 +118,21 @@ def test_a_flat_trade_measures_zero_rather_than_reporting_nothing():
 
     assert trade.mae_pnl == 0.0
     assert trade.mfe_pnl == 0.0
+
+
+def test_a_flat_short_measures_positive_zero_on_every_platform():
+    """A short that never moved has a raw excursion of -0.0; the engine reports +0.0, the same
+    bits on every platform. Run through the installed (release, optimised) extension, where the
+    clamp was once lowered to a hardware min that keeps -0.0 on ARM."""
+    n = 12
+    flat = np.full(n, 100.0)
+    result = run_strategy_backtest(
+        HoldTenBars, **_bars(flat, flat, flat, flat), bar_stamp="close", direction=-1
+    )
+    trades = result.trades()
+    assert trades, "no trades produced"
+    trade = trades[0]
+
+    assert trade.direction == -1
+    assert math.copysign(1.0, trade.mae_pnl) == 1.0, f"mae_pnl is {trade.mae_pnl!r}"
+    assert math.copysign(1.0, trade.mfe_pnl) == 1.0, f"mfe_pnl is {trade.mfe_pnl!r}"

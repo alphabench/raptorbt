@@ -1,12 +1,14 @@
 """Replay committed TA-Lib fixtures through the expression engine. Needs numpy only.
 
 Relations (the registry's `relation` for the function):
-    exact               relative error <= 1e-10 where both are defined, identical NaN mask
+    exact               relative error <= 1e-10 where both are defined, identical NaN mask;
+                        an absolute difference within the float-noise floor (below) passes
     converges           NaN masks agree from the later first-valid on; difference <= 1e-8
                         after K bars, K derived from the decay; bars before K are pinned
     defined_difference  the two sides are defined differently (first-valid index, seed,
                         convention); the per-case difference is pinned in pinned.json and
-                        any change fails
+                        any change fails: first-valid bars, bar counts and K exactly, the
+                        pinned magnitude to 1e-6 of itself or the float-noise floor
     candle              integers exactly equal
 
 `python tests/python/oracle/replay.py --pin` rewrites pinned.json from the current engine
@@ -29,7 +31,15 @@ FUNCTIONS_JSON = os.path.normpath(os.path.join(HERE, "..", "..", "oracle", "tali
 EXACT_REL = 1e-10
 CONVERGE_ABS = 1e-8
 CONVERGE_FLOOR = 1e-9  # K is where a seed difference of order 1 (relative) decays below this
-SCALE_FLOOR = 1e-12  # relative error is taken against max(|ref|, SCALE_FLOOR * max|series|)
+# Float-noise floor, relative to the case's scale (the largest |value| TA-Lib returns across
+# all outputs of the case). Two correct implementations of a recursive filter, or of a
+# difference of two outputs (MACD's histogram is macd - signal), disagree by a few hundred ulps
+# of the operands, and by a different amount on each libm (atan, sin, cos and exp are not
+# correctly rounded): MACDEXT's MAMA-based histogram near zero differs by 9.4e-15 on a series of
+# scale 2.7 between macOS and Linux, HT_SINE's lead sine by 7.7e-15 on scale 1. 1e-13 of the
+# scale (~450 ulps) holds both with margin and is still 1e7 below a 1e-6 change.
+NOISE_FLOOR = 1e-13
+PIN_REL = 1e-6  # a pinned magnitude above the noise floor may move by this much of itself
 RELATIONS = ("exact", "converges", "defined_difference", "candle")
 
 _cache = {}
@@ -135,13 +145,27 @@ def convergence_bars(fn, params):
 # --------------------------------------------------------------------- comparisons
 
 
-def _rel_err(ours, ref, both):
-    scale = max(float(np.max(np.abs(ref[both]))) if both.any() else 0.0, 0.0) * SCALE_FLOOR
-    den = np.maximum(np.abs(ref[both]), scale if scale > 0 else 1e-300)
+def series_scale(*arrays):
+    """The largest |value| over the arrays, NaN ignored; 0.0 when none is defined."""
+    m = 0.0
+    for a in arrays:
+        a = np.asarray(a, dtype=np.float64)
+        ok = ~np.isnan(a)
+        if ok.any():
+            m = max(m, float(np.max(np.abs(a[ok]))))
+    return m
+
+
+def _rel_err(ours, ref, both, scale):
+    # Relative error, but with the denominator floored so that an absolute difference of
+    # NOISE_FLOOR * scale is exactly EXACT_REL: near zero the relative error is meaningless.
+    floor = scale * NOISE_FLOOR / EXACT_REL
+    den = np.maximum(np.abs(ref[both]), floor if floor > 0 else 1e-300)
     return np.abs(ours[both] - ref[both]) / den
 
 
-def check_exact(ours, ref):
+def check_exact(ours, ref, scale=None):
+    """`scale` is the case's scale (see NOISE_FLOOR); this output's own by default."""
     problems = []
     if len(ours) != len(ref):
         return [f"length {len(ours)} != {len(ref)}"]
@@ -153,7 +177,7 @@ def check_exact(ours, ref):
         )
     both = ~np.isnan(ours) & ~np.isnan(ref)
     if both.any():
-        err = _rel_err(ours, ref, both)
+        err = _rel_err(ours, ref, both, series_scale(ref) if scale is None else scale)
         if err.max() > EXACT_REL:
             j = int(np.flatnonzero(both)[int(err.argmax())])
             problems.append(
@@ -324,6 +348,9 @@ def _replay(fn, talib_name, entry, case, pins, collect, relation, compat, suffix
     ours_all = evaluate(fn, cols, params=reg_params, columns=entry["inputs"])
     problems = []
     outs = output_names(fn)
+    scale = series_scale(
+        *(reference_array(o, case["lookback"], relation) for o in case["out"].values())
+    )
     for oname, out in case["out"].items():
         # Registry names single outputs freely; match by position when names differ.
         key = (
@@ -336,20 +363,40 @@ def _replay(fn, talib_name, entry, case, pins, collect, relation, compat, suffix
         ref = reference_array(out, case["lookback"], relation)
         pk = pin_key(talib_name, case, oname) + suffix
         if relation == "exact":
-            problems += [f"{oname}: {p}" for p in check_exact(ours, ref)]
+            problems += [f"{oname}: {p}" for p in check_exact(ours, ref, scale)]
         elif relation == "candle":
             problems += [f"{oname}: {p}" for p in check_candle(ours, ref, case["lookback"])]
         elif relation == "converges":
             k = convergence_bars(fn, params)
             p, rec = check_converges(ours, ref, k)
             problems += [f"{oname}: {x}" for x in p]
-            problems += _judge_pin(pk, rec, pins, collect)
+            problems += _judge_pin(pk, rec, pins, collect, scale)
         else:
-            problems += _judge_pin(pk, difference_record(ours, ref), pins, collect)
+            problems += _judge_pin(pk, difference_record(ours, ref), pins, collect, scale)
     return problems
 
 
-def _judge_pin(pk, rec, pins, collect):
+PIN_MAGNITUDES = ("max_abs", "early_max_abs")
+
+
+def same_pin(pinned, now, scale):
+    """A pin holds when every count and bar index is identical and each pinned magnitude moved
+    by at most PIN_REL of itself or NOISE_FLOOR * scale, whichever is larger. Exact hex equality
+    fails on the libm noise NOISE_FLOOR describes; a real change to the difference (a different
+    seed, convention or first-valid bar) moves it by far more, or moves a count."""
+    if set(pinned) != set(now):
+        return False
+    for k, v in pinned.items():
+        if k in PIN_MAGNITUDES:
+            a, b = float.fromhex(v), float.fromhex(now[k])
+            if abs(a - b) > max(PIN_REL * abs(a), NOISE_FLOOR * scale):
+                return False
+        elif v != now[k]:
+            return False
+    return True
+
+
+def _judge_pin(pk, rec, pins, collect, scale):
     if rec is None:
         return []
     if collect is not None:
@@ -357,7 +404,7 @@ def _judge_pin(pk, rec, pins, collect):
         return []
     if pk not in pins:
         return [f"no pinned record for {pk} (run replay.py --pin and review)"]
-    if pins[pk] != rec:
+    if not same_pin(pins[pk], rec, scale):
         return [f"pinned difference changed for {pk}: pinned {pins[pk]}, now {rec}"]
     return []
 

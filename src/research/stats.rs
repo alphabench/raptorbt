@@ -3,6 +3,7 @@
 use crate::core::error::{RaptorError, Result};
 use crate::math::fsum::fsum;
 use crate::pricing::norm::{norm_cdf, norm_ppf};
+use std::f64::consts::EULER_GAMMA as EULER;
 
 use super::SplitMix64;
 
@@ -54,8 +55,6 @@ pub enum DeflatedSharpe {
         samples: i64,
     },
 }
-
-const EULER: f64 = 0.577_215_664_901_532_9;
 
 /// Bailey and López de Prado's deflated Sharpe ratio: the probability that the best
 /// annualised Sharpe of `sharpes.len()` trials is above the Sharpe luck alone hands the

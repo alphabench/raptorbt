@@ -304,6 +304,8 @@ flag, because the old numbers were wrong.
 - `ctx.is_warmup` is true at every event before `run_strategies(trade_from=)` (and
   `run_strategies_windowed`), where every order is refused `warmup`, as it is on a `LiveNode`'s
   warm-up bars. A strategy that returned on it still sent those orders, which the run refused.
+- A trade whose adverse excursion is zero reports `mae_pnl` as `0.0` on every platform; a short
+  that never moved against its entry read `-0.0` on ARM (macOS) and `0.0` on x86-64.
 
 ### Migration
 

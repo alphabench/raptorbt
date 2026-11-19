@@ -277,13 +277,19 @@ def cointegration(cols, alpha=0.05):
 HURST_MIN_OBS = 256
 HURST_MIN_WINDOW = 16
 HURST_SCALES = 12
+# A log-spaced scale within this relative distance below an integer is that integer: the end
+# points 16 and n // 4 are integers that `pow` misses by an ulp either way depending on the libm.
+HURST_SCALE_TIE = 1e-12
 ANIS_LLOYD_EXACT_MAX = 340
 
 
 def hurst_scales(n):
     """Block sizes for `n` increments: twelve log-spaced sizes from 16 to n/4 (at least four
-    blocks at the largest), floored, distinct, as numpy's `logspace` evaluates them."""
-    s = np.floor(np.logspace(math.log10(HURST_MIN_WINDOW), math.log10(n // 4), HURST_SCALES))
+    blocks at the largest), as numpy's `logspace` evaluates them, floored after scaling by
+    1 + HURST_SCALE_TIE so that a size a rounding error below an integer is that integer on every
+    platform, distinct."""
+    v = np.logspace(math.log10(HURST_MIN_WINDOW), math.log10(n // 4), HURST_SCALES)
+    s = np.floor(v * (1.0 + HURST_SCALE_TIE))
     return [int(v) for v in np.unique(s)]
 
 

@@ -9,7 +9,11 @@ import raptorbt
 from raptorbt import _raptorbt
 from raptorbt.strategy import Strategy
 
-SRC = Path(raptorbt.__file__).resolve().parents[2] / "src"
+# The Rust sources are read from the checkout this test file lives in, not from
+# next to the installed package: CI installs a wheel, whose package directory
+# has no `src/` beside it.
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "Cargo.toml").is_file())
+SRC = REPO / "src"
 
 
 def test_the_manifest_is_json_and_versioned():
@@ -46,7 +50,7 @@ def test_every_hook_a_strategy_has_is_listed():
 def test_every_indicator_the_extension_registers_is_listed_with_its_parameters():
     caps = raptorbt.capabilities()
     arrays = {i["name"]: i for i in caps["indicators"]["arrays"]}
-    text = (Path(raptorbt.__file__).resolve().parents[2] / "src" / "lib.rs").read_text()
+    text = (SRC / "lib.rs").read_text()
     block = text[text.index("Register indicator functions") :]
     block = block[: block.index("_INDICATOR_FUNCTIONS")]
     registered = re.findall(r"indicator!\(python::bindings::(\w+)\)", block)

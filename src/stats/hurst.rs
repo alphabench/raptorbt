@@ -2,10 +2,14 @@
 //! detrended fluctuation analysis (DFA). Above 0.5 the increments persist (trend), below 0.5
 //! they reverse (mean reversion), 0.5 is a random walk.
 //!
-//! The scales are `unique(floor(logspace(log10(16), log10(n/4), 12)))`, evaluated as numpy
-//! does: `10 ** (i * step + start)` with the last exponent set to `stop`. A scale sits on an
-//! edge when `10 ** log10(m)` lands a rounding error below `m` (`10 ** log10(64)` is
-//! 63.99999999999999 and floors to 63), so the evaluation order here is part of the contract.
+//! The scales are `unique(floor(v * (1 + 1e-12)))` for `v` in numpy's
+//! `logspace(log10(16), log10(n/4), 12)`, evaluated as numpy does: `10 ** (i * step + start)`
+//! with the last exponent set to `stop`. Mathematically the end points are the integers 16 and
+//! `n/4`, but `log10` is rounded and `pow` differs by an ulp between libms: `10 ** log10(85)` is
+//! 84.99999999999999 on one platform and 85.00000000000001 on another. A value within a relative
+//! 1e-12 below an integer is therefore taken as that integer ([`SCALE_TIE`]); every other value
+//! is numpy's floor (the other scales of the lengths the tests sweep, 256 to 60,000, are all at
+//! least 2.8e-7 relative from an integer).
 //!
 //! The estimate carries no verdict. The Python function `reading` is "persistent" above 0.55, "anti-persistent"
 //! below 0.45 and "random walk" between, on the mean of the two estimates.
@@ -22,6 +26,10 @@ pub const N_SCALES: usize = 12;
 /// The gamma-function form of E[R/S] up to here; Peters' approximation above.
 pub const ANIS_LLOYD_EXACT_MAX: usize = 340;
 pub const MIN_FIT_POINTS: usize = 4;
+/// Relative tolerance below an integer at which a log-spaced scale is that integer: far above
+/// the few-ulp (~1e-15) spread of `pow` between platforms, far below any scale's distance from an
+/// integer that is not an end point.
+pub const SCALE_TIE: f64 = 1e-12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RescaledRange {
@@ -55,7 +63,7 @@ pub fn scales(n: usize) -> Vec<usize> {
     let mut out: Vec<usize> = (0..N_SCALES)
         .map(|i| {
             let exponent = if i == N_SCALES - 1 { stop } else { i as f64 * step + start };
-            10.0f64.powf(exponent).floor() as usize
+            (10.0f64.powf(exponent) * (1.0 + SCALE_TIE)).floor() as usize
         })
         .collect();
     out.sort_unstable();
