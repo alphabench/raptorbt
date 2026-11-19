@@ -120,6 +120,7 @@ Declarations, from `raptorbt.strategy`:
 | --- | --- |
 | `Requirements(roles, timeframes, holding, data=("bar",), warmup=None, max_structure=None, params=None, max_position=None)` | The manifest. `.to_dict()`, `Requirements.from_dict(d)`. |
 | `Underlying(asset=)`, `Instrument(symbol, asset=)`, `Universe(asset=, min=, max=, data=)`, `Future(of, contract=)`, `Chain(of, expiry, strikes, rights=)` | Roles: bound by the deployer to one symbol, fixed, bound by the deployer to a list of `min` to `max` symbols (a basket; `bindings={"basket": ["A", "B"]}`, read with `ctx.role("basket")`, a tuple), derived future, derived option chain. |
+| `raptorbt.strategy.PointInTime(symbols, steps)` | A `Universe` binding whose members change: `symbols` is the union of every member, `steps` are `(start_ns, members)` pairs in ascending order. `ctx.role(name)` then returns the members at the context's event time, so a strategy never sees a name before it joined or after it left; the bars of the union are fed throughout. The manifest is the same `Universe`; `.at(ns)` answers any instant (before the first step: none). |
 | `StrikeWindow(low, high)`, `StrikeWindow.around(n)`, `ByDelta(low, high)` | Which strikes of a chain. |
 | `Holding.intraday(flatten_before="HH:MM")`, `Holding.overnight()` | Holding style. |
 | `Bars(n, timeframe=None)`, `Duration.minutes/hours/days(n)` | Warm-up. |
