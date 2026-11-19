@@ -5,43 +5,72 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - Unreleased
 
-### Fixed
-
-- An MCX contract named by an `EXCHANGE:NAME` key (`underlying="MCX:CRUDEOIL"`,
-  `"MCX:CRUDEOIL26DECFUT"`) takes the session of its class, as the bare name does; it was refused
-  `mcx_session_unknown`.
-
-- On a `LiveNode` with a venue (`PaperExecution` or an adapter), the orders the engine builds
-  itself (the entry of `enter()`, the close of `close_position()` and of an exit signal, the
-  stop and target legs, schedule slices and the square-off) were sent `tif="gtc"`, which a
-  segment that holds only day orders refuses: on NFO, BFO, CDS, BCD, BSE and MCX the entry
-  raised `order_validity_unsupported` and a position could not be closed. They are now sent
-  gtc only where the segment holds it (NSE cash, NSE commodity, a venue the engine does not
-  know, unchanged) and the instrument's default (`"day"`) elsewhere. A backtest builds no order
-  for these and was never refused.
-- `auto_roll` with `roll_sizing="notional"` (the default) no longer raises a bare `KeyError` when
-  the next contract is so dear that the notional keeps no whole lot of it: the roll fails as
-  `on_roll_failed(..., "zero_size", ...)` naming the open that was not sent, which raises
-  `roll_open_failed` unless overridden.
-- A roll due on an instant the market takes no orders (the bar stamped at the session's close)
-  is no longer failed with `roll_close_failed` (`market_closed`): the close is sent again at the
-  next event, and the open follows its fill as usual.
-- `ctx.is_warmup` is true at every event before `run_strategies(trade_from=)` (and
-  `run_strategies_windowed`), where every order is refused `warmup`, as it is on a `LiveNode`'s
-  warm-up bars. A strategy that returned on it still sent those orders, which the run refused.
-
-### Changed
-
-- `bar_ns` is honoured for close-stamped bars too, where `run_strategies` ignored it: it is
-  the width of the primary bars an expression on a coarser clock (`at(...)`) uses, in place of
-  the most common gap of the stored bars, so an illiquid symbol's sparse bars are no longer
-  mis-sized. Only a run that passed `bar_ns` with `bar_stamp="close"` and used such an expression
-  can differ (it was refused or mis-sized before). An invalid `bar_ns` is now refused with
-  `close` as well.
+The first stable release. It covers everything since 0.13.4, including the
+changes first prepared as 0.14.0, which was never published. **Several results
+change, and a few calls are refused that used to run.** Re-run your backtests
+on 1.0.0 before trusting old numbers; nothing is kept behind a compatibility
+flag, because the old numbers were wrong.
 
 ### Added
+
+
+- **A strategy declares what it needs.** `requirements` is data (roles,
+  timeframes, holding, warm-up, parameters) that a host can check, fingerprint
+  and bind before a run starts.
+- **Live trading.** `LiveNode` runs the same `Strategy` class on a pushed feed.
+  It keeps a hash-chained journal, rebuilds from it after a crash, reconciles
+  with the venue, fences a restored node with an epoch, and adds and retires
+  instruments while running.
+- **Venues and brokers.** Orders can be worked by a venue and booked from its
+  execution reports, against a paper venue or an adapter of your own. A common
+  adapter layer (outbox, idempotent ids, fill normalisation) comes with thin
+  Kite, Upstox and Dhan mappings that pass the adapter conformance kit.
+- **Orders and positions.** Atomic order groups and option structures (hedge
+  legs first, all legs fill together or none), percent and absolute exits on a
+  position or a named group, continuous futures with a declared roll rule, and
+  netting that accumulates like a broker.
+- **Money and fees.** Money is booked in fixed-point minor units. Fees are data
+  (`FeeSchedule`, `RateCard`) with dated statutory rows per instrument, and
+  margin is a typed `MarginModel`. Contract expiry, settlement, delivery and
+  corporate actions are modelled.
+- **Pricing and research.** Option pricing, Greeks, implied volatility and an
+  option chain with no lookahead; research statistics and the full report;
+  standalone resampling.
+- **`bar_stamp` and `bar_ns`** declare whether bar timestamps mark a bar's open
+  or its close. Open-stamped and close-stamped copies of the same data give
+  identical results.
+- **Structured errors.** Every error raised on purpose is a `RaptorBTError`
+  with a `code`, the accepted alternatives and the skill that covers it
+  (`docs/errors.md`).
+- **Skills for AI agents**, shipped in the wheel and checked by
+  `python -m raptorbt.skills check`, and runnable `examples/`.
+- **Opt-in crash reporting**, off by default. Nothing is sent unless it is enabled
+  (`raptorbt.enable_crash_reporting(endpoint=..., key=...)` or `RAPTORBT_CRASH_REPORTING=1`) and an
+  endpoint and key are given (the arguments, or `RAPTORBT_CRASH_ENDPOINT` and `RAPTORBT_CRASH_KEY`).
+  There is no built-in destination: enabled without them, it logs one line and sends nothing.
+- **An expression language.** `rb.expr("zscore(close, 20) > 1 and adx(14) > 20")`
+  is compiled in Rust, typechecked with a position and a did-you-mean, and evaluated in
+  batch or one bar at a time from the same kernel, so the two give the same bits. Python
+  operators on `rb.col` build the same expression. `raptorbt.expressions.functions` and
+  `describe` list the registry (215 functions: every TA-Lib function, the candlestick
+  patterns and the Hilbert functions among them, plus regressions, beta, correlation,
+  range volatilities and fractional differencing). Cross-sectional operators (`rank`
+  and the like) and `at("1d", ...)` for a coarser timeframe are part of it.
+- **Expressions in a strategy.** `ctx.indicators.expr(text, instrument=...)` and
+  `expr_all(text)` run an expression on the bank, in a backtest and on a `LiveNode`,
+  with no new order path. A strategy that uses it needs a host with this build.
+- **TA-Lib agreement.** Every TA-Lib function (158) has a counterpart, replayed against
+  TA-Lib 0.6.4 fixtures. Each is `exact`, `converges`, a pinned `defined_difference` or,
+  for candlesticks, equal on every bar; the table is
+  `docs/quantitative-correctness/matrix.md`. Existing numbers are unchanged.
+- **`raptorbt.stats`.** Stationarity, cointegration, GARCH, Markov regimes, PCA factors,
+  event study, HAC t-statistics, Hurst, impact, SPA, PBO and more, in Rust with no
+  dependency beyond NumPy. `cointegration` no longer raises `IndexError` from seven series up.
+- **`raptorbt.analysis`, `python -m raptorbt`, three skills and `examples/analysis/`**
+  (see Analysis for agents below). `capabilities()` gains `functions`,
+  `statistics` and `analysis`.
 
 - `BacktestConfig.with_squareoff_times({symbol: "HH:MM"})` (read back as `squareoff_times`,
   minutes by symbol): each named symbol is squared off at its own time and every other at
@@ -90,69 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rates instead of being refused with `fee_schedule_gap`; the rows that were in
   force keep pricing their own days.
 
-## [1.0.0] - 2026-11-04
-
-The first stable release. It covers everything since 0.13.4, including the
-changes first prepared as 0.14.0, which was never published. **Several results
-change, and a few calls are refused that used to run.** Re-run your backtests
-on 1.0.0 before trusting old numbers; nothing is kept behind a compatibility
-flag, because the old numbers were wrong.
-
-### Added
-
-- **A strategy declares what it needs.** `requirements` is data (roles,
-  timeframes, holding, warm-up, parameters) that a host can check, fingerprint
-  and bind before a run starts.
-- **Live trading.** `LiveNode` runs the same `Strategy` class on a pushed feed.
-  It keeps a hash-chained journal, rebuilds from it after a crash, reconciles
-  with the venue, fences a restored node with an epoch, and adds and retires
-  instruments while running.
-- **Venues and brokers.** Orders can be worked by a venue and booked from its
-  execution reports, against a paper venue or an adapter of your own. A common
-  adapter layer (outbox, idempotent ids, fill normalisation) comes with thin
-  Kite, Upstox and Dhan mappings that pass the adapter conformance kit.
-- **Orders and positions.** Atomic order groups and option structures (hedge
-  legs first, all legs fill together or none), percent and absolute exits on a
-  position or a named group, continuous futures with a declared roll rule, and
-  netting that accumulates like a broker.
-- **Money and fees.** Money is booked in fixed-point minor units. Fees are data
-  (`FeeSchedule`, `RateCard`) with dated statutory rows per instrument, and
-  margin is a typed `MarginModel`. Contract expiry, settlement, delivery and
-  corporate actions are modelled.
-- **Pricing and research.** Option pricing, Greeks, implied volatility and an
-  option chain with no lookahead; research statistics and the full report;
-  standalone resampling.
-- **`bar_stamp` and `bar_ns`** declare whether bar timestamps mark a bar's open
-  or its close. Open-stamped and close-stamped copies of the same data give
-  identical results.
-- **Structured errors.** Every error raised on purpose is a `RaptorBTError`
-  with a `code`, the accepted alternatives and the skill that covers it
-  (`docs/errors.md`).
-- **Skills for AI agents**, shipped in the wheel and checked by
-  `python -m raptorbt.skills check`, and runnable `examples/`.
-- **Opt-in crash reporting**, off by default.
-- **An expression language.** `rb.expr("zscore(close, 20) > 1 and adx(14) > 20")`
-  is compiled in Rust, typechecked with a position and a did-you-mean, and evaluated in
-  batch or one bar at a time from the same kernel, so the two give the same bits. Python
-  operators on `rb.col` build the same expression. `raptorbt.expressions.functions` and
-  `describe` list the registry (215 functions: every TA-Lib function, the candlestick
-  patterns and the Hilbert functions among them, plus regressions, beta, correlation,
-  range volatilities and fractional differencing). Cross-sectional operators (`rank`
-  and the like) and `at("1d", ...)` for a coarser timeframe are part of it.
-- **Expressions in a strategy.** `ctx.indicators.expr(text, instrument=...)` and
-  `expr_all(text)` run an expression on the bank, in a backtest and on a `LiveNode`,
-  with no new order path. A strategy that uses it needs a host with this build.
-- **TA-Lib agreement.** Every TA-Lib function (158) has a counterpart, replayed against
-  TA-Lib 0.6.4 fixtures. Each is `exact`, `converges`, a pinned `defined_difference` or,
-  for candlesticks, equal on every bar; the table is
-  `docs/quantitative-correctness/matrix.md`. Existing numbers are unchanged.
-- **`raptorbt.stats`.** Stationarity, cointegration, GARCH, Markov regimes, PCA factors,
-  event study, HAC t-statistics, Hurst, impact, SPA, PBO and more, in Rust with no
-  dependency beyond NumPy. `cointegration` no longer raises `IndexError` from seven series up.
-- **`raptorbt.analysis`, `python -m raptorbt`, three skills and `examples/analysis/`**
-  (see Analysis for agents under Unreleased). `capabilities()` gains `functions`,
-  `statistics` and `analysis`.
-
 - **Speed, measured.** Single-series parity with TA-Lib is not met for most functions (30 of
   158 within 1.1x, 57 within 1.5x, MAVP over 10x by design) because accuracy and zero `unsafe`
   were kept over speed. Shared work is faster: 20 shared expressions 0.3-0.4x of TA-Lib's time,
@@ -199,7 +165,24 @@ flag, because the old numbers were wrong.
 - `skills.for_task` weights rare words, indexes function and module names (`doji`, `garch`),
   stems `analysis`/`analyses`, and lists what the matches depend on.
 
+### Changed
+
+- `bar_ns` is honoured for close-stamped bars too, where `run_strategies` ignored it: it is
+  the width of the primary bars an expression on a coarser clock (`at(...)`) uses, in place of
+  the most common gap of the stored bars, so an illiquid symbol's sparse bars are no longer
+  mis-sized. Only a run that passed `bar_ns` with `bar_stamp="close"` and used such an expression
+  can differ (it was refused or mis-sized before). An invalid `bar_ns` is now refused with
+  `close` as well.
+- `Strategy.drain_orders()` returns `("enter", size_frac, stop, target)` and `("close",)` tuples,
+  where it returned `MarketOrder` and `ClosePosition` objects. Only code that calls it (the runner
+  does) sees the difference.
+- `ctx.positions` in a single-instrument run is called, `ctx.positions()`, as in a portfolio run.
+  Using the attribute itself as a list still works and warns.
+- `raptorbt.PortfolioContext` and `raptorbt.strategy.PortfolioContext` are deprecated aliases that
+  now return `RuntimeContext`, the context a portfolio strategy receives; using either warns.
+
 ### Results change
+
 
 - **Cash-account shorts are valued as shorts.** A 1,000-unit short from 100 to
   90 ended at 90,000 instead of 110,000. Affects equity, drawdown, ratios and
@@ -231,8 +214,17 @@ flag, because the old numbers were wrong.
   `None`.
 - **Events that share a timestamp** are applied, decided and matched as a
   group, and every indicator is current before any strategy decides.
+- **`bar_ns` is honoured with `bar_stamp="close"`** (see Changed): an expression on a coarser
+  clock (`at(...)`) sizes the primary bars by `bar_ns` and not by the most common gap of the
+  stored bars, so a run on sparse bars can differ.
+- **A delivery entry squared in part the same day is charged as one contract-note order.** Buy 2
+  at 284.65, sell 1 the same day and 1 the next day: the buy is one order, one unit intraday and
+  one delivery, and its charges are summed before rounding once, 0.3059452 = 0.31. Each part had
+  been rounded on its own (0.01 + 0.29 = 0.30). Trade charges and P&L move by paise on such
+  entries; a fully squared same-day round trip, and a position that is only held, are unchanged.
 
 ### Breaking
+
 
 - `bar_stamp` is required on the runners that take it; leaving it out raises
   `missing_bar_stamp`.
@@ -252,7 +244,69 @@ flag, because the old numbers were wrong.
   `execution::slippage::MarketImpact` are removed, and `EventSession`'s
   `set_*` and `push_*` calls return `Result`.
 
+### Fixed
+
+- `research.sweep`'s deflated Sharpe read the rows' kurtosis as raw when `row_from` filled it with
+  the engine's excess kurtosis (a normal series is 0, not 3), which overstated the best trial's
+  `dsr` (0.93159 where the right figure is 0.92863 for a normal series of 101 samples). `row_from`
+  now carries excess + 3.
+- `audit_bars` with `min_bars=0` or `intraday_gap_bars` below 1 (or not a number), and
+  `predictive_test` and `factor_report` with a `lag` or horizon as large as the series (up to
+  `2**64 - 1`), panicked or wrapped around; they now refuse (`invalid_input` and
+  `insufficient_observations`).
+- An expression that is a bare field (`rb.expr("close")`) passed an infinite input through, and
+  `session_volume`, `session_vwap`, `session_open`, `session_high`, `session_low`,
+  `session_return` and `session_first` could output an infinity, against the documented rule that
+  a value is a number or NaN. An infinity is now NaN there too, in batch and in stream. Daily
+  bars stamped at 00:00 lie outside every session, so the session functions give NaN on them;
+  this is now stated in the expressions skill.
+- Reopening a journal file whose frame length field was corrupted to more than the bytes left,
+  with whole frames behind it, read it as a torn tail and truncated the valid records away. It is
+  now refused (`journal_failed`) and the file is left untouched; a short last frame with nothing
+  after it is still cut as before.
+- An MCX contract named by an `EXCHANGE:NAME` key (`underlying="MCX:CRUDEOIL"`,
+  `"MCX:CRUDEOIL26DECFUT"`) takes the session of its class, as the bare name does; it was refused
+  `mcx_session_unknown`.
+- On a `LiveNode` with a venue (`PaperExecution` or an adapter), the orders the engine builds
+  itself (the entry of `enter()`, the close of `close_position()` and of an exit signal, the
+  stop and target legs, schedule slices and the square-off) were sent `tif="gtc"`, which a
+  segment that holds only day orders refuses: on NFO, BFO, CDS, BCD, BSE and MCX the entry
+  raised `order_validity_unsupported` and a position could not be closed. They are now sent
+  gtc only where the segment holds it (NSE cash, NSE commodity, a venue the engine does not
+  know, unchanged) and the instrument's default (`"day"`) elsewhere. A backtest builds no order
+  for these and was never refused.
+- On a `LiveNode` with a venue, a stop or target set with `enter()` (or on an order, or
+  configured on the position) for an instrument on NFO, BFO, CDS, BCD, BSE or MCX lapsed after
+  the first session: its day order expired at the close, nothing sent it again, and a position
+  held overnight was left unprotected (a backtest kept the level and closed the position; paper
+  and live did not). The lapsed leg is now placed again at the first event of the next session,
+  for what the position then holds, unless the position was closed, the strategy cancelled the
+  leg, or a close is working. On `PaperExecution` the leg meets the session's first bar before
+  the strategy decides on it, so a bar that opens through the level fills it at the open, as in
+  a backtest; on a broker venue the leg is sent at that bar's close, and when the bar has already
+  traded through the level the engine closes the position at market there instead. A re-armed leg
+  the venue rejects (sent or later reported) is watched by the engine; a leg the venue could not
+  be reached for is sent again on each event until it is, and given up (journaled) when the
+  session closes. Each lapse and each outcome is journaled (`engine_exit`, reasons
+  `lapsed_day_order`, `rearmed`, `rearm_level_crossed`, `rearm_rejected`,
+  `rearm_refused_watching`, `rearm_deferred`, `rearm_abandoned`, `rearm_skipped`). NSE cash,
+  whose legs are good-till-cancelled, is unchanged. A node whose journal was written by an
+  earlier engine and holds a lapsed leg's report cannot be restored from it (`replay_diverged`:
+  this engine writes a `lapsed_day_order` record and the re-arm requests the old journal lacks);
+  restart such a node after the session instead of restoring it.
+- `auto_roll` with `roll_sizing="notional"` (the default) no longer raises a bare `KeyError` when
+  the next contract is so dear that the notional keeps no whole lot of it: the roll fails as
+  `on_roll_failed(..., "zero_size", ...)` naming the open that was not sent, which raises
+  `roll_open_failed` unless overridden.
+- A roll due on an instant the market takes no orders (the bar stamped at the session's close)
+  is no longer failed with `roll_close_failed` (`market_closed`): the close is sent again at the
+  next event, and the open follows its fill as usual.
+- `ctx.is_warmup` is true at every event before `run_strategies(trade_from=)` (and
+  `run_strategies_windowed`), where every order is refused `warmup`, as it is on a `LiveNode`'s
+  warm-up bars. A strategy that returned on it still sent those orders, which the run refused.
+
 ### Migration
+
 
 - Pass `bar_stamp="close"` if your bar timestamps mark the bar's end, or
   `bar_stamp="open", bar_ns=<width in ns>` if they mark its start (as Kite

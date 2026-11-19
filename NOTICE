@@ -2,8 +2,9 @@ raptorbt
 Copyright (c) Alphabench
 
 This product's test suite checks its indicator and statistics functions against reference
-implementations. The committed fixtures hold numbers those libraries produced; no source
-code of them is included or linked into raptorbt.
+implementations. The committed fixtures hold numbers those libraries produced, and numbers
+from the independent references in tests/oracle/stats_reference.py, written from the
+published definitions; no source code of the libraries is included or linked into raptorbt.
 
 - TA-Lib (https://ta-lib.org), BSD 3-Clause. Reference output for the technical-analysis
   functions in tests/python/oracle/fixtures/talib_*.json.gz, produced with TA-Lib 0.6.4.
@@ -26,3 +27,19 @@ code of them is included or linked into raptorbt.
   (c) 2009-2018 statsmodels Developers; (c) 2006 Jonathan E. Taylor; (c) 2006-2008 Scipy
   Developers. Redistribution of these data follows the BSD 3-Clause conditions: the notice
   above, no use of the contributors' names to endorse this product.
+- statsmodels (https://www.statsmodels.org), BSD 3-Clause. The statistics in src/stats follow
+  the behaviour of the statsmodels functions they replace: adfuller and kpss (stationarity.rs),
+  coint and coint_johansen (coint.rs), and MarkovRegression with switching variance (hmm.rs),
+  including their lag selection, eigenvector normalisation and initialisation conventions.
+  The code is written from the published methods; no statsmodels source text is included.
+  Where a result differs from statsmodels the difference is stated in the module's
+  documentation.
+- arch (https://github.com/bashtage/arch), University of Illinois/NCSA Open Source License.
+  The GARCH fit in src/stats/garch.rs follows the behaviour of the arch package (backcast,
+  start-value grid, rescaling rule, analytic forecast); it was read for its behaviour and none
+  of its code is included. The optimiser is different (BFGS).
+- The KPSS critical values in src/stats/tables.rs are those of D. Kwiatkowski, P. C. B.
+  Phillips, P. Schmidt and Y. Shin (Journal of Econometrics 54, 1992), read from statsmodels as
+  described above. The Markov-switching smoother follows C.-J. Kim (Journal of Econometrics 60,
+  1994), and the KPSS automatic bandwidth follows Hobijn, Franses and Ooms
+  (1998).
