@@ -330,7 +330,7 @@ impl EngineKernel {
                 }
                 (entry, exit) => entry.or(exit),
             };
-            let Some(trade) = self.ledger.close_position(
+            let Some(mut trade) = self.ledger.close_position(
                 position_id,
                 ExitDetails {
                     idx,
@@ -344,6 +344,7 @@ impl EngineKernel {
             ) else {
                 continue;
             };
+            trade.exit_fee_breakdown = settle_breakdown;
             self.credit_close(position_id, &trade);
             events.push(EngineEvent::Exited { idx, trade: Box::new(trade) });
 

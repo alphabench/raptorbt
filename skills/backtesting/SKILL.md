@@ -89,7 +89,9 @@ same trading date, when the round trip is restated to the intraday row and the
 difference refunded, as the contract note does. Only the components that differ
 between the rows are restated; brokerage stays as booked, so an order charged
 per order is not charged again on each slice of a partly closed position. The
-breakdown is in `trade.fee_breakdown`. `fee_segment` (for example
+breakdown is in `trade.fee_breakdown`, the round trip as one, and each leg's alone in
+`trade.entry_fee_breakdown` and `trade.exit_fee_breakdown` (a same-day restated trade
+reports both legs on the intraday row). `fee_segment` (for example
 `"NSE-INTRADAY"`, `"NFO-OPT"`) is an explicit override that prices every
 instrument on that one row. A schedule without a row for an instrument (or an
 instrument with no venue, or a BSE equity with no `scrip_group`) is refused

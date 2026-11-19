@@ -428,6 +428,8 @@ the skills it names, then copy the script.
 | 1-minute entries confirmed by a 15-minute trend (composite bars) | `examples/multi-timeframe/trend_confirmation.py` |
 | An options strategy on a chain: strike and expiry picks, ATR stops, sizing, account limits | `examples/options/nifty_momentum.py` |
 | A hedge-first multi-leg structure (bear call spread) with a defined-risk margin model | `examples/options/bear_call_spread.py` |
+| An intraday short straddle sized by margin and closed before the close | `examples/options/short_straddle.py` |
+| An intraday long-option scalp: index cross gated by the chain's implied volatility, quick exit | `examples/options/chain_scalp.py` |
 | Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
 | A basket strategy over instruments the deployer picks (a `Universe` role), with a warm-up session before `trade_from` | `examples/portfolio/top_n_basket.py` |
 | A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |

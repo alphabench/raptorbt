@@ -907,6 +907,13 @@ pub struct PyTrade {
     /// `total` equals `fees`, so reported costs and the equity curve agree.
     #[pyo3(get)]
     pub fee_breakdown: Option<HashMap<String, f64>>,
+    /// The entry leg's itemized costs alone; same keys as `fee_breakdown`, `total` the booked
+    /// `entry_fees`. `None` when the fee model does not itemise or the entry was several fills.
+    #[pyo3(get)]
+    pub entry_fee_breakdown: Option<HashMap<String, f64>>,
+    /// The exit leg's itemized costs alone; same keys, `total` the booked `exit_fees`.
+    #[pyo3(get)]
+    pub exit_fee_breakdown: Option<HashMap<String, f64>>,
     #[pyo3(get)]
     pub exit_reason: String,
     /// Worst price reached against the position while it was open.
@@ -3265,6 +3272,21 @@ fn finite(value: f64) -> Option<f64> {
     }
 }
 
+/// A fee breakdown as the dict `Trade.fee_breakdown` carries.
+fn fee_parts_dict(b: crate::execution::costs::FeeBreakdown) -> HashMap<String, f64> {
+    HashMap::from([
+        ("brokerage".to_string(), b.brokerage),
+        ("stt".to_string(), b.stt),
+        ("exchange_txn".to_string(), b.exchange_txn),
+        ("sebi_fee".to_string(), b.sebi_fee),
+        ("stamp_duty".to_string(), b.stamp_duty),
+        ("gst".to_string(), b.gst),
+        ("ipft".to_string(), b.ipft),
+        ("dp_charge".to_string(), b.dp_charge),
+        ("total".to_string(), b.total()),
+    ])
+}
+
 /// Convert a Rust trade to its Python counterpart.
 pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
     PyTrade {
@@ -3283,19 +3305,9 @@ pub(crate) fn convert_trade(t: crate::core::types::Trade) -> PyTrade {
         fees: t.fees,
         entry_fees: t.entry_fees,
         exit_fees: t.exit_fees,
-        fee_breakdown: t.fee_breakdown.map(|b| {
-            HashMap::from([
-                ("brokerage".to_string(), b.brokerage),
-                ("stt".to_string(), b.stt),
-                ("exchange_txn".to_string(), b.exchange_txn),
-                ("sebi_fee".to_string(), b.sebi_fee),
-                ("stamp_duty".to_string(), b.stamp_duty),
-                ("gst".to_string(), b.gst),
-                ("ipft".to_string(), b.ipft),
-                ("dp_charge".to_string(), b.dp_charge),
-                ("total".to_string(), b.total()),
-            ])
-        }),
+        fee_breakdown: t.fee_breakdown.map(fee_parts_dict),
+        entry_fee_breakdown: t.entry_fee_breakdown.map(fee_parts_dict),
+        exit_fee_breakdown: t.exit_fee_breakdown.map(fee_parts_dict),
         exit_reason: format!("{:?}", t.exit_reason),
         mae_price: t.mae_price,
         mfe_price: t.mfe_price,
