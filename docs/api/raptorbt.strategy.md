@@ -31,6 +31,7 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`OptionLeg`](#optionleg) | class | One option leg of the structure the strategy holds, as data: ``side`` (``buy`` or ``sell``), ``right`` (``call`` or ``put``), ``lots``, the strike and the expiry. |
 | [`ParamSchema`](#paramschema) | class | The typed parameters of a ``StrategyConfig`` subclass. |
 | [`ParamSpec`](#paramspec) | class | ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = False, min: 'float \| None' = None, max: 'float \| None' = None, choices: 'tuple[Any, ...] \| None' = None, nullable: 'bool' = False, description: 'str \| None' = None) |
+| [`PointInTime`](#pointintime) | class | The binding of a ``Universe`` role whose members change: a tuple of the union of the members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order. |
 | [`Requirements`](#requirements) | class | Everything a deployer must know about a strategy before it runs. |
 | [`RequirementsError`](#requirementserror) | exception | A declaration that cannot be built. ``issues`` holds the structured reasons. |
 | [`RolePlan`](#roleplan) | class | What one role means at a time: ``symbols`` are the concrete contracts to subscribe to, ``expiries`` the expiries (ns) a chain resolved to, ``atm`` the money strike, ``detail`` anything else (``roll_to`` for a continuous future). |
@@ -869,6 +870,31 @@ ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = Fa
 | `nullable` | *No docstring.* |
 | `required` | *No docstring.* |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
+
+### `PointInTime`
+
+*class*
+
+```python
+class PointInTime(tuple)
+PointInTime(symbols: 'Iterable[str]', steps: 'Iterable[tuple[int, Sequence[str]]]') -> 'PointInTime'
+```
+
+The binding of a ``Universe`` role whose members change: a tuple of the union of the
+members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order.
+
+``steps[i]`` holds from ``start_ns`` (ns since the epoch, an event time) until the next
+step's start; the last holds on. :meth:`at` answers the members at an instant: before the
+first step none, and with no instant (a context before its first event) the union.
+Every member of a step must be in ``symbols``, and a step lists a symbol once.
+
+>>> p = PointInTime(["A", "B", "C"], [(0, ["A", "B"]), (100, ["B", "C"])])
+>>> p.at(99), p.at(100), tuple(p)
+(('A', 'B'), ('B', 'C'), ('A', 'B', 'C'))
+
+| Member | What it is |
+| --- | --- |
+| `at(self, now_ns: 'int | None') -> 'tuple[str, ...]'` | The members at ``now_ns``; the whole union when it is ``None``. |
 
 ### `QuoteTick`
 

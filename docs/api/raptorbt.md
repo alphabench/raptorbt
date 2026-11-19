@@ -1855,11 +1855,13 @@ Python-exposed trade.
 | Member | What it is |
 | --- | --- |
 | `direction` | *No docstring.* |
+| `entry_fee_breakdown` | The entry leg's itemized costs alone; same keys as `fee_breakdown`, `total` the booked `entry_fees`. `None` when the fee model does not itemise or the entry was several fills. |
 | `entry_fees` | Costs charged when the position was opened. |
 | `entry_idx` | *No docstring.* |
 | `entry_notional_minor` | Booked notional of the entry (`price * size * multiplier`), in minor units. |
 | `entry_price` | *No docstring.* |
 | `entry_time` | *No docstring.* |
+| `exit_fee_breakdown` | The exit leg's itemized costs alone; same keys, `total` the booked `exit_fees`. |
 | `exit_fees` | Costs charged when it was closed. |
 | `exit_idx` | *No docstring.* |
 | `exit_notional_minor` | Booked notional of the exit, in minor units. |
