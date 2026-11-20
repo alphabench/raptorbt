@@ -78,6 +78,20 @@ the cancel-and-replace pending states a live venue adds, is in
 **Resting orders start matching on the next bar.** An order cannot rest into a
 bar that already closed when it was placed.
 
+**Exit rules.** `self.set_exit(ctx, ExitRule(...), symbol=)` (or `symbols=` with
+`name=`, or a structure's `group=`) states when to close a position that already
+exists: `stop_loss_pct` / `take_profit_pct` (percent of what the positions cost),
+`stop_loss` / `take_profit` (amounts of P&L), `premium_at_or_above` /
+`premium_at_or_below` (the sum of direction × last price × size; for a long of
+`q` units, `premium_at_or_below=level * q` is a stop at the price `level`). The
+first condition that holds fires, in that order. Mix `ExitEvents` in before
+`Strategy` to have the rules evaluated after every `on_bar` and `on_trade`, or
+call `self.update_exits(ctx)` yourself. A rule that fires sends one reduce-only
+market order per open position (client id `{rule id}:x{n}`). A rule has no
+modify: to move a stop or a target, `cancel_exit(handle)` and `set_exit` a new
+rule. The live behaviour (a venue that holds the rule, retries) is in
+[live-trading](../live-trading/SKILL.md).
+
 ## 3. API reference
 
 | Name | What it is |
@@ -92,6 +106,7 @@ bar that already closed when it was placed.
 | `Strategy.cache` | `order(id)`, `orders()`, `orders_open()`, `is_order_open(id)`, `realized_pnl()`: order states folded from events. |
 | `raptorbt.MarketOrder`, `raptorbt.ClosePosition` | The legacy intents behind `enter()` and `close_position()`. Prefer the methods. |
 | `raptorbt.StopConfig`, `raptorbt.TargetConfig` | Fixed, ATR, trailing and risk-reward stop and target models for `BacktestConfig` (`set_fixed_stop(0.02)` is 2 percent; fractions, not percents). |
+| `raptorbt.strategy.ExitRule`, `ExitEvents`, `ExitHandle`; `Strategy.set_exit(ctx, rule, *, symbol= / symbols=, name= / group=)`, `update_exits(ctx, marks=None)`, `cancel_exit(handle)` | Exit rules on a position or a named group (see "Exit rules" above). `set_exit` returns the handle: `state` is `armed`, `venue`, `fired`, `done`, `canceled` or `failed`, `reason` the condition that fired, `close_ids` the orders it sent. |
 
 Events carry `kind`, `idx`, `client_order_id`, `price`, `size` and
 `reject_reason`. Order-level `reject_reason` values: `invalid_qty`,
@@ -468,6 +483,47 @@ assert run("premium").exit_reason == "StopLoss"   # the engine held the premium 
 assert run("index").exit_reason == "Signal"       # the strategy closed the contract itself
 ```
 
+Moving a stop with an exit rule. The first rule risks 15 of P&L; once the close
+reaches 103 the strategy cancels it and sets a stop at the price 102, above the
+entry. The rule fires on the bar that closes at 102 and closes the position with
+a reduce-only market order:
+
+```python
+import numpy as np
+from raptorbt import BacktestConfig, Strategy, run_strategies
+from raptorbt.strategy import orders
+from raptorbt.strategy.exits import ExitEvents, ExitRule
+
+MIN = 60 * 10**9
+close = np.array([100, 100, 101, 102, 103, 102.5, 102, 101.5, 101, 100.5], dtype=float)
+bars = {"AAA": dict(timestamps=np.arange(1, 11, dtype=np.int64) * MIN, open=close, high=close + 0.1,
+                    low=close - 0.1, close=close, volume=np.full(10, 1000.0))}
+
+
+class Raise(ExitEvents, Strategy):
+    def on_start(self, ctx):
+        self.handles, self.n = [], 0
+
+    def on_bar(self, ctx):
+        self.n += 1
+        if self.n == 1:
+            self.submit_order(orders.Market(side="buy", quantity=10))
+        elif ctx.positions("AAA") and not self.handles:
+            self.handles.append(self.set_exit(ctx, ExitRule(stop_loss=15.0), symbol="AAA"))
+        elif ctx.bar.close >= 103 and self.handles[-1].state == "armed":
+            self.cancel_exit(self.handles[-1])          # a rule has no modify: cancel it, set another
+            self.handles.append(self.set_exit(ctx, ExitRule(premium_at_or_below=102.0 * 10), symbol="AAA"))
+
+
+s = Raise()
+(r,) = run_strategies([s], bars, BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close")
+first, moved = s.handles
+assert (first.state, moved.state, moved.reason) == ("canceled", "done", "premium_at_or_below")
+assert moved.close_ids == [f"{moved.id}:x0"]
+(trade,) = r.result.trades()
+assert (trade.entry_price, trade.exit_price, trade.pnl) == (100.0, 102.0, 20.0)
+```
+
 ## 6. Composition
 
 - A strategy sends orders; the account they trade against, with netting,
@@ -479,7 +535,10 @@ assert run("index").exit_reason == "Signal"       # the strategy closed the cont
 - Option chains and structure definitions: [instruments](../instruments/SKILL.md).
 - A live venue answers with execution reports instead of the simulated
   matcher: [execution](../execution/SKILL.md).
-- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/tick-level/passive_quotes.py`.
+- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/tick-level/passive_quotes.py`,
+  `examples/tick-level/tick_scalper.py` (a fixed stop on each entry and the configuration's
+  trailing stop, on prints), `examples/tick-level/dynamic_exit.py` (exit rules moved while
+  the position is open, batch and live).
 
 ## 7. Constraints and correctness
 
@@ -549,6 +608,21 @@ assert run("index").exit_reason == "Signal"       # the strategy closed the cont
   and size step; one that rounds to zero is rejected as `zero_size`.
 - Order ids are deterministic (`"{order_id_tag}-{n}"`, counted per strategy), so
   two identical runs produce identical ids.
+- **What an exit rule costs.** On every event `update_exits` visits every handle
+  the strategy has set; a cancelled or finished handle is skipped by its state but
+  never removed. For each armed rule it reads the positions of each symbol the rule
+  covers and that symbol's last price. On a live node and in a windowed run the last
+  price (the last close, else the last `ltp`) comes from the engine without
+  building `ctx.series`; in a batch run it is read from `ctx.series`, a view of the
+  arrays (a copy for a symbol whose built bars join its bars). No per-rule timing
+  is published. On ticks, where this runs on every print: one rule per position,
+  or one group rule (`symbols=`, `name=`) for legs that exit together, rather than
+  a rule per leg; and move a rule on a step (a price moved by a set amount), not on
+  every print, since every move leaves a cancelled handle behind.
+- **Percents are percents here.** `ExitRule(stop_loss_pct=30)` is 30 percent of
+  cost, unlike `StopConfig`'s fractions. Nothing fires until every symbol of the
+  rule has a position and a last price; `premium` leaves out the instrument's
+  multiplier, `pnl` and `cost` include it.
 
 ## 8. Common mistakes
 
@@ -586,6 +660,11 @@ orders.Limit(side="buy", price=0.0, quantity=1)         # InvalidOrder: invalid_
   no error and no event.
 - Assuming a limit buy at a price above the market fills at that price. It
   fills at the market, which is better for a buyer.
+- Setting a new `ExitRule` to move a stop without cancelling the old one: both
+  stay armed and the first to hold fires.
+- Leaving a rule armed after its position was closed some other way: it waits,
+  and covers the symbol's next position at that position's own entry price.
+  Cancel it when you close.
 - Sizing from indicators in a fill hook under `fill_timing="next_bar_open"`: an order you queue from a fill hook (`on_fill`, `on_position_event`) answers a fill at a bar's open, but an indicator or object you own and update yourself already includes that bar's close. Size from values you stored on an earlier bar (for example in `on_bar`), not from indicators read in the hook.
 
 ## 9. Validation

@@ -62,8 +62,8 @@ Where to look, by what you saw.
 
 | Code | Class | Cause and fix |
 | --- | --- | --- |
-| `non_finite_price` | `InvalidData` | A bar's open, high, low or close is NaN or infinite; the message names the column and first index. Clean the data; a pushed tick or bar with a NaN price is refused the same way and changes nothing. |
-| `decreasing_timestamps` | `InvalidData` | A batch tape goes backwards. A pushed event older than its symbol's latest raises `invalid_parameter` ("timestamps must not decrease"). |
+| `non_finite_price` | `InvalidData` | A bar's open, high, low or close is NaN or infinite; the message names the column and first index. Clean the data; a pushed tick (`ltp`, `bid` or `ask`, the first in that order named) or bar with a NaN or infinite price is refused the same way, before it is journaled, and changes nothing. |
+| `decreasing_timestamps` | `InvalidData` | A batch tape goes backwards. A pushed event older than its symbol's latest raises `invalid_parameter` ("timestamps must not decrease"). A tick older only than another symbol's latest, or than the last `advance_time`, is not refused: it is taken at its own time. |
 | `length_mismatch`, `missing_field`, `empty_data`, `invalid_array`, `invalid_input_type`, `no_symbols`, `duplicate_symbols` | `InvalidData` / `InvalidParameter` | The arrays are not the same length, a field is absent, there is nothing to run on, or the argument is not a dict of numeric arrays. See [market-data](../market-data/SKILL.md). |
 | `missing_bar_stamp`, `invalid_bar_stamp`, `missing_bar_ns` | `InvalidParameter` | `bar_stamp` is required and is `"open"` or `"close"`; `"open"` needs `bar_ns`. Any entry that takes bars refuses a missing `bar_stamp`; pass it. |
 | `invalid_fill_timing`, `invalid_oms_type`, `invalid_account_type`, `invalid_leverage`, `invalid_money_decimals`, `invalid_squareoff_time`, `invalid_config`, `invalid_parameter` | `InvalidParameter` | A `BacktestConfig` or run argument is out of range. `valid` lists the alternatives. See [core](../core/SKILL.md). |
@@ -475,10 +475,16 @@ time of writing; verified by running them; none is papered over above):
    the amount first.
 3. `node.health()["unconfirmed"]` is empty on a node with no journal even when an
    order's request raised.
-4. A push to a symbol the node does not have raises a plain `KeyError` (no
-   `code`), and `initial_positions` that need a margin account raise a plain
-   `ValueError`; `invalid_initial_positions` covers only a bad strategy index,
-   quantity or price.
+4. **Two `warm_up()` calls back to back that meet at one close time** (the
+   second's first bar, of another symbol, has the close time of the first's last
+   bar, and nothing was journaled between them) are journaled like one call, and a
+   restore replays them as one. It raises nothing and `state_digest()` matches, but
+   the strategy's hooks hear those bars differently (a hook sees the other symbol's
+   bar), so state a strategy keeps itself may differ. Give such history in one call.
+5. **A trailing stop from `BacktestConfig.set_trailing_stop` is reported as a
+   stop**: its trade's `exit_reason` is `"StopLoss"`, the same as a fixed stop's
+   (bar and tick runners). Tell them apart by the exit price against the fixed
+   level, as `examples/tick-level/tick_scalper.py` does.
 
 ## 8. Common mistakes
 
@@ -517,6 +523,10 @@ except ValueError as e:
   on an order that opens a position (`invalid_qty`).
 - Pushing market data from a hook (`runtime_busy`), or after `finish`
   (`node_finished`).
+- Waiting for a bar built from ticks after `advance_time`, or for `on_quote` after
+  a tick with one side of the book: the bar closes on the symbol's next tick of a
+  later window, and a quote needs both `bid` and `ask`
+  ([market-data](../market-data/SKILL.md)).
 - Restoring with a different strategy, feed or warm-up than wrote the journal
   (`replay_diverged`), or with a strategy that reads the clock.
 - Resuming with `accept="all"` to get past `recovering`.

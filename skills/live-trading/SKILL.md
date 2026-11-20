@@ -35,14 +35,28 @@ A `LiveNode` hosts many strategies on one pushed feed, on the same Rust core as
 `run_strategies`. A strategy sees what its own backtest would show it. The node
 is **single-threaded**: pushes, reports and hooks happen in the order calls are
 made, a push from inside a hook raises `runtime_busy`, and nothing is applied
-from another thread. Memory does not grow with the feed (fixed rings of the
-latest `history` rows per symbol; `curve_samples` bounds the equity curves).
+from another thread. Market data does not grow with the feed (fixed rings of the
+latest `history` rows per symbol). The equity, drawdown and returns curves do:
+one sample per distinct timestamp per strategy, about 32 bytes each. They grow in
+fixed blocks, so a push never copies the samples already taken, but they are kept
+whole unless `curve_samples=N` bounds them (each strategy then keeps between `N` and
+`2N` of the latest samples, and the curves and metrics `finish()` returns cover only
+that window; trades and orders stay complete). Set it for a node that runs for days or
+hosts many strategies on a busy tick feed (the live benchmarks measured about 1.6 GB of
+curves for 50 strategies over 1,000,000 ticks, `benches/python/README.md`); leave it
+`None` when you need the exact curves of the whole session.
 
 **The feed.** `push_tick(symbol, ts, ltp, bid, ask, ..., arrival_ns=)`,
 `push_bar(symbol, ts, o, h, l, c, v, arrival_ns=)`, `push_depth(...)`,
 `advance_time(ts)` (fires due timers and alerts with no data) and
-`push_report(...)`. Timestamps must not decrease per symbol. A pushed bar is
-stamped as the node's `bar_stamp` says (`"open"` or `"close"`); it is required.
+`push_report(...)`. Timestamps must not decrease per symbol; a tick older than
+another symbol's last push or than the last `advance_time` is taken at its own
+time. A pushed bar is stamped as the node's `bar_stamp` says (`"open"` or
+`"close"`); it is required. What one tick row delivers (a trade, then its quote
+when both sides are given; nothing for a one-sided book), when a bar built from
+ticks closes (on the symbol's first tick of a later window, never on
+`advance_time`) and what `ctx.series` holds once those bars join a symbol's bars
+are in [market-data](../market-data/SKILL.md).
 
 **Groups.** By default each push is delivered on arrival, alone. To deliver the
 bars of several symbols for one timestamp the way a batch run does, use
@@ -72,7 +86,14 @@ venue. `warmup="live"` replays bars as ordinary bars (orders match). The default
 is muted for your own `ExecutionAdapter`, live otherwise; a live warm-up that
 makes an order against a real venue raises `unsupported_in_venue_run`.
 `ctx.is_warmup` is true in every hook on a warm-up bar (and, in a backtest, at every
-event before `run_strategies(trade_from=)`).
+event before `run_strategies(trade_from=)`). A symbol warmed with bars may then be fed
+ticks: the first bar built from them is the window after the last warm-up bar. A node
+primed with `warm_up()` after construction, once or several times, before or after
+live bars, is restored from its journal like any other. One case is not: a second
+`warm_up()` whose first bar has the close time of the first call's last bar, for
+another symbol, with no record journaled between the two calls, replays as one call:
+nothing is raised and `state_digest()` matches, but a hook hears the other symbol's
+bar, so what the strategy keeps itself can differ. Give such history in one call.
 
 **Adopted positions.** `initial_positions={strategy: {symbol: seed}}`, with
 `seed = {"quantity", "avg_price", "timestamp_ns"?, "margin_minor"?,
@@ -114,7 +135,12 @@ is in state `"live"`, or `"recovering"` when the venue and the node disagree
 (`recovering`) while reports, `resend`, `reconcile` and `annotate` are allowed.
 Restore time grows with the journal since `seq_base`, so a long-running host
 starts a new journal per session and carries strategy state with
-`Strategy.state()`.
+`Strategy.state()`. A host that already stores the market data it pushes may drop
+the journal's `tick` and `time` records, keep each input's values and the `seq` it
+took (`journal.count` just before the push), and rebuild those records at restore
+with `raptorbt.journal.canonical`; a record rebuilt that way has the original's
+bytes and chain link. The fields, and how to confirm the chain, are in
+`docs/architecture/journal-and-recovery.md` ("Market data from the host's own store").
 
 **Fencing.** `LiveNode(epoch=E)`. An adapter with `fence(epoch)` raises
 `Fenced` when a newer epoch owns the account. The node checks before every
@@ -792,7 +818,10 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
 - Feeds: [market-data](../market-data/SKILL.md), [subscriptions](../subscriptions/SKILL.md)
   and [timeframes](../timeframes/SKILL.md) (`primary_bars=`, `bar_stamp`).
 - The shipped mappings are for Kite Connect v3, Upstox v3 and DhanHQ v2 only.
-- Runnable examples: `examples/live-trading/paper_node.py`.
+- Exit rules, and what an armed rule costs per event: [orders](../orders/SKILL.md).
+- Runnable examples: `examples/live-trading/paper_node.py`; on ticks,
+  `examples/tick-level/tick_scalper.py` and `examples/tick-level/dynamic_exit.py`, each run
+  in batch and on a node fed one print at a time, with the same result.
 
 ## 7. Constraints and correctness
 
@@ -840,7 +869,10 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
   ATR stops, `liquidate_on_margin_call` and shared account groups with a venue
   are refused at construction.
 - **Percent exits** measure percent of the covered positions' entry value; a
-  rule fires once and its orders pass `order_check`. `order_check_scope="typed"` declares that
+  rule fires once and its orders pass `order_check`. On a node an armed rule reads
+  each symbol's last price from the engine, not from a copy of `ctx.series`; it
+  still runs on every bar and print (with `ExitEvents`), so a tick strategy keeps few rules
+  (one per position or one per group of legs) and moves them on a step. `order_check_scope="typed"` declares that
   the check judges typed orders only: `enter()` and `close_position()` are then not refused
   (`order_check_intent`) and are not shown to it; use it when the check judges forms an intent
   cannot have (a kind, a validity, `post_only`). A venue that defines

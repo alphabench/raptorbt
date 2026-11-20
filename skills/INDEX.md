@@ -124,6 +124,7 @@ Load when:
 - Handling timestamps, bar_stamp, bar open versus close stamps and ordering.
 - Checking what a strategy can see at an event (no lookahead).
 - Computing tick features or running tick-level simulation.
+- Feeding ticks to a live node: what one push_tick row delivers, when a bar built from ticks closes, and what ctx.series holds once built bars join a symbol's bars.
 
 ## Subscriptions
 
@@ -224,6 +225,7 @@ Load when:
 - Implementing a stop-loss, target or time in force (day, gtd, ioc, fok).
 - Explaining why an order was rejected, or placing a multi-leg option structure.
 - Putting an ATR stop or target on an option leg: the premium or the index.
+- Moving a stop-loss or take-profit on an open position with exit rules (ExitRule, set_exit, cancel_exit, ExitEvents).
 
 ## Execution
 
@@ -431,4 +433,6 @@ the skills it names, then copy the script.
 | Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
 | A basket strategy over instruments the deployer picks (a `Universe` role), with a warm-up session before `trade_from` | `examples/portfolio/top_n_basket.py` |
 | A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |
+| A tick scalper trading momentum from its trade hook, with a fixed and a trailing stop and a capped entry count, run in batch and on a live node | `examples/tick-level/tick_scalper.py` |
+| A position whose stop-loss and take-profit exit rules move with the price while it is open, run in batch and on a live node | `examples/tick-level/dynamic_exit.py` |
 | The same strategy on a paper `LiveNode`, matching the batch run, with a journal checkpoint and restore | `examples/live-trading/paper_node.py` |

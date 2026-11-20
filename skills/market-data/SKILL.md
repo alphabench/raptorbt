@@ -57,6 +57,37 @@ In a run with several symbols, a symbol's `latest` and `history` hold the bars
 that had closed by the current event, in merged time order. Symbols may be
 stamped on different clocks; each sees only what has closed.
 
+**`ctx.series(symbol)`** is a symbol's bars once it has had a bar, otherwise its
+tick rows (`timestamps`, `ltp`, `bid`, `ask`, ...). The bars `primary_bars` builds
+from a symbol's prints join its bars from the symbol's first pushed or given bar on,
+in the order `on_bar` hears them, the bar being delivered included, the same in a
+batch run, a windowed run and a live node. A built bar is stamped in the series as a
+given bar of the same close would be (its open under `bar_stamp="open"`); the
+`bar.timestamp` that `on_bar` receives for a built bar is its close whatever
+`bar_stamp` says. Bars built before the symbol's first given bar do not join, and a
+symbol fed only ticks keeps its tick series.
+
+**Ticks on a live node.** `LiveNode.push_tick(symbol, ts, ltp, bid, ask, ...)` is one
+row, as in a batch tape: `ltp > 0` is a trade, `bid > 0` and `ask > 0` together are a
+quote, heard after that row's trade. `bid` and `ask` not given are 0: the row is a
+trade only, and `ctx.best_bid` / `ctx.best_ask` keep the last two-sided quote (`None`
+before any). A one-sided book makes no quote; a row with neither a print nor a
+two-sided book makes no event and is still journaled. The call returns the number of
+events (0, 1 or 2). A `nan` or infinite `ltp`, `bid` or `ask` is refused
+(`non_finite_price`) before it is journaled, and nothing changes.
+
+- A tick must not be older than its own symbol's last tick (`invalid_parameter`).
+  One older than another symbol's last push, or than the last `advance_time`, is
+  accepted at its own time: its hook sees its own timestamp and it joins the bar of
+  its own window.
+- A bar built from ticks (`primary_bars`, and composite bars over them) closes on its
+  symbol's first tick of a later window. `advance_time` never closes it, and a window
+  with no tick makes no bar.
+- A symbol warmed with closed bars (`warmup_bars=`, `warm_up`, `push_bar`,
+  `push_group`) and then fed ticks builds its next bar from the window after the last
+  bar given, and its indicators run on across the join. A tick stamped at that bar's
+  close opens the next bar; an earlier one is refused.
+
 ## 3. API reference
 
 | Name | What it is |
@@ -65,6 +96,7 @@ stamped on different clocks; each sees only what has closed.
 | `run_strategies(strategies, data=, ticks=, depth=, primary_bars=, bar_stamp=, bar_ns=, ...)` | Many symbols or strategies; bars, ticks and depth together. |
 | `raptorbt.run_tick_strategy(strategy, ticks, depth=, primary_bars=, ...)` | Ticks only; the same runtime with one strategy. `primary_bars=(step, unit)` builds bars *from the prints* as a view; orders still match on ticks. |
 | `raptorbt.TickStrategyStream(strategy, symbols, ...)` | The same, fed one event at a time (`push_tick`, `push_bar`, `push_depth`). |
+| `LiveNode.push_tick(symbol, ts, ltp, bid=0.0, ask=0.0, buy_qty_delta=0.0, sell_qty_delta=0.0, ltq=0.0, bid_qty=0.0, ask_qty=0.0, oi=0.0, *, arrival_ns=None)` | One tick row on a live node (see "Ticks on a live node"); returns how many events it made. The node itself is the [live-trading](../live-trading/SKILL.md) skill. |
 | `raptorbt.strategy.TradeTick` | `timestamp`, `price`, `size`, `symbol`, `oi`. `size` is `ltq` when the feed has it, else the flow-delta proxy. |
 | `raptorbt.strategy.QuoteTick` | `timestamp`, `bid`, `ask`, `symbol`, `bid_size`, `ask_size` (`nan` when unknown), `.mid`, `.spread`. |
 | `raptorbt.bars_from_ticks(timestamps, ltp, buy_qty_delta, sell_qty_delta, step, unit)` | Ticks to bars; returns six arrays (stamps are window ends). |
@@ -211,6 +243,47 @@ run_tick_strategy(m, ticks, primary_bars=(1, "m"))   # bars built from prints, a
 assert all(t % (60 * S) == 0 for t in m.stamps)       # stamped at the window end
 ```
 
+Tick rows pushed to a live node one at a time. A row with no book is a trade
+only, a one-sided book with no print is nothing, `advance_time` closes no bar built
+from ticks, and once the symbol has had bars the built bar joins `ctx.series()`:
+
+```python
+from raptorbt import BacktestConfig, LiveNode, Strategy
+
+S = 10**9
+MIN = 60 * S
+
+
+class Ear(Strategy):
+    def on_start(self, ctx):
+        self.heard = []
+
+    def on_trade(self, ctx, tick):
+        self.heard.append(("trade", tick.timestamp // S, ctx.best_bid))
+
+    def on_quote(self, ctx, quote):
+        self.heard.append(("quote", quote.timestamp // S, quote.bid))
+
+    def on_bar(self, ctx, bar):
+        closes = ctx.series()["close"]
+        self.heard.append(("bar", bar.timestamp // S, bar.close, len(closes), closes[-1]))
+
+
+ear = Ear()
+node = LiveNode([ear], ["AAA"], BacktestConfig(initial_capital=1e6, fees=0.0), bar_stamp="close",
+                primary_bars=(1, "m"))
+for m in (1, 2):                                          # history as closed 1-minute bars
+    node.push_bar("AAA", m * MIN, 100.0, 101.0, 99.0, 100.0 + m, 10.0)
+assert node.push_tick("AAA", 2 * MIN + 5 * S, 103.0) == 1             # no book: a trade only
+assert node.push_tick("AAA", 2 * MIN + 9 * S, 103.5, 103.4, 103.6) == 2  # a trade, then its quote
+assert node.push_tick("AAA", 2 * MIN + 20 * S, 0.0, 103.4, 0.0) == 0     # one-sided, no print: nothing
+node.advance_time(4 * MIN)                                # past the window: no bar yet
+assert [h[0] for h in ear.heard].count("bar") == 2
+node.push_tick("AAA", 4 * MIN + 1 * S, 104.0)            # the first tick of a later window closes it
+assert ear.heard[2:5] == [("trade", 125, None), ("trade", 129, None), ("quote", 129, 103.4)]
+assert ear.heard[5] == ("bar", 180, 103.5, 3, 103.5)      # the built bar joins the series: 3 rows
+```
+
 Depth. A strategy that subscribes to `"book"` receives snapshots; they inform
 queue position and never fill:
 
@@ -288,7 +361,10 @@ assert result.metrics.total_trades > 0
   [timeframes](../timeframes/SKILL.md).
 - Symbols need matching specs (lots, sessions): [instruments](../instruments/SKILL.md).
 - Indicators over bars: [indicators](../indicators/SKILL.md).
-- Runnable examples: `examples/tick-level/passive_quotes.py`, `examples/multi-instrument/relative_value.py`.
+- A live node, its journal and restore: [live-trading](../live-trading/SKILL.md).
+- Runnable examples: `examples/tick-level/passive_quotes.py`, `examples/tick-level/tick_scalper.py`
+  (a momentum scalper on prints, with its batch and live runs compared),
+  `examples/tick-level/dynamic_exit.py`, `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 
@@ -324,7 +400,16 @@ assert result.metrics.total_trades > 0
   cumulative values where deltas are expected inflates every bar's flow.
 - **`primary_bars` is a view.** Bars built from prints fire `on_bar` and feed
   indicators; fills still happen on ticks. A tick strategy with no
-  `primary_bars` never gets `on_bar`.
+  `primary_bars` never gets `on_bar`. Once a symbol has had a given bar, the bars
+  built after it are rows of `ctx.series(symbol)` too (section 2); before that its
+  series is its ticks.
+- **A built bar closes on a later tick.** Live, the last window of a quiet symbol
+  stays open until that symbol prints again; `advance_time` fires timers and
+  alerts, not bars.
+- **One symbol's ticks never go back.** A tick older than its symbol's last tick is
+  refused; a tick older than another symbol's last tick, or than the last
+  `advance_time`, is taken at its own time (and the node's `health()["clock_ns"]`
+  steps back to it).
 - **Depth needs ticks** for the same symbol (`depth_without_ticks`).
 
 ## 8. Common mistakes
@@ -369,6 +454,10 @@ run_strategy_backtest(Writer, timestamps=np.arange(1, 5, dtype=np.int64) * MIN,
 - Reading `ctx.data.quote(symbol)` without subscribing to quotes:
   `not_subscribed_data`.
 - Expecting quotes or books to fill a resting order.
+- Pushing a tick with only a bid (or only an ask) and waiting for `on_quote`: a
+  quote needs both sides.
+- Calling `advance_time` at a minute boundary to close the minute's bar on a
+  tick-fed node: it closes on the symbol's next tick.
 - Passing a data dict whose keys differ from the `symbol` or the specs.
 - Mixing bar widths in one symbol's array and expecting aggregation to repair
   it; the engine refuses a bar off its grid in resampling and does not guess.

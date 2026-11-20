@@ -42,7 +42,10 @@ bar of the same instrument arrives, before that bar's own `on_bar`. So when a 5
 minute bar ending 09:20 reaches you, the clock (`ctx.bar_close_ts`) already reads
 the 09:21 bar's close, and `event.timestamp` is 09:20. The delay is deliberate:
 the engine cannot know a window is over until a bar past it exists. The last
-window of a run is therefore never delivered.
+window of a run is therefore never delivered. On ticks the same holds one level
+down: a bar built from prints, and a composite bar over those, closes on the
+symbol's first print of a later window; on a live node `advance_time` does not
+close either.
 
 **Where bars arrive.** Define `on_bar(self, ctx, event)` (two required
 parameters) to receive primary bars (`event.timeframe is None`) and composite
@@ -210,7 +213,9 @@ assert s.quotes == n and s.last_quote.symbol == "AAA"
   [indicators](../indicators/SKILL.md).
 - The hooks themselves, and order placement from them, are the
   [strategy](../strategy/SKILL.md) skill.
-- Runnable examples: `examples/multi-timeframe/trend_confirmation.py`.
+- Runnable examples: `examples/multi-timeframe/trend_confirmation.py`,
+  `examples/tick-level/tick_scalper.py` (subscribes the trades and quotes of the
+  symbols it is given, in `on_start`).
 
 ## 7. Constraints and correctness
 
@@ -235,6 +240,10 @@ assert s.quotes == n and s.last_quote.symbol == "AAA"
 - **One window short.** The window still open when the data ends is not
   delivered. A backtest on an exact multiple of the width ends one composite
   bar before the data does.
+- **Built from prints, closed by a print.** On a tick-fed live node a 1-minute
+  bar and a 3-minute bar (`subscribe_bars(3, "m")`) whose windows have both
+  ended are delivered on the symbol's next print; windows with no print give no
+  bar, and `advance_time` delivers none.
 - **`subscribe_bars` fans out to every symbol** and is delivered even for
   symbols you did not name; use `subscribe` for per-instrument control.
 

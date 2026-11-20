@@ -5,6 +5,82 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - Unreleased
+
+Faster live and kernel paths, bars built from prints in `ctx.series()`, and a restore that
+works after `warm_up()`. No public call changes. **Bars and ticks are still slower than
+0.13.x**: on the published harness 1.0.0 took 137.5 µs for 1,000 bars where 0.13.4 took
+72.6 µs, and 288.1 ms for 1,875,000 bars where 0.13.4 took 151.1 ms
+(`benches/python/README.md`, "Slower than 0.13.x"). 1.1.0 has not been measured on that
+harness yet, so nothing below says how much faster it is, and nothing here claims to close
+that gap.
+
+### Changed
+
+- **A live push does less.** `push_tick` and `push_group` check each input once, and a tick
+  row that makes no event (no print and no two-sided book) stays in Rust, with no call back
+  into Python.
+- **A kernel step does less.** No matching pass runs on an empty order book, a step allocates
+  nothing, the wide money conversion is out of line, and exit reasons are looked up rather
+  than built. A bar with nothing deferred and no working order makes no call for either.
+- **A journal record costs less.** Each record is written straight to its canonical bytes, and
+  market-data payloads skip the intermediate value map when nothing keeps them. The bytes and
+  the chain are unchanged.
+- **Curves grow without copying.** A strategy's equity, drawdown and returns curves grow in
+  fixed blocks, so a push on a long-running node never copies the samples already taken
+  (`tests/curve_no_realloc.rs`). They still grow with the feed; `curve_samples=` bounds them.
+- **An exit rule marks without building the series.** On a `LiveNode` and in
+  `run_strategies_windowed`, an `ExitRule` reads a symbol's last close, else its last `ltp`,
+  from the engine instead of copying `ctx.series(symbol)` out of its ring on every event. The
+  price is the same, bit for bit, and the rules decide the same
+  (`tests/python/test_exit_marks.py`). A batch `run_strategies` reads the series as before.
+
+### Results change
+
+- **`ctx.series()` includes bars built from prints.** For a symbol given both bars and ticks,
+  with `primary_bars`, the bars built from its prints join its bars from its first given bar
+  on: in the order `on_bar` hears them, the bar being delivered included, stamped as a given
+  bar of the same close would be. This holds alike in `run_strategies`,
+  `run_strategies_windowed` and a `LiveNode` (where the series shows at most `history` rows).
+  Before, the series of such a symbol held only its given bars. A symbol fed only ticks keeps
+  its tick series, and bars built before a symbol's first given bar do not join
+  (`tests/python/test_series_built_bars.py`).
+
+### Fixed
+
+- **A node primed with `warm_up()` after construction restores.** `LiveNode.restore` replays
+  the bars of each `warm_up()` call as that call gave them: one call or several, before or
+  after live bars, and from a checkpoint taken between two calls. One case is not replayed as
+  it ran: a second `warm_up()` whose first bar, of another symbol, has the close time of the
+  first call's last bar, with no record journaled between the two, replays as one call. The
+  restore raises nothing and the state digest matches, but a hook hears the other symbol's bar
+  (`tests/python/test_journal_market_span.py`, marked as a known limit). Give such history in
+  one call.
+
+### Added
+
+- **Market records from the host's own store.** A host that keeps the market data it pushes can
+  drop the journal's `tick` and `time` records and rebuild them at restore with
+  `raptorbt.journal.canonical`, byte for byte and with the same chain link; the fields are in
+  `docs/architecture/journal-and-recovery.md`. The same tests pin what a tick-fed node does at
+  each boundary: a tick older than the last `advance_time` is taken at its own time, a bar built
+  from ticks closes on its symbol's first tick of a later window and never on `advance_time`,
+  an absent book is journaled as zero and makes no quote, and a non-finite `bid` or `ask` is
+  refused before it is journaled.
+- **Benchmarks of the `Strategy` API.** `benches/python/` adds `live_latency.py`,
+  `live_memory.py`, `live_concurrency.py`, `live_multi.py` and `strategy_backtest.py`: one
+  `LiveNode.push_tick` call, memory per symbol and per million ticks, nodes per process and
+  processes per machine, many symbols and timeframes on one node, and one `run_strategies`
+  call. How to run and read them is in `benches/python/README.md`.
+- **The tick benchmark must trade to the end.** `run_all.py` funds its tick runs with 10,000,000
+  and exits with an error when a run stops trading before the end of its input; the 1.0.0
+  10,000,000-tick figure timed a run that had run out of cash at 87.5% of its input.
+- **Determinism is a test.** `tests/python/test_determinism.py` runs one backtest twenty times
+  and requires one digest over every curve, trade and metric.
+- **Wheels for Python 3.10 to 3.13** on Linux, macOS and Windows.
+- `examples/tick-level/tick_scalper.py` and `examples/tick-level/dynamic_exit.py`, and skills
+  on ticks fed to a live node, bars built from prints in `ctx.series()` and moving an exit rule.
+
 ## [1.0.0] - Unreleased
 
 The first stable release. It covers everything since 0.13.4, including the
