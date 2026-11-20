@@ -1905,8 +1905,10 @@ impl EngineKernel {
         // that bar generated. Exits before the entry, mirroring the phase
         // order below; the entry then participates in this bar's own
         // stop/target checks, since a position opened at the open lives
-        // through the rest of the bar.
-        if mode == StepMode::Bar && !opened {
+        // through the rest of the bar. With nothing stashed the call is skipped: taking `None`
+        // leaves `None`, and the call alone (a large frame that reads the whole intent) was a
+        // measurable part of every step.
+        if mode == StepMode::Bar && !opened && self.deferred.is_some() {
             self.fill_deferred(idx, bar, gate.data_open, &mut events);
         }
 
@@ -2136,6 +2138,10 @@ impl EngineKernel {
         }
         let (swept, held_before) = if opened {
             (std::mem::take(&mut self.open_swept), std::mem::take(&mut self.open_held_before))
+        } else if !self.orders.has_working() {
+            // Nothing is working, so the sweep would find nothing to fill and return two empty
+            // lists; its call is skipped.
+            (Vec::new(), Vec::new())
         } else {
             self.sweep_market(idx, bar, gate.data_open, mode, defer_signals, &mut events)
         };

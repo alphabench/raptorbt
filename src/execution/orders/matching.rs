@@ -181,6 +181,14 @@ impl OrderEngine {
         self.live().iter().filter(|o| !o.status.is_terminal())
     }
 
+    /// Whether any order is working: `working().next().is_some()`, without the
+    /// filter. `live` starts at the first order that has not ended, so it is
+    /// empty exactly when nothing is working.
+    #[inline]
+    pub(crate) fn has_working(&self) -> bool {
+        !self.live().is_empty()
+    }
+
     /// Every order ever submitted, in submission order.
     pub fn all(&self) -> &[Order] {
         &self.orders
@@ -357,7 +365,28 @@ impl OrderEngine {
         self.match_events(idx, tick, fill_model, MatchMode::Trade, None)
     }
 
+    /// A matching pass. With no order working nothing can match, expire or cancel, and the
+    /// instant covered is the only state the pass leaves (a position's target reads it): that is
+    /// recorded here, inline at the caller, without entering the full pass and its large frame.
+    #[inline]
     fn match_events(
+        &mut self,
+        idx: usize,
+        bar: &OhlcvBar,
+        fill_model: &FillModel,
+        mode: MatchMode,
+        only: Option<&[u64]>,
+    ) -> Vec<MatchOutcome> {
+        if !self.has_working() {
+            self.prev_session_ts = Some(covered_instant(bar, mode));
+            return Vec::new();
+        }
+        self.match_working(idx, bar, fill_model, mode, only)
+    }
+
+    /// [`OrderEngine::match_events`] on a book with an order working.
+    #[inline(never)]
+    fn match_working(
         &mut self,
         idx: usize,
         bar: &OhlcvBar,
@@ -369,19 +398,7 @@ impl OrderEngine {
         let mut actions = Vec::new();
         let tz = self.tz_offset_ns;
         let latency = self.order_latency_ns;
-        // The instant the data covers, for session tests. A bar is stamped at
-        // its close, so its last instant is one nanosecond earlier: the bar
-        // closing exactly at the session close is still inside the session.
-        let session_ts = match mode {
-            MatchMode::Bar => bar.timestamp.saturating_sub(1),
-            MatchMode::Trade => bar.timestamp,
-        };
-        // No order is working: nothing below can match, expire or cancel, and the instant
-        // covered is the only state the pass leaves (a position's target reads it).
-        if self.live().is_empty() {
-            self.prev_session_ts = Some(session_ts);
-            return expiries;
-        }
+        let session_ts = covered_instant(bar, mode);
         // Only a bar can open a session: a print has no range to gap through.
         let session_open = mode == MatchMode::Bar && self.opens_session(session_ts);
         self.prev_session_ts = Some(session_ts);
@@ -621,11 +638,22 @@ impl OrderEngine {
     }
 }
 
+/// The instant the data covers, for session tests. A bar is stamped at its
+/// close, so its last instant is one nanosecond earlier: the bar closing
+/// exactly at the session close is still inside the session.
+#[inline]
+fn covered_instant(bar: &OhlcvBar, mode: MatchMode) -> Timestamp {
+    match mode {
+        MatchMode::Bar => bar.timestamp.saturating_sub(1),
+        MatchMode::Trade => bar.timestamp,
+    }
+}
+
 /// Whether a DAY order has lapsed at the close of its session, or `None`
 /// when the order is not a DAY order or the instrument has no calendar (the
 /// caller then falls back to the local-date rule in [`expired`]).
 ///
-/// `session_ts` is the instant the data covers (see `match_events`).
+/// `session_ts` is the instant the data covers (see `covered_instant`).
 fn session_day_expiry(
     order: &Order,
     session_ts: Timestamp,
@@ -704,6 +732,53 @@ mod tests {
         assert_eq!(engine.cancel_all(), vec![ids[40]]);
         assert_eq!(engine.working().count(), 0);
         assert_eq!(engine.all().len(), 50, "ended orders stay in the book");
+    }
+
+    #[test]
+    fn has_working_says_what_working_finds() {
+        // The kernel skips its market sweep, and a matching pass returns early, on
+        // `has_working`: it must agree with the filtered scan in every state the book can be in,
+        // whichever orders ended and in whatever order.
+        let agree = |engine: &OrderEngine, n: usize| {
+            assert_eq!(engine.has_working(), engine.working().next().is_some(), "{n}");
+        };
+        let mut engine = OrderEngine::new();
+        agree(&engine, 0);
+        let mut ids = Vec::new();
+        for n in 0..6 {
+            let mut order = Order::plain(
+                OrderSide::Buy,
+                QtySpec::Units(1.0),
+                OrderKind::Limit { price: 90.0 },
+                TimeInForce::Gtc,
+            );
+            order.client_id = format!("t-{n}");
+            if n % 2 == 0 {
+                let _ = order.transition(OrderStatus::Accepted);
+            }
+            ids.push(engine.submit(order));
+            agree(&engine, n + 1);
+        }
+        // End them out of order: a later one first, then the first, then the rest.
+        for (n, at) in [3usize, 0, 5, 1, 2, 4].into_iter().enumerate() {
+            assert!(engine.cancel(ids[at]));
+            agree(&engine, 10 + n);
+        }
+        assert!(!engine.has_working());
+        let mut order =
+            Order::plain(OrderSide::Sell, QtySpec::Units(1.0), OrderKind::Market, TimeInForce::Day);
+        order.client_id = "t-late".into();
+        let late = engine.submit(order);
+        agree(&engine, 20);
+        assert!(engine.has_working());
+        for (n, to) in [OrderStatus::Accepted, OrderStatus::PartiallyFilled, OrderStatus::Filled]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(engine.get_mut(late).map(|o| o.transition(to)), Some(true));
+            agree(&engine, 21 + n);
+        }
+        assert!(!engine.has_working());
     }
 
     #[test]
