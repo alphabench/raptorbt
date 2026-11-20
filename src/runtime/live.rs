@@ -40,6 +40,25 @@ struct Rings {
     ticks: Option<RowRing<TickRow>>,
     depth: Option<RowRing<DepthTick>>,
     keeps: Vec<Keep>,
+    /// The bars built from prints that joined the bar series (see [`LiveFeed::push_built`]).
+    /// Boxed: most instruments never have one.
+    built: Option<Box<RowRing<BuiltRow>>>,
+}
+
+/// A primary bar the engine built from prints, as `ctx.series` shows it: stamped as a pushed bar
+/// of the same close would be, after the first `pos` pushed bars.
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltRow {
+    /// The pushed bars delivered before it (the bar watermark when it was delivered).
+    pub pos: u64,
+    pub bar: KernelBar,
+}
+
+impl BuiltRow {
+    const BLANK: BuiltRow = BuiltRow {
+        pos: 0,
+        bar: KernelBar { timestamp: 0, open: 0.0, high: 0.0, low: 0.0, close: 0.0, volume: 0.0 },
+    };
 }
 
 /// Which ring a [`RingError`] came from, for the message.
@@ -187,6 +206,7 @@ impl LiveFeed {
             r.bars.as_ref().map(|b| b.first_row()),
             r.ticks.as_ref().map(|t| t.first_row()),
             r.depth.as_ref().map(|d| d.first_row()),
+            r.built.as_ref().map(|b| b.first_row()),
         ]
         .into_iter()
         .flatten()
@@ -220,6 +240,9 @@ impl LiveFeed {
         }
         if let Some(d) = r.depth.as_mut() {
             d.grow(rows);
+        }
+        if let Some(b) = r.built.as_mut() {
+            b.grow(rows);
         }
     }
 
@@ -285,6 +308,35 @@ impl LiveFeed {
         let seq = ring.end_row();
         ring.push(seq, row)?;
         Ok(seq)
+    }
+
+    /// Store a bar the engine built from `instrument`'s prints for its bar series. It makes no
+    /// event: the print that completed it is the event. The ring is made on the first, at the
+    /// instrument's capacity, grows with [`LiveFeed::reserve`] and, under
+    /// [`LiveFeed::keep_all`], when full; otherwise the oldest row is overwritten.
+    ///
+    /// No strategy's keep holds a row back here, so a push is never refused, after the print was
+    /// taken in. Nothing a keep asks for is lost by it: every built bar's print is a row of the
+    /// tick ring, which the same keeps hold at the same capacity, so a print is refused there
+    /// before this ring could drop a kept row. The one exception: a keep raised past the
+    /// capacity from a hook while an open group still holds a print that completes a bar; that
+    /// print was stored before the keep, and its bar overwrites the oldest.
+    pub fn push_built(&mut self, instrument: InstrumentId, row: BuiltRow) {
+        let capacity = self.capacity_of(instrument);
+        let all = self.keep_every_row[instrument.index()];
+        let ring = self.rings[instrument.index()]
+            .built
+            .get_or_insert_with(|| Box::new(RowRing::new(capacity, 0, BuiltRow::BLANK)));
+        if all {
+            ring.grow_if_full();
+        }
+        let seq = ring.end_row();
+        ring.push(seq, row).expect("the next row of a ring no consumer holds back");
+    }
+
+    /// The bars built from `instrument`'s prints that its bar series holds.
+    pub fn built(&self, instrument: InstrumentId) -> Option<&RowRing<BuiltRow>> {
+        self.rings[instrument.index()].built.as_deref()
     }
 
     /// Store a depth snapshot and return the event for it.
@@ -373,6 +425,9 @@ impl HeapSize for LiveFeed {
                     + r.ticks.as_ref().map_or(0, HeapSize::heap_bytes)
                     + r.depth.as_ref().map_or(0, HeapSize::heap_bytes)
                     + r.keeps.capacity() * size_of::<Keep>()
+                    + r.built
+                        .as_ref()
+                        .map_or(0, |b| size_of::<RowRing<BuiltRow>>() + b.heap_bytes())
             })
             .sum();
         rings
@@ -523,6 +578,42 @@ mod tests {
         assert_eq!(feed.bars(id(0)).unwrap().first_row(), 0, "an existing ring grew in place");
         feed.reserve(id(0), 1);
         assert_eq!(feed.capacity_of(id(0)), 6, "never smaller");
+    }
+
+    #[test]
+    fn built_bars_are_never_refused_overwrite_the_oldest_and_grow_when_every_row_is_kept() {
+        use std::mem::size_of;
+        let mut feed = LiveFeed::new(vec!["A".into(), "B".into()], 3);
+        let row = |t| BuiltRow { pos: 5, bar: bar(t) };
+        // A keep the ring cannot hold refuses no built bar: the tick ring refuses the print.
+        feed.keep(StrategyId::new(0), id(0), 10);
+        assert!(feed.built(id(0)).is_none(), "made by the first built bar");
+        let before = feed.heap_bytes();
+        for t in 0..10 {
+            feed.push_built(id(0), row(t));
+        }
+        let ring = feed.built(id(0)).unwrap();
+        assert_eq!((ring.first_row(), ring.end_row()), (7, 10));
+        assert_eq!((ring.get(9).unwrap().pos, ring.get(9).unwrap().bar.timestamp), (5, 9));
+        let held = feed.heap_bytes();
+        assert_eq!(held - before, size_of::<RowRing<BuiltRow>>() + 3 * size_of::<BuiltRow>());
+        for t in 10..100 {
+            feed.push_built(id(0), row(t));
+        }
+        assert_eq!(feed.heap_bytes(), held, "fixed once made");
+        assert_eq!(feed.keep_all(id(0)), Err(97), "built rows 0..97 are gone");
+        feed.reserve(id(0), 5);
+        feed.push_built(id(0), row(100));
+        let ring = feed.built(id(0)).unwrap();
+        assert_eq!((ring.capacity(), ring.first_row(), ring.end_row()), (5, 97, 101));
+        feed.keep_all(id(1)).unwrap();
+        for t in 0..10 {
+            feed.push_built(id(1), row(t));
+        }
+        let ring = feed.built(id(1)).unwrap();
+        assert_eq!((ring.first_row(), ring.end_row()), (0, 10), "every row kept");
+        feed.retire_instrument(id(1));
+        assert!(feed.built(id(1)).is_none());
     }
 
     #[test]

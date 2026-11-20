@@ -507,8 +507,8 @@ def test_ticks_after_pushed_history_build_the_next_bar_and_the_indicator_goes_on
     """History given as closed bars (constructor warm-up muted or live, ``warm_up``,
     ``push_bar``, ``push_group``), then ticks: nothing is refused, the first bar the engine
     builds is the window after the last pushed bar, and the indicator runs on across the
-    join. ``ctx.series()`` keeps reading the pushed bars only: the bars built from ticks do not
-    join it."""
+    join. The bars built from ticks join ``ctx.series()``, stamped as a pushed bar of the same
+    close is, and the bar being delivered is in it, as a pushed bar is."""
     strategy = Primed()
     node = LiveNode([strategy], ["A"], _cfg(), journal=rj.Journal(HEADER, memory=True), **_primed_kwargs(how))
     _prime(how, node)
@@ -520,8 +520,8 @@ def test_ticks_after_pushed_history_build_the_next_bar_and_the_indicator_goes_on
         (180, 102.0, 102.0, 10.0, warm, 101.0, 3, 180),
         (240, 103.0, 103.0, 10.0, warm, 102.0, 4, 240),
         (300, 104.0, 104.0, 10.0, warm, 103.0, 5, 300),
-        (360, 110.0, 111.0, 2.0, False, (103.0 + 104.0 + 111.0) / 3, 5, 300),
-        (420, 112.0, 112.0, 1.0, False, (104.0 + 111.0 + 112.0) / 3, 5, 300),
+        (360, 110.0, 111.0, 2.0, False, (103.0 + 104.0 + 111.0) / 3, 6, 360),
+        (420, 112.0, 112.0, 1.0, False, (104.0 + 111.0 + 112.0) / 3, 7, 420),
     ]
 
 

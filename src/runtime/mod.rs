@@ -53,7 +53,7 @@ pub use indicators::{
     CellCore, IndInput, IndKey, IndKind, IndSpec, IndicatorBank, IndicatorRegistry, InputField,
     LocalStreamId, Ohlc, PrimaryOrder, Reading, Registration, Reveal, SlotId,
 };
-pub use live::{LiveFeed, RingKind};
+pub use live::{BuiltRow, LiveFeed, RingKind};
 pub use memory::HeapSize;
 pub use ring::{ColumnSource, ConsumerId, RingColumns, RingError, RowMiss, RowRing, TickRow};
 pub use router::{

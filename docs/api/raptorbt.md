@@ -877,7 +877,11 @@ is raised to what the strategies' indicators read (their longest period).
 to the latest the node has reached: a symbol's bars once it has had any,
 otherwise its ticks (``timestamps``, ``ltp``, ``bid``, ``ask``,
 ``buy_qty_delta``, ``sell_qty_delta``, ``ltq``, ``bid_qty``, ``ask_qty``,
-``oi``). Older rows are overwritten. A strategy that needs more than the
+``oi``). The bars the node builds from a symbol's prints (``primary_bars``)
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a pushed bar of the same close would be, as in
+:func:`~raptorbt.run_strategies`; the series then shows at most ``history``
+rows. Older rows are overwritten. A strategy that needs more than the
 default can call ``ctx.keep_history(rows, symbol=None)``; rows it asked
 for are never overwritten, and a push that would have to overwrite one
 raises ``RuntimeError`` and changes nothing. That is the only way a node
@@ -2598,7 +2602,11 @@ is shared, unless it is put on an account (see ``accounts``). ``directions``, ``
 ``bar_ns`` apply to every strategy, as they would in separate calls.
 
 ``ctx.series(symbol)`` returns read-only views truncated to the latest bar
-the run has reached (empty in ``on_start``), not the full arrays.
+the run has reached (empty in ``on_start``), not the full arrays. For a
+symbol with both bars and ticks, the ``primary_bars`` built from its prints
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a bar of the same close in ``data`` would be; its series is then
+a copy.
 
 ``accounts`` maps a name to an :class:`~raptorbt.AccountSpec`; strategies
 that name it share one account: its cash, margin and account-level risk

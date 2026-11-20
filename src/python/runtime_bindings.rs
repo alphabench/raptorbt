@@ -44,8 +44,8 @@ use crate::runtime::commands::{
 use crate::runtime::groups::GroupSpec;
 use crate::runtime::store::{BarColumns, DepthColumns, TickColumns, TickSlices};
 use crate::runtime::{
-    AggId, AggKey, ColumnSource, Current, EventKind, EventRef, HeapSize, IndInput, IndKey,
-    IndicatorBank, InstrumentId, InstrumentParams, LiveFeed, LocalStreamId, MarketStore,
+    AggId, AggKey, BuiltRow, ColumnSource, Current, EventKind, EventRef, HeapSize, IndInput,
+    IndKey, IndicatorBank, InstrumentId, InstrumentParams, LiveFeed, LocalStreamId, MarketStore,
     MemoryReport, MergeCursor, Ohlc, Pushed, Reveal, RingError, RingKind, RuntimeBuilder,
     RuntimeCore, SlotId, StrategyId, TickRow,
 };
@@ -368,9 +368,10 @@ struct Plan {
     inds: Vec<IndPlan>,
 }
 
-/// A truncated-series dict, the first row it holds and the watermark it was
-/// cut at.
-type SeriesCache = (u64, u64, Py<PyDict>);
+/// A truncated-series dict and what it was cut at: the first row it holds, the watermark, and
+/// `0, 0` for rows of one kind; for a bar series with bars built from prints, the first pushed
+/// row held, the watermark, the built rows' end and one more than the rows shown at most.
+type SeriesCache = ((u64, u64, u64, u64), Py<PyDict>);
 
 /// A per-instrument table that is read on every event and changes only when an instrument is
 /// added to or retired from a running node. Changing it takes the node's [`LiveGuard`] (no push
@@ -431,6 +432,9 @@ struct Shared {
     widths: Vec<i64>,
     /// Truncated series dicts by instrument, valid for one watermark.
     series: RefCell<Vec<Option<SeriesCache>>>,
+    /// A batch run's bars built from prints that join the bar series, by instrument (see
+    /// [`join_built_bar`]). A live node and a windowed run keep them in their rings.
+    built: RefCell<Vec<Vec<BuiltRow>>>,
     /// Rows each live ring holds; `None` for a batch run over a store.
     live_history: Option<usize>,
     /// Set for a windowed run: what each instrument carries (see [`WindowShape`]).
@@ -926,19 +930,37 @@ impl Shared {
         let feed = self.feed.borrow();
         let Some(feed) = feed.as_ref() else { return Ok(()) };
         let shape = self.window.as_ref().expect("windowed");
-        let held = if shape.bars[global.index()] && kind != HistKind::Ticks {
-            feed.bars(global).map(|b| (b.first_row(), b.end_row()))
-        } else {
-            feed.ticks(global).map(|t| (t.first_row(), t.end_row()))
+        let bars = shape.bars[global.index()] && kind != HistKind::Ticks;
+        // `(whether a row was released, the rows held)`.
+        let held = match (bars, feed.built(global)) {
+            (true, Some(built)) => {
+                // Bars built from prints are rows of the bar series too.
+                let ring = feed.bars(global);
+                let pushed = ring.map_or((0, 0), |b| (b.first_row(), b.end_row()));
+                let rows = SeriesBars::new(
+                    |r| ring.and_then(|b| b.get(r).ok()),
+                    pushed,
+                    |r| built.get(r).ok(),
+                    (built.first_row(), built.end_row()),
+                )
+                .count();
+                Some((pushed.0 > 0 || built.first_row() > 0, rows))
+            }
+            (true, None) => feed
+                .bars(global)
+                .map(|b| (b.first_row() > 0, (b.end_row() - b.first_row()) as usize)),
+            (false, _) => feed
+                .ticks(global)
+                .map(|t| (t.first_row() > 0, (t.end_row() - t.first_row()) as usize)),
         };
         match held {
-            Some((first, end)) if first > 0 && ((end - first) as usize) < rows => Err(Fail::new(
+            Some((true, held)) if held < rows => Err(Fail::new(
                 "window_state",
                 format!(
                     "{}: ctx.keep_history({rows}) came after rows were released: only {} are \
                      held and released rows do not come back. Declare it in on_start",
                     self.symbol_text(global.index()),
-                    end - first
+                    held
                 ),
             )
             .into()),
@@ -1040,7 +1062,8 @@ impl Shared {
     /// The truncated, read-only arrays of an instrument: its bars up to the
     /// latest bar reached, or, for an instrument without bars, its tick
     /// arrays up to the latest print or quote reached. A live node serves
-    /// the rows its rings still hold.
+    /// the rows its rings still hold. Bars built from an instrument's prints after its first
+    /// pushed bar join its bars ([`SeriesBars`]).
     fn series_of(
         &self,
         py: Python<'_>,
@@ -1051,6 +1074,9 @@ impl Shared {
             return self.live_series_of(py, global, limit);
         }
         let g = global.index();
+        if !self.built.borrow()[g].is_empty() {
+            return self.batch_built_series(py, global, limit);
+        }
         let (full, n, keys): (Bound<'_, PyDict>, u64, Vec<Bound<'_, PyAny>>) = {
             let arrays = self.arrays.borrow();
             let tick_arrays = self.tick_arrays.borrow();
@@ -1070,8 +1096,8 @@ impl Shared {
         };
         let mut cache = self.series.borrow_mut();
         let slot = &mut cache[g];
-        if let Some((_, w, dict)) = slot {
-            if *w == n {
+        if let Some((key, dict)) = slot {
+            if *key == (0, n, 0, 0) {
                 return Ok(dict.clone_ref(py));
             }
         }
@@ -1086,7 +1112,43 @@ impl Shared {
             out.set_item(key, view)?;
         }
         let out = out.unbind();
-        *slot = Some((0, n, out.clone_ref(py)));
+        *slot = Some(((0, n, 0, 0), out.clone_ref(py)));
+        Ok(out)
+    }
+
+    /// A batch run's bar series of an instrument some of whose bars were built from its prints:
+    /// a copy, merged by [`SeriesBars`] from the run's stored bars (stamped as the caller stamped
+    /// them) and the built ones.
+    fn batch_built_series(
+        &self,
+        py: Python<'_>,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> PyResult<Py<PyDict>> {
+        let g = global.index();
+        let end = self.watermark(global);
+        let built = self.built.borrow();
+        let built = &built[g];
+        let key = (0, end, built.len() as u64, shown_key(limit));
+        if let Some((k, dict)) = &self.series.borrow()[g] {
+            if *k == key {
+                return Ok(dict.clone_ref(py));
+            }
+        }
+        let offset = self.offset_of(g);
+        let given = |r: u64| {
+            let bar = self.store.bar(global, u32::try_from(r).ok()?)?;
+            Some(KernelBar { timestamp: bar.timestamp - offset, ..bar })
+        };
+        let rows = SeriesBars::new(
+            given,
+            (0, end),
+            |r| built.get(r as usize).copied(),
+            (0, built.len() as u64),
+        )
+        .shown(limit);
+        let out = bar_series_dict(py, &rows)?;
+        self.series.borrow_mut()[g] = Some((key, out.clone_ref(py)));
         Ok(out)
     }
 
@@ -1108,6 +1170,19 @@ impl Shared {
             Some(w) => w.bars[g],
             None => feed.as_ref().is_some_and(|f| f.has_bars(global)),
         };
+        if let (true, Some(merged)) =
+            (bars, feed.as_ref().and_then(|f| self.live_built(f, global, limit)))
+        {
+            if let Some((k, dict)) = &self.series.borrow()[g] {
+                if *k == merged.key {
+                    return Ok(dict.clone_ref(py));
+                }
+            }
+            let rows = merged.bars.shown(merged.show);
+            let out = bar_series_dict(py, &rows)?;
+            self.series.borrow_mut()[g] = Some((merged.key, out.clone_ref(py)));
+            return Ok(out);
+        }
         let ticks = feed.as_ref().and_then(|f| f.ticks(global));
         let (first, end) = if bars {
             match feed.as_ref().and_then(|f| f.bars(global)) {
@@ -1123,8 +1198,8 @@ impl Shared {
         // A strategy that declared how many rows it reads sees exactly the last of them, not
         // what the ring happens to hold for the others.
         let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
-        if let Some((f, w, dict)) = &self.series.borrow()[g] {
-            if (*f, *w) == (first, end) {
+        if let Some((key, dict)) = &self.series.borrow()[g] {
+            if *key == (first, end, 0, 0) {
                 return Ok(dict.clone_ref(py));
             }
         }
@@ -1138,7 +1213,7 @@ impl Shared {
         // The columns a windowed run's ticks were given with, as a batch run's series has them.
         let given: Option<&Vec<String>> =
             self.window.as_ref().and_then(|w| w.ticks[g].as_ref()).filter(|_| !bars);
-        match ticks.filter(|_| !bars) {
+        let out = match ticks.filter(|_| !bars) {
             None if given.is_some() => {
                 // Ticks declared, none pushed yet.
                 put("timestamps", PyArray1::from_iter(py, std::iter::empty::<i64>()).into_any())?;
@@ -1147,24 +1222,14 @@ impl Shared {
                         put(key, PyArray1::from_iter(py, std::iter::empty::<f64>()).into_any())?;
                     }
                 }
+                out.unbind()
             }
             None => {
                 let rows: Vec<KernelBar> = match feed.as_ref().and_then(|f| f.bars(global)) {
                     Some(ring) => (first..end).filter_map(|r| ring.get(r).ok()).collect(),
                     None => Vec::new(),
                 };
-                let ts = rows.iter().map(|b| b.timestamp);
-                put("timestamps", PyArray1::from_iter(py, ts).into_any())?;
-                let columns: [BarColumn; 5] = [
-                    ("open", |b| b.open),
-                    ("high", |b| b.high),
-                    ("low", |b| b.low),
-                    ("close", |b| b.close),
-                    ("volume", |b| b.volume),
-                ];
-                for (key, f) in columns {
-                    put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
-                }
+                bar_series_dict(py, &rows)?
             }
             Some(ring) => {
                 let rows: Vec<TickRow> = (first..end).filter_map(|r| ring.get(r).ok()).collect();
@@ -1175,12 +1240,47 @@ impl Shared {
                         put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
                     }
                 }
+                out.unbind()
             }
-        }
-        let out = out.unbind();
+        };
         drop(feed);
-        self.series.borrow_mut()[g] = Some((first, end, out.clone_ref(py)));
+        self.series.borrow_mut()[g] = Some(((first, end, 0, 0), out.clone_ref(py)));
         Ok(out)
+    }
+
+    /// The bar series of `global` in a live node's or a windowed run's rings when bars built from
+    /// its prints have joined it, `None` when none has: the merge of the pushed bars it holds up
+    /// to the watermark with the built ones, the rows a strategy may be shown of it (a live node
+    /// shows at most its `history`, a windowed run the rows declared) and the cache key.
+    fn live_built<'f>(
+        &self,
+        feed: &'f LiveFeed,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> Option<LiveBuilt<'f>> {
+        let built = feed.built(global)?;
+        let (first, end) = match feed.bars(global) {
+            Some(ring) => {
+                (ring.first_row(), self.watermark(global).min(ring.end_row()).max(ring.first_row()))
+            }
+            None => (0, 0),
+        };
+        let cap = self.window.is_none().then(|| feed.capacity_of(global));
+        let show = match (limit, cap) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let rows = feed.bars(global);
+        let given: Box<dyn Fn(u64) -> Option<KernelBar> + 'f> =
+            Box::new(move |r| rows.and_then(|ring| ring.get(r).ok()));
+        let key = (first, end, built.end_row(), shown_key(show));
+        let bars = SeriesBars::new(
+            given,
+            (first, end),
+            Box::new(move |r| built.get(r).ok()) as Box<dyn Fn(u64) -> Option<BuiltRow> + 'f>,
+            (built.first_row(), built.end_row()),
+        );
+        Some(LiveBuilt { bars, show, key })
     }
 
     /// What `live_series_of` would give as the last `close`, else the last `ltp` (`Some(None)`
@@ -1195,6 +1295,17 @@ impl Shared {
             Some(w) => w.bars[g],
             None => feed.as_ref().is_some_and(|f| f.has_bars(global)),
         };
+        if let (true, Some(mut merged)) =
+            (bars, feed.as_ref().and_then(|f| self.live_built(f, global, limit)))
+        {
+            if let Some((k, _)) = &self.series.borrow()[g] {
+                if *k == merged.key {
+                    return None;
+                }
+            }
+            // The newest row is shown whatever the limit: at least one row is.
+            return Some(merged.bars.next().map(|b| b.close));
+        }
         let ticks = feed.as_ref().and_then(|f| f.ticks(global));
         let (first, end) = if bars {
             match feed.as_ref().and_then(|f| f.bars(global)) {
@@ -1208,8 +1319,8 @@ impl Shared {
         };
         let end = end.max(first);
         let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
-        if let Some((f, w, _)) = &self.series.borrow()[g] {
-            if (*f, *w) == (first, end) {
+        if let Some((key, _)) = &self.series.borrow()[g] {
+            if *key == (first, end, 0, 0) {
                 return None;
             }
         }
@@ -1229,6 +1340,122 @@ impl Shared {
             Some(_) => None,
         })
     }
+}
+
+/// The cache key part for the rows shown of a merged bar series: one more than the most shown,
+/// `u64::MAX` for every row (never `0`, which marks a series of one kind).
+fn shown_key(show: Option<usize>) -> u64 {
+    show.map_or(u64::MAX, |n| n as u64 + 1)
+}
+
+type GivenRows<'f> = Box<dyn Fn(u64) -> Option<KernelBar> + 'f>;
+type BuiltRows<'f> = Box<dyn Fn(u64) -> Option<BuiltRow> + 'f>;
+
+/// A merged bar series in a live node's or a windowed run's rings, see [`Shared::live_built`].
+struct LiveBuilt<'f> {
+    bars: SeriesBars<GivenRows<'f>, BuiltRows<'f>>,
+    show: Option<usize>,
+    key: (u64, u64, u64, u64),
+}
+
+/// The bar series of an instrument that has pushed bars and bars the engine built from its
+/// prints, newest first: the one definition a batch run, a windowed run and a live node share.
+///
+/// Every bar is in the order `on_bar` heard it. A built bar is stamped as a pushed bar of the
+/// same close (see [`join_built_bar`]) and carries `pos`, the pushed bars delivered before it, so
+/// it comes after pushed row `pos - 1` and before pushed row `pos`. Pushed rows are `first..end`
+/// (`end`: the watermark, so the bar being delivered is in); built rows past the watermark are
+/// not shown. Only the newest rows that are all still held are given: none before the oldest
+/// pushed row held, and when built rows were dropped, none before the oldest built row held.
+struct SeriesBars<G, B> {
+    given: G,
+    built: B,
+    /// Pushed rows still to give are `start..r`.
+    start: u64,
+    r: u64,
+    /// Built rows still to give are `built_first..j`.
+    built_first: u64,
+    j: u64,
+}
+
+impl<G: Fn(u64) -> Option<KernelBar>, B: Fn(u64) -> Option<BuiltRow>> SeriesBars<G, B> {
+    fn new(
+        given: G,
+        (first, end): (u64, u64),
+        built: B,
+        (built_first, built_end): (u64, u64),
+    ) -> Self {
+        let start = match built(built_first) {
+            Some(oldest) if built_first > 0 => first.max(oldest.pos),
+            _ => first,
+        };
+        let mut j = built_end;
+        while j > built_first && built(j - 1).is_some_and(|b| b.pos > end) {
+            j -= 1;
+        }
+        Self { given, built, start, r: end.max(start), built_first, j }
+    }
+
+    /// The last `show` rows (every row with `None`), oldest first.
+    fn shown(self, show: Option<usize>) -> Vec<KernelBar> {
+        let mut rows: Vec<KernelBar> = self.take(show.unwrap_or(usize::MAX)).collect();
+        rows.reverse();
+        rows
+    }
+}
+
+impl<G: Fn(u64) -> Option<KernelBar>, B: Fn(u64) -> Option<BuiltRow>> Iterator
+    for SeriesBars<G, B>
+{
+    type Item = KernelBar;
+
+    fn next(&mut self) -> Option<KernelBar> {
+        loop {
+            let built = if self.j > self.built_first {
+                (self.built)(self.j - 1).filter(|b| b.pos >= self.start)
+            } else {
+                None
+            };
+            match built {
+                // A built bar after pushed row `r - 1` (or with no pushed row left) comes first.
+                Some(b) if self.r <= self.start || b.pos >= self.r => {
+                    self.j -= 1;
+                    return Some(b.bar);
+                }
+                _ if self.r > self.start => {
+                    self.r -= 1;
+                    if let Some(bar) = (self.given)(self.r) {
+                        return Some(bar);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// A bar series dict: `timestamps` (int64) and `open high low close volume` (float64), read-only.
+fn bar_series_dict(py: Python<'_>, rows: &[KernelBar]) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    let kw = PyDict::new(py);
+    kw.set_item("write", false)?;
+    let put = |key: &str, array: Bound<'_, PyAny>| -> PyResult<()> {
+        array.call_method(intern!(py, "setflags"), (), Some(&kw))?;
+        out.set_item(key, array)
+    };
+    let ts = rows.iter().map(|b| b.timestamp);
+    put("timestamps", PyArray1::from_iter(py, ts).into_any())?;
+    let columns: [BarColumn; 5] = [
+        ("open", |b| b.open),
+        ("high", |b| b.high),
+        ("low", |b| b.low),
+        ("close", |b| b.close),
+        ("volume", |b| b.volume),
+    ];
+    for (key, f) in columns {
+        put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
+    }
+    Ok(out.unbind())
 }
 
 /// The columns of a live node's tick series, after `timestamps`.
@@ -2879,6 +3106,7 @@ impl PyRuntime {
             offsets: Table::new(market.offsets.clone()),
             widths: market.widths.clone(),
             series: RefCell::new((0..n).map(|_| None).collect()),
+            built: RefCell::new((0..n).map(|_| Vec::new()).collect()),
             live_history: market.live,
             window: market.window.clone(),
             history_declared: RefCell::new(Default::default()),
@@ -4864,7 +5092,17 @@ impl PyRuntime {
         // A live node's rings: fixed once allocated, whatever is pushed.
         let rings = self.shared.feed.borrow().as_ref().map_or(0, HeapSize::heap_bytes);
         d.set_item("live_rings", rings)?;
-        d.set_item("total", r.total() + rings)?;
+        // A batch run's bars built from prints that joined a bar series (a live node's and a
+        // windowed run's are in their rings).
+        let built: usize = self
+            .shared
+            .built
+            .borrow()
+            .iter()
+            .map(|b| b.capacity() * std::mem::size_of::<BuiltRow>())
+            .sum();
+        d.set_item("built_bars", built)?;
+        d.set_item("total", r.total() + rings + built)?;
         Ok(d)
     }
 }
@@ -5044,6 +5282,7 @@ impl PyRuntime {
         sh.tick_arrays.borrow_mut().push(None);
         sh.offsets.push(&guard, offset);
         sh.series.borrow_mut().push(None);
+        sh.built.borrow_mut().push(Vec::new());
         sh.retired.push(&guard, false);
         with_feed(sh, |feed| {
             feed.add_instrument(symbol.clone(), capacity);
@@ -5348,10 +5587,48 @@ fn run_one(py: Python<'_>, sh: &Shared, ls: &mut LoopState, e: GroupEvent) -> Py
         core.advance_pushed(e.event, e.payload).map_err(runtime_err)?;
         *core.current().expect("advance sets the current event")
     };
+    join_built_bar(sh, &cur)?;
     open_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     rest_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     let delivered = dispatch(py, sh, ls, &e.event, &cur, None);
     hook_error(sh, delivered)
+}
+
+/// A primary bar the engine built from a print joins the instrument's bar series, once its first
+/// pushed bar has been delivered; before that its series is its ticks, which it stays. It is
+/// stamped as a pushed bar of the same close would be (the symbol's offset moves the close back
+/// to the caller's stamp) and goes after the pushed bars delivered so far, before any strategy
+/// hears the print, so `on_bar` already reads it in the series, as it does a pushed bar. A batch
+/// run keeps it with the run's bars, a live node and a windowed run in their rings (see
+/// [`SeriesBars`]). Neither ever refuses it, since the print was already taken in (see
+/// [`LiveFeed::push_built`] for why no kept row is lost by that).
+fn join_built_bar(sh: &Shared, cur: &Current) -> PyResult<()> {
+    let Some(bar) = cur.primary else { return Ok(()) };
+    let g = cur.event.instrument;
+    let pos = match &*sh.inner.borrow() {
+        Inner::Running(core) => core.watermark(g),
+        _ => return Err(finished()),
+    };
+    if pos == 0 {
+        return Ok(());
+    }
+    let bar = KernelBar {
+        timestamp: bar.timestamp - sh.offset_of(g.index()),
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+    };
+    let row = BuiltRow { pos, bar };
+    if sh.live_history.is_none() {
+        sh.built.borrow_mut()[g.index()].push(row);
+        return Ok(());
+    }
+    with_feed(sh, |feed| {
+        feed.push_built(g, row);
+        Ok(())
+    })
 }
 
 /// Deliver events that may span several timestamps and kinds: in time order,
@@ -5732,6 +6009,13 @@ fn run_round(
     match &mut *sh.inner.borrow_mut() {
         Inner::Running(core) => core.begin_group(&payloads).map_err(runtime_err)?,
         _ => return Err(finished()),
+    }
+    for i in 0..events.len() {
+        let cur = match &*sh.inner.borrow() {
+            Inner::Running(core) => *core.group_event(i),
+            _ => return Err(finished()),
+        };
+        join_built_bar(sh, &cur)?;
     }
     let mut decided = std::mem::take(&mut ls.decided);
     decided.resize_with(events.len(), Vec::new);
