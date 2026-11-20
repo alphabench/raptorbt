@@ -35,6 +35,7 @@
 use crate::accounts::{AccountMode, SharedAccount};
 use crate::core::types::BacktestConfig;
 use crate::portfolio::book::PortfolioBook;
+use crate::portfolio::curve::Curve;
 use crate::portfolio::kernel::EngineEvent;
 use crate::portfolio::session::{ScheduleData, ScheduleEntry};
 
@@ -94,10 +95,10 @@ pub struct AccountGroup {
     /// The run's chosen margin model, when this account margins by it.
     margin_model: Option<std::sync::Arc<crate::accounts::MarginModel>>,
     members: Vec<usize>,
-    equity_curve: Vec<f64>,
-    drawdown_curve: Vec<f64>,
-    locked_curve: Vec<f64>,
-    timestamps: Vec<i64>,
+    equity_curve: Curve<f64>,
+    drawdown_curve: Curve<f64>,
+    locked_curve: Curve<f64>,
+    timestamps: Curve<i64>,
     peak_equity: f64,
     peak_before_sample: f64,
     /// Events applied to any member; the `halted_at` ordinal of a group halt.
@@ -121,10 +122,10 @@ impl AccountGroup {
             liquidate_on_margin_call: base.liquidate_on_margin_call,
             margin_model: base.margin_model.clone(),
             members: Vec::new(),
-            equity_curve: Vec::new(),
-            drawdown_curve: Vec::new(),
-            locked_curve: Vec::new(),
-            timestamps: Vec::new(),
+            equity_curve: Curve::default(),
+            drawdown_curve: Curve::default(),
+            locked_curve: Curve::default(),
+            timestamps: Curve::default(),
             peak_equity: spec.initial_capital,
             peak_before_sample: spec.initial_capital,
             applied: 0,
@@ -163,11 +164,10 @@ impl AccountGroup {
 
     /// Heap held by the sampled curves.
     pub fn curve_heap_bytes(&self) -> usize {
-        (self.equity_curve.capacity()
-            + self.drawdown_curve.capacity()
-            + self.locked_curve.capacity()
-            + self.timestamps.capacity())
-            * std::mem::size_of::<f64>()
+        self.equity_curve.heap_bytes()
+            + self.drawdown_curve.heap_bytes()
+            + self.locked_curve.heap_bytes()
+            + self.timestamps.heap_bytes()
     }
 
     /// Account equity: the pool's cash plus every live member's marks.
@@ -372,7 +372,7 @@ impl AccountGroup {
 
         let mut equity = self.equity(books);
         let ts = entry.timestamp();
-        if self.timestamps.last() == Some(&ts) {
+        if self.timestamps.last() == Some(ts) {
             self.equity_curve.pop();
             self.drawdown_curve.pop();
             self.locked_curve.pop();
@@ -390,10 +390,10 @@ impl AccountGroup {
         self.timestamps.push(ts);
         if let Some(window) = self.curve_window.filter(|&w| self.equity_curve.len() >= 2 * w) {
             let drop = self.equity_curve.len() - window;
-            self.equity_curve.drain(..drop);
-            self.drawdown_curve.drain(..drop);
-            self.locked_curve.drain(..drop);
-            self.timestamps.drain(..drop);
+            self.equity_curve.drain_front(drop);
+            self.drawdown_curve.drain_front(drop);
+            self.locked_curve.drain_front(drop);
+            self.timestamps.drain_front(drop);
         }
 
         // Maintenance: the requirement is the sum over every member.
@@ -498,12 +498,15 @@ impl AccountGroup {
     fn restate_last_sample(&mut self, equity: f64) {
         let Some(last) = self.equity_curve.last_mut() else { return };
         *last = equity;
-        let n = self.equity_curve.len();
         if equity > self.peak_equity {
             self.peak_equity = equity;
         }
-        self.drawdown_curve[n - 1] = (self.peak_equity - equity) / self.peak_equity * 100.0;
-        self.locked_curve[n - 1] = self.account.locked();
+        if let Some(dd) = self.drawdown_curve.last_mut() {
+            *dd = (self.peak_equity - equity) / self.peak_equity * 100.0;
+        }
+        if let Some(locked) = self.locked_curve.last_mut() {
+            *locked = self.account.locked();
+        }
     }
 
     /// Re-price the groups of option legs that share an underlying and
@@ -616,10 +619,10 @@ impl AccountGroup {
         GroupOutcome {
             initial_capital: self.spec.initial_capital,
             balance: self.account.balance(),
-            equity_curve: std::mem::take(&mut self.equity_curve),
-            drawdown_curve: std::mem::take(&mut self.drawdown_curve),
-            locked_curve: std::mem::take(&mut self.locked_curve),
-            timestamps: std::mem::take(&mut self.timestamps),
+            equity_curve: std::mem::take(&mut self.equity_curve).into_vec(),
+            drawdown_curve: std::mem::take(&mut self.drawdown_curve).into_vec(),
+            locked_curve: std::mem::take(&mut self.locked_curve).into_vec(),
+            timestamps: std::mem::take(&mut self.timestamps).into_vec(),
             halted: self.account.is_halted(),
             halted_at: self.account.halted_at(),
             members: self.members.clone(),

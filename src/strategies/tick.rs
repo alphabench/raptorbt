@@ -138,6 +138,7 @@ impl TickBacktest {
             ..self.config.base.clone()
         };
         let mut book = PortfolioBook::new(config.clone(), account_mode(&config));
+        book.reserve_curves(n);
         book.add_instrument(symbol.to_string(), Direction::Long, None, None, PositionPolicy::Net);
 
         let max_hold_ns: i64 = self.config.max_hold_seconds as i64 * 1_000_000_000;

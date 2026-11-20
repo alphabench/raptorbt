@@ -26,6 +26,7 @@ use crate::core::types::{
 use crate::data::DepthTick;
 use crate::instruments::InstrumentSpec;
 use crate::metrics::streaming::StreamingMetrics;
+use crate::portfolio::curve::Curve;
 use crate::portfolio::engine::compute_backtest_metrics_with_config;
 use crate::portfolio::kernel::{Adoption, EngineEvent, EngineKernel, KernelBar, StepInput};
 use crate::portfolio::ledger::PositionPolicy;
@@ -106,10 +107,10 @@ pub struct PortfolioBook {
     unfunded: Vec<usize>,
     /// Whether any print, quote or depth snapshot was applied: a tick run.
     tick_run: bool,
-    equity_curve: Vec<f64>,
-    drawdown_curve: Vec<f64>,
-    returns: Vec<f64>,
-    timestamps: Vec<i64>,
+    equity_curve: Curve<f64>,
+    drawdown_curve: Curve<f64>,
+    returns: Curve<f64>,
+    timestamps: Curve<i64>,
     trades: Vec<Trade>,
     streaming: StreamingMetrics,
     peak_equity: f64,
@@ -225,10 +226,10 @@ impl PortfolioBook {
             last_seen: Vec::new(),
             unfunded: Vec::new(),
             tick_run: false,
-            equity_curve: Vec::new(),
-            drawdown_curve: Vec::new(),
-            returns: Vec::new(),
-            timestamps: Vec::new(),
+            equity_curve: Curve::default(),
+            drawdown_curve: Curve::default(),
+            returns: Curve::default(),
+            timestamps: Curve::default(),
             trades: Vec::new(),
             streaming: StreamingMetrics::new(),
             peak_equity: pool,
@@ -420,9 +421,24 @@ impl PortfolioBook {
         }
     }
 
-    /// Equity sampled so far, once per distinct timestamp.
-    pub fn equity_curve(&self) -> &[f64] {
-        &self.equity_curve
+    /// Equity sampled so far, once per distinct timestamp, copied out of the
+    /// curve's blocks. [`PortfolioBook::last_equity`] reads the last sample.
+    pub fn equity_curve(&self) -> Vec<f64> {
+        self.equity_curve.clone().into_vec()
+    }
+
+    /// The most recent equity sample.
+    pub fn last_equity(&self) -> Option<f64> {
+        self.equity_curve.last()
+    }
+
+    /// Room for `samples` samples in each curve, so a run that knows its
+    /// length keeps them contiguous. Call before the first event.
+    pub fn reserve_curves(&mut self, samples: usize) {
+        self.equity_curve.reserve(samples);
+        self.drawdown_curve.reserve(samples);
+        self.returns.reserve(samples);
+        self.timestamps.reserve(samples);
     }
 
     /// Keep only the most recent samples of the equity, drawdown and returns
@@ -445,11 +461,10 @@ impl PortfolioBook {
 
     /// Heap held by the sampled curves and their timestamps (capacity).
     pub fn curve_heap_bytes(&self) -> usize {
-        (self.equity_curve.capacity()
-            + self.drawdown_curve.capacity()
-            + self.returns.capacity()
-            + self.timestamps.capacity())
-            * std::mem::size_of::<f64>()
+        self.equity_curve.heap_bytes()
+            + self.drawdown_curve.heap_bytes()
+            + self.returns.heap_bytes()
+            + self.timestamps.heap_bytes()
     }
 
     /// The `submitted_idx` an order placed during the current event should
@@ -1313,7 +1328,7 @@ impl PortfolioBook {
     #[inline]
     fn sample_equity(&mut self, ts: Timestamp) -> f64 {
         let equity = self.equity();
-        if self.timestamps.last() == Some(&ts) {
+        if self.timestamps.last() == Some(ts) {
             self.equity_curve.pop();
             self.drawdown_curve.pop();
             self.returns.pop();
@@ -1322,7 +1337,7 @@ impl PortfolioBook {
         } else {
             self.peak_before_sample = self.peak_equity;
         }
-        let prev = self.equity_curve.last().copied();
+        let prev = self.equity_curve.last();
         self.equity_curve.push(equity);
         if equity > self.peak_equity {
             self.peak_equity = equity;
@@ -1338,10 +1353,10 @@ impl PortfolioBook {
         if let Some(window) = self.curve_window.filter(|&w| self.equity_curve.len() >= 2 * w) {
             // Drop the oldest half in one move: amortised constant per sample.
             let drop = self.equity_curve.len() - window;
-            self.equity_curve.drain(..drop);
-            self.drawdown_curve.drain(..drop);
-            self.returns.drain(..drop);
-            self.timestamps.drain(..drop);
+            self.equity_curve.drain_front(drop);
+            self.drawdown_curve.drain_front(drop);
+            self.returns.drain_front(drop);
+            self.timestamps.drain_front(drop);
         }
         equity
     }
@@ -1450,16 +1465,19 @@ impl PortfolioBook {
     fn restate_last_sample(&mut self, equity: f64) {
         let Some(last) = self.equity_curve.last_mut() else { return };
         *last = equity;
-        let n = self.equity_curve.len();
         if equity > self.peak_equity {
             self.peak_equity = equity;
         }
-        self.drawdown_curve[n - 1] = (self.peak_equity - equity) / self.peak_equity * 100.0;
-        let prev = if n >= 2 { Some(self.equity_curve[n - 2]) } else { None };
-        self.returns[n - 1] = match prev {
-            Some(p) if p != 0.0 => (equity - p) / p,
-            _ => 0.0,
-        };
+        if let Some(dd) = self.drawdown_curve.last_mut() {
+            *dd = (self.peak_equity - equity) / self.peak_equity * 100.0;
+        }
+        let prev = self.equity_curve.back(1);
+        if let Some(ret) = self.returns.last_mut() {
+            *ret = match prev {
+                Some(p) if p != 0.0 => (equity - p) / p,
+                _ => 0.0,
+            };
+        }
     }
 
     /// Latch a portfolio-wide halt on the shared account.
@@ -1513,6 +1531,10 @@ impl PortfolioBook {
         if let Some(last) = self.equity_curve.last_mut() {
             *last = final_cash;
         }
+        let equity_curve = std::mem::take(&mut self.equity_curve).into_vec();
+        let drawdown_curve = std::mem::take(&mut self.drawdown_curve).into_vec();
+        let returns = std::mem::take(&mut self.returns).into_vec();
+        let timestamps = std::mem::take(&mut self.timestamps).into_vec();
 
         // In a group the strategy's curve starts from its share of the
         // account, which is not the account's capital the config carries.
@@ -1526,15 +1548,15 @@ impl PortfolioBook {
         // `periods_per_year` it annualizes on observations per trading day
         // times 252 (documented in the metrics reference).
         if self.tick_run && run_config.periods_per_year.is_none() {
-            run_config.periods_per_year = tick_periods_per_year(&self.timestamps, &self.config);
+            run_config.periods_per_year = tick_periods_per_year(&timestamps, &self.config);
         }
         let metrics_config = &run_config;
         let metrics = compute_backtest_metrics_with_config(
-            &self.equity_curve,
-            &self.drawdown_curve,
-            &self.returns,
+            &equity_curve,
+            &drawdown_curve,
+            &returns,
             &self.trades,
-            &self.timestamps,
+            &timestamps,
             metrics_config,
         );
         let outcomes = self
@@ -1571,17 +1593,12 @@ impl PortfolioBook {
             self.kernels.iter().flat_map(|k| k.unverified_fee_rows()).collect();
         unverified.sort();
         unverified.dedup();
-        let result = BacktestResult::new(
-            metrics,
-            self.equity_curve,
-            self.drawdown_curve,
-            self.trades,
-            self.returns,
-        )
-        .with_orders(order_log)
-        .with_unverified_fee_rows(unverified)
-        .with_halt(halted, halted_at)
-        .with_refusals(rejected_entries, unfunded_entries);
+        let result =
+            BacktestResult::new(metrics, equity_curve, drawdown_curve, self.trades, returns)
+                .with_orders(order_log)
+                .with_unverified_fee_rows(unverified)
+                .with_halt(halted, halted_at)
+                .with_refusals(rejected_entries, unfunded_entries);
         SessionOutcome {
             result,
             instruments: outcomes,

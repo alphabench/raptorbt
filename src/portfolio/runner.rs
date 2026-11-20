@@ -264,6 +264,11 @@ impl SingleRunner {
         self.book.is_halted()
     }
 
+    /// Room for `bars` equity samples; see [`PortfolioBook::reserve_curves`].
+    pub fn reserve_curves(&mut self, bars: usize) {
+        self.book.reserve_curves(bars);
+    }
+
     /// Force-close any open position and compute final metrics.
     pub fn finish(self) -> BacktestResult {
         self.book.finish().result
@@ -273,7 +278,7 @@ impl SingleRunner {
     /// before the first step.
     #[inline]
     pub fn equity(&self) -> f64 {
-        self.book.equity_curve().last().copied().unwrap_or(self.config.initial_capital)
+        self.book.last_equity().unwrap_or(self.config.initial_capital)
     }
 
     /// Current uninvested cash.

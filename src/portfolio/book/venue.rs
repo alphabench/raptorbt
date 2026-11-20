@@ -35,7 +35,7 @@ impl PortfolioBook {
         let moved = events
             .iter()
             .any(|e| matches!(e, EngineEvent::Entered { .. } | EngineEvent::Exited { .. }));
-        if moved && self.timestamps.last() == Some(&ts) && self.grouped.is_none() {
+        if moved && self.timestamps.last() == Some(ts) && self.grouped.is_none() {
             let equity = self.equity();
             // The earlier sample may have raised the peak above what the
             // restated one reaches.

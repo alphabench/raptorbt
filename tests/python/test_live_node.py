@@ -263,6 +263,32 @@ def test_push_equals_batch_hook_by_hook():
         assert rf.digest_result(live_results[k]) == rf.digest_result(batch_results[k])
 
 
+def test_a_long_unbounded_node_equals_the_batch_run():
+    # Long enough that each curve outgrows its first buffer and fills several
+    # blocks; every pushed print also carries a quote at the same instant.
+    ticks, depth, pushes = _feed(n=12_000, symbols=("A",))
+    spec = {"name": "legacy", "args": {"drive": "on_trade_tick", "every": 11, "enter_at": 3,
+                                       "exit_at": 8, "frac": 0.2}}
+    cfg = lambda: BacktestConfig(initial_capital=1_000_000.0, fees=0.0)  # noqa: E731
+
+    live = rf.Recorder(script=rf.make_script(spec))
+    live.tick_surface = True
+    node = LiveNode([(live, ["A"])], ["A"], cfg(), bar_stamp="close")
+    for op in pushes:
+        _push(node, op)
+    (live_result,) = node.finish()
+
+    batch = rf.Recorder(script=rf.make_script(spec))
+    batch.tick_surface = True
+    (batch_result,) = run_strategies(
+        [(batch, ["A"])], ticks=ticks, depth=depth, config=cfg(), bar_stamp="close"
+    )
+    assert len(live_result.result.equity_curve()) > 2 * 4096
+    assert len(live_result.result.trades()) > 100
+    assert live.hooks == batch.hooks
+    assert rf.digest_result(live_result) == rf.digest_result(batch_result)
+
+
 # -- time without data ---------------------------------------------------------
 
 

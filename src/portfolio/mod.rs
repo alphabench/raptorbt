@@ -3,6 +3,7 @@
 pub mod allocation;
 pub mod book;
 pub mod covariance;
+pub(crate) mod curve;
 pub mod engine;
 pub mod errors;
 pub mod factor_panel;

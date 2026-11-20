@@ -138,6 +138,7 @@ impl PortfolioEngine {
             inst_config,
         );
         runner.set_corporate_actions(actions, policy)?;
+        runner.reserve_curves(n);
 
         // Determine effective stop/target configs (per-instrument overrides take precedence)
         let effective_stop =

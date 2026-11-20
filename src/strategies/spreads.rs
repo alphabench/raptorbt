@@ -151,6 +151,7 @@ impl SpreadBacktest {
         book_config.squareoff_time_minutes = None;
         book_config.squareoff_time_by_symbol.clear(); // a spread's legs square off together
         let mut book = PortfolioBook::new(book_config, account_mode(base));
+        book.reserve_curves(n);
         for (k, leg) in legs.iter().enumerate() {
             book.add_instrument(
                 format!("SPREAD_LEG{k}"),

@@ -132,6 +132,7 @@ impl PortfolioBacktest {
         // entry may draw (`CapitalAllocation`, handed to the kernel as the
         // step's budget).
         let mut book = PortfolioBook::new(self.config.base.clone(), AccountMode::Cash);
+        book.reserve_curves(n_bars);
         for (_, signals) in instruments {
             let inst_config = instrument_configs.and_then(|m| m.get(&signals.symbol));
             book.add_instrument(
