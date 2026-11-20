@@ -376,6 +376,12 @@ impl OrderEngine {
             MatchMode::Bar => bar.timestamp.saturating_sub(1),
             MatchMode::Trade => bar.timestamp,
         };
+        // No order is working: nothing below can match, expire or cancel, and the instant
+        // covered is the only state the pass leaves (a position's target reads it).
+        if self.live().is_empty() {
+            self.prev_session_ts = Some(session_ts);
+            return expiries;
+        }
         // Only a bar can open a session: a print has no range to gap through.
         let session_open = mode == MatchMode::Bar && self.opens_session(session_ts);
         self.prev_session_ts = Some(session_ts);
@@ -711,6 +717,33 @@ mod tests {
         // Bar trades down to it: fill at limit.
         let outcomes = engine.match_bar(2, &bar(2, 100.0, 100.5, 98.5, 99.5), &fm);
         assert_eq!(outcomes, vec![MatchOutcome::Fill { order_id: id, price: 99.0 }]);
+    }
+
+    #[test]
+    fn an_empty_book_leaves_the_state_a_working_book_leaves() {
+        // A pass over a book with nothing working returns early. It must still record the
+        // instant it covered, which tells a later bar whether it opens a session (a resting
+        // order's gap fill reads it, and so does a position's target in the kernel).
+        let fm = FillModel::default();
+        let mut empty = OrderEngine::new();
+        let (mut working, _) =
+            engine_with(OrderKind::Limit { price: 1.0 }, OrderSide::Buy, TimeInForce::Gtc);
+        let day = 20_468i64 * NS_PER_DAY;
+        let stamps = [day + 1_000, day + 2_000, day + NS_PER_DAY + 1_000, day + 3 * NS_PER_DAY];
+        for (i, &ts) in stamps.iter().enumerate() {
+            let probe = ts + NS_PER_DAY / 2;
+            let b = bar(ts, 100.0, 101.0, 99.0, 100.0);
+            let (a, w) = if i % 2 == 0 {
+                (empty.match_bar(i + 1, &b, &fm), working.match_bar(i + 1, &b, &fm))
+            } else {
+                (empty.match_trade(i + 1, &b, &fm), working.match_trade(i + 1, &b, &fm))
+            };
+            assert!(a.is_empty() && w.is_empty());
+            assert!(working.working().count() == 1 && empty.working().count() == 0);
+            assert_eq!(empty.prev_session_ts, working.prev_session_ts, "{i}");
+            assert_eq!(empty.opens_session(probe), working.opens_session(probe), "{i}");
+        }
+        assert_eq!(empty.prev_session_ts, Some(stamps[3]));
     }
 
     #[test]

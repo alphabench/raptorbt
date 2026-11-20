@@ -461,6 +461,9 @@ pub struct EngineKernel {
     pub(crate) squareoff_outbox: bool,
     /// Position ids the strategy asked to close, applied on the next step.
     pub(crate) pending_closes: Vec<u64>,
+    /// Scratch for the ids of the open positions a step walks while it may close them, kept
+    /// so a step with a position open does not allocate. Empty between uses.
+    open_ids: Vec<u64>,
     /// A forced flatten (halt, margin call, daily loss) the strategy's book
     /// asked for: the exit reason, and the first bar stamp that may fill it. It is
     /// an ordinary reduce-only market order for every position, so it fills
@@ -628,6 +631,7 @@ impl EngineKernel {
             slice_outbox: Vec::new(),
             squareoff_outbox: false,
             pending_closes: Vec::new(),
+            open_ids: Vec::new(),
             flatten_request: None,
             account: AccountMode::Cash,
             margin: MarginBook::default(),
@@ -2212,8 +2216,10 @@ impl EngineKernel {
 
         // Protective exits, per position in opening order: stop > target. Net policy holds one
         // position, reproducing the original sequence exactly.
-        let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-        for position_id in open_ids {
+        let mut open_ids = std::mem::take(&mut self.open_ids);
+        debug_assert!(open_ids.is_empty());
+        open_ids.extend(self.ledger.positions().iter().map(|p| p.id));
+        for &position_id in &open_ids {
             if let Some(event) = self.try_exit_position(idx, bar, position_id, false, false) {
                 events.push(event);
             }
@@ -2228,6 +2234,8 @@ impl EngineKernel {
                 }
             }
         }
+        open_ids.clear();
+        self.open_ids = open_ids;
 
         // Session square-off: the first event at or after the cutoff flattens
         // the book, after the position's own protective exits and before
@@ -2464,11 +2472,13 @@ impl EngineKernel {
             })
             .map(|o| o.id)
             .collect();
-        let held_before: Vec<u64> = if defer_signals && mode == StepMode::Bar {
-            self.ledger.positions().iter().map(|p| p.id).collect()
-        } else {
-            Vec::new()
-        };
+        // Read only by the entry-bar protection, which runs only when something was swept.
+        let held_before: Vec<u64> =
+            if defer_signals && mode == StepMode::Bar && !market_ids.is_empty() {
+                self.ledger.positions().iter().map(|p| p.id).collect()
+            } else {
+                Vec::new()
+            };
         let swept = market_ids.clone();
         for id in market_ids {
             // Under deferral an order of this instrument was acknowledged on

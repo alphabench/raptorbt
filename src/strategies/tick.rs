@@ -204,8 +204,12 @@ impl TickBacktest {
         }
 
         let mut result = book.finish().result;
+        // Pushed in tick order, at most one per tick: sorted, so a search finds what a scan
+        // from the front would.
+        debug_assert!(reasons.windows(2).all(|w| w[0].0 < w[1].0));
         for trade in result.trades.iter_mut() {
-            if let Some((_, reason)) = reasons.iter().find(|(idx, _)| *idx == trade.exit_idx) {
+            let at = reasons.partition_point(|(idx, _)| *idx < trade.exit_idx);
+            if let Some((_, reason)) = reasons.get(at).filter(|(idx, _)| *idx == trade.exit_idx) {
                 if trade.exit_reason == ExitReason::Signal {
                     trade.exit_reason = *reason;
                 }
@@ -415,6 +419,48 @@ mod tests {
 
         assert_eq!(result.trades.len(), 1);
         assert_eq!(result.trades[0].exit_reason, ExitReason::TimeExit);
+    }
+
+    #[test]
+    fn each_trade_keeps_the_reason_of_its_own_exit_tick() {
+        // Signal, time and end-of-data exits interleaved: every trade's reason is the one
+        // recorded at its exit tick, whichever trades came before it.
+        let n = 195;
+        let ticks = make_ticks(n, 100.0, 0.0);
+        let mut entries: Vec<bool> = (0..n).map(|i| i % 30 == 0).collect();
+        entries[192] = true;
+        let exits: Vec<bool> = (0..n).map(|i| i % 60 == 5).collect();
+        let config = TickBacktestConfig {
+            base: BacktestConfig {
+                initial_capital: 10_000.0,
+                fees: 0.0,
+                slippage: 0.0,
+                ..Default::default()
+            },
+            stop_loss_pct: 50.0,
+            take_profit_pct: 50.0,
+            max_hold_seconds: 10,
+            entry_cooldown_ticks: 1,
+            ..Default::default()
+        };
+        let result = TickBacktest::new(config).run(&ticks, &entries, &exits, "TEST");
+
+        let seen: Vec<(usize, ExitReason)> =
+            result.trades.iter().map(|t| (t.exit_idx, t.exit_reason)).collect();
+        use ExitReason::{EndOfData, Signal, TimeExit};
+        assert_eq!(
+            seen,
+            vec![
+                (5, Signal),
+                (40, TimeExit),
+                (65, Signal),
+                (100, TimeExit),
+                (125, Signal),
+                (160, TimeExit),
+                (185, Signal),
+                (194, EndOfData),
+            ]
+        );
     }
 
     #[test]
