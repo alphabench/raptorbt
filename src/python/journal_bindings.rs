@@ -241,7 +241,7 @@ impl PyJournal {
             if let Some(path) = &file {
                 let sink = FileSink::open(path, policy, &header, seq_base, chain.as_deref())
                     .map_err(|e| PyErr::from(Fail::new("journal_failed", e)))?;
-                j.add_sink(Box::new(sink));
+                j.add_byte_sink(Box::new(sink));
             }
             if let Some(cb) = sink {
                 j.add_sink(Box::new(CallbackSink(cb)));

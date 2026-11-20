@@ -71,6 +71,7 @@ use super::strategy_bindings::{
     atr_period, convert_snapshot, parse_account_mode, parse_qty_spec, submit_order_checked,
     submit_order_on, submit_twap_on, PyEngineEvent, PyKernelSession, PyPositionSnapshot,
 };
+use crate::journal::market::{self as jm, Payload};
 
 /// Events between interpreter signal checks.
 const SIGNAL_EVERY: u64 = 4096;
@@ -597,6 +598,27 @@ impl Shared {
             client_order_id,
             payload(),
         );
+        appended.map(|_| ()).map_err(journal_err)
+    }
+
+    /// [`Shared::jlog`] for a record of market data, given the payload itself:
+    /// a journal that keeps no record values takes its bytes without building
+    /// the value.
+    fn jlog_payload(
+        &self,
+        kind: &str,
+        event_ns: i64,
+        arrival_ns: i64,
+        source: &str,
+        payload: &impl Payload,
+    ) -> PyResult<()> {
+        if !self.journal_on.get() {
+            return Ok(());
+        }
+        self.control.now.set((event_ns, arrival_ns));
+        let journal = self.journal.borrow().clone().expect("journal_on implies a journal");
+        let appended =
+            journal.borrow_mut().append_payload(kind, event_ns, arrival_ns, source, payload);
         appended.map(|_| ()).map_err(journal_err)
     }
 
@@ -4407,20 +4429,23 @@ impl PyRuntime {
             let ts = timestamp;
             self.stamp(ts, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, ts).map_err(runtime_err))?;
-            sh.jlog(jk::TICK, ts, arrival_ns.unwrap_or(ts), jsrc::FEED, None, || {
-                JV::map([
-                    ("symbol", JV::str(sh.symbol_text(g.index()))),
-                    ("ltp", JV::Float(ltp)),
-                    ("bid", JV::Float(bid)),
-                    ("ask", JV::Float(ask)),
-                    ("buy_qty_delta", JV::Float(buy_qty_delta)),
-                    ("sell_qty_delta", JV::Float(sell_qty_delta)),
-                    ("ltq", JV::Float(ltq)),
-                    ("bid_qty", JV::Float(bid_qty)),
-                    ("ask_qty", JV::Float(ask_qty)),
-                    ("oi", JV::Float(oi)),
-                ])
-            })?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let tick = jm::Tick {
+                    symbol: &symbol,
+                    ltp,
+                    bid,
+                    ask,
+                    buy_qty_delta,
+                    sell_qty_delta,
+                    ltq,
+                    bid_qty,
+                    ask_qty,
+                    oi,
+                };
+                sh.jlog_payload(jk::TICK, ts, arrival_ns.unwrap_or(ts), jsrc::FEED, &tick)?;
+            }
             let trade = ltp > 0.0;
             let quote = bid > 0.0 && ask > 0.0;
             if !trade && !quote {
@@ -4500,18 +4525,22 @@ impl PyRuntime {
             let close_ts = timestamp + sh.offset_of(g.index());
             self.stamp(close_ts, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, close_ts).map_err(runtime_err))?;
-            sh.jlog(jk::BAR, close_ts, arrival_ns.unwrap_or(close_ts), jsrc::FEED, None, || {
-                JV::map([
-                    ("symbol", JV::str(sh.symbol_text(g.index()))),
-                    ("timestamp", JV::Int(timestamp)),
-                    ("open", JV::Float(open)),
-                    ("high", JV::Float(high)),
-                    ("low", JV::Float(low)),
-                    ("close", JV::Float(close)),
-                    ("volume", JV::Float(volume)),
-                    ("warmup", JV::Bool(sh.warmup.get())),
-                ])
-            })?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let bar = jm::Bar {
+                    symbol: &symbol,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    warmup: sh.warmup.get(),
+                };
+                let arrival = arrival_ns.unwrap_or(close_ts);
+                sh.jlog_payload(jk::BAR, close_ts, arrival, jsrc::FEED, &bar)?;
+            }
             let stamped = KernelBar { timestamp, open, high, low, close, volume };
             let event =
                 store_row(sh, g, RingKind::Bars, |feed| feed.push_bar(g, close_ts, stamped))?;
@@ -4546,28 +4575,13 @@ impl PyRuntime {
             let g = self.instrument(instrument)?;
             self.stamp(timestamp, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, timestamp).map_err(runtime_err))?;
-            sh.jlog(
-                jk::DEPTH,
-                timestamp,
-                arrival_ns.unwrap_or(timestamp),
-                jsrc::FEED,
-                None,
-                || {
-                    let side = |levels: &[(f64, f64)]| {
-                        JV::List(
-                            levels
-                                .iter()
-                                .map(|&(p, q)| JV::List(vec![JV::Float(p), JV::Float(q)]))
-                                .collect(),
-                        )
-                    };
-                    JV::map([
-                        ("symbol", JV::str(sh.symbol_text(g.index()))),
-                        ("bids", side(&bids)),
-                        ("asks", side(&asks)),
-                    ])
-                },
-            )?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let depth = jm::Depth { symbol: &symbol, bids: &bids, asks: &asks };
+                let arrival = arrival_ns.unwrap_or(timestamp);
+                sh.jlog_payload(jk::DEPTH, timestamp, arrival, jsrc::FEED, &depth)?;
+            }
             let levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
                 levels
                     .iter()
@@ -4679,9 +4693,7 @@ impl PyRuntime {
             let mut guard = self.live_loop()?;
             self.drain_held(py, &mut guard)?;
             self.settle_push();
-            sh.jlog(jk::TIME, timestamp, timestamp, jsrc::FEED, None, || {
-                JV::map([("timestamp", JV::Int(timestamp))])
-            })?;
+            sh.jlog_payload(jk::TIME, timestamp, timestamp, jsrc::FEED, &jm::Time { timestamp })?;
             let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
             for st in &strats {
                 let locals = match &*sh.inner.borrow() {

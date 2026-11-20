@@ -144,29 +144,44 @@ impl Value {
 
 /// A float as the text the encoding stores.
 pub fn float_text(f: f64) -> String {
+    let mut out = String::new();
+    push_float_text(&mut out, f);
+    out
+}
+
+/// [`float_text`], appended to `out` without a string of its own.
+fn push_float_text(out: &mut String, f: f64) {
     if f.is_nan() {
-        "NaN".to_string()
+        out.push_str("NaN");
     } else if f.is_infinite() {
-        if f > 0.0 { "inf" } else { "-inf" }.to_string()
+        out.push_str(if f > 0.0 { "inf" } else { "-inf" });
     } else if f == 0.0 && f.is_sign_negative() {
-        "-0".to_string()
+        out.push_str("-0");
     } else {
         // Rust's Display for f64 is the shortest text that parses back to the
         // same bits, and never uses an exponent.
-        format!("{f}")
+        let _ = write!(out, "{f}");
     }
 }
 
 fn write_float(out: &mut String, f: f64) {
     out.push('"');
-    out.push_str(&float_text(f));
+    push_float_text(out, f);
     out.push('"');
 }
 
 /// A JSON string as Python's `json.dumps(..., ensure_ascii=True)` writes it.
 pub fn write_str(out: &mut String, s: &str) {
     out.push('"');
-    for c in s.chars() {
+    // Runs of printable ASCII other than the two escaped characters are copied
+    // whole; every other character is escaped one by one.
+    let mut run = 0;
+    for (i, c) in s.char_indices() {
+        if matches!(c, ' '..='~') && c != '"' && c != '\\' {
+            continue;
+        }
+        out.push_str(&s[run..i]);
+        run = i + c.len_utf8();
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -175,7 +190,6 @@ pub fn write_str(out: &mut String, s: &str) {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
-            ' '..='~' => out.push(c),
             _ => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
@@ -184,6 +198,7 @@ pub fn write_str(out: &mut String, s: &str) {
             }
         }
     }
+    out.push_str(&s[run..]);
     out.push('"');
 }
 
@@ -213,6 +228,78 @@ mod tests {
         let mut out = String::new();
         write_str(&mut out, "a\"b\\c\n\u{e9}\u{1f600}");
         assert_eq!(out, "\"a\\\"b\\\\c\\n\\u00e9\\ud83d\\ude00\"");
+    }
+
+    /// The writers as they were before they wrote in place: one character at a
+    /// time, and a string per float.
+    fn old_write_str(out: &mut String, s: &str) {
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0c}' => out.push_str("\\f"),
+                ' '..='~' => out.push(c),
+                _ => {
+                    let mut units = [0u16; 2];
+                    for unit in c.encode_utf16(&mut units) {
+                        let _ = write!(out, "\\u{unit:04x}");
+                    }
+                }
+            }
+        }
+        out.push('"');
+    }
+
+    fn old_float_text(f: f64) -> String {
+        if f.is_nan() {
+            "NaN".to_string()
+        } else if f.is_infinite() {
+            if f > 0.0 { "inf" } else { "-inf" }.to_string()
+        } else if f == 0.0 && f.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            format!("{f}")
+        }
+    }
+
+    #[test]
+    fn the_in_place_writers_write_what_the_old_ones_wrote() {
+        let mut state = 0x0123_4567_89ab_cdefu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabet: Vec<char> = (0u32..0x80)
+            .chain([0xe9, 0x7ff, 0x800, 0x20ac, 0xd7ff, 0xe000, 0xfffd, 0xffff, 0x1_0000, 0x1f600])
+            .chain([0x10_ffff])
+            .filter_map(char::from_u32)
+            .collect();
+        for _ in 0..20_000 {
+            let len = (next() % 24) as usize;
+            let s: String =
+                (0..len).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect();
+            let (mut new, mut old) = (String::from("x"), String::from("x"));
+            write_str(&mut new, &s);
+            old_write_str(&mut old, &s);
+            assert_eq!(new, old, "{s:?}");
+            let f = f64::from_bits(next());
+            for f in [f, -f, (next() >> 11) as f64, (next() % 1_000_000) as f64 / 100.0] {
+                let mut out = String::from("x");
+                Value::Float(f).write(&mut out);
+                assert_eq!(out, format!("x\"{}\"", old_float_text(f)));
+                assert_eq!(float_text(f), old_float_text(f));
+            }
+        }
+        for f in [0.0, -0.0, 5e-324, f64::MAX, f64::MIN, f64::NAN, f64::INFINITY, -f64::INFINITY] {
+            assert_eq!(float_text(f), old_float_text(f));
+        }
     }
 
     #[test]

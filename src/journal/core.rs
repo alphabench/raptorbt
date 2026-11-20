@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use super::chain::{chain_start, chain_step};
+use super::market::Payload;
 use super::record::{kind, Record};
 use super::sink::Sink;
 use super::value::Value;
@@ -75,12 +76,17 @@ pub struct Journal {
     chain_from: String,
     chain: String,
     sinks: Vec<Box<dyn Sink>>,
+    /// Sinks that may read a record's value, not only its bytes.
+    value_sinks: usize,
     memory: Option<Memory>,
     /// Records a replay must reproduce, front first.
     expected: VecDeque<Rc<Stored>>,
     replayed: u64,
     broken: bool,
     last_kind: Option<String>,
+    /// The buffer the next record's bytes are written into, when the last
+    /// record's were not kept.
+    scratch: String,
 }
 
 impl Journal {
@@ -98,15 +104,26 @@ impl Journal {
             chain_from: chain.clone(),
             chain,
             sinks: Vec::new(),
+            value_sinks: 0,
             memory: None,
             expected: VecDeque::new(),
             replayed: 0,
             broken: false,
             last_kind: None,
+            scratch: String::new(),
         }
     }
 
     pub fn add_sink(&mut self, sink: Box<dyn Sink>) {
+        self.value_sinks += 1;
+        self.sinks.push(sink);
+    }
+
+    /// A sink that reads only a record's bytes and its kind, never its other
+    /// fields: while every sink is one and no memory is kept, a market-data
+    /// record reaches the sinks with a `Null` payload and its bytes written
+    /// without building the value (see [`Journal::append_payload`]).
+    pub(crate) fn add_byte_sink(&mut self, sink: Box<dyn Sink>) {
         self.sinks.push(sink);
     }
 
@@ -185,6 +202,39 @@ impl Journal {
         client_order_id: Option<&str>,
         payload: Value,
     ) -> Result<u64, JournalError> {
+        self.append_with(kind, ts_event, ts_arrival, source, client_order_id, payload, None)
+    }
+
+    /// Append a record of market data. Its bytes are those [`Journal::append`]
+    /// writes for `payload.value()`; the value is built only when something
+    /// keeps it (memory, or a sink other than a byte sink).
+    pub(crate) fn append_payload(
+        &mut self,
+        kind: &str,
+        ts_event: i64,
+        ts_arrival: i64,
+        source: &str,
+        payload: &impl Payload,
+    ) -> Result<u64, JournalError> {
+        if self.memory.is_some() || self.value_sinks > 0 {
+            return self.append(kind, ts_event, ts_arrival, source, None, payload.value());
+        }
+        let write = |out: &mut String| payload.write(out);
+        self.append_with(kind, ts_event, ts_arrival, source, None, Value::Null, Some(&write))
+    }
+
+    /// `write`, when given, writes the payload's bytes in place of `payload`.
+    #[allow(clippy::too_many_arguments)]
+    fn append_with(
+        &mut self,
+        kind: &str,
+        ts_event: i64,
+        ts_arrival: i64,
+        source: &str,
+        client_order_id: Option<&str>,
+        payload: Value,
+        write: Option<&dyn Fn(&mut String)>,
+    ) -> Result<u64, JournalError> {
         if self.broken {
             return Err(JournalError::Broken);
         }
@@ -197,37 +247,71 @@ impl Journal {
             client_order_id: client_order_id.map(str::to_string),
             payload,
         };
-        let canonical = record.canonical();
-        let chain = chain_step(&self.chain, &canonical);
+        let mut text = std::mem::take(&mut self.scratch);
+        text.clear();
+        // A record kept in memory takes its buffer with it: the next one
+        // starts from the room `Value::to_bytes` gives.
+        text.reserve(128);
+        match write {
+            Some(write) => record.write_canonical(&mut text, write),
+            None => record.write_canonical(&mut text, |out| record.payload.write(out)),
+        }
+        let canonical = text.into_bytes();
+        let seq = record.seq;
         if let Some(exp) = self.expected.front() {
             if exp.canonical != canonical {
                 return Err(JournalError::Diverged {
-                    seq: record.seq,
+                    seq,
                     expected: String::from_utf8_lossy(&exp.canonical).into_owned(),
                     got: String::from_utf8_lossy(&canonical).into_owned(),
                 });
             }
             let stored = self.expected.pop_front().expect("peeked");
             self.replayed += 1;
+            self.reuse(canonical);
             self.advance(stored);
-            return Ok(record.seq);
+            return Ok(seq);
         }
-        let seq = record.seq;
-        let stored = Rc::new(Stored { record, canonical, chain });
+        let chain = chain_step(&self.chain, &canonical);
+        let stored = Stored { record, canonical, chain };
         for sink in &mut self.sinks {
             if let Err(e) = sink.write(&stored) {
                 self.broken = true;
                 return Err(JournalError::Sink(e));
             }
         }
-        self.advance(stored);
+        if self.memory.is_some() {
+            self.advance(Rc::new(stored));
+        } else {
+            // Nothing keeps the record: its link becomes the head and its
+            // buffer takes the next record's bytes.
+            self.next_seq = seq + 1;
+            self.set_last_kind(kind);
+            self.chain = stored.chain;
+            self.reuse(stored.canonical);
+        }
         Ok(seq)
+    }
+
+    fn reuse(&mut self, mut bytes: Vec<u8>) {
+        bytes.clear();
+        self.scratch = String::from_utf8(bytes).expect("an empty buffer is text");
+    }
+
+    fn set_last_kind(&mut self, kind: &str) {
+        if let Some(last) = &mut self.last_kind {
+            last.clear();
+            last.push_str(kind);
+        } else {
+            self.last_kind = Some(kind.to_string());
+        }
     }
 
     fn advance(&mut self, stored: Rc<Stored>) {
         self.next_seq = stored.record.seq + 1;
-        self.chain = stored.chain.clone();
-        self.last_kind = Some(stored.record.kind.clone());
+        self.chain.clear();
+        self.chain.push_str(&stored.chain);
+        self.set_last_kind(&stored.record.kind);
         if let Some(mem) = &mut self.memory {
             mem.held.push_back(stored);
             if let Some(cap) = mem.cap {

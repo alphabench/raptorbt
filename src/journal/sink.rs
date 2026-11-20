@@ -67,14 +67,20 @@ pub struct FileSink {
     file: File,
     policy: Fsync,
     since_sync: u32,
+    /// The frame of the record being written, kept for the next one.
+    frame: Vec<u8>,
 }
 
 fn frame(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(FRAME_HEAD + payload.len());
+    frame_into(&mut out, payload);
+    out
+}
+
+fn frame_into(out: &mut Vec<u8>, payload: &[u8]) {
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
     out.extend_from_slice(payload);
-    out
 }
 
 impl FileSink {
@@ -111,13 +117,17 @@ impl FileSink {
             file.write_all(&bytes).map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
         }
-        Ok(FileSink { file, policy, since_sync: 0 })
+        Ok(FileSink { file, policy, since_sync: 0, frame: Vec::new() })
     }
 }
 
 impl Sink for FileSink {
     fn write(&mut self, stored: &Stored) -> Result<(), String> {
-        self.file.write_all(&frame(&stored.canonical)).map_err(|e| e.to_string())?;
+        // One write per record, as one frame: a record is with the operating
+        // system before the append returns, under every policy.
+        self.frame.clear();
+        frame_into(&mut self.frame, &stored.canonical);
+        self.file.write_all(&self.frame).map_err(|e| e.to_string())?;
         let force = match self.policy {
             Fsync::Every => true,
             Fsync::EveryN(n) => {
