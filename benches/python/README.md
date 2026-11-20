@@ -45,10 +45,28 @@ as the harness requires. Other machines will differ; compare only within one har
 | 1,000,000 | 157.3 ms | 6.36 | 5,703 | yes |
 | 10,000,000 | 1.908 s | 5.24 | 35,700 | no |
 
+The tick rows above ran on the harness's then default of 100,000 of capital. At 10,000,000 ticks the account ran
+out of cash: 1,132,518 entries were refused as unfunded and the last exit was at tick 8,752,707 (87.5% of the
+input), so that figure times a run that had stopped trading. The 1.0.0 harness recorded `reached_end` but did not
+check it. The harness now funds the tick runs with 10,000,000 and exits with an error when a run does not trade to
+the end of its input.
+
 Spread batch: 394.8 ms serial, 58.3 ms parallel, 6.77x, 8,571 per second, 500 distinct returns, matches the serial run.
 Sweep (184 combinations of 93,750 bars, 17.25M bar evaluations): 2.74 s wall, 2.52 s in the engine, peak RSS
 71.9 MB. Determinism: 20 runs, 1 distinct result hash. Metrics: 48 attributes, 31 keys in `to_dict()`.
 Engine extension: 6.4 MB.
+
+## Measured on raptorbt 1.1.0
+
+Not yet measured. To be filled in from `run_all.py` on the release build: the bar table, the tick table (tick runs
+funded with 10,000,000, every row reaching the end of its input), and the machine, Python and numpy versions.
+
+| Ticks | Best | M ticks/s | Trades | Reached the end |
+|---|---|---|---|---|
+| 10,000 | _to be measured_ | | | |
+| 100,000 | _to be measured_ | | | |
+| 1,000,000 | _to be measured_ | | | |
+| 10,000,000 | _to be measured_ | | | |
 
 ## Slower than 0.13.x
 
@@ -66,7 +84,9 @@ On this harness and this machine, 1.0.0 is slower on the bar and tick paths than
 | 1,000,000 ticks | 145.6M ticks/s | 6.4M ticks/s |
 | 10,000,000 ticks | 135.3M ticks/s | 5.2M ticks/s |
 
-The 0.13.4 column is a single run; the 1.0.0 column is the median of 3. A build of the 1.0.0 source made locally
+The 0.13.4 column is a single run; the 1.0.0 column is the median of 3. The 10,000,000-tick rows ran on 100,000
+of capital: the 1.0.0 run stopped trading at 87.5% of its input (see above), and the 0.13.4 run was not checked
+for it. A build of the 1.0.0 source made locally
 measures the same as the wheel, so this is a change in the engine, not in the measurement or the packaging. Do
 not read the 0.7.0 note above as covering it: that one was a change of harness.
 
@@ -78,10 +98,14 @@ number that is wrong:
 
 - **Release build only.** A `cargo build` without `--release` is several times
   slower and not what ships.
-- **Tick runs must traverse the whole array.** `run_tick_backtest` defaults to
-  `max_trades=50` and *stops early* once it hits the cap, so a naive timing
-  measures a partial run and reports an inflated ticks/sec. The harness raises
-  the cap and asserts the last trade's `exit_idx` lands at the end of the input.
+- **Tick runs must trade to the end of the array.** A `max_trades` cap makes
+  `run_tick_backtest` *stop early* once it is reached, and an account that runs
+  out of cash refuses every later entry; either way a naive timing measures a
+  run that stopped trading and reports a flattering ticks/sec. The harness sets
+  no effective cap, funds the runs with 10,000,000, and exits non-zero unless
+  every run's last exit lands within 100 ticks of the end and no entry was
+  refused as unfunded. (Up to 1.0.0 it recorded this check without enforcing
+  it.)
 
 ## Live path, memory and concurrency benchmarks
 
