@@ -371,7 +371,7 @@ def _replay(node, journal, ck) -> None:
         rec = journal.peek()
         kind, payload = rec.kind, rec.payload
         try:
-            _apply(node, journal, rec, kind, payload)
+            _apply(node, journal, rec, kind, payload, None if checked else check_at)
         except Exception:
             # A push that failed in the original run failed here too, and the
             # engine wrote the same `error` record. Anything else is a replay
@@ -407,9 +407,33 @@ def _check_digest(node, journal, ck) -> None:
         )
 
 
-def _apply(node, journal, rec, kind, p) -> None:
+def _warm_up_pushes(node, journal, stop_at):
+    """The pushes of the bars one ``LiveNode.warm_up`` call journaled (``warmup: true``), read
+    as the replay re-applies them. The call ends at the first other record, at a bar that sorts
+    before the one ahead of it (a call pushes its bars by close time, then symbol: it is a later
+    call's), or at the checkpoint's count (taken between calls). A constructor's warm-up bars
+    are replayed by the constructor and never reach here."""
+    last = None
+    while journal.replaying and journal.count != stop_at:
+        rec = journal.peek()
+        p = rec.payload
+        if rec.kind != "bar" or not p.get("warmup"):
+            return
+        index = node._index(p["symbol"], "warm_up")
+        if last is not None and (rec.ts_event, index) < last:
+            return
+        last = (rec.ts_event, index)
+        yield (
+            index, p["timestamp"], float(p["open"]), float(p["high"]), float(p["low"]),
+            float(p["close"]), float(p["volume"]),
+        )
+
+
+def _apply(node, journal, rec, kind, p, stop_at=None) -> None:
     arrival = rec.ts_arrival
-    if kind == "tick":
+    if kind == "bar" and p.get("warmup"):
+        node._warm_up(_warm_up_pushes(node, journal, stop_at))
+    elif kind == "tick":
         node.push_tick(
             p["symbol"], rec.ts_event, float(p["ltp"]), float(p["bid"]), float(p["ask"]),
             float(p["buy_qty_delta"]), float(p["sell_qty_delta"]), float(p["ltq"]),

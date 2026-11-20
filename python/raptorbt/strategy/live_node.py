@@ -661,7 +661,11 @@ class LiveNode:
         """
         self._check_open()
         self._stamps.require_given(f"{self._name}.warm_up")
-        pushes = _warmup(bars, self._index_of, self._stamps)
+        self._warm_up(_warmup(bars, self._index_of, self._stamps))
+
+    def _warm_up(self, pushes) -> None:
+        """Push ``pushes`` (``(index, ts, o, h, l, c, v)``) as ``warm_up`` does: muted, in one
+        group kept off the journal. A restore passes the bars one ``warm_up`` journaled."""
         self._rt.set_warmup(True, True)
         self._muted_now = True
         try:

@@ -554,20 +554,123 @@ def test_a_node_primed_with_bars_then_fed_ticks_restores(how):
     assert replayed.heard == strategy.heard
 
 
-@pytest.mark.xfail(strict=True, raises=StateError, reason=(
-    "known defect: the replay pushes a journaled warm_up() bar (warmup: true) as a live bar "
-    "(warmup: false) and diverges at its first record"
-))
 def test_a_node_primed_with_warm_up_after_construction_restores():
     journal = rj.Journal(HEADER, memory=True)
-    node = LiveNode([Primed()], ["A"], _cfg(), journal=journal, **_primed_kwargs("warm_up"))
+    strategy = Primed()
+    node = LiveNode([strategy], ["A"], _cfg(), journal=journal, **_primed_kwargs("warm_up"))
     _prime("warm_up", node)
     _ticks(node)
+    replayed = Primed()
     restored = LiveNode.restore(
-        None, [Primed()], ["A"], _cfg(), journal=rj.Journal(HEADER, memory=True),
+        None, [replayed], ["A"], _cfg(), journal=rj.Journal(HEADER, memory=True),
         records=[r.canonical() for r in journal.since(0)], **_primed_kwargs("warm_up"),
     )
     assert restored.state_digest() == node.state_digest()
+    assert replayed.heard == strategy.heard
+
+
+class PrimedPair(Strategy):
+    def __init__(self):
+        super().__init__()
+        self.heard = []
+
+    def on_start(self, ctx):
+        self.sma = {s: self.register_indicator(Indicator.sma(3), symbol=s) for s in SYMBOLS}
+
+    def on_bar(self, ctx, bar):
+        self.heard.append(
+            (bar.timestamp // NS, bar.close, ctx.is_warmup, self.sma["A"].value, self.sma["B"].value)
+        )
+
+
+def _history(first, n, base):
+    c = base + np.arange(n, dtype=float)
+    return dict(
+        timestamps=(np.arange(n) + first) * MIN, open=c, high=c + 1, low=c - 1, close=c,
+        volume=np.full(n, 10.0),
+    )
+
+
+def _warm(**bars):
+    return lambda node: node.warm_up(bars)
+
+
+def _bar(symbol, minute, c):
+    return lambda node: node.push_bar(symbol, minute * MIN, c, c + 1, c - 1, c, 10.0)
+
+
+WARM_UP_STEPS = {
+    "twice": [_warm(A=_history(1, 3, 100.0)), _warm(A=_history(4, 2, 103.0)), _bar("A", 6, 105.0)],
+    "after_live_bars": [
+        _bar("A", 1, 99.0), _bar("A", 2, 99.5), _warm(A=_history(3, 3, 100.0)), _bar("A", 6, 105.0),
+        _warm(A=_history(7, 2, 106.0)), _bar("A", 9, 108.0),
+    ],
+    "two_symbols": [
+        _warm(A=_history(1, 5, 100.0), B=_history(1, 5, 200.0)),
+        lambda node: node.push_group(6 * MIN, {"A": (105.0, 106.0, 104.0, 105.0, 10.0),
+                                               "B": (205.0, 206.0, 204.0, 205.0, 10.0)}),
+    ],
+    "second_call_older_than_the_first": [
+        _warm(A=_history(1, 5, 100.0)), _warm(B=_history(1, 5, 200.0)), _bar("B", 6, 205.0),
+    ],
+}
+
+
+@pytest.mark.parametrize("steps", WARM_UP_STEPS.values(), ids=WARM_UP_STEPS)
+def test_warm_up_calls_restore_at_every_step(steps):
+    """``warm_up`` called twice, after live bars, for two symbols, and a second call older than
+    the first: a restore from the records up to the end of each step (right after a warm-up, and
+    later) reproduces every record, the state digest and what the strategy heard."""
+    journal = rj.Journal(HEADER, memory=True)
+    strategy = PrimedPair()
+    node = LiveNode([strategy], SYMBOLS, _cfg(), journal=journal, **_primed_kwargs("warm_up"))
+    cuts = []
+    for step in steps:
+        step(node)
+        cuts.append((journal.count, node.state_digest(), list(strategy.heard)))
+    records = [r.canonical() for r in journal.since(0)]
+    for count, digest, heard in cuts:
+        replayed = PrimedPair()
+        restored = LiveNode.restore(
+            None, [replayed], SYMBOLS, _cfg(), journal=rj.Journal(HEADER, memory=True),
+            records=records[:count], **_primed_kwargs("warm_up"),
+        )
+        assert restored.state_digest() == digest
+        assert replayed.heard == heard
+
+
+def test_a_checkpoint_between_two_warm_up_calls_restores():
+    journal = rj.Journal(HEADER, memory=True)
+    node = LiveNode([PrimedPair()], SYMBOLS, _cfg(), journal=journal, **_primed_kwargs("warm_up"))
+    node.warm_up({"A": _history(1, 3, 100.0)})
+    checkpoint = node.checkpoint()
+    node.warm_up({"A": _history(4, 2, 103.0)})
+    node.push_bar("A", 6 * MIN, 105.0, 106.0, 104.0, 105.0, 10.0)
+    restored = LiveNode.restore(
+        checkpoint, [PrimedPair()], SYMBOLS, _cfg(), journal=rj.Journal(HEADER, memory=True),
+        records=[r.canonical() for r in journal.since(0)], **_primed_kwargs("warm_up"),
+    )
+    assert restored.state_digest() == node.state_digest()
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "known limit: a warm_up() whose first bar shares its close time with the previous "
+    "warm_up()'s last bar, of a later symbol, with no record between, journals the same bytes "
+    "as one call; the replay applies them as one group and a hook sees the other symbol's bar"
+))
+def test_a_second_warm_up_at_the_close_time_the_first_ended_on_restores():
+    journal = rj.Journal(HEADER, memory=True)
+    strategy = PrimedPair()
+    node = LiveNode([strategy], SYMBOLS, _cfg(), journal=journal, **_primed_kwargs("warm_up"))
+    node.warm_up({"A": _history(1, 3, 100.0), "B": _history(1, 2, 200.0)})
+    node.warm_up({"B": _history(3, 3, 202.0)})
+    replayed = PrimedPair()
+    restored = LiveNode.restore(
+        None, [replayed], SYMBOLS, _cfg(), journal=rj.Journal(HEADER, memory=True),
+        records=[r.canonical() for r in journal.since(0)], **_primed_kwargs("warm_up"),
+    )
+    assert restored.state_digest() == node.state_digest()
+    assert replayed.heard == strategy.heard
 
 
 # -- 6. an absent book and a NaN book -------------------------------------------------
