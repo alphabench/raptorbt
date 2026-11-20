@@ -253,9 +253,9 @@ mod tests {
         fn symbol(&mut self) -> String {
             const PARTS: [&str; 12] = [
                 "",
-                "NSE:",
-                "RELIANCE",
-                "BANKNIFTY24DEC50000CE",
+                "X:",
+                "ALPHA",
+                "SYMBOLA24DEC50000CE",
                 "a\"b",
                 "back\\slash",
                 "\n\t\r",
