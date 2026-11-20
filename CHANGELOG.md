@@ -312,6 +312,16 @@ flag, because the old numbers were wrong.
 - A roll due on an instant the market takes no orders (the bar stamped at the session's close)
   is no longer failed with `roll_close_failed` (`market_closed`): the close is sent again at the
   next event, and the open follows its fill as usual.
+- `auto_roll` no longer fails a roll whose close can never fill. When the old contract has no bar
+  after the roll is decided (its data ends before its expiry, or `roll_days=0` puts the roll on
+  the expiry itself), the engine settles the position at the expiry and the close ends `canceled`
+  or `rejected` for `expired`; that raised `roll_close_failed` and stopped the run with the position
+  already gone. The roll now goes on: the open follows in the new contract for the quantity that was
+  held, sized as usual on the price the position settled at (the old contract's last close when the
+  settlement named none), sent again at the next event if the market is closed at the expiry. The
+  close keeps its status, the open's tags carry `settled="expiry"`, and the new
+  `on_roll_settled(ctx, roll, close_id, price)` hears it. A close refused before the expiry, with
+  the position still held, still fails the roll.
 - `ctx.is_warmup` is true at every event before `run_strategies(trade_from=)` (and
   `run_strategies_windowed`), where every order is refused `warmup`, as it is on a `LiveNode`'s
   warm-up bars. A strategy that returned on it still sent those orders, which the run refused.

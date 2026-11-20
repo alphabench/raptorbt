@@ -1028,9 +1028,11 @@ or after the rule's time. A role's first event only records its contract: no rol
 | `auto_roll` | *No docstring.* |
 | `load_state(self, state)` | *No docstring.* |
 | `on_bar(self, ctx, bar)` | *No docstring.* |
+| `on_contract_event(self, ctx, event)` | Notes the price a held contract settled at, for a roll that settles instead of closing. |
 | `on_order_event(self, ctx, event)` | *No docstring.* |
 | `on_roll(self, ctx, roll: 'RollEvent') -> 'None'` | A continuous role moved to another contract. |
 | `on_roll_failed(self, ctx, roll: 'RollEvent', close_id: 'str', status: 'str', reason) -> 'None'` | A step of the roll ended without filling (``status`` is ``rejected``, ``canceled`` or ``expired``; ``zero_size`` for an open the new contract's price sizes to no lot, which names the open that was not sent). A close refused ``market_closed`` is not a failure: it is sent again at the next event. ``close_id`` names the order: a close of a position in the old contract (the open in the new contract was not sent, and the position is still in the old one), or, when its id ends in ``:o{k}``, the open in the new contract (the position is closed and not open in the new contract). Raises by default. |
+| `on_roll_settled(self, ctx, roll: 'RollEvent', close_id: 'str', price) -> 'None'` | The close of a roll could not fill and the old contract settled the position at its expiry instead: the open in the new contract follows (``close_id`` names the close that ended without filling, ``price`` the price the old contract settled at, ``None`` when it is not known). |
 | `on_roll_sized(self, ctx, roll: 'RollEvent', sizing: 'dict') -> 'None'` | The open of a roll was sized. ``sizing`` has ``policy``, ``lots_old``, ``lots_new``, ``notional_old``, ``notional_new`` and ``residual`` (the notional the rounding leaves out of the new contract: old minus new, so positive is under-exposed). |
 | `on_trade(self, ctx, tick)` | *No docstring.* |
 | `roll_sizing` | *No docstring.* |

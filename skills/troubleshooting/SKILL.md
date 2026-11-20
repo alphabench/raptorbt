@@ -152,7 +152,7 @@ state is as it was before the call.
 | `stale_epoch`, `epoch_required`, `fence_unsupported` | `StateError` / `InvalidParameter` | `restore()` needs an `epoch` newer than the journal's; an `epoch` was given with an adapter whose `can_fence` is not true. |
 | `adapter_cannot_adopt`, `adapter_namespace_missing`, `adapter_namespace_mismatch`, `hedging_unsupported_by_venue` | `StateError` / `InvalidParameter` | The adapter cannot account for the orders the node holds (`restore_orders` or `keeps_own_records`), has no `namespace`, is not the namespace the journal was written for, or nets positions under a hedging node. |
 | `exit_rule_unconfirmed`, `exit_rule_not_cancellable`, `exit_close_failed` | `StateError` | The venue did not say what it holds for an exit rule (ask it: reconcile), cannot take a held rule back, or refused the closes of a rule the allowed number of times. |
-| `roll_close_failed`, `roll_open_failed` | `StateError` | An auto-roll's close or open ended without filling: the position is still in the old contract (close failed) or in neither (open failed). Override `on_roll_failed` to handle it. |
+| `roll_close_failed`, `roll_open_failed` | `StateError` | An auto-roll's close or open ended without filling: the position is still in the old contract (close failed) or in neither (open failed). Override `on_roll_failed` to handle it. A close that ends `canceled` or `rejected` for `expired` at the old contract's expiry is not a failure: the contract settled the position and the open follows (`on_roll_settled`). |
 
 **An order was rejected** (`order_rejected`, `event.reject_reason`).
 

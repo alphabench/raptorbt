@@ -53,6 +53,10 @@ event. Never assume a queued order is a position.
 `ctx.history(n)`, `ctx.datetime`. Portfolio runs (`run_strategies`) add
 `ctx.symbol`, `ctx.symbols`, `ctx.series(symbol)`, `ctx.position_for(symbol)`
 and `ctx.open_orders()`. A single-instrument run has no `ctx.symbol`.
+`ctx.series(symbol)` shows every bar of the symbol since the run began unless the strategy
+declares how many it reads with `ctx.keep_history(N, symbol=symbol)` in `on_start`; a run over
+many symbols and a long window holds all of them in memory, so declare the look-back the logic
+needs (a few sessions of a ranking, a moving average's period) and read no further back.
 `ctx.positions(symbol=None)` is a method in every runner (the symbol is
 ignored in a single-instrument run); the attribute used as a list is deprecated.
 
