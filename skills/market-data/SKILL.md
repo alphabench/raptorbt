@@ -87,6 +87,10 @@ events (0, 1 or 2). A `nan` or infinite `ltp`, `bid` or `ask` is refused
   `push_group`) and then fed ticks builds its next bar from the window after the last
   bar given, and its indicators run on across the join. A tick stamped at that bar's
   close opens the next bar; an earlier one is refused.
+- Bars and ticks of one symbol are fed one way at a time: bars as history up to its
+  first tick, then ticks only. A bar pushed once its ticks have started (one stamped
+  before its last tick is refused) is executed and heard beside the bar the engine
+  builds from the same prints, and both are rows of its series (every bar twice).
 
 ## 3. API reference
 
@@ -364,7 +368,9 @@ assert result.metrics.total_trades > 0
 - A live node, its journal and restore: [live-trading](../live-trading/SKILL.md).
 - Runnable examples: `examples/tick-level/passive_quotes.py`, `examples/tick-level/tick_scalper.py`
   (a momentum scalper on prints, with its batch and live runs compared),
-  `examples/tick-level/dynamic_exit.py`, `examples/multi-instrument/relative_value.py`.
+  `examples/tick-level/dynamic_exit.py`, `examples/multi-instrument/cross_instrument_factor.py`
+  (a flow factor over several instruments' prints, read with five-minute bars built from them),
+  `examples/multi-instrument/relative_value.py`.
 
 ## 7. Constraints and correctness
 

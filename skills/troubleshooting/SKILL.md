@@ -139,7 +139,7 @@ state is as it was before the call.
 | `invalid_structure`, `structure_contract_missing`, `structure_missing_mark` | `InvalidParameter` / `StateError` | A leg, selector or submission argument is invalid; the chain lists no contract the leg selects at the event time; or a price or mark a structure needs was not supplied (`prices` or `marks`). |
 | `structure_limit_breached`, `structure_margin_exceeded` | `InvalidParameter` | The legs' prices make the net premium worse than `net_limit`; the margin model needs more than `available`. Nothing was queued. |
 | `below_one_lot`, `invalid_sizing_input` | `InvalidParameter` | A sizing rule yields under one lot (nothing is rounded up), or an input is not a positive finite number. |
-| `unknown_role_binding`, `unknown_role`, `no_requirements`, `unresolved_role`, `no_instrument_spec` | `InvalidParameter` / `UnknownSymbol` | A `bindings` key or `ctx.role` name no strategy declares, a strategy with no `requirements`, a role the data cannot resolve at this time, or a symbol with no `InstrumentSpec`. |
+| `unknown_role_binding`, `unknown_role`, `no_requirements`, `unresolved_role`, `role_before_event`, `no_instrument_spec` | `InvalidParameter` / `UnknownSymbol` | A `bindings` key or `ctx.role` name no strategy declares, a strategy with no `requirements`, a role the data cannot resolve at this time, a `Future` role read before the first event (read it in `on_bar`, not `on_start`), or a symbol with no `InstrumentSpec`. |
 | `invalid_binding`, `universe_size`, `universe_instrument` | `InvalidParameter` | A role bound to the wrong shape (a list for an `Underlying`; for a `Universe` anything but a list of distinct symbols); a `Universe` bound to fewer than its `min` or more than its `max` symbols; `ctx.instrument(role)` of a `Universe`, which names many symbols (`ctx.role(role)` lists them). |
 
 *Live node, journal and venue, not listed above.*
@@ -152,7 +152,7 @@ state is as it was before the call.
 | `stale_epoch`, `epoch_required`, `fence_unsupported` | `StateError` / `InvalidParameter` | `restore()` needs an `epoch` newer than the journal's; an `epoch` was given with an adapter whose `can_fence` is not true. |
 | `adapter_cannot_adopt`, `adapter_namespace_missing`, `adapter_namespace_mismatch`, `hedging_unsupported_by_venue` | `StateError` / `InvalidParameter` | The adapter cannot account for the orders the node holds (`restore_orders` or `keeps_own_records`), has no `namespace`, is not the namespace the journal was written for, or nets positions under a hedging node. |
 | `exit_rule_unconfirmed`, `exit_rule_not_cancellable`, `exit_close_failed` | `StateError` | The venue did not say what it holds for an exit rule (ask it: reconcile), cannot take a held rule back, or refused the closes of a rule the allowed number of times. |
-| `roll_close_failed`, `roll_open_failed` | `StateError` | An auto-roll's close or open ended without filling: the position is still in the old contract (close failed) or in neither (open failed). Override `on_roll_failed` to handle it. |
+| `roll_close_failed`, `roll_open_failed` | `StateError` | An auto-roll's close or open ended without filling: the position is still in the old contract (close failed) or in neither (open failed). Override `on_roll_failed` to handle it. A close that ends `canceled` or `rejected` for `expired` at the old contract's expiry is not a failure: the contract settled the position and the open follows (`on_roll_settled`). |
 
 **An order was rejected** (`order_rejected`, `event.reject_reason`).
 

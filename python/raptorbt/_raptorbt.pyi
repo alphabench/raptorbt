@@ -204,6 +204,14 @@ class Trade:
     # Present only when config.fee_segment selects an itemized schedule.
     # Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
     fee_breakdown: dict[str, float] | None
+    # The entry leg's and the exit leg's itemized costs alone, under the fee schedule's own
+    # component names (brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, ipft,
+    # dp_charge) and ``total``, the booked cost of the leg (``entry_fees`` / ``exit_fees``).
+    # ``total`` can differ from the sum of the parts by the rounding the fee row applies. None
+    # when the fee model does not itemise, on paths that synthesise a trade, and for the
+    # entry of a position built from several fills.
+    entry_fee_breakdown: dict[str, float] | None
+    exit_fee_breakdown: dict[str, float] | None
     exit_reason: str
     # Intra-trade extremes, measured bar by bar while the position was open.
     # None on paths that synthesise a trade instead of closing a tracked

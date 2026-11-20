@@ -464,6 +464,8 @@ impl PositionLedger {
             entry_fees: scale.to_f64(managed.entry_fees_money),
             exit_fees: scale.to_f64(exit_fees_money),
             fee_breakdown,
+            entry_fee_breakdown: managed.entry_breakdown,
+            exit_fee_breakdown: None,
             exit_reason,
             mae_price: Some(adverse_price),
             mfe_price: Some(favourable_price),

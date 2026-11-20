@@ -53,6 +53,10 @@ event. Never assume a queued order is a position.
 `ctx.history(n)`, `ctx.datetime`. Portfolio runs (`run_strategies`) add
 `ctx.symbol`, `ctx.symbols`, `ctx.series(symbol)`, `ctx.position_for(symbol)`
 and `ctx.open_orders()`. A single-instrument run has no `ctx.symbol`.
+`ctx.series(symbol)` shows every bar of the symbol since the run began unless the strategy
+declares how many it reads with `ctx.keep_history(N, symbol=symbol)` in `on_start`; a run over
+many symbols and a long window holds all of them in memory, so declare the look-back the logic
+needs (a few sessions of a ranking, a moving average's period) and read no further back.
 `ctx.positions(symbol=None)` is a method in every runner (the symbol is
 ignored in a single-instrument run); the attribute used as a list is deprecated.
 
@@ -119,7 +123,8 @@ Declarations, from `raptorbt.strategy`:
 | Name | What it is |
 | --- | --- |
 | `Requirements(roles, timeframes, holding, data=("bar",), warmup=None, max_structure=None, params=None, max_position=None)` | The manifest. `.to_dict()`, `Requirements.from_dict(d)`. |
-| `Underlying(asset=)`, `Instrument(symbol, asset=)`, `Universe(asset=, min=, max=, data=)`, `Future(of, contract=)`, `Chain(of, expiry, strikes, rights=)` | Roles: bound by the deployer to one symbol, fixed, bound by the deployer to a list of `min` to `max` symbols (a basket; `bindings={"basket": ["A", "B"]}`, read with `ctx.role("basket")`, a tuple), derived future, derived option chain. |
+| `Underlying(asset=)`, `Instrument(symbol, asset=)`, `Universe(asset=, min=, max=, data=)`, `Future(of, contract=)`, `Chain(of, expiry, strikes, rights=)` | Roles: bound by the deployer to one symbol, fixed, bound by the deployer to a list of `min` to `max` symbols (a basket; `bindings={"basket": ["A", "B"]}`, read with `ctx.role("basket")`, a tuple), derived future, derived option chain; read a `Future` role (or a `Chain` on one) with `ctx.role(name)` in `on_bar`, never in `on_start`, because the front contract depends on the event's time and `on_start` has none (`role_before_event`). |
+| `raptorbt.strategy.PointInTime(symbols, steps)` | A `Universe` binding whose members change: `symbols` is the union of every member, `steps` are `(start_ns, members)` pairs in ascending order. `ctx.role(name)` then returns the members at the context's event time, so a strategy never sees a name before it joined or after it left; the bars of the union are fed throughout. The manifest is the same `Universe`; `.at(ns)` answers any instant (before the first step: none). |
 | `StrikeWindow(low, high)`, `StrikeWindow.around(n)`, `ByDelta(low, high)` | Which strikes of a chain. |
 | `Holding.intraday(flatten_before="HH:MM")`, `Holding.overnight()` | Holding style. |
 | `Bars(n, timeframe=None)`, `Duration.minutes/hours/days(n)` | Warm-up. |

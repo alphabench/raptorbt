@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] - Unreleased
 
-Faster live and kernel paths, bars built from prints in `ctx.series()`, and a restore that
-works after `warm_up()`. No public call changes. **Bars and ticks are still slower than
+Faster live and kernel paths, bars built from prints in `ctx.series()`, a restore that
+works after `warm_up()`, a basket whose members change over time, each leg's fees on a
+trade, and a roll that goes on when the old contract settles at its expiry. No call is
+removed or renamed; a `Future` role read before the first event is now refused (see
+Changed). **Bars and ticks are still slower than
 0.13.x**: on the published harness 1.0.0 took 137.5 µs for 1,000 bars where 0.13.4 took
 72.6 µs, and 288.1 ms for 1,875,000 bars where 0.13.4 took 151.1 ms
 (`benches/python/README.md`, "Slower than 0.13.x"). 1.1.0 has not been measured on that
@@ -34,6 +37,11 @@ that gap.
   from the engine instead of copying `ctx.series(symbol)` out of its ring on every event. The
   price is the same, bit for bit, and the rules decide the same
   (`tests/python/test_exit_marks.py`). A batch `run_strategies` reads the series as before.
+- **A `Future` role is read in a hook that has an event.** `ctx.role(name)` of a `Future` (or of
+  a `Chain` on one) names the contract that is front at the event's time; before the first event
+  (`on_init`, `on_start`) the context has no time, and the read is now refused
+  `role_before_event` with its fix (read it in `on_bar`) instead of being answered for some
+  other instant.
 
 ### Results change
 
@@ -56,8 +64,29 @@ that gap.
   restore raises nothing and the state digest matches, but a hook hears the other symbol's bar
   (`tests/python/test_journal_market_span.py`, marked as a known limit). Give such history in
   one call.
+- `auto_roll` no longer fails a roll whose close can never fill. When the old contract has no bar
+  after the roll is decided (its data ends before its expiry, or `roll_days=0` puts the roll on
+  the expiry itself), the engine settles the position at the expiry and the close ends `canceled`
+  or `rejected` for `expired`; that raised `roll_close_failed` and stopped the run with the position
+  already gone. The roll now goes on: the open follows in the new contract for the quantity that was
+  held, sized as usual on the price the position settled at (the old contract's last close when the
+  settlement named none), sent again at the next event if the market is closed at the expiry. The
+  close keeps its status, the open's tags carry `settled="expiry"`, and the new
+  `on_roll_settled(ctx, roll, close_id, price)` hears it. A close refused before the expiry, with
+  the position still held, still fails the roll (`tests/python/test_auto_roll_settlement.py`).
 
 ### Added
+
+- **A basket whose members change.** A `Universe` role can be bound to
+  `PointInTime(symbols, steps)`: the union of every member and the members from each change
+  on. `ctx.role(name)` returns the members at the event's time; the manifest is unchanged
+  (`tests/python/test_point_in_time.py`).
+- **Each leg's fees on a trade.** Under a fee schedule that itemises, `trade.entry_fee_breakdown`
+  and `trade.exit_fee_breakdown` give each leg's charge by the schedule's components and its
+  booked `total`, and the `full_report` trade rows carry them as `entry_fee_parts` and
+  `exit_fee_parts`. They are `None` (empty in the rows) when the schedule does not itemise, and
+  for the entry of a position built from several fills. `fee_breakdown`, the round trip as one,
+  is unchanged.
 
 - **Market records from the host's own store.** A host that keeps the market data it pushes can
   drop the journal's `tick` and `time` records and rebuild them at restore with
@@ -80,6 +109,11 @@ that gap.
 - **Wheels for Python 3.10 to 3.13** on Linux, macOS and Windows.
 - `examples/tick-level/tick_scalper.py` and `examples/tick-level/dynamic_exit.py`, and skills
   on ticks fed to a live node, bars built from prints in `ctx.series()` and moving an exit rule.
+- `examples/options/short_straddle.py`, `examples/options/chain_scalp.py`,
+  `examples/portfolio/short_basket_intraday.py`, `examples/single-instrument/futures_front_roll.py`
+  and `examples/multi-instrument/cross_instrument_factor.py`, and skills on point-in-time
+  baskets, each leg's fees, reading a `Future` role, feeding a symbol's bars and ticks one way at
+  a time, and declaring the look-back a strategy reads.
 
 ## [1.0.0] - Unreleased
 

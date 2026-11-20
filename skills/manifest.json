@@ -82,6 +82,7 @@
         "raptorbt.strategy.Bars",
         "raptorbt.strategy.Duration",
         "raptorbt.strategy.Legs",
+        "raptorbt.strategy.PointInTime",
         "raptorbt.strategy.ParamSchema",
         "raptorbt.strategy.ParamSpec",
         "raptorbt.strategy.Issue",

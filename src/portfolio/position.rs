@@ -162,6 +162,8 @@ impl PositionManager {
             entry_fees: pos.entry_fees,
             exit_fees,
             fee_breakdown,
+            entry_fee_breakdown: None,
+            exit_fee_breakdown: None,
             exit_reason,
             mae_price: Some(adverse_price),
             mfe_price: Some(favourable_price),

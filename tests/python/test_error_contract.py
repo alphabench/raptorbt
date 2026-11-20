@@ -754,6 +754,22 @@ def _():
     run(Roled(lambda s, ctx: ctx.role("fut")))
 
 
+@case("role_before_event", "name")
+def _():
+    from raptorbt.strategy import Future, Holding, Requirements, Underlying
+
+    class AtStart(Noop):
+        requirements = Requirements(
+            roles={"index": Underlying(asset="index"), "fut": Future(of="index")},
+            timeframes=["1m"], holding=Holding.overnight(), data=["bar"],
+        )
+
+        def on_start(self, ctx):
+            ctx.role("fut")
+
+    run(AtStart(), bindings={"index": "A"})
+
+
 @case("unknown_role_binding", "bindings")
 def _():
     run(bindings={"fut": "A"})

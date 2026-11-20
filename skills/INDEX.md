@@ -426,12 +426,17 @@ the skills it names, then copy the script.
 | Stationarity, then half-life, then a signal window chosen from it | `examples/analysis/stationarity_to_signal.py` |
 | The same expression explored in a session and run in a strategy, asserted byte-identical | `examples/analysis/expression_to_strategy.py` |
 | A single-instrument strategy with indicators, fees, a stop and a target, and its results | `examples/single-instrument/sma_cross.py` |
+| A front future held through its expiry, the position carried into the next contract by the roll (a `Future` role read in `on_bar`) | `examples/single-instrument/futures_front_roll.py` |
 | Two instruments read together in one decision (the equal-timestamp group rule) | `examples/multi-instrument/relative_value.py` |
+| A running flow factor over several instruments, updated on every trade and read with a coarser bar, trading one | `examples/multi-instrument/cross_instrument_factor.py` |
 | 1-minute entries confirmed by a 15-minute trend (composite bars) | `examples/multi-timeframe/trend_confirmation.py` |
-| An options strategy on a chain: strike and expiry picks, ATR stops, sizing, account limits | `examples/options/nifty_momentum.py` |
+| An options strategy on a chain: strike and expiry picks, ATR stops, sizing, account limits | `examples/multi-timeframe/nifty_momentum.py` |
 | A hedge-first multi-leg structure (bear call spread) with a defined-risk margin model | `examples/options/bear_call_spread.py` |
+| An intraday short straddle sized by margin and closed before the close | `examples/options/short_straddle.py` |
+| An intraday long-option scalp: index cross gated by the chain's implied volatility, quick exit | `examples/options/chain_scalp.py` |
 | Several strategies on a shared account with drawdown, daily-loss and halt limits | `examples/portfolio/shared_account.py` |
 | A basket strategy over instruments the deployer picks (a `Universe` role), with a warm-up session before `trade_from` | `examples/portfolio/top_n_basket.py` |
+| An intraday short basket over members that change by day (a `Universe` role bound `PointInTime`), squared off before the close | `examples/portfolio/short_basket_intraday.py` |
 | A tick strategy with quotes and resting limit orders | `examples/tick-level/passive_quotes.py` |
 | A tick scalper trading momentum from its trade hook, with a fixed and a trailing stop and a capped entry count, run in batch and on a live node | `examples/tick-level/tick_scalper.py` |
 | A position whose stop-loss and take-profit exit rules move with the price while it is open, run in batch and on a live node | `examples/tick-level/dynamic_exit.py` |

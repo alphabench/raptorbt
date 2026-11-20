@@ -58,6 +58,15 @@ ticks closes (on the symbol's first tick of a later window, never on
 `advance_time`) and what `ctx.series` holds once those bars join a symbol's bars
 are in [market-data](../market-data/SKILL.md).
 
+**Ticks and bars.** A strategy that reads ticks is fed its live data as ticks: build
+the node with `primary_bars=(1, "m")` (its smallest bar width) and `push_tick`, and
+the engine builds the bars the strategy reads from the prints, exactly as
+`run_tick_strategy` does. Closed bars given as history before a symbol's first tick
+(`warmup_bars=`, `warm_up`, `push_bar`) are fine: the bars built after them join the
+symbol's `ctx.series()`. Once its ticks start, do not push bars of that symbol beside
+them: a pushed bar executes and is delivered and kept beside the one the engine built
+from the same prints (every bar twice).
+
 **Groups.** By default each push is delivered on arrival, alone. To deliver the
 bars of several symbols for one timestamp the way a batch run does, use
 `push_group(ts, {symbol: (o, h, l, c, v)})` or `begin_group()`, the pushes,
@@ -821,7 +830,9 @@ assert positions["FA"] == [] and positions["FB"][0].size == 2.0  # moved by real
 - Exit rules, and what an armed rule costs per event: [orders](../orders/SKILL.md).
 - Runnable examples: `examples/live-trading/paper_node.py`; on ticks,
   `examples/tick-level/tick_scalper.py` and `examples/tick-level/dynamic_exit.py`, each run
-  in batch and on a node fed one print at a time, with the same result.
+  in batch and on a node fed one print at a time, with the same result; a front future held
+  across its roll (a `Future` role read in `on_bar`, `auto_roll`),
+  `examples/single-instrument/futures_front_roll.py`.
 
 ## 7. Constraints and correctness
 

@@ -31,6 +31,7 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`OptionLeg`](#optionleg) | class | One option leg of the structure the strategy holds, as data: ``side`` (``buy`` or ``sell``), ``right`` (``call`` or ``put``), ``lots``, the strike and the expiry. |
 | [`ParamSchema`](#paramschema) | class | The typed parameters of a ``StrategyConfig`` subclass. |
 | [`ParamSpec`](#paramspec) | class | ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = False, min: 'float \| None' = None, max: 'float \| None' = None, choices: 'tuple[Any, ...] \| None' = None, nullable: 'bool' = False, description: 'str \| None' = None) |
+| [`PointInTime`](#pointintime) | class | The binding of a ``Universe`` role whose members change: a tuple of the union of the members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order. |
 | [`Requirements`](#requirements) | class | Everything a deployer must know about a strategy before it runs. |
 | [`RequirementsError`](#requirementserror) | exception | A declaration that cannot be built. ``issues`` holds the structured reasons. |
 | [`RolePlan`](#roleplan) | class | What one role means at a time: ``symbols`` are the concrete contracts to subscribe to, ``expiries`` the expiries (ns) a chain resolved to, ``atm`` the money strike, ``detail`` anything else (``roll_to`` for a continuous future). |
@@ -874,6 +875,31 @@ ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = Fa
 | `required` | *No docstring.* |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
 
+### `PointInTime`
+
+*class*
+
+```python
+class PointInTime(tuple)
+PointInTime(symbols: 'Iterable[str]', steps: 'Iterable[tuple[int, Sequence[str]]]') -> 'PointInTime'
+```
+
+The binding of a ``Universe`` role whose members change: a tuple of the union of the
+members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order.
+
+``steps[i]`` holds from ``start_ns`` (ns since the epoch, an event time) until the next
+step's start; the last holds on. :meth:`at` answers the members at an instant: before the
+first step none, and with no instant (a context before its first event) the union.
+Every member of a step must be in ``symbols``, and a step lists a symbol once.
+
+>>> p = PointInTime(["A", "B", "C"], [(0, ["A", "B"]), (100, ["B", "C"])])
+>>> p.at(99), p.at(100), tuple(p)
+(('A', 'B'), ('B', 'C'), ('A', 'B', 'C'))
+
+| Member | What it is |
+| --- | --- |
+| `at(self, now_ns: 'int | None') -> 'tuple[str, ...]'` | The members at ``now_ns``; the whole union when it is ``None``. |
+
 ### `QuoteTick`
 
 *class*
@@ -1006,9 +1032,11 @@ or after the rule's time. A role's first event only records its contract: no rol
 | `auto_roll` | *No docstring.* |
 | `load_state(self, state)` | *No docstring.* |
 | `on_bar(self, ctx, bar)` | *No docstring.* |
+| `on_contract_event(self, ctx, event)` | Notes the price a held contract settled at, for a roll that settles instead of closing. |
 | `on_order_event(self, ctx, event)` | *No docstring.* |
 | `on_roll(self, ctx, roll: 'RollEvent') -> 'None'` | A continuous role moved to another contract. |
 | `on_roll_failed(self, ctx, roll: 'RollEvent', close_id: 'str', status: 'str', reason) -> 'None'` | A step of the roll ended without filling (``status`` is ``rejected``, ``canceled`` or ``expired``; ``zero_size`` for an open the new contract's price sizes to no lot, which names the open that was not sent). A close refused ``market_closed`` is not a failure: it is sent again at the next event. ``close_id`` names the order: a close of a position in the old contract (the open in the new contract was not sent, and the position is still in the old one), or, when its id ends in ``:o{k}``, the open in the new contract (the position is closed and not open in the new contract). Raises by default. |
+| `on_roll_settled(self, ctx, roll: 'RollEvent', close_id: 'str', price) -> 'None'` | The close of a roll could not fill and the old contract settled the position at its expiry instead: the open in the new contract follows (``close_id`` names the close that ended without filling, ``price`` the price the old contract settled at, ``None`` when it is not known). |
 | `on_roll_sized(self, ctx, roll: 'RollEvent', sizing: 'dict') -> 'None'` | The open of a roll was sized. ``sizing`` has ``policy``, ``lots_old``, ``lots_new``, ``notional_old``, ``notional_new`` and ``residual`` (the notional the rounding leaves out of the new contract: old minus new, so positive is under-exposed). |
 | `on_trade(self, ctx, tick)` | *No docstring.* |
 | `roll_sizing` | *No docstring.* |

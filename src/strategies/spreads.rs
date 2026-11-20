@@ -497,6 +497,8 @@ fn aggregate(leg_trades: &[Trade], forced: &HashMap<usize, ExitReason>) -> Vec<T
                 entry_fees,
                 exit_fees,
                 fee_breakdown: breakdown,
+                entry_fee_breakdown: None,
+                exit_fee_breakdown: None,
                 exit_reason: forced.get(&entry_idx).copied().unwrap_or(last.exit_reason),
                 // The structure is synthesised from its legs, which are not
                 // measured as one position. None means "not measured".

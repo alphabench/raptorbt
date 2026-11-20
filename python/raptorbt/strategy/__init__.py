@@ -29,6 +29,7 @@ from raptorbt.strategy.context import (
 from raptorbt.strategy.orders import ClosePosition, MarketOrder
 from raptorbt.strategy.multi_runner import Window, WindowDone, run_strategies, run_strategies_windowed
 from raptorbt.strategy.portfolio_runner import run_portfolio_strategy
+from raptorbt.strategy.membership import PointInTime
 from raptorbt.strategy.requirements import (
     Bars,
     ByDelta,
@@ -82,6 +83,7 @@ __all__ = [
     "OptionLeg",
     "ParamSchema",
     "ParamSpec",
+    "PointInTime",
     "Requirements",
     "RequirementsError",
     "RolePlan",

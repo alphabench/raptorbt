@@ -415,7 +415,8 @@ assert abs(free_after_selling(0.10, 0.02) - (1_000_000.0 - 0.12 * 24_000.0 * LOT
   segment are [execution](../execution/SKILL.md).
 - Daily and longer bars follow a symbol's schedule; see
   [timeframes](../timeframes/SKILL.md).
-- Runnable examples: `examples/options/nifty_momentum.py`, `examples/options/bear_call_spread.py`.
+- Runnable examples: `examples/multi-timeframe/nifty_momentum.py`, `examples/options/bear_call_spread.py`,
+  `examples/options/short_straddle.py`, `examples/options/chain_scalp.py`.
 
 ## 7. Constraints and correctness
 

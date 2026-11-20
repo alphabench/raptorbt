@@ -275,7 +275,7 @@ assert not s.rows[3][1] and s.rows[4][1] and abs(s.rows[4][2] - 1.0) < 1e-12
   [backtesting](../backtesting/SKILL.md). Using indicator values in `on_bar`:
   [strategy](../strategy/SKILL.md).
 - ATR-based stops and targets are configuration, not indicators: [orders](../orders/SKILL.md).
-- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/options/nifty_momentum.py`.
+- Runnable examples: `examples/single-instrument/sma_cross.py`, `examples/multi-timeframe/nifty_momentum.py`.
 
 ## 7. Constraints and correctness
 

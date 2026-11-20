@@ -2939,6 +2939,7 @@ impl EngineKernel {
             },
         )?;
 
+        trade.exit_fee_breakdown = exit_breakdown;
         let refund =
             self.restate_same_day(&mut trade, entry_breakdown, exit_breakdown, squared, None);
         self.credit_close(position_id, &trade);
@@ -3016,6 +3017,12 @@ impl EngineKernel {
         combined.add(&c.exit);
         combined.exact_total = Some(trade.fees);
         trade.fee_breakdown = Some(combined);
+        // each leg as repriced on the intraday row, its total the booked amount of the leg
+        let booked = |parts: crate::execution::costs::FeeBreakdown, total: f64| {
+            Some(crate::execution::costs::FeeBreakdown { exact_total: Some(total), ..parts })
+        };
+        trade.entry_fee_breakdown = booked(c.entry, trade.entry_fees);
+        trade.exit_fee_breakdown = booked(c.exit, trade.exit_fees);
         if let Some(r) = open.and_then(|id| self.ledger.get_mut(id)) {
             let mut parts = c.entry_parts;
             if let Some((earlier, _)) = squared {
@@ -3553,6 +3560,7 @@ impl EngineKernel {
         // The slice's cash movement is the whole-close arithmetic on the
         // slice's booked amounts; the lock was released above, not here.
         let squared = self.ledger.get(position_id).and_then(|m| m.same_day_squared);
+        trade.exit_fee_breakdown = exit_breakdown;
         let refund =
             self.restate_same_day(&mut trade, None, exit_breakdown, squared, Some(position_id));
         self.credit_slice(&trade);
