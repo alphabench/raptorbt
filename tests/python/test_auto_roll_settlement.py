@@ -87,7 +87,7 @@ def test_a_close_with_no_bar_left_in_the_old_contract_is_settled_and_the_roll_go
         assert len(settled) == 1 and settled[0][:3] == ("FA", "FB", "fut:roll0:c0")
         assert settled[0][3] == data["FA"]["close"][-1]  # the contract's last price, which it settled at
         exits = [t for t in result.result.trades() if t.symbol == "FA"]
-        assert len(exits) == 1 and exits[0].exit_reason == "settlement"
+        assert len(exits) == 1 and exits[0].exit_reason == "Settlement"
 
 
 def test_a_roll_due_at_the_expiry_itself_is_settled_and_the_open_waits_for_the_market():
