@@ -712,7 +712,7 @@ there.
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
 | `is_halted(self, strategy_index: 'int') -> 'bool'` | Whether a margin call or drawdown kill-switch has latched. |
 | `journal` | The node's :class:`~raptorbt.journal.Journal`, or ``None``. |
-| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them. |
+| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them: the last close, else the last traded ``ltp``. A symbol with no price yet (no data, or only quote-only rows in view) is not in the dict. |
 | `memory_report(self) -> 'dict[str, int]'` | Heap bytes held by the Rust side, by category; ``live_rings`` is the fixed size of the history rings. Python objects are not counted. |
 | `now_ns` | Event time of the latest input the node took (``0`` before the first). |
 | `open_group` | The timestamp group left open, if any, and what it holds: ``{"timestamp": ns, "symbols": [...]}``. A node restored from a journal that ends inside a group has one: the replay delivered nothing of it, exactly as before the crash, so the host sends the symbols not listed here and calls :meth:`flush`. |

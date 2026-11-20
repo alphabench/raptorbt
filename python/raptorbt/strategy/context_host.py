@@ -36,6 +36,7 @@ from typing import Mapping, Sequence
 
 from raptorbt import OptionChain
 from raptorbt.errors import InvalidParameter, UnknownSymbol
+from raptorbt.strategy.exits import _price_of
 from raptorbt.strategy.membership import PointInTime
 from raptorbt.strategy.requirements import (
     Chain,
@@ -244,15 +245,14 @@ class ContextHost:
         return self._cache
 
     def _prices(self, ctx) -> dict[str, float]:
+        """The last price of each symbol, as exit rules read it (the last close, else the last
+        traded ``ltp``). A symbol with none (no data, or only quote-only rows in view) is left
+        out, so a role that needs its price says ``needs_price`` instead of resolving at 0."""
         out: dict[str, float] = {}
         for symbol in ctx.symbols:
-            try:
-                series = ctx.series(symbol)
-            except (KeyError, RuntimeError):
-                continue
-            column = series.get("close") if len(series.get("close", ())) else series.get("ltp")
-            if column is not None and len(column):
-                out[symbol] = float(column[-1])
+            price = _price_of(ctx, symbol)
+            if price is not None:
+                out[symbol] = price
         return out
 
 

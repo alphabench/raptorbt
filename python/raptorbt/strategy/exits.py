@@ -46,6 +46,15 @@ symbols of the group), at the last prices:
 that order. Nothing fires until every symbol of the rule has a position and a
 last price.
 
+A symbol's mark is its last bar ``close``, else its last *traded* price: the last
+tick row with ``ltp > 0`` among the rows ``ctx.series`` shows. A quote-only row
+(``ltp`` 0) carries no trade and is passed over, as it is by fills, trailing stops
+and equity; a symbol whose rows so far are all quotes has no mark, and its rule
+waits. The engine never marks a rule at the bid, ask or mid by itself: a quote is
+an offer, not a trade, and on a wide, one-sided or stale book it would fire a stop
+no trade reached. A strategy that wants a quote mark says so with
+``update_exits(ctx, marks={symbol: quote.mid})``.
+
 Firing
 ------
 
@@ -70,6 +79,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+import numpy as np
+
 from raptorbt._raptorbt import RuntimeContext
 from raptorbt.errors import InvalidOrder, InvalidParameter, StateError, UnknownSymbol
 from raptorbt.execution import AdapterError, OrderRefused, Unsupported
@@ -87,6 +98,39 @@ _KEPT = 64
 class ExitRuleUnconfirmed(AdapterError):
     """The venue did not say whether it took, changed or dropped an exit rule (an error after
     the request left, or a request whose result was never written)."""
+
+
+def _last_traded(ltp) -> float | None:
+    """The last positive ``ltp``, passing over quote-only rows (``ltp`` 0), else ``None``.
+    ``RuntimeContext._last_price`` answers the same; change both together."""
+    if ltp is None or not len(ltp):
+        return None
+    last = float(ltp[-1])
+    if last > 0.0:
+        return last
+    traded = np.flatnonzero(np.asarray(ltp, dtype=np.float64) > 0.0)
+    return float(ltp[traded[-1]]) if traded.size else None
+
+
+def _price_of(ctx, sym) -> float | None:
+    """The last price of ``sym`` a strategy reads: its last bar ``close``, else its last traded
+    ``ltp`` (``> 0``, quote-only rows passed over) among the rows ``ctx.series`` shows; ``None``
+    when there is none (no data, a symbol ``series`` refuses, or only quotes so far). Exit rules
+    mark at it, and the context host resolves roles and plans with it."""
+    if type(ctx) is RuntimeContext:
+        # The same price without building the series, which a live node copies out of its
+        # ring on every new row; it says when the series must be read instead.
+        known, price = ctx._last_price(sym)
+        if known:
+            return price
+    try:
+        series = ctx.series(sym)
+    except (KeyError, RuntimeError):
+        return None
+    values = series.get("close")
+    if values is not None and len(values):
+        return float(values[-1])
+    return _last_traded(series.get("ltp"))
 
 
 def _invalid(message: str, parameter: str, value) -> InvalidParameter:
@@ -477,21 +521,7 @@ class ExitBook:
     def _mark(ctx, sym, marks):
         if marks is not None:
             return marks.get(sym)
-        if type(ctx) is RuntimeContext:
-            # The same price without building the series, which a live node copies out of its
-            # ring on every new row; it says when the series must be read instead.
-            known, price = ctx._last_price(sym)
-            if known:
-                return price
-        try:
-            series = ctx.series(sym)
-        except (KeyError, RuntimeError):
-            return None
-        for column in ("close", "ltp"):
-            values = series.get(column)
-            if values is not None and len(values):
-                return float(values[-1])
-        return None
+        return _price_of(ctx, sym)
 
     def _close(self, ctx, h: ExitHandle) -> None:
         n = 0

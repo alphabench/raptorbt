@@ -96,8 +96,17 @@ impl TickBacktest {
     /// The position is one instrument of a [`PortfolioBook`], stepped once per
     /// tick on the price that tick is acted on: the last print for the stop
     /// and the target, the ask for an entry, the bid for a market exit. A
-    /// position still open on the last tick is sold at its bid, costs
+    /// position still open on the last print is sold at its bid, costs
     /// included. The equity curve has a point per tick.
+    ///
+    /// A row with `ltp` 0 carries no trade (a quote-only row). It is no print:
+    /// it fills nothing, triggers no stop, target or time exit, and leaves
+    /// equity where the previous row left it (its point repeats the last
+    /// price the book was stepped at). An entry or exit signal on such a row
+    /// is taken at the next print, at that print's ask or bid, as an order
+    /// decided on a quote rests until a trade in `run_tick_strategy`. Rows
+    /// after the last print change nothing. A tape with no row of `ltp` 0
+    /// runs exactly as before. The Python binding refuses a negative `ltp`.
     ///
     /// Costs and P&L both scale by `|quantity| * lot_size`. A zero quantity
     /// trades nothing and returns an empty result; a negative quantity is
@@ -158,26 +167,49 @@ impl TickBacktest {
             volume: 0.0,
         };
 
+        // A row with no trade (`ltp` 0: a quote-only row) is no print: the tape's last print is
+        // where it ends for a position still open.
+        let last_print = ticks.ltp.iter().rposition(|&p| p > 0.0);
+        // The price the book was last stepped at (0.0 before the first step, when nothing is
+        // held). A row with no print steps at it again: a price the stop and the target were
+        // already measured against, so it fills nothing and leaves equity where it was.
+        let mut stepped = 0.0;
+        // A signal on a row with no print, taken at the next print: an order decided on a quote
+        // rests until a trade (as `run_tick_strategy` matches one).
+        let (mut entry_asked, mut exit_asked) = (false, false);
+
         for i in 0..n {
             let ltp = ticks.ltp[i];
+            let ts = ticks.timestamps[i];
+            if ltp <= 0.0 {
+                if book.kernel(0).is_in_position() {
+                    exit_asked |= exits[i];
+                } else {
+                    entry_asked |= entries[i];
+                }
+                book.apply(&bar_entry(0, i, point(stepped, ts)), None, StepInput::default());
+                continue;
+            }
             let bid = if ticks.bid[i] > 0.0 { ticks.bid[i] } else { ltp };
             let ask = if ticks.ask[i] > 0.0 { ticks.ask[i] } else { ltp };
-            let ts = ticks.timestamps[i];
 
             if book.kernel(0).is_in_position() {
                 // The stop and the target read the last print, tick-exact.
                 let events =
                     book.apply(&bar_entry(0, i, point(ltp, ts)), None, StepInput::default());
+                stepped = ltp;
+                let exit_signal = exits[i] || exit_asked;
+                exit_asked = false;
                 if events.iter().any(|e| matches!(e, EngineEvent::Exited { .. })) {
                     closed += 1;
                     cooldown_until = i + self.config.entry_cooldown_ticks;
                 } else {
                     let time_exit = max_hold_ns > 0 && (ts - entry_time) >= max_hold_ns;
-                    let end_of_data = i == n - 1;
-                    if exits[i] || time_exit || end_of_data {
+                    let end_of_data = Some(i) == last_print;
+                    if exit_signal || time_exit || end_of_data {
                         let reason = if time_exit {
                             ExitReason::TimeExit
-                        } else if end_of_data && !exits[i] {
+                        } else if end_of_data && !exit_signal {
                             ExitReason::EndOfData
                         } else {
                             ExitReason::Signal
@@ -185,6 +217,7 @@ impl TickBacktest {
                         // A market sell at the bid.
                         let input = StepInput { exit: true, ..StepInput::default() };
                         book.apply(&bar_entry(0, i, point(bid, ts)), None, input);
+                        stepped = bid;
                         reasons.push((i, reason));
                         closed += 1;
                         cooldown_until = i + self.config.entry_cooldown_ticks;
@@ -193,14 +226,18 @@ impl TickBacktest {
                 if closed >= self.config.max_trades {
                     break;
                 }
-            } else if i >= cooldown_until && entries[i] && ask > 0.0 {
+            } else if i >= cooldown_until && (entries[i] || entry_asked) && ask > 0.0 {
                 // A market buy at the ask, of the lots asked for.
                 let input = StepInput { entry: true, units: Some(size), ..StepInput::default() };
                 book.apply(&bar_entry(0, i, point(ask, ts)), None, input);
+                stepped = ask;
                 entry_time = ts;
             } else {
                 book.apply(&bar_entry(0, i, point(ltp, ts)), None, StepInput::default());
+                stepped = ltp;
             }
+            // An entry asked for on a row with no print is the next print's to take or leave.
+            entry_asked = false;
         }
 
         let mut result = book.finish().result;
@@ -775,5 +812,108 @@ mod tests {
         assert_eq!(trade.size, 1.0, "one bare unit, as before");
         assert_eq!(trade.entry_fees, 0.1, "price 100 * 0.001, the old arithmetic");
         assert_eq!(trade.exit_fees, 0.1);
+    }
+
+    /// A flat tape at 100 (bid 99.5, ask 100.5) whose rows in `quotes` carry no trade (`ltp` 0).
+    fn flat_with_quotes(n: usize, quotes: &[usize]) -> TickData {
+        let mut ticks = make_ticks(n, 100.0, 0.0);
+        for &i in quotes {
+            ticks.ltp[i] = 0.0;
+        }
+        ticks
+    }
+
+    fn quote_run(ticks: &TickData, entries: &[bool], exits: &[bool]) -> BacktestResult {
+        let config = TickBacktestConfig {
+            base: BacktestConfig { initial_capital: 10_000.0, fees: 0.0, ..Default::default() },
+            stop_loss_pct: 5.0,
+            take_profit_pct: 10.0,
+            max_hold_seconds: 0,
+            entry_cooldown_ticks: 0,
+            ..Default::default()
+        };
+        TickBacktest::new(config).run(ticks, entries, exits, "AAA")
+    }
+
+    #[test]
+    fn a_quote_only_row_does_not_stop_a_long_out() {
+        // Before: the row's `ltp` 0 was read as a print, so the 5% stop fired and sold at 0.0.
+        let ticks = flat_with_quotes(10, &[4]);
+        let mut entries = vec![false; 10];
+        entries[0] = true;
+        let result = quote_run(&ticks, &entries, &[false; 10]);
+        assert_eq!(result.trades.len(), 1);
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::EndOfData);
+        assert_eq!(trade.exit_idx, 9);
+        assert_eq!(trade.exit_price, 99.5, "sold at the last print's bid");
+    }
+
+    #[test]
+    fn a_quote_only_row_leaves_equity_where_it_was() {
+        // Before: equity at the row was marked at 0.0, a loss of the whole position.
+        let ticks = flat_with_quotes(10, &[4, 5]);
+        let mut entries = vec![false; 10];
+        entries[0] = true;
+        let result = quote_run(&ticks, &entries, &[false; 10]);
+        assert_eq!(result.equity_curve.len(), 10, "one point per row, quote-only rows included");
+        assert_eq!(result.equity_curve[4], result.equity_curve[3]);
+        assert_eq!(result.equity_curve[5], result.equity_curve[3]);
+    }
+
+    #[test]
+    fn an_entry_signal_on_a_quote_only_row_is_taken_at_the_next_print() {
+        // Before: it bought on the quote-only row itself.
+        let mut ticks = flat_with_quotes(10, &[2]);
+        ticks.ask[3] = 100.75;
+        let mut entries = vec![false; 10];
+        entries[2] = true;
+        let result = quote_run(&ticks, &entries, &[false; 10]);
+        assert_eq!(result.trades.len(), 1);
+        assert_eq!(result.trades[0].entry_idx, 3);
+        assert_eq!(result.trades[0].entry_price, 100.75, "at the next print's ask");
+    }
+
+    #[test]
+    fn an_exit_signal_on_a_quote_only_row_is_taken_at_the_next_print() {
+        // Before: it sold on the quote-only row itself.
+        let mut ticks = flat_with_quotes(10, &[5]);
+        ticks.bid[6] = 99.25;
+        let mut entries = vec![false; 10];
+        entries[0] = true;
+        let mut exits = vec![false; 10];
+        exits[5] = true;
+        let result = quote_run(&ticks, &entries, &exits);
+        assert_eq!(result.trades.len(), 1);
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_idx, 6);
+        assert_eq!(trade.exit_reason, ExitReason::Signal);
+        assert_eq!(trade.exit_price, 99.25, "at the next print's bid");
+    }
+
+    #[test]
+    fn a_tape_that_ends_in_quotes_closes_at_its_last_print() {
+        // Before: the close waited for the last row, a quote-only one, and sold there.
+        let mut ticks = flat_with_quotes(10, &[7, 8, 9]);
+        ticks.bid[6] = 99.0;
+        let mut entries = vec![false; 10];
+        entries[0] = true;
+        let result = quote_run(&ticks, &entries, &[false; 10]);
+        assert_eq!(result.trades.len(), 1);
+        let trade = &result.trades[0];
+        assert_eq!(trade.exit_reason, ExitReason::EndOfData);
+        assert_eq!(trade.exit_idx, 6);
+        assert_eq!(trade.exit_price, 99.0);
+        assert_eq!(result.equity_curve.len(), 10);
+        assert_eq!(result.equity_curve[9], result.equity_curve[6]);
+    }
+
+    #[test]
+    fn a_tape_of_quotes_only_trades_nothing() {
+        // Before: it bought at the first row's ask and sold at the last row's bid.
+        let ticks = flat_with_quotes(5, &[0, 1, 2, 3, 4]);
+        let result = quote_run(&ticks, &[true; 5], &[false; 5]);
+        assert!(result.trades.is_empty());
+        assert!(result.equity_curve.iter().all(|&e| e == 10_000.0));
     }
 }

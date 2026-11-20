@@ -511,6 +511,15 @@ def _():
     raptorbt.run_tick_backtest(g[0], g[4], g[4], g[4], g[5], g[5], g[5], g[6], g[7], quantity=-1)
 
 
+@case("invalid_data", "ltp", name="negative_tick_ltp")
+def _():
+    # ltp 0 is a row with no trade; a negative one is no price at all.
+    g = legs()[0]
+    ltp = g[4].copy()
+    ltp[3] = -1.0
+    raptorbt.run_tick_backtest(g[0], ltp, g[4], g[4], g[5], g[5], g[5], g[6], g[7])
+
+
 @case("invalid_squareoff_time", "squareoff_time")
 def _():
     BacktestConfig(squareoff_time="25:99")

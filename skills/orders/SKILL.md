@@ -86,7 +86,10 @@ exists: `stop_loss_pct` / `take_profit_pct` (percent of what the positions cost)
 `q` units, `premium_at_or_below=level * q` is a stop at the price `level`). The
 first condition that holds fires, in that order. Mix `ExitEvents` in before
 `Strategy` to have the rules evaluated after every `on_bar` and `on_trade`, or
-call `self.update_exits(ctx)` yourself. A rule that fires sends one reduce-only
+call `self.update_exits(ctx)` yourself. The last price is the last bar close, else
+the last traded `ltp` (`> 0`): a quote-only tick row is no trade and never marks a
+rule, and a symbol with only quotes so far has no price, so its rule waits. To mark
+at a quote, pass it: `self.update_exits(ctx, marks={sym: quote.mid})`. A rule that fires sends one reduce-only
 market order per open position (client id `{rule id}:x{n}`). A rule has no
 modify: to move a stop or a target, `cancel_exit(handle)` and `set_exit` a new
 rule. The live behaviour (a venue that holds the rule, retries) is in
@@ -612,7 +615,7 @@ assert (trade.entry_price, trade.exit_price, trade.pnl) == (100.0, 102.0, 20.0)
   the strategy has set; a cancelled or finished handle is skipped by its state but
   never removed. For each armed rule it reads the positions of each symbol the rule
   covers and that symbol's last price. On a live node and in a windowed run the last
-  price (the last close, else the last `ltp`) comes from the engine without
+  price (the last close, else the last `ltp > 0`) comes from the engine without
   building `ctx.series`; in a batch run it is read from `ctx.series`, a view of the
   arrays (a copy for a symbol whose built bars join its bars). No per-rule timing
   is published. On ticks, where this runs on every print: one rule per position,

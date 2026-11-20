@@ -2583,6 +2583,9 @@ pub fn run_multi_backtest<'py>(
 /// `buy_qty_delta` and `sell_qty_delta` must already be per-tick deltas —
 /// pass the difference from the previous tick, not a feed's cumulative session totals.
 /// `entries` / `exits` are caller-computed boolean signal arrays.
+/// `ltp` 0 marks a row with no trade (a quote-only row): it fills nothing, triggers no stop or
+/// target and does not move equity, and a signal on it is taken at the next print; a negative
+/// `ltp` is refused (`invalid_data`).
 ///
 /// Returns a `PyBacktestResult` with the same fields as `run_single_backtest`.
 #[pyfunction]
@@ -2659,6 +2662,20 @@ pub fn run_tick_backtest<'py>(
     let (ltp, bid, ask) = (numpy_to_vec_f64(ltp), numpy_to_vec_f64(bid), numpy_to_vec_f64(ask));
     for (column, values) in [("ltp", &ltp), ("bid", &bid), ("ask", &ask)] {
         crate::data::ensure_series_finite(&format!("{symbol} ticks"), column, values)?;
+    }
+    // `ltp` 0 is a row with no trade (a quote-only row); a negative one is no price at all.
+    if let Some(index) = ltp.iter().position(|&p| p < 0.0) {
+        return Err(Fail::new(
+            "invalid_data",
+            format!(
+                "{symbol} ticks: ltp is negative ({}) at index {index}; a row with no trade has ltp 0",
+                ltp[index]
+            ),
+        )
+        .op("run_tick_backtest")
+        .param("ltp")
+        .value(index)
+        .into());
     }
     let tick_data = crate::core::types::TickData {
         timestamps,

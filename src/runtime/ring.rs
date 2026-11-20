@@ -467,6 +467,15 @@ impl<T: Copy> RowRing<T> {
     }
 }
 
+impl RowRing<TickRow> {
+    /// The last traded price among `rows`: the newest row the ring holds with `ltp > 0`. A
+    /// quote-only row (`ltp` 0) carries no trade and is passed over; `None` when no held row of
+    /// `rows` traded. Exit rules mark at it (`PyRuntimeContext::_last_price`).
+    pub fn last_trade(&self, rows: Range<u64>) -> Option<f64> {
+        rows.rev().find_map(|r| self.get(r).ok().filter(|t| t.ltp > 0.0)).map(|t| t.ltp)
+    }
+}
+
 impl<T> HeapSize for RowRing<T> {
     fn heap_bytes(&self) -> usize {
         self.rows.len() * std::mem::size_of::<T>()
@@ -599,6 +608,33 @@ mod tests {
         assert_eq!(ring.get(2).unwrap().ltp, 2.0);
         assert_eq!(ring.get(3).unwrap_err(), RowMiss::NotYetArrived { next: 3 });
         assert_eq!(ring.push(5, row(5)), Err(RingError::Gap { expected: 3, got: 5 }));
+    }
+
+    #[test]
+    fn the_last_trade_passes_over_quote_only_rows() {
+        let trade = |t: i64, px: f64| TickRow { timestamp: t, ltp: px, ..TickRow::default() };
+        let quote = |t: i64| TickRow {
+            timestamp: t,
+            ltp: 0.0,
+            bid: 99.9,
+            ask: 100.1,
+            ..TickRow::default()
+        };
+        let mut ring = RowRing::new(3, 0, TickRow::default());
+        ring.push(0, quote(0)).unwrap();
+        assert_eq!(ring.last_trade(0..1), None, "only quotes so far: no trade, no price");
+        ring.push(1, trade(1, 100.0)).unwrap();
+        ring.push(2, quote(2)).unwrap();
+        assert_eq!(ring.last_trade(0..3), Some(100.0), "a quote after a trade is not a price");
+        assert_eq!(ring.last_trade(2..3), None, "rows not shown are not read");
+        ring.push(3, trade(3, 94.5)).unwrap();
+        assert_eq!(ring.last_trade(1..4), Some(94.5));
+        ring.push(4, quote(4)).unwrap();
+        ring.push(5, quote(5)).unwrap();
+        // Row 3 is the oldest the ring holds; rows evicted before it are not read either.
+        assert_eq!(ring.last_trade(0..6), Some(94.5));
+        ring.push(6, quote(6)).unwrap();
+        assert_eq!(ring.last_trade(0..7), None, "the last trade was evicted");
     }
 
     #[test]

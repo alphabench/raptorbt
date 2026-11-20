@@ -1283,9 +1283,9 @@ impl Shared {
         Some(LiveBuilt { bars, show, key })
     }
 
-    /// What `live_series_of` would give as the last `close`, else the last `ltp` (`Some(None)`
-    /// when its dict would hold neither, or holds them empty), read from one row instead of
-    /// copying the ring. `None` when a dict for the same rows is cached: a strategy may have
+    /// What `live_series_of` would give as the last `close`, else the last positive `ltp` (a
+    /// quote-only row's `ltp` 0 is no trade; `Some(None)` when its dict would hold neither, holds
+    /// them empty, or holds no positive `ltp`), read from the rows instead of copying the ring. `None` when a dict for the same rows is cached: a strategy may have
     /// changed that dict in place, so the caller reads it as before. Mirrors `live_series_of`
     /// row for row; change both together.
     fn live_last_price(&self, global: InstrumentId, limit: Option<usize>) -> Option<Option<f64>> {
@@ -1334,8 +1334,10 @@ impl Shared {
                 .and_then(|f| f.bars(global))
                 .and_then(|ring| (first..end).rev().find_map(|r| ring.get(r).ok()))
                 .map(|b| b.close),
+            // The last traded price: quote-only rows (`ltp` 0) are passed over, as the exit
+            // book's `_last_traded` does on the series.
             Some(ring) if given.is_none_or(|g| g.iter().any(|k| k == "ltp")) => {
-                (first..end).rev().find_map(|r| ring.get(r).ok()).map(|t| t.ltp)
+                ring.last_trade(first..end)
             }
             Some(_) => None,
         })
@@ -2006,7 +2008,9 @@ impl PyRuntimeContext {
     }
 
     /// The price an exit rule marks `symbol` at, as `(known, price)`: what reading the last
-    /// `close`, else `ltp`, of `series(symbol)` gives, without building the series. A live
+    /// `close`, else the last positive `ltp` (the last trade: a quote-only row is passed over),
+    /// of `series(symbol)` gives, without building the series; `(true, None)` when no row
+    /// traded. A live
     /// node's `series` copies its ring once per new row, which a rule checked on every tick
     /// would pay each time. `known` is false wherever `series` itself must be read: a batch run,
     /// a symbol it would refuse, or a series already cached for these rows.

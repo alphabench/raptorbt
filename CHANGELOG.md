@@ -74,6 +74,33 @@ that gap.
   close keeps its status, the open's tags carry `settled="expiry"`, and the new
   `on_roll_settled(ctx, roll, close_id, price)` hears it. A close refused before the expiry, with
   the position still held, still fails the roll (`tests/python/test_auto_roll_settlement.py`).
+- **A quote-only tick no longer fires an exit rule.** An exit rule on a symbol with no bars
+  marked it at the last tick row's `ltp`, and a quote-only row (`ltp` 0 with a two-sided quote)
+  made that mark 0.0: a long's stop, or a short's target, fired on a price that never traded.
+  The mark is now the last traded price, the last row with `ltp > 0` among the rows
+  `ctx.series` shows, and with none (only quotes so far, or only quotes in the rows shown) the
+  rule has no mark and waits, as it does for a symbol with no price. This holds alike on a
+  `LiveNode`, in `run_strategies_windowed` (`ctx._last_price`) and in batch runs (the series),
+  which still agree. Rules never mark at the bid, ask or mid on their own, as fills, trailing
+  stops and equity do not; a strategy that wants a quote mark passes it to
+  `update_exits(ctx, marks=...)` (`tests/python/test_exit_marks.py`).
+- **`run_tick_backtest` no longer reads a quote-only row as a print.** A row with `ltp` 0 (a
+  quote and no trade) was stepped at 0.0: a long's stop fired and sold at 0.0, equity was
+  marked at 0.0, and an entry or exit signal on the row filled at its quote. Such a row now
+  fills nothing, triggers no stop, target or time exit, and leaves equity where the previous
+  row left it (the curve keeps one point per row); a signal on it is taken at the next print,
+  at that print's ask or bid, as an order decided on a quote rests until a trade in
+  `run_tick_strategy`. A position still open at the end is sold at the last print's bid, not
+  at a quote-only row after it. A negative `ltp` is refused (`invalid_data`, parameter `ltp`).
+  A tape with no row of `ltp` 0 gives the same result as before, bit for bit
+  (`src/strategies/tick.rs` tests).
+- **Roles and instrument plans no longer find the money at 0.** The last prices a role, a
+  plan (`plan_instruments`) and `LiveNode.last_prices` read were the last close, else the last
+  row's `ltp`, so a quote-only last row gave 0.0 and a chain's strike window resolved around
+  the lowest listed strikes. They now read the price exit rules mark at (the last close, else
+  the last traded `ltp`); a symbol with none is left out, so the role says `needs_price` (and
+  `ctx.role` raises `unresolved_role`) as it does for a symbol with no data
+  (`tests/python/test_live_node_instruments.py`).
 
 ### Added
 

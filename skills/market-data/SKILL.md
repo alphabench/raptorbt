@@ -104,7 +104,7 @@ events (0, 1 or 2). A `nan` or infinite `ltp`, `bid` or `ask` is refused
 | `raptorbt.strategy.TradeTick` | `timestamp`, `price`, `size`, `symbol`, `oi`. `size` is `ltq` when the feed has it, else the flow-delta proxy. |
 | `raptorbt.strategy.QuoteTick` | `timestamp`, `bid`, `ask`, `symbol`, `bid_size`, `ask_size` (`nan` when unknown), `.mid`, `.spread`. |
 | `raptorbt.bars_from_ticks(timestamps, ltp, buy_qty_delta, sell_qty_delta, step, unit)` | Ticks to bars; returns six arrays (stamps are window ends). |
-| `raptorbt.run_tick_backtest(timestamps, ltp, bid, ask, buy_qty_delta, sell_qty_delta, oi, entries, exits, ...)` | Array runner over a tick tape with precomputed boolean signals. |
+| `raptorbt.run_tick_backtest(timestamps, ltp, bid, ask, buy_qty_delta, sell_qty_delta, oi, entries, exits, ...)` | Array runner over a tick tape with precomputed boolean signals. A row with `ltp` 0 is no trade: it fills nothing, triggers no stop or target, leaves equity as it was, and a signal on it is taken at the next print; a negative `ltp` is refused (`invalid_data`). |
 | `raptorbt.tick_spread_pct(bid, ask)` | Spread as a percentage of mid; 0 where both sides are zero. |
 | `raptorbt.buy_sell_imbalance_delta(buy_cumulative, sell_cumulative)` | Per-tick buy share in `[0, 1]` (0.5 neutral) from **cumulative** session totals. |
 | `raptorbt.return_window(timestamps, ltp, window_seconds)` | Lookback return in percent; `nan` until the window has history. |

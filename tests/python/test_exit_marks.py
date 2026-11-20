@@ -1,4 +1,5 @@
-"""Exit rules mark a symbol at the last ``close``, else the last ``ltp``, of ``ctx.series``.
+"""Exit rules mark a symbol at the last ``close``, else the last traded ``ltp`` (``> 0``: a
+quote-only row is no trade), of ``ctx.series``.
 
 A runtime context answers that price without building the series (``ctx._last_price``), which a
 live node would otherwise copy out of its ring on every new row. These tests hold the answer to
@@ -21,6 +22,7 @@ from raptorbt import journal as rj
 from raptorbt.strategy import exits as ex
 from raptorbt.strategy import orders
 from raptorbt.strategy.exits import ExitEvents, ExitRule
+from raptorbt.strategy.tick_runner import run_tick_strategy
 
 from test_journal import HEADER
 from test_windowed import windowed_like
@@ -36,11 +38,11 @@ def _series_mark(ctx, sym):
         series = ctx.series(sym)
     except (KeyError, RuntimeError):
         return None, False
-    for column in ("close", "ltp"):
-        values = series.get(column)
-        if values is not None and len(values):
-            return float(values[-1]), True
-    return None, True
+    values = series.get("close")
+    if values is not None and len(values):
+        return float(values[-1]), True
+    traded = [float(v) for v in series.get("ltp", ()) if v > 0.0]
+    return (traded[-1] if traded else None), True
 
 
 def _bits(x):
@@ -66,6 +68,9 @@ class Probe(Strategy):
 
     def on_trade(self, ctx, tick=None):
         self._check(ctx, "trade")
+
+    def on_quote(self, ctx, quote=None):
+        self._check(ctx, "quote")
 
     def _check(self, ctx, where):
         for sym in ctx.symbols:
@@ -326,3 +331,214 @@ def test_a_restore_with_rules_open_replays_and_continues_the_same(feed, seed):
     # The hook log is not compared: what a restore replays to the strategy is the restore's own
     # contract, and the slow-path run ``whole`` is compared hook for hook above.
     _same((s, node, j), whole, hooks=False)
+
+
+# -- a quote-only row is no price -----------------------------------------------------------------
+#
+# A live or batch tick row with ``ltp`` 0 and a two-sided quote is a quote and no trade. Before the
+# fix the rules marked it at 0.0 (the fast mark and the series mark alike), so a long's stop fired on
+# a price that never traded.
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+@pytest.mark.parametrize("history", [None, 3])
+def test_the_fast_mark_is_the_series_mark_over_quote_only_rows(history, seed):
+    rng = random.Random(seed)
+    s = Probe(live=True)
+    node = LiveNode([s], ["A", "B"], CFG, bar_stamp="close", history=history)
+    walks = {"A": _walk(rng, 80, 100.0), "B": _walk(rng, 80, 40.0)}
+    for i in range(80):
+        for k, sym in enumerate(("A", "B")):
+            ts = T0 + (i * 60 + k + 1) * NS
+            px = walks[sym][i]
+            # B quotes only for its first rows; then both quote without a print, now and then in runs.
+            quote_only = (sym == "B" and i < 6) or rng.random() < 0.35
+            node.push_tick(sym, ts, 0.0 if quote_only else px, px - 0.05, px + 0.05)
+    node.finish()
+    assert not s.wrong, s.wrong[:5]
+    assert s.known > 0
+
+
+@pytest.mark.parametrize("cut", [("whole", 0), ("random", 4)])
+def test_the_fast_mark_is_the_series_mark_over_quote_only_rows_in_a_windowed_run(cut):
+    rng = np.random.default_rng(11)
+    n = 300
+    ts = T0 + np.cumsum(rng.integers(1, 4, n)) * NS
+    px = 100 + np.cumsum(rng.normal(0, 0.1, n))
+    ltp = np.where(rng.random(n) < 0.35, 0.0, px)
+    ltp[:5] = 0.0
+    ticks = {"A": {"timestamps": ts, "ltp": ltp, "bid": px - 0.05, "ask": px + 0.05}}
+    for keep in (None, [("A", 2, "ticks")]):
+        s = Probe(live=True, keep=keep)
+        windowed_like([s], None, CFG, ticks=ticks, cut=cut)
+        assert not s.wrong, (keep, s.wrong[:5])
+        assert s.known > 0
+
+
+class StopOnQuotes(Strategy):
+    """Buys 10 of AAA, sets a 5% stop once filled, and evaluates its rules on every trade and every
+    quote. ``trail`` records each event's kind, time, the mark the rule reads and the rule state."""
+
+    def __init__(self):
+        super().__init__()
+        self.handle = None
+        self.trail: list = []
+
+    def on_trade(self, ctx, tick=None):
+        if ctx.symbol == "AAA":
+            if self.handle is None and not ctx.positions("AAA") and not self.trail:
+                self.submit_order(orders.Market(side="buy", units=10.0, instrument="AAA"))
+            elif self.handle is None and ctx.positions("AAA"):
+                self.handle = self.set_exit(ctx, ExitRule(stop_loss_pct=5), symbol="AAA")
+        self._step(ctx, "trade")
+
+    def on_quote(self, ctx, quote=None):
+        self._step(ctx, "quote")
+
+    def _step(self, ctx, kind):
+        self.update_exits(ctx)
+        mark = ex.ExitBook._mark(ctx, "AAA", None)
+        self.trail.append((kind, ctx.symbol, ctx.event_ns, mark, self.handle.state if self.handle else None))
+
+    def fired_at(self):
+        return next(ts for kind, _, ts, _, state in self.trail if state not in (None, "armed"))
+
+
+# The tape: three prints at 100, a quote-only row, a print at 96 (above the stop), another quote-only
+# row, then a print at 94 (below it). A quote-only row has ``ltp`` 0.
+TAPE = [(100.0, 99.95, 100.05), (100.0, 99.95, 100.05), (100.0, 99.95, 100.05), (0.0, 99.9, 100.1),
+        (96.0, 95.95, 96.05), (0.0, 50.0, 96.1), (94.0, 93.95, 94.05), (94.0, 93.95, 94.05)]
+TAPE_TS = [T0 + (i + 1) * NS for i in range(len(TAPE))]
+
+
+def _tape_live(fast):
+    s = StopOnQuotes()
+    node = LiveNode([s], ["AAA"], CFG, bar_stamp="close")
+    with pytest.MonkeyPatch.context() as mp:
+        if not fast:
+            mp.setattr(ex, "RuntimeContext", _Nothing)
+        for ts, (ltp, bid, ask) in zip(TAPE_TS, TAPE):
+            node.push_tick("AAA", ts, ltp, bid, ask)
+    return s
+
+
+def _tape_ticks():
+    cols = np.array(TAPE)
+    return {"AAA": {"timestamps": np.array(TAPE_TS, dtype=np.int64), "ltp": cols[:, 0], "bid": cols[:, 1],
+                    "ask": cols[:, 2]}}
+
+
+def _assert_stopped_at_the_trade(s):
+    assert s.handle is not None
+    # Every quote-only row reads the last trade, never 0.0, and fires nothing.
+    quotes = [(ts, mark, state) for kind, _, ts, mark, state in s.trail
+              if kind == "quote" and ts in (TAPE_TS[3], TAPE_TS[5])]
+    assert [m for _, m, _ in quotes] == [100.0, 96.0], quotes
+    assert all(state == "armed" for _, _, state in quotes), quotes
+    # The stop fires at the print below it, and for the reason it was set.
+    assert s.fired_at() == TAPE_TS[6]
+    assert s.handle.reason == "stop_loss_pct"
+
+
+def test_a_quote_only_tick_does_not_fire_a_stop_on_a_live_node():
+    fast, slow = _tape_live(fast=True), _tape_live(fast=False)
+    _assert_stopped_at_the_trade(fast)
+    _assert_stopped_at_the_trade(slow)
+    assert fast.trail == slow.trail
+
+
+@pytest.mark.parametrize("run", ["run_tick_strategy", "run_strategies", "windowed"])
+def test_a_quote_only_tick_does_not_fire_a_stop_in_a_batch_or_windowed_run(run):
+    s = StopOnQuotes()
+    if run == "run_tick_strategy":
+        run_tick_strategy(s, _tape_ticks(), CFG)
+    elif run == "run_strategies":
+        run_strategies([s], {}, CFG, ticks=_tape_ticks())
+    else:
+        windowed_like([s], None, CFG, ticks=_tape_ticks(), cut=("random", 3))
+    _assert_stopped_at_the_trade(s)
+
+
+@pytest.mark.parametrize("fast", [True, False])
+def test_a_symbol_with_only_quotes_so_far_has_no_mark(fast):
+    seen = []
+
+    class Watch(Strategy):
+        def on_quote(self, ctx, quote=None):
+            # The fast answer is asked only on the fast path: reading the series caches it.
+            asked = ctx._last_price("BBB") if fast else None
+            seen.append((ctx.symbol, asked, ex.ExitBook._mark(ctx, "BBB", None)))
+
+    node = LiveNode([Watch()], ["AAA", "BBB"], CFG, bar_stamp="close")
+    with pytest.MonkeyPatch.context() as mp:
+        if not fast:
+            mp.setattr(ex, "RuntimeContext", _Nothing)
+        node.push_tick("BBB", T0 + NS, 0.0, 9.9, 10.1)
+        node.push_tick("AAA", T0 + 2 * NS, 100.0, 99.9, 100.1)
+        node.push_tick("BBB", T0 + 3 * NS, 0.0, 9.8, 10.2)
+        none = (True, None) if fast else None
+        assert seen == [("BBB", none, None), ("AAA", none, None), ("BBB", none, None)]
+        node.push_tick("BBB", T0 + 4 * NS, 10.05, 10.0, 10.1)
+    assert seen[-1] == ("BBB", (True, 10.05) if fast else None, 10.05)
+
+
+@pytest.mark.parametrize("fast", [True, False])
+def test_a_rule_whose_shown_rows_are_all_quotes_waits_for_the_next_trade(fast):
+    # With two rows shown, two quote-only rows after the last print leave no trade in view: the
+    # rule has no mark and does not fire (before the fix it read 0.0 and stopped the long out).
+    s = StopOnQuotes()
+    node = LiveNode([s], ["AAA"], CFG, bar_stamp="close", history=2)
+    rows = [(100.0, 99.95, 100.05)] * 3 + [(0.0, 50.0, 100.1)] * 3 + [(94.0, 93.95, 94.05)] * 2
+    stamps = [T0 + (i + 1) * NS for i in range(len(rows))]
+    with pytest.MonkeyPatch.context() as mp:
+        if not fast:
+            mp.setattr(ex, "RuntimeContext", _Nothing)
+        for ts, (ltp, bid, ask) in zip(stamps, rows):
+            node.push_tick("AAA", ts, ltp, bid, ask)
+    marks = [mark for kind, _, ts, mark, state in s.trail if kind == "quote" and ts in stamps[4:6]]
+    assert marks == [None, None]
+    assert s.fired_at() == stamps[6]
+
+
+class Trailing(Strategy):
+    """Buys 10 of AAA, then rests a trailing stop 2.0 under the high; records fills and equity."""
+
+    def __init__(self):
+        super().__init__()
+        self.n = 0
+        self.fills: list = []
+        self.equity: list = []
+
+    def on_trade(self, ctx, tick=None):
+        self.n += 1
+        if self.n == 1:
+            self.submit_order(orders.Market(side="buy", units=10.0, instrument="AAA"))
+        elif self.n == 3:
+            self.submit_order(orders.TrailingStopMarket(side="sell", offset=2.0, units=10.0, instrument="AAA"))
+
+    def on_quote(self, ctx, quote=None):
+        self.equity.append((ctx.event_ns, ctx.equity))
+
+    def on_order_event(self, ctx, event):
+        if event.kind == "order_filled":
+            self.fills.append((ctx.event_ns, event.price))
+
+
+@pytest.mark.parametrize("mode", ["live", "batch"])
+def test_a_quote_only_tick_moves_no_trailing_stop_and_marks_no_equity(mode):
+    # The stop trails to 99.0 under the 101 high. A quote-only row with its bid at 49.95 neither
+    # triggers it nor marks equity; the print at 98 does.
+    ltp = np.array([100.0, 100.0, 100.0, 101.0, 0.0, 101.0, 98.0])
+    ref = np.where(ltp > 0, ltp, 50.0)
+    stamps = T0 + np.arange(1, len(ltp) + 1, dtype=np.int64) * NS
+    s = Trailing()
+    if mode == "live":
+        node = LiveNode([s], ["AAA"], CFG, bar_stamp="close")
+        for ts, p, r in zip(stamps, ltp, ref):
+            node.push_tick("AAA", int(ts), float(p), float(r) - 0.05, float(r) + 0.05)
+    else:
+        run_tick_strategy(s, {"AAA": {"timestamps": stamps, "ltp": ltp, "bid": ref - 0.05, "ask": ref + 0.05}}, CFG)
+    assert [px for _, px in s.fills][-1] == 98.0
+    assert s.fills[-1][0] == int(stamps[6])
+    equity = dict(s.equity)
+    assert equity[int(stamps[4])] == equity[int(stamps[3])]

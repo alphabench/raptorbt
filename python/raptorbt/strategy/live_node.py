@@ -1080,7 +1080,9 @@ class LiveNode:
         return self._rt.last_event_ns()
 
     def last_prices(self, strategy_index: int) -> dict[str, float]:
-        """The last price of each symbol strategy ``strategy_index`` trades, as it reads them."""
+        """The last price of each symbol strategy ``strategy_index`` trades, as it reads them: the
+        last close, else the last traded ``ltp``. A symbol with no price yet (no data, or only
+        quote-only rows in view) is not in the dict."""
         return self._host._prices(self._ctxs[strategy_index])
 
     def apply_plan(self, plan) -> None:

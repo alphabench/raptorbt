@@ -131,7 +131,7 @@ impl OhlcvData<'_> {
 pub struct TickData {
     /// Nanoseconds-since-epoch timestamp for each tick.
     pub timestamps: Vec<Timestamp>,
-    /// Last traded price at each tick.
+    /// Last traded price at each tick; 0.0 on a row that carries no trade (a quote-only row).
     pub ltp: Vec<Price>,
     /// Best bid price at each tick (0.0 if unavailable).
     pub bid: Vec<Price>,

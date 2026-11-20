@@ -1341,7 +1341,8 @@ class RuntimeContext:
     # (every row is shown) or the run is not windowed.
     def declared_history(self, symbol: str | None = ...) -> int | None: ...
     def _instrument_index(self, symbol: str | None = ...) -> int: ...
-    # ``(known, price)``: the last close, else ltp, of ``series(symbol)`` without building it;
+    # ``(known, price)``: the last close, else the last positive ltp (a quote-only row is no
+    # trade), of ``series(symbol)`` without building it;
     # ``known`` is false where ``series`` must be read instead.
     def _last_price(self, symbol: str) -> tuple[bool, float | None]: ...
     #: ``(locked_margin, realized_pnl, unrealized_pnl, gross_exposure,
