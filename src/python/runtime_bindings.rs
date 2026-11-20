@@ -220,6 +220,51 @@ struct ClockSlot {
     /// Exactly `Clock`: with an empty schedule `_advance` only stores the
     /// time, which the loop then does itself.
     plain: bool,
+    /// The time the loop last stored in `_now` itself, while no `_advance` has run since: an
+    /// event at that same time (the quote of a print's row) has nothing to store. Kept only
+    /// for a clock no other slot holds (`alone`), as another slot's store would not show here.
+    stored: Cell<Option<i64>>,
+    alone: Cell<bool>,
+}
+
+impl ClockSlot {
+    fn new(clock: Py<PyAny>, alerts: Py<PyDict>, timers: Py<PyDict>, plain: bool) -> Self {
+        Self { clock, alerts, timers, plain, stored: Cell::new(None), alone: Cell::new(true) }
+    }
+
+    /// Move the clock to `ts` (`ts_obj` is it as a Python int) and return what fell due: `None`
+    /// when the schedule is empty and the clock is exactly `Clock`, whose `_advance` would only
+    /// have stored the time.
+    fn advance<'py>(
+        &self,
+        py: Python<'py>,
+        ts: i64,
+        ts_obj: &Bound<'py, PyInt>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let clock = self.clock.bind(py);
+        if self.plain && self.alerts.bind(py).is_empty() && self.timers.bind(py).is_empty() {
+            if !self.alone.get() || self.stored.get() != Some(ts) {
+                clock.setattr(intern!(py, "_now"), ts_obj)?;
+                self.stored.set(Some(ts));
+            }
+            return Ok(None);
+        }
+        // `_advance` stores the time itself, before anything it can raise.
+        self.stored.set(None);
+        Ok(Some(clock.call_method1(intern!(py, "_advance"), (ts,))?))
+    }
+}
+
+/// Mark the clocks two slots share: a store through one of them is not seen by the other's
+/// `stored`. Called when the slots are first known and when an instrument adds some.
+fn mark_shared_clocks<'a>(slots: impl Iterator<Item = &'a ClockSlot>) {
+    let mut seen: HashMap<*mut pyo3::ffi::PyObject, &ClockSlot> = HashMap::new();
+    for slot in slots {
+        if let Some(first) = seen.insert(slot.clock.as_ptr(), slot) {
+            first.alone.set(false);
+            slot.alone.set(false);
+        }
+    }
 }
 
 /// One composite stream of a strategy: a subscription on one instrument.
@@ -2970,12 +3015,9 @@ impl PyRuntime {
         for clock in clocks {
             let b = clock.bind(py);
             let plain = b.get_type().is(&clock_cls);
-            clock_slots.push(ClockSlot {
-                alerts: b.getattr("_alerts")?.cast_into::<PyDict>()?.unbind(),
-                timers: b.getattr("_timers")?.cast_into::<PyDict>()?.unbind(),
-                clock,
-                plain,
-            });
+            let alerts = b.getattr("_alerts")?.cast_into::<PyDict>()?.unbind();
+            let timers = b.getattr("_timers")?.cast_into::<PyDict>()?.unbind();
+            clock_slots.push(ClockSlot::new(clock, alerts, timers, plain));
         }
 
         // Subscriptions: one aggregator per (symbol, subscription), numbered
@@ -3555,6 +3597,10 @@ impl PyRuntime {
                 }),
                 late,
             }));
+        }
+        {
+            let tables: Vec<_> = strats.iter().map(|s| s.tables.borrow()).collect();
+            mark_shared_clocks(tables.iter().flat_map(|t| t.clocks.iter()));
         }
         *self.shared.strats.borrow_mut() = strats;
         self.shared.venue_on.set(route.is_some());
@@ -4931,12 +4977,10 @@ impl PyRuntime {
             st.ctx.bind(py).borrow().books.borrow_mut().push(None);
             let clock = st.late.clock.bind(py).call_method0("clone_schedule")?;
             let mut t = st.tables.borrow_mut();
-            t.clocks.push(ClockSlot {
-                alerts: clock.getattr("_alerts")?.cast_into::<PyDict>()?.unbind(),
-                timers: clock.getattr("_timers")?.cast_into::<PyDict>()?.unbind(),
-                plain: clock.get_type().is(&clock_cls),
-                clock: clock.unbind(),
-            });
+            let alerts = clock.getattr("_alerts")?.cast_into::<PyDict>()?.unbind();
+            let timers = clock.getattr("_timers")?.cast_into::<PyDict>()?.unbind();
+            let plain = clock.get_type().is(&clock_cls);
+            t.clocks.push(ClockSlot::new(clock.unbind(), alerts, timers, plain));
             let (privates, primary_natives) = split_indicators(
                 py,
                 st.late.indicators.iter().filter(|(sub, _)| sub.is_none()).map(|(_, obj)| obj),
@@ -4973,6 +5017,11 @@ impl PyRuntime {
                     reveal: None,
                 });
             }
+        }
+        {
+            let strats = sh.strats.borrow();
+            let tables: Vec<_> = strats.iter().map(|s| s.tables.borrow()).collect();
+            mark_shared_clocks(tables.iter().flat_map(|t| t.clocks.iter()));
         }
         let ls = guard.as_mut().expect("checked by live_loop");
         ls.wanted.push(mask);
@@ -5117,9 +5166,15 @@ impl PyRuntime {
         // one is complete: no event of it can still arrive.
         let ready: Vec<GroupEvent> = {
             let mut held = sh.held.borrow_mut();
-            let (ready, keep): (Vec<_>, Vec<_>) =
-                held.drain(..).partition(|h| h.event.ts < event.ts);
-            *held = keep;
+            // The usual group holds one timestamp: nothing is complete, and nothing is moved.
+            let ready = if held.iter().any(|h| h.event.ts < event.ts) {
+                let (ready, keep): (Vec<_>, Vec<_>) =
+                    held.drain(..).partition(|h| h.event.ts < event.ts);
+                *held = keep;
+                ready
+            } else {
+                Vec::new()
+            };
             held.push(pushed);
             ready
         };
@@ -5178,15 +5233,15 @@ impl PyRuntime {
     /// subscribed to it.
     fn mark_time(&self, py: Python<'_>, g: InstrumentId, ts: i64) -> PyResult<()> {
         let sh = &*self.shared;
-        let _guard = self.live_loop()?;
+        let guard = self.live_loop()?;
         self.settle_push();
         let subs: Vec<StrategyId> = match &*sh.inner.borrow() {
             Inner::Running(c) => c.subscribers(g).to_vec(),
             _ => return Err(finished()),
         };
-        let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
+        let ls = guard.as_ref().expect("checked by live_loop");
         for sid in subs {
-            let st = strats.iter().find(|s| s.sid == sid).expect("subscribed");
+            let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
             time_only(py, sh, st, g, ts)?;
         }
         Ok(())
@@ -6254,9 +6309,10 @@ fn time_only(
         strategy.setattr(intern!(py, "clock"), clock)?;
         st.active_clock.set(local);
     }
-    let due = clock.call_method1(intern!(py, "_advance"), (ts,))?;
-    for time_event in due.try_iter()? {
-        strategy.call_method1(intern!(py, "on_time_event"), (ctx, time_event?))?;
+    if let Some(due) = cs.advance(py, ts, &ts.into_pyobject(py)?)? {
+        for time_event in due.try_iter()? {
+            strategy.call_method1(intern!(py, "on_time_event"), (ctx, time_event?))?;
+        }
     }
     if has_commands(py, st) || has_intents(py, st) {
         settle(py, sh, st, global, local, 0, ts)?;
@@ -6364,12 +6420,7 @@ fn enter(
         strategy.setattr(intern!(py, "clock"), clock)?;
         st.active_clock.set(local);
     }
-    let due = if cs.plain && cs.alerts.bind(py).is_empty() && cs.timers.bind(py).is_empty() {
-        clock.setattr(intern!(py, "_now"), ev.ts_obj)?;
-        None
-    } else {
-        Some(clock.call_method1(intern!(py, "_advance"), (ev.event.ts,))?)
-    };
+    let due = cs.advance(py, ev.event.ts, ev.ts_obj)?;
     let mut fired = false;
     if let Some(due) = due {
         if st.mask & HOOK_TIME_EVENT != 0 {
