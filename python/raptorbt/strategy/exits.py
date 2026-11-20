@@ -70,6 +70,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from raptorbt._raptorbt import RuntimeContext
 from raptorbt.errors import InvalidOrder, InvalidParameter, StateError, UnknownSymbol
 from raptorbt.execution import AdapterError, OrderRefused, Unsupported
 from raptorbt.strategy.orders import Market
@@ -476,6 +477,12 @@ class ExitBook:
     def _mark(ctx, sym, marks):
         if marks is not None:
             return marks.get(sym)
+        if type(ctx) is RuntimeContext:
+            # The same price without building the series, which a live node copies out of its
+            # ring on every new row; it says when the series must be read instead.
+            known, price = ctx._last_price(sym)
+            if known:
+                return price
         try:
             series = ctx.series(sym)
         except (KeyError, RuntimeError):

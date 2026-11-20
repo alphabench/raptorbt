@@ -1182,6 +1182,53 @@ impl Shared {
         self.series.borrow_mut()[g] = Some((first, end, out.clone_ref(py)));
         Ok(out)
     }
+
+    /// What `live_series_of` would give as the last `close`, else the last `ltp` (`Some(None)`
+    /// when its dict would hold neither, or holds them empty), read from one row instead of
+    /// copying the ring. `None` when a dict for the same rows is cached: a strategy may have
+    /// changed that dict in place, so the caller reads it as before. Mirrors `live_series_of`
+    /// row for row; change both together.
+    fn live_last_price(&self, global: InstrumentId, limit: Option<usize>) -> Option<Option<f64>> {
+        let g = global.index();
+        let feed = self.feed.borrow();
+        let bars = match &self.window {
+            Some(w) => w.bars[g],
+            None => feed.as_ref().is_some_and(|f| f.has_bars(global)),
+        };
+        let ticks = feed.as_ref().and_then(|f| f.ticks(global));
+        let (first, end) = if bars {
+            match feed.as_ref().and_then(|f| f.bars(global)) {
+                Some(ring) => (ring.first_row(), self.watermark(global).min(ring.end_row())),
+                None => (0, 0),
+            }
+        } else if let Some(ring) = ticks {
+            (ring.first_row(), self.tick_watermark(global).min(ring.end_row()))
+        } else {
+            (0, 0)
+        };
+        let end = end.max(first);
+        let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
+        if let Some((f, w, _)) = &self.series.borrow()[g] {
+            if (*f, *w) == (first, end) {
+                return None;
+            }
+        }
+        let given: Option<&Vec<String>> =
+            self.window.as_ref().and_then(|w| w.ticks[g].as_ref()).filter(|_| !bars);
+        // `live_series_of` keeps the rows `get` answers, so the last one is the last it answers.
+        Some(match ticks.filter(|_| !bars) {
+            None if given.is_some() => None,
+            None => feed
+                .as_ref()
+                .and_then(|f| f.bars(global))
+                .and_then(|ring| (first..end).rev().find_map(|r| ring.get(r).ok()))
+                .map(|b| b.close),
+            Some(ring) if given.is_none_or(|g| g.iter().any(|k| k == "ltp")) => {
+                (first..end).rev().find_map(|r| ring.get(r).ok()).map(|t| t.ltp)
+            }
+            Some(_) => None,
+        })
+    }
 }
 
 /// The columns of a live node's tick series, after `timestamps`.
@@ -1729,6 +1776,27 @@ impl PyRuntimeContext {
     /// The local index of a symbol in this strategy.
     fn _instrument_index(&self, symbol: Option<&str>) -> PyResult<usize> {
         self.index_of(symbol)
+    }
+
+    /// The price an exit rule marks `symbol` at, as `(known, price)`: what reading the last
+    /// `close`, else `ltp`, of `series(symbol)` gives, without building the series. A live
+    /// node's `series` copies its ring once per new row, which a rule checked on every tick
+    /// would pay each time. `known` is false wherever `series` itself must be read: a batch run,
+    /// a symbol it would refuse, or a series already cached for these rows.
+    fn _last_price(&self, symbol: &str) -> (bool, Option<f64>) {
+        if self.shared.live_history.is_none() {
+            return (false, None);
+        }
+        let Ok(local) = self.index_of(Some(symbol)) else {
+            return (false, None);
+        };
+        let Ok(g) = self.shared.global_of(self.sid, local) else {
+            return (false, None);
+        };
+        match self.shared.live_last_price(g, self.shared.declared_rows(self.sid, g)) {
+            Some(price) => (true, price),
+            None => (false, None),
+        }
     }
 }
 
