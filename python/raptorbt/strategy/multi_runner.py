@@ -792,7 +792,11 @@ def run_strategies(
     ``bar_ns`` apply to every strategy, as they would in separate calls.
 
     ``ctx.series(symbol)`` returns read-only views truncated to the latest bar
-    the run has reached (empty in ``on_start``), not the full arrays.
+    the run has reached (empty in ``on_start``), not the full arrays. For a
+    symbol with both bars and ticks, the ``primary_bars`` built from its prints
+    once it has had a bar join its bars, in the order ``on_bar`` hears them and
+    stamped as a bar of the same close in ``data`` would be; its series is then
+    a copy.
 
     ``accounts`` maps a name to an :class:`~raptorbt.AccountSpec`; strategies
     that name it share one account: its cash, margin and account-level risk

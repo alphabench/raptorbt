@@ -838,6 +838,105 @@ def test_a_file_journal_is_the_whole_recovery(tmp_path):
     assert torn == 0 and rj.verify(again, header) == restored.journal.head()[1]
 
 
+MARKET_SYMBOLS = ["A", "B", 'Caf\u00e9 "\u20ac\U0001f600\\']
+# Fields a refused tick row still carries into its record (no trade, no quote).
+AWKWARD = [float("nan"), float("inf"), -float("inf"), -0.0, 5e-324, 2.2250738585072014e-308,
+           1.7976931348623157e308, 1e21, 1e-7, 0.1, 9007199254740993.0, 2.0**64, -123456789.12345679]
+
+
+def market_run(journal):
+    """Bars, ticks, depth and clock moves on three symbols, with orders between
+    them: every kind of market-data record next to the records that force."""
+    venue = MockVenue()
+    node = LiveNode([Trader()], MARKET_SYMBOLS, CONFIG, bar_stamp="close", execution=venue,
+                    journal=journal)
+    rng = random.Random(1729)
+    sampled = []  # the size fields of each refused tick row, in order
+    for step in script(30):
+        run_step(node, venue, step)
+        if step[0] != "bar" or step[1] != "B":
+            continue
+        t = step[2]
+        for k in range(3):
+            price = round(rng.uniform(50, 150), rng.randint(0, 6))
+            node.push_tick(MARKET_SYMBOLS[2], t + 10 + k, price, price - 0.05, price + 0.05,
+                           buy_qty_delta=-0.0, sell_qty_delta=float(rng.randint(0, 10**6)),
+                           ltq=rng.choice([0.0, 1.0, 75.0]), bid_qty=rng.random(), ask_qty=1e-9,
+                           oi=float(2**53 + 1), arrival_ns=t + 11 + k)
+        sampled.append(rng.sample(AWKWARD, 6))
+        node.push_tick(MARKET_SYMBOLS[2], t + 20, 0.0, 0.0, 0.0, *sampled[-1])
+        levels = [(round(rng.uniform(1, 200), 2), float(rng.randint(0, 500))) for _ in range(rng.randint(0, 5))]
+        asks = [(p + 1.0, q) for p, q in levels]
+        node.push_depth(MARKET_SYMBOLS[2], t + 30, levels, asks, arrival_ns=t + 31)
+        node.push_depth(MARKET_SYMBOLS[2], t + 40, [], [])
+        node.advance_time(t + 50)
+    return node, venue, sampled
+
+
+def test_a_journal_that_keeps_no_records_writes_the_bytes_one_that_keeps_them_writes(tmp_path):
+    # A file-only journal writes market data without building the record's
+    # value; memory, or a sink callback, builds every value first. The files,
+    # the heads and what a callback receives must not tell them apart.
+    direct, kept, called = (str(tmp_path / f"{n}.journal") for n in ("direct", "kept", "called"))
+    received = []
+    journals = [
+        rj.Journal(HEADER, file=direct),
+        rj.Journal(HEADER, file=kept, memory=True),
+        rj.Journal(HEADER, file=called, sink=lambda r: received.append((r.canonical(), r.chain))),
+    ]
+    for j in journals:
+        sampled = market_run(j)[2]
+        j.sync()
+    heads = [j.head()[:2] for j in journals]
+    assert heads[0] == heads[1] == heads[2]
+    data = [(tmp_path / f"{n}.journal").read_bytes() for n in ("direct", "kept", "called")]
+    assert data[0] == data[1] == data[2]
+    header, base, chain_from, records, torn = rj.read(direct)
+    assert torn == 0 and rj.verify(records, header) == heads[0][1]
+    assert [(r.canonical(), r.chain) for r in records] == received
+    assert [r.canonical() for r in records] == [r.canonical() for r in journals[1].since(0)]
+    got = {r.kind for r in records}
+    assert {"tick", "bar", "depth", "time", "command", "report"} <= got, got
+    # Each record re-encoded from what it says gives its bytes.
+    for r in records:
+        again = rj.canonical(
+            {
+                "seq": r.seq, "kind": r.kind, "ts_event": r.ts_event, "ts_arrival": r.ts_arrival,
+                "source": r.source, "client_order_id": r.client_order_id, "payload": r.payload,
+            }
+        )
+        assert again == r.canonical(), r.seq
+    # A refused row's size fields hold the text the encoder gives each float
+    # (rj.canonical of a float is that text, quoted).
+    fields = ("buy_qty_delta", "sell_qty_delta", "ltq", "bid_qty", "ask_qty", "oi")
+    awkward = [r for r in records if r.kind == "tick" and r.payload["ltp"] == "0"]
+    assert len(awkward) == len(sampled)
+    for r, values in zip(awkward, sampled):
+        assert [r.payload[f] for f in fields] == [json.loads(rj.canonical(v)) for v in values], r.seq
+    # Every awkward value reached a record (repr tells -0.0 and NaN apart).
+    assert {repr(v) for values in sampled for v in values} == {repr(v) for v in AWKWARD}
+
+
+def test_a_journal_that_keeps_no_records_replays_against_its_own_file(tmp_path):
+    path = str(tmp_path / "run.journal")
+    node, venue, _ = market_run(rj.Journal(HEADER, file=path))
+    want = node.state_digest()
+    del node
+    # The replay appends through the same direct path and is held to the file.
+    j, records = rj.open_for_recovery(path)
+    restored = LiveNode.restore(
+        None, [Trader()], MARKET_SYMBOLS, CONFIG, journal=j, records=records, execution=venue,
+        bar_stamp="close",
+    )
+    assert not j.replaying
+    settle(restored, venue)
+    assert restored.state_digest() == want
+    j.sync()
+    header, base, chain_from, again, torn = rj.read(path)
+    assert torn == 0 and rj.verify(again, header) == j.head()[1]
+    assert [r.canonical() for r in again[: len(records)]] == [r.canonical() for r in records]
+
+
 # -- the recovery gate ---------------------------------------------------------------------
 
 

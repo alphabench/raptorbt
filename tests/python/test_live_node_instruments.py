@@ -492,6 +492,46 @@ def test_the_plan_is_pure_and_names_what_holds_a_strike_that_left_the_window():
     assert held not in node.symbols and held in node.retired_instruments
 
 
+def _quoted_chain_node(trade):
+    """A chain node whose underlying printed at 100 (``trade``) or not, then quoted without a
+    print (a tick row with ``ltp`` 0)."""
+    cf, universe = _chain_universe()
+    node = LiveNode(
+        [_chain_strategy()()], [cf.U], CONFIG, bar_stamp="close", history=32,
+        instruments=universe, bindings={"index": cf.U},
+    )
+    if trade:
+        node.push_tick(cf.U, cf.T0 + cf.STEP, 100.0, 99.95, 100.05)
+    node.push_tick(cf.U, cf.T0 + 2 * cf.STEP, 0.0, 99.9, 100.1)
+    return cf, node
+
+
+def test_a_quote_only_tick_is_not_the_price_the_plan_finds_the_money_with():
+    # Before: the last row's ltp 0 was the price, so the window sat at the lowest strikes.
+    from raptorbt.strategy.requirements import plan_instruments
+
+    cf, node = _quoted_chain_node(trade=True)
+    assert node.last_prices(0) == {cf.U: 100.0}
+    plan = plan_instruments(node)
+    assert not plan.issues
+    assert {s[4:].rstrip("CPE") for s in plan.add} == {"95", "100", "105"}
+    assert set(node.ctx(0).role("opts")) == set(plan.add)
+
+
+def test_an_underlying_with_only_quotes_has_no_price_and_its_chain_waits_for_one():
+    # Before: the price was 0.0 and the plan added the strikes around 0 (the lowest listed).
+    from raptorbt.strategy.requirements import plan_instruments
+
+    cf, node = _quoted_chain_node(trade=False)
+    assert node.last_prices(0) == {}, "no trade, no price: as for a symbol with no data"
+    plan = plan_instruments(node)
+    assert not plan.add
+    assert [i.code for i in plan.issues] == ["needs_price"]
+    with pytest.raises(UnknownSymbol) as e:
+        node.ctx(0).role("opts")
+    assert e.value.code == "unresolved_role" and "needs_price" in str(e.value)
+
+
 # -- continuous futures ----------------------------------------------------------------------
 
 

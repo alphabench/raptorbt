@@ -327,7 +327,7 @@ assert risk.total_vol_annualized > 0.0
 - Stop-loss and target levels are order features, not limits: see orders and
   `StopConfig`/`TargetConfig`.
 - Event hooks are in [strategy](../strategy/SKILL.md).
-- Runnable examples: `examples/portfolio/shared_account.py`, `examples/options/nifty_momentum.py`.
+- Runnable examples: `examples/portfolio/shared_account.py`, `examples/multi-timeframe/nifty_momentum.py`.
 
 ## 7. Constraints and correctness
 

@@ -151,6 +151,7 @@ impl SpreadBacktest {
         book_config.squareoff_time_minutes = None;
         book_config.squareoff_time_by_symbol.clear(); // a spread's legs square off together
         let mut book = PortfolioBook::new(book_config, account_mode(base));
+        book.reserve_curves(n);
         for (k, leg) in legs.iter().enumerate() {
             book.add_instrument(
                 format!("SPREAD_LEG{k}"),
@@ -496,6 +497,8 @@ fn aggregate(leg_trades: &[Trade], forced: &HashMap<usize, ExitReason>) -> Vec<T
                 entry_fees,
                 exit_fees,
                 fee_breakdown: breakdown,
+                entry_fee_breakdown: None,
+                exit_fee_breakdown: None,
                 exit_reason: forced.get(&entry_idx).copied().unwrap_or(last.exit_reason),
                 // The structure is synthesised from its legs, which are not
                 // measured as one position. None means "not measured".

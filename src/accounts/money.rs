@@ -198,10 +198,13 @@ impl MoneyScale {
     #[inline]
     pub fn to_f64(self, m: Money) -> f64 {
         // A balance fits an `i64` outside absurd runs, and `i64 -> f64` is one
-        // instruction where `i128 -> f64` is a library call.
+        // instruction where `i128 -> f64` is a library call. The wide arm is out
+        // of line: inlined, the compiler computes both arms and selects, which
+        // makes the library call on every view. Both arms round the same integer
+        // to nearest, so the value is the same either way.
         let minor = match i64::try_from(m.0) {
             Ok(small) => small as f64,
-            Err(_) => m.0 as f64,
+            Err(_) => wide_to_f64(m.0),
         };
         minor / POW10[self.places as usize]
     }
@@ -213,6 +216,14 @@ impl MoneyScale {
     pub fn snap(self, x: f64) -> Result<f64> {
         Ok(self.to_f64(self.money(x)?))
     }
+}
+
+/// `i128 -> f64` for an amount beyond `i64`, kept off the path of every
+/// other conversion (see [`MoneyScale::to_f64`]).
+#[cold]
+#[inline(never)]
+fn wide_to_f64(minor: i128) -> f64 {
+    minor as f64
 }
 
 #[cfg(test)]
@@ -246,6 +257,23 @@ mod tests {
         for minor in [-9_007_199_254_740_991_i128 / 3, -5, -1, 0, 1, 7, 99_999_999_999] {
             let m = Money::from_minor(minor);
             assert_eq!(s.money(s.to_f64(m)).unwrap(), m, "{minor}");
+        }
+    }
+
+    #[test]
+    fn a_view_is_the_wide_conversion_on_both_sides_of_i64() {
+        let edge = i128::from(i64::MAX);
+        let low = i128::from(i64::MIN);
+        for minor in [0, -1, 1, 9_007_199_254_740_993, edge, edge + 1, low, low - 1, edge * 1_000] {
+            for places in [0, 2, 9] {
+                let s = MoneyScale::new(places).unwrap();
+                let direct = minor as f64 / POW10[places as usize];
+                assert_eq!(
+                    s.to_f64(Money::from_minor(minor)).to_bits(),
+                    direct.to_bits(),
+                    "{minor}"
+                );
+            }
         }
     }
 

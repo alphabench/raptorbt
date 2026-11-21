@@ -116,6 +116,24 @@ on_discrepancy=None, **the arguments the node was built with)`.
 `instruments` are those the node was *built* with: the instruments it added later come back from the
 journal's `instrument_add` records (with their specs), in the order they were added.
 
+**Market data from the host's own store.** A host that already keeps the market data it
+pushes need not keep the journal's `tick` and `time` records as well. It keeps the other
+records and, per market input, the values it pushed and the sequence number the record took
+(`journal.count` just before the push), and at restore rebuilds each record with
+`raptorbt.journal.canonical({...})`: `seq`, `kind`, `ts_event` (the push's timestamp),
+`ts_arrival` (the `arrival_ns` given, else the timestamp; always the timestamp for `time`),
+`source` `"feed"`, `client_order_id` `None`, and the payload, for a tick its `symbol` and the
+nine numbers of `push_tick` given as Python floats (an argument not given is `0.0`), for a
+time step `{"timestamp": ns}`. It passes the bytes, in sequence order with the kept records,
+to `restore(records=...)`. A record rebuilt this way has the original's bytes and chain link
+(`tests/python/test_journal_market_span.py`). The replay pushes each input as its record
+states it and compares what the node then writes: a record in another form (an integer where
+the engine writes a float, another `source`) diverges where it stands, and one with other
+values diverges at the first record they change. A difference that changes nothing the node
+writes afterwards (an arrival time before any order) is found only by the chain head, so pass
+the checkpoint taken at the end of the records (`include_log=False` keeps it small), or fold
+the chain with `chain_step` and compare it with a head you kept.
+
 ## Recovery
 
 1. **Load** the checkpoint, or the journal's records.

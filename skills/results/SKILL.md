@@ -30,7 +30,15 @@ one in `.result`, with `per_instrument` summaries and `rejected_entries`).
   `result.returns()`: per-bar returns as fractions, with a leading `0.0`.
 - `result.trades()`: round trips. `pnl` is **net of fees**; `fees` is the whole
   round trip; `exit_reason` says how it ended (`Signal`, `Order`, a stop or
-  target, `Settlement`, `EndOfData`).
+  target, `Settlement`, `EndOfData`). Under a fee schedule, `entry_fee_breakdown`
+  and `exit_fee_breakdown` give each leg's charge by the schedule's own
+  components (`brokerage`, `stt`, `exchange_txn`, `sebi_fee`, `stamp_duty`,
+  `gst`, `ipft`, `dp_charge`) and `total`, the booked cost of the leg; `total`
+  differs from the sum of the parts by the rounding of the fee row, so state
+  that difference as its own line. The `full_report` trade rows carry the same
+  as `entry_fee_parts` and `exit_fee_parts`. They are `None` (empty in the
+  rows) when the schedule does not itemise, and for the entry of a position
+  built from several fills.
 - `result.orders()`: what became of each *typed* order, including those that
   never filled (`status`, `reject_reason`). Intents from `enter()` and
   `close_position()` do not appear here; a refused entry shows in

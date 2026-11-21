@@ -122,6 +122,7 @@ impl BasketBacktest {
 
         let mut book =
             PortfolioBook::new(self.config.base.clone(), account_mode(&self.config.base));
+        book.reserve_curves(n_bars);
         for (_, signals) in instruments {
             // The cap is applied to the leg's share below, where the weights
             // are known; the kernel would apply it to a fraction of it.

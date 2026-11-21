@@ -5,6 +5,7 @@
 pub mod adapter;
 pub mod chain;
 pub mod core;
+pub(crate) mod market;
 pub mod record;
 pub mod sink;
 pub mod value;

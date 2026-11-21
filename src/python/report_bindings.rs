@@ -144,6 +144,20 @@ fn period_day(x: &Bound<'_, PyAny>) -> PyResult<i64> {
     ))
 }
 
+/// A leg's fee components under the fee model's own names (not `component`'s report names),
+/// empty when the trade carries none.
+fn leg_parts(item: &Bound<'_, PyAny>, name: &str) -> PyResult<BTreeMap<String, f64>> {
+    let mut out = BTreeMap::new();
+    if let Some(parts) = field(item, name)? {
+        let parts =
+            parts.cast::<PyDict>().map_err(|_| invalid_input("fees by component is a dict"))?;
+        for (k, v) in parts.iter() {
+            out.insert(k.extract::<String>()?, v.extract::<f64>()?);
+        }
+    }
+    Ok(out)
+}
+
 fn attr_trade_from(item: &Bound<'_, PyAny>) -> PyResult<AttrTrade> {
     let fees = optional::<f64>(item, "fees")?.unwrap_or(0.0);
     let pnl: f64 = required(item, "pnl")?;
@@ -168,6 +182,8 @@ fn attr_trade_from(item: &Bound<'_, PyAny>) -> PyResult<AttrTrade> {
         entry_fees: optional::<f64>(item, "entry_fees")?.unwrap_or(0.0),
         exit_fees: optional::<f64>(item, "exit_fees")?.unwrap_or(0.0),
         fee_parts,
+        entry_parts: leg_parts(item, "entry_fee_breakdown")?,
+        exit_parts: leg_parts(item, "exit_fee_breakdown")?,
         tag: tag_of(item)?,
         settlement: optional::<String>(item, "exit_reason")?
             .is_some_and(|r| r.eq_ignore_ascii_case("settlement")),
@@ -513,6 +529,8 @@ fn full_report<'py>(
             d.set_item("fees", t.fees)?;
             d.set_item("entry_fees", t.entry_fees)?;
             d.set_item("exit_fees", t.exit_fees)?;
+            d.set_item("entry_fee_parts", t.entry_parts)?;
+            d.set_item("exit_fee_parts", t.exit_parts)?;
             d.set_item("slippage", py.None())?;
             d.set_item("net", t.net)?;
             d.set_item("tag", t.tag)?;

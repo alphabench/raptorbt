@@ -301,7 +301,7 @@ impl PortfolioBook {
 
     /// Timestamp of the book's last sample.
     pub fn last_sample_ts(&self) -> Option<i64> {
-        self.timestamps.last().copied()
+        self.timestamps.last()
     }
 
     /// Whether the account-level flatten-on-daily-loss is configured.

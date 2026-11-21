@@ -131,7 +131,7 @@ impl OhlcvData<'_> {
 pub struct TickData {
     /// Nanoseconds-since-epoch timestamp for each tick.
     pub timestamps: Vec<Timestamp>,
-    /// Last traded price at each tick.
+    /// Last traded price at each tick; 0.0 on a row that carries no trade (a quote-only row).
     pub ltp: Vec<Price>,
     /// Best bid price at each tick (0.0 if unavailable).
     pub bid: Vec<Price>,
@@ -317,6 +317,14 @@ pub struct Trade {
     /// `fees` -- the equity curve and the reported costs are the same money.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
+    /// The entry leg's itemized costs alone (`entry_fees`), when the fee model itemises and the
+    /// entry was one fill. Its `total()` is the booked entry cost; a total that differs from the
+    /// sum of the parts is the rounding the fee row applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
+    /// The exit leg's itemized costs alone (`exit_fees`), under the same conditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_fee_breakdown: Option<crate::execution::indian_costs::FeeBreakdown>,
     /// Exit reason.
     pub exit_reason: ExitReason,
     /// Worst price the trade reached against the position before it closed.

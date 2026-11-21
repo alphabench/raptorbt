@@ -511,6 +511,15 @@ def _():
     raptorbt.run_tick_backtest(g[0], g[4], g[4], g[4], g[5], g[5], g[5], g[6], g[7], quantity=-1)
 
 
+@case("invalid_data", "ltp", name="negative_tick_ltp")
+def _():
+    # ltp 0 is a row with no trade; a negative one is no price at all.
+    g = legs()[0]
+    ltp = g[4].copy()
+    ltp[3] = -1.0
+    raptorbt.run_tick_backtest(g[0], ltp, g[4], g[4], g[5], g[5], g[5], g[6], g[7])
+
+
 @case("invalid_squareoff_time", "squareoff_time")
 def _():
     BacktestConfig(squareoff_time="25:99")
@@ -752,6 +761,22 @@ def _():
 
     Roled = with_roles(index=Underlying(asset="index"), fut=Future(of="index"))
     run(Roled(lambda s, ctx: ctx.role("fut")))
+
+
+@case("role_before_event", "name")
+def _():
+    from raptorbt.strategy import Future, Holding, Requirements, Underlying
+
+    class AtStart(Noop):
+        requirements = Requirements(
+            roles={"index": Underlying(asset="index"), "fut": Future(of="index")},
+            timeframes=["1m"], holding=Holding.overnight(), data=["bar"],
+        )
+
+        def on_start(self, ctx):
+            ctx.role("fut")
+
+    run(AtStart(), bindings={"index": "A"})
 
 
 @case("unknown_role_binding", "bindings")

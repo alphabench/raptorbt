@@ -22,6 +22,11 @@ from _data import bars, sma_signals  # noqa: E402
 
 CAPITAL = 100_000.0
 FEES = 0.0002
+# The tick runs buy one unit near 1,000 per trade and keep the default fees
+# (0.001). On 100,000 the fees and the spread exhaust the account part way
+# through the 10M-tick run, after which every entry is refused and the timing
+# is of a run that stopped trading. 10,000,000 funds every size to the end.
+TICK_CAPITAL = 10_000_000.0
 
 
 def _cfg():
@@ -74,19 +79,31 @@ def bench_ticks():
     rows = {}
     for n, reps in ((10_000, 300), (100_000, 100), (1_000_000, 20), (10_000_000, 3)):
         ts, ltp, bid, ask, bq, sq, oi, e, x = _ticks(n)
-        # max_trades defaults to 50 and BREAKS THE LOOP once reached, so the
-        # default would time a partial traversal and inflate ticks/sec.
+        # A max_trades cap breaks the loop once reached, so the run must not
+        # hit one: a capped run times a partial traversal and inflates ticks/sec.
         best, _, res = _time(
             lambda: r.run_tick_backtest(
                 timestamps=ts, ltp=ltp, bid=bid, ask=ask, buy_qty_delta=bq,
                 sell_qty_delta=sq, oi=oi, entries=e, exits=x, symbol="T",
+                initial_capital=TICK_CAPITAL,
                 max_trades=10_000_000, entry_cooldown_ticks=10),
             reps)
         trades = res.trades()
         last_exit = trades[-1].exit_idx if trades else -1
         rows[n] = {"best_ms": best * 1e3, "m_ticks_per_s": n / best / 1e6,
                    "trades": len(trades), "last_exit_idx": last_exit,
-                   "reached_end": bool(last_exit >= n - 100)}
+                   "unfunded_entries": res.unfunded_entries,
+                   "reached_end": bool(last_exit >= n - 100 and res.unfunded_entries == 0)}
+    stopped = {n: row for n, row in rows.items() if not row["reached_end"]}
+    if stopped:
+        # A run that stopped trading part way is not the figure the table
+        # publishes; refuse to report it.
+        detail = "; ".join(
+            f"{n:,} ticks: last exit at {row['last_exit_idx']:,}, "
+            f"{row['unfunded_entries']:,} entries refused as unfunded"
+            for n, row in stopped.items())
+        print(json.dumps({"ticks": rows}, indent=2), file=sys.stderr)
+        raise SystemExit(f"tick benchmark did not trade to the end of its input ({detail})")
     return rows
 
 

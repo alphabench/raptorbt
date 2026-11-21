@@ -71,7 +71,13 @@ with `ctx.role("basket")`; the run binds it with
 `run_strategies(..., bindings={"basket": [...]})`. `trade_from=<ns>` runs the
 bars before it without trading them (orders decided earlier are refused
 `warmup`), so momentum and other indicators are primed when trading starts.
-`examples/portfolio/top_n_basket.py` runs both.
+`examples/portfolio/top_n_basket.py` runs both. A basket whose members change
+(an index's constituents, the stocks eligible on each day) is bound with
+`raptorbt.strategy.PointInTime(union, steps=[(start_ns, members), ...])`:
+bars are fed for the union, and `ctx.role("basket")` returns the members at
+the event's time, so ranking and trading only what it returns never uses a
+name outside its membership. `examples/portfolio/short_basket_intraday.py`
+runs it.
 
 **Account groups.** Strategies can share an account:
 `run_strategies(..., accounts={"desk": AccountSpec(...)})`, with the strategy

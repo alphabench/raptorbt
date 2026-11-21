@@ -243,7 +243,8 @@ Bars that the engine builds from finer data (`primary_bars`, `subscribe_bars`,
 `BarAggregator`) are stamped at the **end** of their window. A bar labelled `t`
 contains only data strictly before `t` (`src/data/aggregate.rs`). The bar is
 emitted when the first record of a later window arrives, or when the stream is
-flushed at the end of data.
+flushed at the end of data. On a live node `advance_time` emits none: a bar built
+from a symbol's prints waits for that symbol's first print of a later window.
 
 ## Lifecycle: corporate actions and expiries
 

@@ -811,6 +811,11 @@ CODES: dict[str, Code] = {
         UnknownSymbol, "instruments", "ctx.role could not resolve a requirements role at this time.",
         ["supply the data or instrument specs the role needs", "bindings={role: symbol}"],
     ),
+    "role_before_event": _c(
+        InvalidParameter, "instruments",
+        "ctx.role of a Future (or a Chain on one) was read before the run's first event, when the context has no time.",
+        ["read ctx.role(name) in on_bar, which has an event, not in on_init or on_start"],
+    ),
     "invalid_adjust": _c(
         InvalidParameter, "market-data", "continuous_series needs adjust to be 'raw', 'back' or 'ratio'.",
         ["raw", "back", "ratio"],

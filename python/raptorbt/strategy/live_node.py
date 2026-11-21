@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import weakref
+from math import isfinite as _isfinite
 from typing import Iterable, Literal, Sequence
 
 import numpy as np
@@ -149,7 +150,11 @@ class LiveNode:
     to the latest the node has reached: a symbol's bars once it has had any,
     otherwise its ticks (``timestamps``, ``ltp``, ``bid``, ``ask``,
     ``buy_qty_delta``, ``sell_qty_delta``, ``ltq``, ``bid_qty``, ``ask_qty``,
-    ``oi``). Older rows are overwritten. A strategy that needs more than the
+    ``oi``). The bars the node builds from a symbol's prints (``primary_bars``)
+    once it has had a bar join its bars, in the order ``on_bar`` hears them and
+    stamped as a pushed bar of the same close would be, as in
+    :func:`~raptorbt.run_strategies`; the series then shows at most ``history``
+    rows. Older rows are overwritten. A strategy that needs more than the
     default can call ``ctx.keep_history(rows, symbol=None)``; rows it asked
     for are never overwritten, and a push that would have to overwrite one
     raises ``RuntimeError`` and changes nothing. That is the only way a node
@@ -574,12 +579,25 @@ class LiveNode:
         Timestamps must not decrease per symbol (equal ones are allowed);
         a decreasing one raises ``ValueError`` and changes nothing.
         """
-        self._check_open(push=True)
-        ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
-        self._note_push(symbol, timestamp)
+        # The checks of ``_check_open``, ``ensure_pushed_finite``, ``_note_push`` and ``_index``,
+        # in their order, each taken whole only when its quick test fails: a push is per tick.
+        if (
+            self._finished
+            or self._replaying
+            or self._state != "live"
+            or (self._epoch is not None and self._rt.fenced)
+        ):
+            self._check_open(push=True)
+        if not (_isfinite(ltp) and _isfinite(bid) and _isfinite(ask)):
+            ensure_pushed_finite(symbol, f"{self._name}.push_tick", ltp=ltp, bid=bid, ask=ask)
+        last = self._last_push
+        self._last_push = (symbol, timestamp)
+        if not (last is None or last[1] != timestamp or last[0] == symbol):
+            self._note_ungrouped(last, symbol, timestamp)
         try:
+            index = self._index_of.get(symbol)
             return self._rt.push_tick(
-                self._index(symbol, "push_tick"),
+                self._index(symbol, "push_tick") if index is None else index,
                 timestamp,
                 ltp,
                 bid,
@@ -614,6 +632,10 @@ class LiveNode:
         """
         self._check_open(push=True)
         self._check_bar(symbol, timestamp, open, high, low, close, volume, "push_bar")
+        self._push_bar(symbol, timestamp, open, high, low, close, volume, arrival_ns)
+
+    def _push_bar(self, symbol, timestamp, open, high, low, close, volume, arrival_ns) -> None:
+        """``push_bar`` once the node is open and the bar checked (``_check_bar``)."""
         self._stamps.require_given(f"{self._name}.push_bar")
         self._note_push(symbol, timestamp)
         index = self._index(symbol, "push_bar")
@@ -643,7 +665,11 @@ class LiveNode:
         """
         self._check_open()
         self._stamps.require_given(f"{self._name}.warm_up")
-        pushes = _warmup(bars, self._index_of, self._stamps)
+        self._warm_up(_warmup(bars, self._index_of, self._stamps))
+
+    def _warm_up(self, pushes) -> None:
+        """Push ``pushes`` (``(index, ts, o, h, l, c, v)``) as ``warm_up`` does: muted, in one
+        group kept off the journal. A restore passes the bars one ``warm_up`` journaled."""
         self._rt.set_warmup(True, True)
         self._muted_now = True
         try:
@@ -728,17 +754,29 @@ class LiveNode:
             )
             self._check_bar(symbol, timestamp, o, h, l, c, v, "push_group")
             rows.append((symbol, o, h, l, c, v))
+        # A subclass that overrides push_bar is called for each bar, as it always was.
+        own = type(self).push_bar is LiveNode.push_bar
         self.begin_group(timestamp)
         for symbol, o, h, l, c, v in rows:
-            self.push_bar(symbol, timestamp, o, h, l, c, v, arrival_ns=arrival_ns)
+            if own:
+                # Each bar was checked above, and nothing a check reads changes while the group
+                # fills: the group's timestamp is the bars', and each symbol appears once.
+                self._check_open(push=True)
+                self._push_bar(symbol, timestamp, o, h, l, c, v, arrival_ns)
+            else:
+                self.push_bar(symbol, timestamp, o, h, l, c, v, arrival_ns=arrival_ns)
         self.flush()
 
     def _check_bar(self, symbol, timestamp, open, high, low, close, volume, call) -> None:
         """What ``push_bar`` refuses before it delivers anything, in its order."""
-        reject_bar_only_settings(self._bar_config, [symbol], f"{self._name}.{call}")
-        ensure_pushed_finite(
-            symbol, f"{self._name}.{call}", open=open, high=high, low=low, close=close
-        )
+        # Each check is taken whole only when its quick test fails: a bar is checked per push.
+        config = self._bar_config
+        if config is not None and (config.order_latency_ns != 0 or config.partial_fills):
+            reject_bar_only_settings(config, [symbol], f"{self._name}.{call}")
+        if not (_isfinite(open) and _isfinite(high) and _isfinite(low) and _isfinite(close)):
+            ensure_pushed_finite(
+                symbol, f"{self._name}.{call}", open=open, high=high, low=low, close=close
+            )
         group_ts = getattr(self, "_group_ts", None)
         if group_ts is not None and self._rt.group_open and timestamp != group_ts:
             # A group declared at a timestamp holds that timestamp's bars: one stamped otherwise
@@ -791,7 +829,13 @@ class LiveNode:
         at a time, so what a decision sees can differ. The first one is logged (WARNING, ``raptorbt.strategy.live_node``)."""
         last = self._last_push
         self._last_push = (symbol, timestamp)
-        if last is None or last[1] != timestamp or last[0] == symbol or self._rt.group_open:
+        if last is None or last[1] != timestamp or last[0] == symbol:
+            return
+        self._note_ungrouped(last, symbol, timestamp)
+
+    def _note_ungrouped(self, last, symbol: str, timestamp: int) -> None:
+        """The part of ``_note_push`` for a push at the previous push's timestamp."""
+        if self._rt.group_open:
             return
         self._ungrouped += 1
         if self._ungrouped == 1:
@@ -1036,7 +1080,9 @@ class LiveNode:
         return self._rt.last_event_ns()
 
     def last_prices(self, strategy_index: int) -> dict[str, float]:
-        """The last price of each symbol strategy ``strategy_index`` trades, as it reads them."""
+        """The last price of each symbol strategy ``strategy_index`` trades, as it reads them: the
+        last close, else the last traded ``ltp``. A symbol with no price yet (no data, or only
+        quote-only rows in view) is not in the dict."""
         return self._host._prices(self._ctxs[strategy_index])
 
     def apply_plan(self, plan) -> None:

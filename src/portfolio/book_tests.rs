@@ -153,6 +153,62 @@ fn a_windowed_book_holds_flat_memory_and_still_refuses_late_adoption() {
     );
 }
 
+/// A run that fills several curve blocks, trading so the equity moves, with a
+/// second print at some instants (the instant's sample is replaced), among
+/// them the last print of each block.
+fn run_long(reserve: bool, window: Option<usize>) -> SessionOutcome {
+    use crate::portfolio::curve::BLOCK;
+    let n = 3 * BLOCK + 700;
+    let mut book = PortfolioBook::new(config(), AccountMode::Cash);
+    book.add_instrument("AAA".into(), Direction::Long, None, None, PositionPolicy::Net);
+    if reserve {
+        book.reserve_curves(n);
+    }
+    book.set_curve_window(window);
+    let closes: Vec<f64> = (0..n).map(|i| 100.0 + ((i * 7919) % 101) as f64 * 0.05).collect();
+    let mut idx = 0;
+    for (i, bar) in bars(0, &closes).into_iter().enumerate() {
+        let again = KernelBar { close: bar.close + 0.5, ..bar };
+        let input = StepInput { entry: i % 40 == 1, exit: i % 40 == 21, ..StepInput::default() };
+        let entry = ScheduleEntry { instrument: 0, local_idx: idx, data: ScheduleData::Bar(bar) };
+        book.apply(&entry, None, input);
+        idx += 1;
+        if i % 997 == 0 || i % BLOCK == BLOCK - 1 {
+            let entry =
+                ScheduleEntry { instrument: 0, local_idx: idx, data: ScheduleData::Bar(again) };
+            book.apply(&entry, None, StepInput::default());
+            idx += 1;
+        }
+    }
+    book.finish()
+}
+
+#[test]
+fn a_long_unbounded_run_keeps_the_curves_a_reserved_run_keeps() {
+    use crate::portfolio::curve::BLOCK;
+    let blocks = run_long(false, None);
+    let contiguous = run_long(true, None);
+    let (a, b) = (&blocks.result, &contiguous.result);
+    assert_eq!(a.equity_curve.len(), 3 * BLOCK + 700, "one sample per distinct instant");
+    assert!(a.trades.len() > 100, "the run trades");
+    assert_eq!(bits(&a.equity_curve), bits(&b.equity_curve));
+    assert_eq!(bits(&a.drawdown_curve), bits(&b.drawdown_curve));
+    assert_eq!(bits(&a.returns), bits(&b.returns));
+    assert_eq!(format!("{:?}", a.trades), format!("{:?}", b.trades));
+    assert_eq!(format!("{:?}", a.metrics), format!("{:?}", b.metrics));
+    // A window wider than a block drains whole blocks and part of one, and
+    // still keeps the tail of the full curve, sample for sample.
+    let windowed = run_long(false, Some(BLOCK + 300));
+    let w = &windowed.result;
+    let kept = w.equity_curve.len();
+    assert!((BLOCK + 300..2 * BLOCK + 600).contains(&kept), "kept {kept}");
+    let from = a.equity_curve.len() - kept;
+    assert_eq!(bits(&w.equity_curve), bits(&a.equity_curve[from..]));
+    assert_eq!(bits(&w.drawdown_curve), bits(&a.drawdown_curve[from..]));
+    assert_eq!(bits(&w.returns), bits(&a.returns[from..]));
+    assert_eq!(format!("{:?}", w.trades), format!("{:?}", a.trades));
+}
+
 #[test]
 fn an_instrument_named_in_squareoff_time_by_symbol_squares_off_at_its_own_minute() {
     let mut config = config();

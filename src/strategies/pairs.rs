@@ -96,6 +96,7 @@ impl PairsBacktest {
 
         let mut book =
             PortfolioBook::new(self.config.base.clone(), account_mode(&self.config.base));
+        book.reserve_curves(n);
         for (_, direction, name) in &legs {
             book.add_instrument(
                 format!("{}_{name}", signals.symbol),

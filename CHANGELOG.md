@@ -5,7 +5,144 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - Unreleased
+## [1.1.0] - 2026-11-21
+
+Faster live and kernel paths, bars built from prints in `ctx.series()`, a restore that
+works after `warm_up()`, a basket whose members change over time, each leg's fees on a
+trade, and a roll that goes on when the old contract settles at its expiry. No call is
+removed or renamed; a `Future` role read before the first event is now refused (see
+Changed). **1.0.0's bars and ticks were slower than
+0.13.x**: on the published harness 1.0.0 took 137.5 µs for 1,000 bars where 0.13.4 took
+72.6 µs, and 288.1 ms for 1,875,000 bars where 0.13.4 took 151.1 ms
+(`benches/python/README.md`, "Slower than 0.13.x"). 1.1.0 has not been measured on that
+harness, so nothing below says how much faster it is, and nothing here claims to close
+that gap.
+
+### Changed
+
+- **A live push does less.** `push_tick` and `push_group` check each input once, and a tick
+  row that makes no event (no print and no two-sided book) stays in Rust, with no call back
+  into Python.
+- **A kernel step does less.** No matching pass runs on an empty order book, a step allocates
+  nothing, the wide money conversion is out of line, and exit reasons are looked up rather
+  than built. A bar with nothing deferred and no working order makes no call for either.
+- **A journal record costs less.** Each record is written straight to its canonical bytes, and
+  market-data payloads skip the intermediate value map when nothing keeps them. The bytes and
+  the chain are unchanged.
+- **Curves grow without copying.** A strategy's equity, drawdown and returns curves grow in
+  fixed blocks, so a push on a long-running node never copies the samples already taken
+  (`tests/curve_no_realloc.rs`). They still grow with the feed; `curve_samples=` bounds them.
+- **An exit rule marks without building the series.** On a `LiveNode` and in
+  `run_strategies_windowed`, an `ExitRule` reads a symbol's last close, else its last `ltp`,
+  from the engine instead of copying `ctx.series(symbol)` out of its ring on every event. The
+  price is the same, bit for bit, and the rules decide the same
+  (`tests/python/test_exit_marks.py`). A batch `run_strategies` reads the series as before.
+- **A `Future` role is read in a hook that has an event.** `ctx.role(name)` of a `Future` (or of
+  a `Chain` on one) names the contract that is front at the event's time; before the first event
+  (`on_init`, `on_start`) the context has no time, and the read is now refused
+  `role_before_event` with its fix (read it in `on_bar`) instead of being answered for some
+  other instant.
+
+### Results change
+
+- **`ctx.series()` includes bars built from prints.** For a symbol given both bars and ticks,
+  with `primary_bars`, the bars built from its prints join its bars from its first given bar
+  on: in the order `on_bar` hears them, the bar being delivered included, stamped as a given
+  bar of the same close would be. This holds alike in `run_strategies`,
+  `run_strategies_windowed` and a `LiveNode` (where the series shows at most `history` rows).
+  Before, the series of such a symbol held only its given bars. A symbol fed only ticks keeps
+  its tick series, and bars built before a symbol's first given bar do not join
+  (`tests/python/test_series_built_bars.py`).
+
+### Fixed
+
+- **A node primed with `warm_up()` after construction restores.** `LiveNode.restore` replays
+  the bars of each `warm_up()` call as that call gave them: one call or several, before or
+  after live bars, and from a checkpoint taken between two calls. One case is not replayed as
+  it ran: a second `warm_up()` whose first bar, of another symbol, has the close time of the
+  first call's last bar, with no record journaled between the two, replays as one call. The
+  restore raises nothing and the state digest matches, but a hook hears the other symbol's bar
+  (`tests/python/test_journal_market_span.py`, marked as a known limit). Give such history in
+  one call.
+- `auto_roll` no longer fails a roll whose close can never fill. When the old contract has no bar
+  after the roll is decided (its data ends before its expiry, or `roll_days=0` puts the roll on
+  the expiry itself), the engine settles the position at the expiry and the close ends `canceled`
+  or `rejected` for `expired`; that raised `roll_close_failed` and stopped the run with the position
+  already gone. The roll now goes on: the open follows in the new contract for the quantity that was
+  held, sized as usual on the price the position settled at (the old contract's last close when the
+  settlement named none), sent again at the next event if the market is closed at the expiry. The
+  close keeps its status, the open's tags carry `settled="expiry"`, and the new
+  `on_roll_settled(ctx, roll, close_id, price)` hears it. A close refused before the expiry, with
+  the position still held, still fails the roll (`tests/python/test_auto_roll_settlement.py`).
+- **A quote-only tick no longer fires an exit rule.** An exit rule on a symbol with no bars
+  marked it at the last tick row's `ltp`, and a quote-only row (`ltp` 0 with a two-sided quote)
+  made that mark 0.0: a long's stop, or a short's target, fired on a price that never traded.
+  The mark is now the last traded price, the last row with `ltp > 0` among the rows
+  `ctx.series` shows, and with none (only quotes so far, or only quotes in the rows shown) the
+  rule has no mark and waits, as it does for a symbol with no price. This holds alike on a
+  `LiveNode`, in `run_strategies_windowed` (`ctx._last_price`) and in batch runs (the series),
+  which still agree. Rules never mark at the bid, ask or mid on their own, as fills, trailing
+  stops and equity do not; a strategy that wants a quote mark passes it to
+  `update_exits(ctx, marks=...)` (`tests/python/test_exit_marks.py`).
+- **`run_tick_backtest` no longer reads a quote-only row as a print.** A row with `ltp` 0 (a
+  quote and no trade) was stepped at 0.0: a long's stop fired and sold at 0.0, equity was
+  marked at 0.0, and an entry or exit signal on the row filled at its quote. Such a row now
+  fills nothing, triggers no stop, target or time exit, and leaves equity where the previous
+  row left it (the curve keeps one point per row); a signal on it is taken at the next print,
+  at that print's ask or bid, as an order decided on a quote rests until a trade in
+  `run_tick_strategy`. A position still open at the end is sold at the last print's bid, not
+  at a quote-only row after it. A negative `ltp` is refused (`invalid_data`, parameter `ltp`).
+  A tape with no row of `ltp` 0 gives the same result as before, bit for bit
+  (`src/strategies/tick.rs` tests).
+- **Roles and instrument plans no longer find the money at 0.** The last prices a role, a
+  plan (`plan_instruments`) and `LiveNode.last_prices` read were the last close, else the last
+  row's `ltp`, so a quote-only last row gave 0.0 and a chain's strike window resolved around
+  the lowest listed strikes. They now read the price exit rules mark at (the last close, else
+  the last traded `ltp`); a symbol with none is left out, so the role says `needs_price` (and
+  `ctx.role` raises `unresolved_role`) as it does for a symbol with no data
+  (`tests/python/test_live_node_instruments.py`).
+
+### Added
+
+- **A basket whose members change.** A `Universe` role can be bound to
+  `PointInTime(symbols, steps)`: the union of every member and the members from each change
+  on. `ctx.role(name)` returns the members at the event's time; the manifest is unchanged
+  (`tests/python/test_point_in_time.py`).
+- **Each leg's fees on a trade.** Under a fee schedule that itemises, `trade.entry_fee_breakdown`
+  and `trade.exit_fee_breakdown` give each leg's charge by the schedule's components and its
+  booked `total`, and the `full_report` trade rows carry them as `entry_fee_parts` and
+  `exit_fee_parts`. They are `None` (empty in the rows) when the schedule does not itemise, and
+  for the entry of a position built from several fills. `fee_breakdown`, the round trip as one,
+  is unchanged.
+
+- **Market records from the host's own store.** A host that keeps the market data it pushes can
+  drop the journal's `tick` and `time` records and rebuild them at restore with
+  `raptorbt.journal.canonical`, byte for byte and with the same chain link; the fields are in
+  `docs/architecture/journal-and-recovery.md`. The same tests pin what a tick-fed node does at
+  each boundary: a tick older than the last `advance_time` is taken at its own time, a bar built
+  from ticks closes on its symbol's first tick of a later window and never on `advance_time`,
+  an absent book is journaled as zero and makes no quote, and a non-finite `bid` or `ask` is
+  refused before it is journaled.
+- **Benchmarks of the `Strategy` API.** `benches/python/` adds `live_latency.py`,
+  `live_memory.py`, `live_concurrency.py`, `live_multi.py` and `strategy_backtest.py`: one
+  `LiveNode.push_tick` call, memory per symbol and per million ticks, nodes per process and
+  processes per machine, many symbols and timeframes on one node, and one `run_strategies`
+  call. How to run and read them is in `benches/python/README.md`.
+- **The tick benchmark must trade to the end.** `run_all.py` funds its tick runs with 10,000,000
+  and exits with an error when a run stops trading before the end of its input; the 1.0.0
+  10,000,000-tick figure timed a run that had run out of cash at 87.5% of its input.
+- **Determinism is a test.** `tests/python/test_determinism.py` runs one backtest twenty times
+  and requires one digest over every curve, trade and metric.
+- **Wheels for Python 3.10 to 3.13** on Linux, macOS and Windows.
+- `examples/tick-level/tick_scalper.py` and `examples/tick-level/dynamic_exit.py`, and skills
+  on ticks fed to a live node, bars built from prints in `ctx.series()` and moving an exit rule.
+- `examples/options/short_straddle.py`, `examples/options/chain_scalp.py`,
+  `examples/portfolio/short_basket_intraday.py`, `examples/single-instrument/futures_front_roll.py`
+  and `examples/multi-instrument/cross_instrument_factor.py`, and skills on point-in-time
+  baskets, each leg's fees, reading a `Future` role, feeding a symbol's bars and ticks one way at
+  a time, and declaring the look-back a strategy reads.
+
+## [1.0.0] - 2026-11-19
 
 The first stable release. It covers everything since 0.13.4, including the
 changes first prepared as 0.14.0, which was never published. **Several results

@@ -877,7 +877,11 @@ is raised to what the strategies' indicators read (their longest period).
 to the latest the node has reached: a symbol's bars once it has had any,
 otherwise its ticks (``timestamps``, ``ltp``, ``bid``, ``ask``,
 ``buy_qty_delta``, ``sell_qty_delta``, ``ltq``, ``bid_qty``, ``ask_qty``,
-``oi``). Older rows are overwritten. A strategy that needs more than the
+``oi``). The bars the node builds from a symbol's prints (``primary_bars``)
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a pushed bar of the same close would be, as in
+:func:`~raptorbt.run_strategies`; the series then shows at most ``history``
+rows. Older rows are overwritten. A strategy that needs more than the
 default can call ``ctx.keep_history(rows, symbol=None)``; rows it asked
 for are never overwritten, and a push that would have to overwrite one
 raises ``RuntimeError`` and changes nothing. That is the only way a node
@@ -998,7 +1002,7 @@ there.
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
 | `is_halted(self, strategy_index: 'int') -> 'bool'` | Whether a margin call or drawdown kill-switch has latched. |
 | `journal` | The node's :class:`~raptorbt.journal.Journal`, or ``None``. |
-| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them. |
+| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them: the last close, else the last traded ``ltp``. A symbol with no price yet (no data, or only quote-only rows in view) is not in the dict. |
 | `memory_report(self) -> 'dict[str, int]'` | Heap bytes held by the Rust side, by category; ``live_rings`` is the fixed size of the history rings. Python objects are not counted. |
 | `now_ns` | Event time of the latest input the node took (``0`` before the first). |
 | `open_group` | The timestamp group left open, if any, and what it holds: ``{"timestamp": ns, "symbols": [...]}``. A node restored from a journal that ends inside a group has one: the replay delivered nothing of it, exactly as before the crash, so the host sends the symbols not listed here and calls :meth:`flush`. |
@@ -1855,11 +1859,13 @@ Python-exposed trade.
 | Member | What it is |
 | --- | --- |
 | `direction` | *No docstring.* |
+| `entry_fee_breakdown` | The entry leg's itemized costs alone; same keys as `fee_breakdown`, `total` the booked `entry_fees`. `None` when the fee model does not itemise or the entry was several fills. |
 | `entry_fees` | Costs charged when the position was opened. |
 | `entry_idx` | *No docstring.* |
 | `entry_notional_minor` | Booked notional of the entry (`price * size * multiplier`), in minor units. |
 | `entry_price` | *No docstring.* |
 | `entry_time` | *No docstring.* |
+| `exit_fee_breakdown` | The exit leg's itemized costs alone; same keys, `total` the booked `exit_fees`. |
 | `exit_fees` | Costs charged when it was closed. |
 | `exit_idx` | *No docstring.* |
 | `exit_notional_minor` | Booked notional of the exit, in minor units. |
@@ -2598,7 +2604,11 @@ is shared, unless it is put on an account (see ``accounts``). ``directions``, ``
 ``bar_ns`` apply to every strategy, as they would in separate calls.
 
 ``ctx.series(symbol)`` returns read-only views truncated to the latest bar
-the run has reached (empty in ``on_start``), not the full arrays.
+the run has reached (empty in ``on_start``), not the full arrays. For a
+symbol with both bars and ticks, the ``primary_bars`` built from its prints
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a bar of the same close in ``data`` would be; its series is then
+a copy.
 
 ``accounts`` maps a name to an :class:`~raptorbt.AccountSpec`; strategies
 that name it share one account: its cash, margin and account-level risk
@@ -2827,6 +2837,9 @@ All arrays must be the same length N (one element per tick).
 `buy_qty_delta` and `sell_qty_delta` must already be per-tick deltas —
 pass the difference from the previous tick, not a feed's cumulative session totals.
 `entries` / `exits` are caller-computed boolean signal arrays.
+`ltp` 0 marks a row with no trade (a quote-only row): it fills nothing, triggers no stop or
+target and does not move equity, and a signal on it is taken at the next print; a negative
+`ltp` is refused (`invalid_data`).
 
 Returns a `PyBacktestResult` with the same fields as `run_single_backtest`.
 

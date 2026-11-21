@@ -1,6 +1,6 @@
 //! One journal record and the kinds there are.
 
-use super::value::Value;
+use super::value::{write_str, Value};
 
 /// Record kinds. A new kind only adds; a reader that does not know one keeps
 /// it as data.
@@ -108,7 +108,33 @@ impl Record {
 
     /// The canonical bytes the chain is taken over.
     pub fn canonical(&self) -> Vec<u8> {
-        self.to_value().to_bytes()
+        let mut out = String::with_capacity(128);
+        self.write_canonical(&mut out, |out| self.payload.write(out));
+        out.into_bytes()
+    }
+
+    /// The bytes of [`Record::to_value`] without building it: the keys in the
+    /// order the canonical form sorts them, the payload written by `payload`
+    /// at its place (the record's own `payload` is not read).
+    pub(crate) fn write_canonical(&self, out: &mut String, payload: impl FnOnce(&mut String)) {
+        out.push_str("{\"client_order_id\":");
+        match &self.client_order_id {
+            Some(id) => write_str(out, id),
+            None => Value::Null.write(out),
+        }
+        out.push_str(",\"kind\":");
+        write_str(out, &self.kind);
+        out.push_str(",\"payload\":");
+        payload(out);
+        out.push_str(",\"seq\":");
+        Value::Int(self.seq as i64).write(out);
+        out.push_str(",\"source\":");
+        write_str(out, &self.source);
+        out.push_str(",\"ts_arrival\":");
+        Value::Int(self.ts_arrival).write(out);
+        out.push_str(",\"ts_event\":");
+        Value::Int(self.ts_event).write(out);
+        out.push('}');
     }
 
     pub fn from_value(v: &Value) -> Result<Record, String> {
@@ -153,6 +179,11 @@ mod tests {
         };
         let text = String::from_utf8(r.canonical()).unwrap();
         let back = Record::from_value(&Value::from_json(&text).unwrap()).unwrap();
+        assert_eq!(r.canonical(), r.to_value().to_bytes());
+        let none = Record { client_order_id: None, kind: "caf\u{e9}\n".into(), ..r.clone() };
+        assert_eq!(none.canonical(), none.to_value().to_bytes());
+        let wide = Record { seq: u64::MAX, ts_event: i64::MIN, ts_arrival: i64::MAX, ..r.clone() };
+        assert_eq!(wide.canonical(), wide.to_value().to_bytes());
         // The float came back as its text; the bytes are what matter.
         assert_eq!(back.canonical(), r.canonical());
         assert_eq!(back.seq, 7);

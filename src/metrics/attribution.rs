@@ -40,6 +40,11 @@ pub struct AttrTrade {
     pub exit_fees: f64,
     /// Fees by component, when the fee model itemises.
     pub fee_parts: BTreeMap<String, f64>,
+    /// The entry leg's fees by the fee model's own component names (`total` the booked leg
+    /// cost), when the model itemises and the entry was one fill; empty otherwise.
+    pub entry_parts: BTreeMap<String, f64>,
+    /// The exit leg's fees, as `entry_parts`.
+    pub exit_parts: BTreeMap<String, f64>,
     pub tag: String,
     pub settlement: bool,
     /// The position was still open when the data ended and the run closed it at the last
@@ -206,6 +211,10 @@ pub struct TradeRow {
     pub fees: f64,
     pub entry_fees: f64,
     pub exit_fees: f64,
+    /// Entry-leg fee components, as `AttrTrade::entry_parts`.
+    pub entry_parts: BTreeMap<String, f64>,
+    /// Exit-leg fee components, as `AttrTrade::exit_parts`.
+    pub exit_parts: BTreeMap<String, f64>,
     pub net: f64,
     pub tag: String,
     pub rule: Option<String>,
@@ -235,6 +244,8 @@ pub fn trade_rows(trades: &[AttrTrade], origins: &[Option<String>]) -> Vec<Trade
             fees: t.fees,
             entry_fees: t.entry_fees,
             exit_fees: t.exit_fees,
+            entry_parts: t.entry_parts.clone(),
+            exit_parts: t.exit_parts.clone(),
             net: t.realised - t.fees,
             tag: t.tag.clone(),
             rule: origins.get(i).cloned().flatten(),
@@ -268,6 +279,8 @@ mod tests {
             entry_fees: 1.0,
             exit_fees: 1.0,
             fee_parts: BTreeMap::from([("brokerage".into(), 1.5), ("total".into(), 2.0)]),
+            entry_parts: BTreeMap::new(),
+            exit_parts: BTreeMap::new(),
             tag: "a".into(),
             settlement: false,
             open_at_end: false,

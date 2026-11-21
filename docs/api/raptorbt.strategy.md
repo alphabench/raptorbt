@@ -31,6 +31,7 @@ Run one with :func:`run_strategy_backtest`, which returns the same
 | [`OptionLeg`](#optionleg) | class | One option leg of the structure the strategy holds, as data: ``side`` (``buy`` or ``sell``), ``right`` (``call`` or ``put``), ``lots``, the strike and the expiry. |
 | [`ParamSchema`](#paramschema) | class | The typed parameters of a ``StrategyConfig`` subclass. |
 | [`ParamSpec`](#paramspec) | class | ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = False, min: 'float \| None' = None, max: 'float \| None' = None, choices: 'tuple[Any, ...] \| None' = None, nullable: 'bool' = False, description: 'str \| None' = None) |
+| [`PointInTime`](#pointintime) | class | The binding of a ``Universe`` role whose members change: a tuple of the union of the members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order. |
 | [`Requirements`](#requirements) | class | Everything a deployer must know about a strategy before it runs. |
 | [`RequirementsError`](#requirementserror) | exception | A declaration that cannot be built. ``issues`` holds the structured reasons. |
 | [`RolePlan`](#roleplan) | class | What one role means at a time: ``symbols`` are the concrete contracts to subscribe to, ``expiries`` the expiries (ns) a chain resolved to, ``atm`` the money strike, ``detail`` anything else (``roll_to`` for a continuous future). |
@@ -586,7 +587,11 @@ is raised to what the strategies' indicators read (their longest period).
 to the latest the node has reached: a symbol's bars once it has had any,
 otherwise its ticks (``timestamps``, ``ltp``, ``bid``, ``ask``,
 ``buy_qty_delta``, ``sell_qty_delta``, ``ltq``, ``bid_qty``, ``ask_qty``,
-``oi``). Older rows are overwritten. A strategy that needs more than the
+``oi``). The bars the node builds from a symbol's prints (``primary_bars``)
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a pushed bar of the same close would be, as in
+:func:`~raptorbt.run_strategies`; the series then shows at most ``history``
+rows. Older rows are overwritten. A strategy that needs more than the
 default can call ``ctx.keep_history(rows, symbol=None)``; rows it asked
 for are never overwritten, and a push that would have to overwrite one
 raises ``RuntimeError`` and changes nothing. That is the only way a node
@@ -707,7 +712,7 @@ there.
 | `instruments` | The ``InstrumentSpec`` of every symbol the host gave one for (``instruments=`` and :meth:`add_instrument`), listed contracts the node does not trade included. A copy. |
 | `is_halted(self, strategy_index: 'int') -> 'bool'` | Whether a margin call or drawdown kill-switch has latched. |
 | `journal` | The node's :class:`~raptorbt.journal.Journal`, or ``None``. |
-| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them. |
+| `last_prices(self, strategy_index: 'int') -> 'dict[str, float]'` | The last price of each symbol strategy ``strategy_index`` trades, as it reads them: the last close, else the last traded ``ltp``. A symbol with no price yet (no data, or only quote-only rows in view) is not in the dict. |
 | `memory_report(self) -> 'dict[str, int]'` | Heap bytes held by the Rust side, by category; ``live_rings`` is the fixed size of the history rings. Python objects are not counted. |
 | `now_ns` | Event time of the latest input the node took (``0`` before the first). |
 | `open_group` | The timestamp group left open, if any, and what it holds: ``{"timestamp": ns, "symbols": [...]}``. A node restored from a journal that ends inside a group has one: the replay delivered nothing of it, exactly as before the crash, so the host sends the symbols not listed here and calls :meth:`flush`. |
@@ -870,6 +875,31 @@ ParamSpec(name: 'str', type: 'str', default: 'Any' = None, required: 'bool' = Fa
 | `required` | *No docstring.* |
 | `to_dict(self) -> 'dict[str, Any]'` | *No docstring.* |
 
+### `PointInTime`
+
+*class*
+
+```python
+class PointInTime(tuple)
+PointInTime(symbols: 'Iterable[str]', steps: 'Iterable[tuple[int, Sequence[str]]]') -> 'PointInTime'
+```
+
+The binding of a ``Universe`` role whose members change: a tuple of the union of the
+members, carrying ``steps``, ``(start_ns, members)`` pairs in ascending order.
+
+``steps[i]`` holds from ``start_ns`` (ns since the epoch, an event time) until the next
+step's start; the last holds on. :meth:`at` answers the members at an instant: before the
+first step none, and with no instant (a context before its first event) the union.
+Every member of a step must be in ``symbols``, and a step lists a symbol once.
+
+>>> p = PointInTime(["A", "B", "C"], [(0, ["A", "B"]), (100, ["B", "C"])])
+>>> p.at(99), p.at(100), tuple(p)
+(('A', 'B'), ('B', 'C'), ('A', 'B', 'C'))
+
+| Member | What it is |
+| --- | --- |
+| `at(self, now_ns: 'int | None') -> 'tuple[str, ...]'` | The members at ``now_ns``; the whole union when it is ``None``. |
+
 ### `QuoteTick`
 
 *class*
@@ -1002,9 +1032,11 @@ or after the rule's time. A role's first event only records its contract: no rol
 | `auto_roll` | *No docstring.* |
 | `load_state(self, state)` | *No docstring.* |
 | `on_bar(self, ctx, bar)` | *No docstring.* |
+| `on_contract_event(self, ctx, event)` | Notes the price a held contract settled at, for a roll that settles instead of closing. |
 | `on_order_event(self, ctx, event)` | *No docstring.* |
 | `on_roll(self, ctx, roll: 'RollEvent') -> 'None'` | A continuous role moved to another contract. |
 | `on_roll_failed(self, ctx, roll: 'RollEvent', close_id: 'str', status: 'str', reason) -> 'None'` | A step of the roll ended without filling (``status`` is ``rejected``, ``canceled`` or ``expired``; ``zero_size`` for an open the new contract's price sizes to no lot, which names the open that was not sent). A close refused ``market_closed`` is not a failure: it is sent again at the next event. ``close_id`` names the order: a close of a position in the old contract (the open in the new contract was not sent, and the position is still in the old one), or, when its id ends in ``:o{k}``, the open in the new contract (the position is closed and not open in the new contract). Raises by default. |
+| `on_roll_settled(self, ctx, roll: 'RollEvent', close_id: 'str', price) -> 'None'` | The close of a roll could not fill and the old contract settled the position at its expiry instead: the open in the new contract follows (``close_id`` names the close that ended without filling, ``price`` the price the old contract settled at, ``None`` when it is not known). |
 | `on_roll_sized(self, ctx, roll: 'RollEvent', sizing: 'dict') -> 'None'` | The open of a roll was sized. ``sizing`` has ``policy``, ``lots_old``, ``lots_new``, ``notional_old``, ``notional_new`` and ``residual`` (the notional the rounding leaves out of the new contract: old minus new, so positive is under-exposed). |
 | `on_trade(self, ctx, tick)` | *No docstring.* |
 | `roll_sizing` | *No docstring.* |
@@ -1643,7 +1675,11 @@ is shared, unless it is put on an account (see ``accounts``). ``directions``, ``
 ``bar_ns`` apply to every strategy, as they would in separate calls.
 
 ``ctx.series(symbol)`` returns read-only views truncated to the latest bar
-the run has reached (empty in ``on_start``), not the full arrays.
+the run has reached (empty in ``on_start``), not the full arrays. For a
+symbol with both bars and ticks, the ``primary_bars`` built from its prints
+once it has had a bar join its bars, in the order ``on_bar`` hears them and
+stamped as a bar of the same close in ``data`` would be; its series is then
+a copy.
 
 ``accounts`` maps a name to an :class:`~raptorbt.AccountSpec`; strategies
 that name it share one account: its cash, margin and account-level risk

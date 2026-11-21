@@ -204,6 +204,14 @@ class Trade:
     # Present only when config.fee_segment selects an itemized schedule.
     # Keys: brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, total.
     fee_breakdown: dict[str, float] | None
+    # The entry leg's and the exit leg's itemized costs alone, under the fee schedule's own
+    # component names (brokerage, stt, exchange_txn, sebi_fee, stamp_duty, gst, ipft,
+    # dp_charge) and ``total``, the booked cost of the leg (``entry_fees`` / ``exit_fees``).
+    # ``total`` can differ from the sum of the parts by the rounding the fee row applies. None
+    # when the fee model does not itemise, on paths that synthesise a trade, and for the
+    # entry of a position built from several fills.
+    entry_fee_breakdown: dict[str, float] | None
+    exit_fee_breakdown: dict[str, float] | None
     exit_reason: str
     # Intra-trade extremes, measured bar by bar while the position was open.
     # None on paths that synthesise a trade instead of closing a tracked
@@ -1333,6 +1341,10 @@ class RuntimeContext:
     # (every row is shown) or the run is not windowed.
     def declared_history(self, symbol: str | None = ...) -> int | None: ...
     def _instrument_index(self, symbol: str | None = ...) -> int: ...
+    # ``(known, price)``: the last close, else the last positive ltp (a quote-only row is no
+    # trade), of ``series(symbol)`` without building it;
+    # ``known`` is false where ``series`` must be read instead.
+    def _last_price(self, symbol: str) -> tuple[bool, float | None]: ...
     #: ``(locked_margin, realized_pnl, unrealized_pnl, gross_exposure,
     #: net_exposure)``; backs ``ctx.portfolio``.
     def _portfolio_totals(self) -> tuple[float, float, float, float, float]: ...

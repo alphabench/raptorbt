@@ -138,6 +138,7 @@ impl PortfolioEngine {
             inst_config,
         );
         runner.set_corporate_actions(actions, policy)?;
+        runner.reserve_curves(n);
 
         // Determine effective stop/target configs (per-instrument overrides take precedence)
         let effective_stop =
@@ -1294,6 +1295,8 @@ mod tests {
                 entry_fees: 0.0,
                 exit_fees: 0.0,
                 fee_breakdown: None,
+                entry_fee_breakdown: None,
+                exit_fee_breakdown: None,
                 exit_reason: ExitReason::Signal,
                 mae_price: None,
                 mfe_price: None,
@@ -1418,6 +1421,8 @@ mod tests {
             entry_fees: 0.0,
             exit_fees: 0.0,
             fee_breakdown: None,
+            entry_fee_breakdown: None,
+            exit_fee_breakdown: None,
             exit_reason: ExitReason::Signal,
             mae_price: None,
             mfe_price: None,

@@ -44,8 +44,8 @@ use crate::runtime::commands::{
 use crate::runtime::groups::GroupSpec;
 use crate::runtime::store::{BarColumns, DepthColumns, TickColumns, TickSlices};
 use crate::runtime::{
-    AggId, AggKey, ColumnSource, Current, EventKind, EventRef, HeapSize, IndInput, IndKey,
-    IndicatorBank, InstrumentId, InstrumentParams, LiveFeed, LocalStreamId, MarketStore,
+    AggId, AggKey, BuiltRow, ColumnSource, Current, EventKind, EventRef, HeapSize, IndInput,
+    IndKey, IndicatorBank, InstrumentId, InstrumentParams, LiveFeed, LocalStreamId, MarketStore,
     MemoryReport, MergeCursor, Ohlc, Pushed, Reveal, RingError, RingKind, RuntimeBuilder,
     RuntimeCore, SlotId, StrategyId, TickRow,
 };
@@ -71,6 +71,7 @@ use super::strategy_bindings::{
     atr_period, convert_snapshot, parse_account_mode, parse_qty_spec, submit_order_checked,
     submit_order_on, submit_twap_on, PyEngineEvent, PyKernelSession, PyPositionSnapshot,
 };
+use crate::journal::market::{self as jm, Payload};
 
 /// Events between interpreter signal checks.
 const SIGNAL_EVERY: u64 = 4096;
@@ -220,6 +221,51 @@ struct ClockSlot {
     /// Exactly `Clock`: with an empty schedule `_advance` only stores the
     /// time, which the loop then does itself.
     plain: bool,
+    /// The time the loop last stored in `_now` itself, while no `_advance` has run since: an
+    /// event at that same time (the quote of a print's row) has nothing to store. Kept only
+    /// for a clock no other slot holds (`alone`), as another slot's store would not show here.
+    stored: Cell<Option<i64>>,
+    alone: Cell<bool>,
+}
+
+impl ClockSlot {
+    fn new(clock: Py<PyAny>, alerts: Py<PyDict>, timers: Py<PyDict>, plain: bool) -> Self {
+        Self { clock, alerts, timers, plain, stored: Cell::new(None), alone: Cell::new(true) }
+    }
+
+    /// Move the clock to `ts` (`ts_obj` is it as a Python int) and return what fell due: `None`
+    /// when the schedule is empty and the clock is exactly `Clock`, whose `_advance` would only
+    /// have stored the time.
+    fn advance<'py>(
+        &self,
+        py: Python<'py>,
+        ts: i64,
+        ts_obj: &Bound<'py, PyInt>,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let clock = self.clock.bind(py);
+        if self.plain && self.alerts.bind(py).is_empty() && self.timers.bind(py).is_empty() {
+            if !self.alone.get() || self.stored.get() != Some(ts) {
+                clock.setattr(intern!(py, "_now"), ts_obj)?;
+                self.stored.set(Some(ts));
+            }
+            return Ok(None);
+        }
+        // `_advance` stores the time itself, before anything it can raise.
+        self.stored.set(None);
+        Ok(Some(clock.call_method1(intern!(py, "_advance"), (ts,))?))
+    }
+}
+
+/// Mark the clocks two slots share: a store through one of them is not seen by the other's
+/// `stored`. Called when the slots are first known and when an instrument adds some.
+fn mark_shared_clocks<'a>(slots: impl Iterator<Item = &'a ClockSlot>) {
+    let mut seen: HashMap<*mut pyo3::ffi::PyObject, &ClockSlot> = HashMap::new();
+    for slot in slots {
+        if let Some(first) = seen.insert(slot.clock.as_ptr(), slot) {
+            first.alone.set(false);
+            slot.alone.set(false);
+        }
+    }
 }
 
 /// One composite stream of a strategy: a subscription on one instrument.
@@ -322,9 +368,10 @@ struct Plan {
     inds: Vec<IndPlan>,
 }
 
-/// A truncated-series dict, the first row it holds and the watermark it was
-/// cut at.
-type SeriesCache = (u64, u64, Py<PyDict>);
+/// A truncated-series dict and what it was cut at: the first row it holds, the watermark, and
+/// `0, 0` for rows of one kind; for a bar series with bars built from prints, the first pushed
+/// row held, the watermark, the built rows' end and one more than the rows shown at most.
+type SeriesCache = ((u64, u64, u64, u64), Py<PyDict>);
 
 /// A per-instrument table that is read on every event and changes only when an instrument is
 /// added to or retired from a running node. Changing it takes the node's [`LiveGuard`] (no push
@@ -385,6 +432,9 @@ struct Shared {
     widths: Vec<i64>,
     /// Truncated series dicts by instrument, valid for one watermark.
     series: RefCell<Vec<Option<SeriesCache>>>,
+    /// A batch run's bars built from prints that join the bar series, by instrument (see
+    /// [`join_built_bar`]). A live node and a windowed run keep them in their rings.
+    built: RefCell<Vec<Vec<BuiltRow>>>,
     /// Rows each live ring holds; `None` for a batch run over a store.
     live_history: Option<usize>,
     /// Set for a windowed run: what each instrument carries (see [`WindowShape`]).
@@ -552,6 +602,27 @@ impl Shared {
             client_order_id,
             payload(),
         );
+        appended.map(|_| ()).map_err(journal_err)
+    }
+
+    /// [`Shared::jlog`] for a record of market data, given the payload itself:
+    /// a journal that keeps no record values takes its bytes without building
+    /// the value.
+    fn jlog_payload(
+        &self,
+        kind: &str,
+        event_ns: i64,
+        arrival_ns: i64,
+        source: &str,
+        payload: &impl Payload,
+    ) -> PyResult<()> {
+        if !self.journal_on.get() {
+            return Ok(());
+        }
+        self.control.now.set((event_ns, arrival_ns));
+        let journal = self.journal.borrow().clone().expect("journal_on implies a journal");
+        let appended =
+            journal.borrow_mut().append_payload(kind, event_ns, arrival_ns, source, payload);
         appended.map(|_| ()).map_err(journal_err)
     }
 
@@ -859,19 +930,37 @@ impl Shared {
         let feed = self.feed.borrow();
         let Some(feed) = feed.as_ref() else { return Ok(()) };
         let shape = self.window.as_ref().expect("windowed");
-        let held = if shape.bars[global.index()] && kind != HistKind::Ticks {
-            feed.bars(global).map(|b| (b.first_row(), b.end_row()))
-        } else {
-            feed.ticks(global).map(|t| (t.first_row(), t.end_row()))
+        let bars = shape.bars[global.index()] && kind != HistKind::Ticks;
+        // `(whether a row was released, the rows held)`.
+        let held = match (bars, feed.built(global)) {
+            (true, Some(built)) => {
+                // Bars built from prints are rows of the bar series too.
+                let ring = feed.bars(global);
+                let pushed = ring.map_or((0, 0), |b| (b.first_row(), b.end_row()));
+                let rows = SeriesBars::new(
+                    |r| ring.and_then(|b| b.get(r).ok()),
+                    pushed,
+                    |r| built.get(r).ok(),
+                    (built.first_row(), built.end_row()),
+                )
+                .count();
+                Some((pushed.0 > 0 || built.first_row() > 0, rows))
+            }
+            (true, None) => feed
+                .bars(global)
+                .map(|b| (b.first_row() > 0, (b.end_row() - b.first_row()) as usize)),
+            (false, _) => feed
+                .ticks(global)
+                .map(|t| (t.first_row() > 0, (t.end_row() - t.first_row()) as usize)),
         };
         match held {
-            Some((first, end)) if first > 0 && ((end - first) as usize) < rows => Err(Fail::new(
+            Some((true, held)) if held < rows => Err(Fail::new(
                 "window_state",
                 format!(
                     "{}: ctx.keep_history({rows}) came after rows were released: only {} are \
                      held and released rows do not come back. Declare it in on_start",
                     self.symbol_text(global.index()),
-                    end - first
+                    held
                 ),
             )
             .into()),
@@ -973,7 +1062,8 @@ impl Shared {
     /// The truncated, read-only arrays of an instrument: its bars up to the
     /// latest bar reached, or, for an instrument without bars, its tick
     /// arrays up to the latest print or quote reached. A live node serves
-    /// the rows its rings still hold.
+    /// the rows its rings still hold. Bars built from an instrument's prints after its first
+    /// pushed bar join its bars ([`SeriesBars`]).
     fn series_of(
         &self,
         py: Python<'_>,
@@ -984,6 +1074,9 @@ impl Shared {
             return self.live_series_of(py, global, limit);
         }
         let g = global.index();
+        if !self.built.borrow()[g].is_empty() {
+            return self.batch_built_series(py, global, limit);
+        }
         let (full, n, keys): (Bound<'_, PyDict>, u64, Vec<Bound<'_, PyAny>>) = {
             let arrays = self.arrays.borrow();
             let tick_arrays = self.tick_arrays.borrow();
@@ -1003,8 +1096,8 @@ impl Shared {
         };
         let mut cache = self.series.borrow_mut();
         let slot = &mut cache[g];
-        if let Some((_, w, dict)) = slot {
-            if *w == n {
+        if let Some((key, dict)) = slot {
+            if *key == (0, n, 0, 0) {
                 return Ok(dict.clone_ref(py));
             }
         }
@@ -1019,7 +1112,43 @@ impl Shared {
             out.set_item(key, view)?;
         }
         let out = out.unbind();
-        *slot = Some((0, n, out.clone_ref(py)));
+        *slot = Some(((0, n, 0, 0), out.clone_ref(py)));
+        Ok(out)
+    }
+
+    /// A batch run's bar series of an instrument some of whose bars were built from its prints:
+    /// a copy, merged by [`SeriesBars`] from the run's stored bars (stamped as the caller stamped
+    /// them) and the built ones.
+    fn batch_built_series(
+        &self,
+        py: Python<'_>,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> PyResult<Py<PyDict>> {
+        let g = global.index();
+        let end = self.watermark(global);
+        let built = self.built.borrow();
+        let built = &built[g];
+        let key = (0, end, built.len() as u64, shown_key(limit));
+        if let Some((k, dict)) = &self.series.borrow()[g] {
+            if *k == key {
+                return Ok(dict.clone_ref(py));
+            }
+        }
+        let offset = self.offset_of(g);
+        let given = |r: u64| {
+            let bar = self.store.bar(global, u32::try_from(r).ok()?)?;
+            Some(KernelBar { timestamp: bar.timestamp - offset, ..bar })
+        };
+        let rows = SeriesBars::new(
+            given,
+            (0, end),
+            |r| built.get(r as usize).copied(),
+            (0, built.len() as u64),
+        )
+        .shown(limit);
+        let out = bar_series_dict(py, &rows)?;
+        self.series.borrow_mut()[g] = Some((key, out.clone_ref(py)));
         Ok(out)
     }
 
@@ -1041,6 +1170,19 @@ impl Shared {
             Some(w) => w.bars[g],
             None => feed.as_ref().is_some_and(|f| f.has_bars(global)),
         };
+        if let (true, Some(merged)) =
+            (bars, feed.as_ref().and_then(|f| self.live_built(f, global, limit)))
+        {
+            if let Some((k, dict)) = &self.series.borrow()[g] {
+                if *k == merged.key {
+                    return Ok(dict.clone_ref(py));
+                }
+            }
+            let rows = merged.bars.shown(merged.show);
+            let out = bar_series_dict(py, &rows)?;
+            self.series.borrow_mut()[g] = Some((merged.key, out.clone_ref(py)));
+            return Ok(out);
+        }
         let ticks = feed.as_ref().and_then(|f| f.ticks(global));
         let (first, end) = if bars {
             match feed.as_ref().and_then(|f| f.bars(global)) {
@@ -1056,8 +1198,8 @@ impl Shared {
         // A strategy that declared how many rows it reads sees exactly the last of them, not
         // what the ring happens to hold for the others.
         let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
-        if let Some((f, w, dict)) = &self.series.borrow()[g] {
-            if (*f, *w) == (first, end) {
+        if let Some((key, dict)) = &self.series.borrow()[g] {
+            if *key == (first, end, 0, 0) {
                 return Ok(dict.clone_ref(py));
             }
         }
@@ -1071,7 +1213,7 @@ impl Shared {
         // The columns a windowed run's ticks were given with, as a batch run's series has them.
         let given: Option<&Vec<String>> =
             self.window.as_ref().and_then(|w| w.ticks[g].as_ref()).filter(|_| !bars);
-        match ticks.filter(|_| !bars) {
+        let out = match ticks.filter(|_| !bars) {
             None if given.is_some() => {
                 // Ticks declared, none pushed yet.
                 put("timestamps", PyArray1::from_iter(py, std::iter::empty::<i64>()).into_any())?;
@@ -1080,24 +1222,14 @@ impl Shared {
                         put(key, PyArray1::from_iter(py, std::iter::empty::<f64>()).into_any())?;
                     }
                 }
+                out.unbind()
             }
             None => {
                 let rows: Vec<KernelBar> = match feed.as_ref().and_then(|f| f.bars(global)) {
                     Some(ring) => (first..end).filter_map(|r| ring.get(r).ok()).collect(),
                     None => Vec::new(),
                 };
-                let ts = rows.iter().map(|b| b.timestamp);
-                put("timestamps", PyArray1::from_iter(py, ts).into_any())?;
-                let columns: [BarColumn; 5] = [
-                    ("open", |b| b.open),
-                    ("high", |b| b.high),
-                    ("low", |b| b.low),
-                    ("close", |b| b.close),
-                    ("volume", |b| b.volume),
-                ];
-                for (key, f) in columns {
-                    put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
-                }
+                bar_series_dict(py, &rows)?
             }
             Some(ring) => {
                 let rows: Vec<TickRow> = (first..end).filter_map(|r| ring.get(r).ok()).collect();
@@ -1108,13 +1240,224 @@ impl Shared {
                         put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
                     }
                 }
+                out.unbind()
             }
-        }
-        let out = out.unbind();
+        };
         drop(feed);
-        self.series.borrow_mut()[g] = Some((first, end, out.clone_ref(py)));
+        self.series.borrow_mut()[g] = Some(((first, end, 0, 0), out.clone_ref(py)));
         Ok(out)
     }
+
+    /// The bar series of `global` in a live node's or a windowed run's rings when bars built from
+    /// its prints have joined it, `None` when none has: the merge of the pushed bars it holds up
+    /// to the watermark with the built ones, the rows a strategy may be shown of it (a live node
+    /// shows at most its `history`, a windowed run the rows declared) and the cache key.
+    fn live_built<'f>(
+        &self,
+        feed: &'f LiveFeed,
+        global: InstrumentId,
+        limit: Option<usize>,
+    ) -> Option<LiveBuilt<'f>> {
+        let built = feed.built(global)?;
+        let (first, end) = match feed.bars(global) {
+            Some(ring) => {
+                (ring.first_row(), self.watermark(global).min(ring.end_row()).max(ring.first_row()))
+            }
+            None => (0, 0),
+        };
+        let cap = self.window.is_none().then(|| feed.capacity_of(global));
+        let show = match (limit, cap) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let rows = feed.bars(global);
+        let given: Box<dyn Fn(u64) -> Option<KernelBar> + 'f> =
+            Box::new(move |r| rows.and_then(|ring| ring.get(r).ok()));
+        let key = (first, end, built.end_row(), shown_key(show));
+        let bars = SeriesBars::new(
+            given,
+            (first, end),
+            Box::new(move |r| built.get(r).ok()) as Box<dyn Fn(u64) -> Option<BuiltRow> + 'f>,
+            (built.first_row(), built.end_row()),
+        );
+        Some(LiveBuilt { bars, show, key })
+    }
+
+    /// What `live_series_of` would give as the last `close`, else the last positive `ltp` (a
+    /// quote-only row's `ltp` 0 is no trade; `Some(None)` when its dict would hold neither, holds
+    /// them empty, or holds no positive `ltp`), read from the rows instead of copying the ring. `None` when a dict for the same rows is cached: a strategy may have
+    /// changed that dict in place, so the caller reads it as before. Mirrors `live_series_of`
+    /// row for row; change both together.
+    fn live_last_price(&self, global: InstrumentId, limit: Option<usize>) -> Option<Option<f64>> {
+        let g = global.index();
+        let feed = self.feed.borrow();
+        let bars = match &self.window {
+            Some(w) => w.bars[g],
+            None => feed.as_ref().is_some_and(|f| f.has_bars(global)),
+        };
+        if let (true, Some(mut merged)) =
+            (bars, feed.as_ref().and_then(|f| self.live_built(f, global, limit)))
+        {
+            if let Some((k, _)) = &self.series.borrow()[g] {
+                if *k == merged.key {
+                    return None;
+                }
+            }
+            // The newest row is shown whatever the limit: at least one row is.
+            return Some(merged.bars.next().map(|b| b.close));
+        }
+        let ticks = feed.as_ref().and_then(|f| f.ticks(global));
+        let (first, end) = if bars {
+            match feed.as_ref().and_then(|f| f.bars(global)) {
+                Some(ring) => (ring.first_row(), self.watermark(global).min(ring.end_row())),
+                None => (0, 0),
+            }
+        } else if let Some(ring) = ticks {
+            (ring.first_row(), self.tick_watermark(global).min(ring.end_row()))
+        } else {
+            (0, 0)
+        };
+        let end = end.max(first);
+        let first = limit.map_or(first, |n| first.max(end.saturating_sub(n as u64)));
+        if let Some((key, _)) = &self.series.borrow()[g] {
+            if *key == (first, end, 0, 0) {
+                return None;
+            }
+        }
+        let given: Option<&Vec<String>> =
+            self.window.as_ref().and_then(|w| w.ticks[g].as_ref()).filter(|_| !bars);
+        // `live_series_of` keeps the rows `get` answers, so the last one is the last it answers.
+        Some(match ticks.filter(|_| !bars) {
+            None if given.is_some() => None,
+            None => feed
+                .as_ref()
+                .and_then(|f| f.bars(global))
+                .and_then(|ring| (first..end).rev().find_map(|r| ring.get(r).ok()))
+                .map(|b| b.close),
+            // The last traded price: quote-only rows (`ltp` 0) are passed over, as the exit
+            // book's `_last_traded` does on the series.
+            Some(ring) if given.is_none_or(|g| g.iter().any(|k| k == "ltp")) => {
+                ring.last_trade(first..end)
+            }
+            Some(_) => None,
+        })
+    }
+}
+
+/// The cache key part for the rows shown of a merged bar series: one more than the most shown,
+/// `u64::MAX` for every row (never `0`, which marks a series of one kind).
+fn shown_key(show: Option<usize>) -> u64 {
+    show.map_or(u64::MAX, |n| n as u64 + 1)
+}
+
+type GivenRows<'f> = Box<dyn Fn(u64) -> Option<KernelBar> + 'f>;
+type BuiltRows<'f> = Box<dyn Fn(u64) -> Option<BuiltRow> + 'f>;
+
+/// A merged bar series in a live node's or a windowed run's rings, see [`Shared::live_built`].
+struct LiveBuilt<'f> {
+    bars: SeriesBars<GivenRows<'f>, BuiltRows<'f>>,
+    show: Option<usize>,
+    key: (u64, u64, u64, u64),
+}
+
+/// The bar series of an instrument that has pushed bars and bars the engine built from its
+/// prints, newest first: the one definition a batch run, a windowed run and a live node share.
+///
+/// Every bar is in the order `on_bar` heard it. A built bar is stamped as a pushed bar of the
+/// same close (see [`join_built_bar`]) and carries `pos`, the pushed bars delivered before it, so
+/// it comes after pushed row `pos - 1` and before pushed row `pos`. Pushed rows are `first..end`
+/// (`end`: the watermark, so the bar being delivered is in); built rows past the watermark are
+/// not shown. Only the newest rows that are all still held are given: none before the oldest
+/// pushed row held, and when built rows were dropped, none before the oldest built row held.
+struct SeriesBars<G, B> {
+    given: G,
+    built: B,
+    /// Pushed rows still to give are `start..r`.
+    start: u64,
+    r: u64,
+    /// Built rows still to give are `built_first..j`.
+    built_first: u64,
+    j: u64,
+}
+
+impl<G: Fn(u64) -> Option<KernelBar>, B: Fn(u64) -> Option<BuiltRow>> SeriesBars<G, B> {
+    fn new(
+        given: G,
+        (first, end): (u64, u64),
+        built: B,
+        (built_first, built_end): (u64, u64),
+    ) -> Self {
+        let start = match built(built_first) {
+            Some(oldest) if built_first > 0 => first.max(oldest.pos),
+            _ => first,
+        };
+        let mut j = built_end;
+        while j > built_first && built(j - 1).is_some_and(|b| b.pos > end) {
+            j -= 1;
+        }
+        Self { given, built, start, r: end.max(start), built_first, j }
+    }
+
+    /// The last `show` rows (every row with `None`), oldest first.
+    fn shown(self, show: Option<usize>) -> Vec<KernelBar> {
+        let mut rows: Vec<KernelBar> = self.take(show.unwrap_or(usize::MAX)).collect();
+        rows.reverse();
+        rows
+    }
+}
+
+impl<G: Fn(u64) -> Option<KernelBar>, B: Fn(u64) -> Option<BuiltRow>> Iterator
+    for SeriesBars<G, B>
+{
+    type Item = KernelBar;
+
+    fn next(&mut self) -> Option<KernelBar> {
+        loop {
+            let built = if self.j > self.built_first {
+                (self.built)(self.j - 1).filter(|b| b.pos >= self.start)
+            } else {
+                None
+            };
+            match built {
+                // A built bar after pushed row `r - 1` (or with no pushed row left) comes first.
+                Some(b) if self.r <= self.start || b.pos >= self.r => {
+                    self.j -= 1;
+                    return Some(b.bar);
+                }
+                _ if self.r > self.start => {
+                    self.r -= 1;
+                    if let Some(bar) = (self.given)(self.r) {
+                        return Some(bar);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// A bar series dict: `timestamps` (int64) and `open high low close volume` (float64), read-only.
+fn bar_series_dict(py: Python<'_>, rows: &[KernelBar]) -> PyResult<Py<PyDict>> {
+    let out = PyDict::new(py);
+    let kw = PyDict::new(py);
+    kw.set_item("write", false)?;
+    let put = |key: &str, array: Bound<'_, PyAny>| -> PyResult<()> {
+        array.call_method(intern!(py, "setflags"), (), Some(&kw))?;
+        out.set_item(key, array)
+    };
+    let ts = rows.iter().map(|b| b.timestamp);
+    put("timestamps", PyArray1::from_iter(py, ts).into_any())?;
+    let columns: [BarColumn; 5] = [
+        ("open", |b| b.open),
+        ("high", |b| b.high),
+        ("low", |b| b.low),
+        ("close", |b| b.close),
+        ("volume", |b| b.volume),
+    ];
+    for (key, f) in columns {
+        put(key, PyArray1::from_iter(py, rows.iter().map(f)).into_any())?;
+    }
+    Ok(out.unbind())
 }
 
 /// The columns of a live node's tick series, after `timestamps`.
@@ -1662,6 +2005,29 @@ impl PyRuntimeContext {
     /// The local index of a symbol in this strategy.
     fn _instrument_index(&self, symbol: Option<&str>) -> PyResult<usize> {
         self.index_of(symbol)
+    }
+
+    /// The price an exit rule marks `symbol` at, as `(known, price)`: what reading the last
+    /// `close`, else the last positive `ltp` (the last trade: a quote-only row is passed over),
+    /// of `series(symbol)` gives, without building the series; `(true, None)` when no row
+    /// traded. A live
+    /// node's `series` copies its ring once per new row, which a rule checked on every tick
+    /// would pay each time. `known` is false wherever `series` itself must be read: a batch run,
+    /// a symbol it would refuse, or a series already cached for these rows.
+    fn _last_price(&self, symbol: &str) -> (bool, Option<f64>) {
+        if self.shared.live_history.is_none() {
+            return (false, None);
+        }
+        let Ok(local) = self.index_of(Some(symbol)) else {
+            return (false, None);
+        };
+        let Ok(g) = self.shared.global_of(self.sid, local) else {
+            return (false, None);
+        };
+        match self.shared.live_last_price(g, self.shared.declared_rows(self.sid, g)) {
+            Some(price) => (true, price),
+            None => (false, None),
+        }
     }
 }
 
@@ -2744,6 +3110,7 @@ impl PyRuntime {
             offsets: Table::new(market.offsets.clone()),
             widths: market.widths.clone(),
             series: RefCell::new((0..n).map(|_| None).collect()),
+            built: RefCell::new((0..n).map(|_| Vec::new()).collect()),
             live_history: market.live,
             window: market.window.clone(),
             history_declared: RefCell::new(Default::default()),
@@ -2970,12 +3337,9 @@ impl PyRuntime {
         for clock in clocks {
             let b = clock.bind(py);
             let plain = b.get_type().is(&clock_cls);
-            clock_slots.push(ClockSlot {
-                alerts: b.getattr("_alerts")?.cast_into::<PyDict>()?.unbind(),
-                timers: b.getattr("_timers")?.cast_into::<PyDict>()?.unbind(),
-                clock,
-                plain,
-            });
+            let alerts = b.getattr("_alerts")?.cast_into::<PyDict>()?.unbind();
+            let timers = b.getattr("_timers")?.cast_into::<PyDict>()?.unbind();
+            clock_slots.push(ClockSlot::new(clock, alerts, timers, plain));
         }
 
         // Subscriptions: one aggregator per (symbol, subscription), numbered
@@ -3555,6 +3919,10 @@ impl PyRuntime {
                 }),
                 late,
             }));
+        }
+        {
+            let tables: Vec<_> = strats.iter().map(|s| s.tables.borrow()).collect();
+            mark_shared_clocks(tables.iter().flat_map(|t| t.clocks.iter()));
         }
         *self.shared.strats.borrow_mut() = strats;
         self.shared.venue_on.set(route.is_some());
@@ -4361,20 +4729,23 @@ impl PyRuntime {
             let ts = timestamp;
             self.stamp(ts, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, ts).map_err(runtime_err))?;
-            sh.jlog(jk::TICK, ts, arrival_ns.unwrap_or(ts), jsrc::FEED, None, || {
-                JV::map([
-                    ("symbol", JV::str(sh.symbol_text(g.index()))),
-                    ("ltp", JV::Float(ltp)),
-                    ("bid", JV::Float(bid)),
-                    ("ask", JV::Float(ask)),
-                    ("buy_qty_delta", JV::Float(buy_qty_delta)),
-                    ("sell_qty_delta", JV::Float(sell_qty_delta)),
-                    ("ltq", JV::Float(ltq)),
-                    ("bid_qty", JV::Float(bid_qty)),
-                    ("ask_qty", JV::Float(ask_qty)),
-                    ("oi", JV::Float(oi)),
-                ])
-            })?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let tick = jm::Tick {
+                    symbol: &symbol,
+                    ltp,
+                    bid,
+                    ask,
+                    buy_qty_delta,
+                    sell_qty_delta,
+                    ltq,
+                    bid_qty,
+                    ask_qty,
+                    oi,
+                };
+                sh.jlog_payload(jk::TICK, ts, arrival_ns.unwrap_or(ts), jsrc::FEED, &tick)?;
+            }
             let trade = ltp > 0.0;
             let quote = bid > 0.0 && ask > 0.0;
             if !trade && !quote {
@@ -4454,18 +4825,22 @@ impl PyRuntime {
             let close_ts = timestamp + sh.offset_of(g.index());
             self.stamp(close_ts, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, close_ts).map_err(runtime_err))?;
-            sh.jlog(jk::BAR, close_ts, arrival_ns.unwrap_or(close_ts), jsrc::FEED, None, || {
-                JV::map([
-                    ("symbol", JV::str(sh.symbol_text(g.index()))),
-                    ("timestamp", JV::Int(timestamp)),
-                    ("open", JV::Float(open)),
-                    ("high", JV::Float(high)),
-                    ("low", JV::Float(low)),
-                    ("close", JV::Float(close)),
-                    ("volume", JV::Float(volume)),
-                    ("warmup", JV::Bool(sh.warmup.get())),
-                ])
-            })?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let bar = jm::Bar {
+                    symbol: &symbol,
+                    timestamp,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    warmup: sh.warmup.get(),
+                };
+                let arrival = arrival_ns.unwrap_or(close_ts);
+                sh.jlog_payload(jk::BAR, close_ts, arrival, jsrc::FEED, &bar)?;
+            }
             let stamped = KernelBar { timestamp, open, high, low, close, volume };
             let event =
                 store_row(sh, g, RingKind::Bars, |feed| feed.push_bar(g, close_ts, stamped))?;
@@ -4500,28 +4875,13 @@ impl PyRuntime {
             let g = self.instrument(instrument)?;
             self.stamp(timestamp, arrival_ns);
             with_feed(sh, |feed| feed.check_timestamp(g, timestamp).map_err(runtime_err))?;
-            sh.jlog(
-                jk::DEPTH,
-                timestamp,
-                arrival_ns.unwrap_or(timestamp),
-                jsrc::FEED,
-                None,
-                || {
-                    let side = |levels: &[(f64, f64)]| {
-                        JV::List(
-                            levels
-                                .iter()
-                                .map(|&(p, q)| JV::List(vec![JV::Float(p), JV::Float(q)]))
-                                .collect(),
-                        )
-                    };
-                    JV::map([
-                        ("symbol", JV::str(sh.symbol_text(g.index()))),
-                        ("bids", side(&bids)),
-                        ("asks", side(&asks)),
-                    ])
-                },
-            )?;
+            if sh.journal_on.get() {
+                let symbol = sh.symbol(py, g.index());
+                let symbol = symbol.to_string_lossy();
+                let depth = jm::Depth { symbol: &symbol, bids: &bids, asks: &asks };
+                let arrival = arrival_ns.unwrap_or(timestamp);
+                sh.jlog_payload(jk::DEPTH, timestamp, arrival, jsrc::FEED, &depth)?;
+            }
             let levels = |levels: &[(f64, f64)]| -> Vec<BookLevel> {
                 levels
                     .iter()
@@ -4633,9 +4993,7 @@ impl PyRuntime {
             let mut guard = self.live_loop()?;
             self.drain_held(py, &mut guard)?;
             self.settle_push();
-            sh.jlog(jk::TIME, timestamp, timestamp, jsrc::FEED, None, || {
-                JV::map([("timestamp", JV::Int(timestamp))])
-            })?;
+            sh.jlog_payload(jk::TIME, timestamp, timestamp, jsrc::FEED, &jm::Time { timestamp })?;
             let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
             for st in &strats {
                 let locals = match &*sh.inner.borrow() {
@@ -4738,7 +5096,17 @@ impl PyRuntime {
         // A live node's rings: fixed once allocated, whatever is pushed.
         let rings = self.shared.feed.borrow().as_ref().map_or(0, HeapSize::heap_bytes);
         d.set_item("live_rings", rings)?;
-        d.set_item("total", r.total() + rings)?;
+        // A batch run's bars built from prints that joined a bar series (a live node's and a
+        // windowed run's are in their rings).
+        let built: usize = self
+            .shared
+            .built
+            .borrow()
+            .iter()
+            .map(|b| b.capacity() * std::mem::size_of::<BuiltRow>())
+            .sum();
+        d.set_item("built_bars", built)?;
+        d.set_item("total", r.total() + rings + built)?;
         Ok(d)
     }
 }
@@ -4918,6 +5286,7 @@ impl PyRuntime {
         sh.tick_arrays.borrow_mut().push(None);
         sh.offsets.push(&guard, offset);
         sh.series.borrow_mut().push(None);
+        sh.built.borrow_mut().push(Vec::new());
         sh.retired.push(&guard, false);
         with_feed(sh, |feed| {
             feed.add_instrument(symbol.clone(), capacity);
@@ -4931,12 +5300,10 @@ impl PyRuntime {
             st.ctx.bind(py).borrow().books.borrow_mut().push(None);
             let clock = st.late.clock.bind(py).call_method0("clone_schedule")?;
             let mut t = st.tables.borrow_mut();
-            t.clocks.push(ClockSlot {
-                alerts: clock.getattr("_alerts")?.cast_into::<PyDict>()?.unbind(),
-                timers: clock.getattr("_timers")?.cast_into::<PyDict>()?.unbind(),
-                plain: clock.get_type().is(&clock_cls),
-                clock: clock.unbind(),
-            });
+            let alerts = clock.getattr("_alerts")?.cast_into::<PyDict>()?.unbind();
+            let timers = clock.getattr("_timers")?.cast_into::<PyDict>()?.unbind();
+            let plain = clock.get_type().is(&clock_cls);
+            t.clocks.push(ClockSlot::new(clock.unbind(), alerts, timers, plain));
             let (privates, primary_natives) = split_indicators(
                 py,
                 st.late.indicators.iter().filter(|(sub, _)| sub.is_none()).map(|(_, obj)| obj),
@@ -4973,6 +5340,11 @@ impl PyRuntime {
                     reveal: None,
                 });
             }
+        }
+        {
+            let strats = sh.strats.borrow();
+            let tables: Vec<_> = strats.iter().map(|s| s.tables.borrow()).collect();
+            mark_shared_clocks(tables.iter().flat_map(|t| t.clocks.iter()));
         }
         let ls = guard.as_mut().expect("checked by live_loop");
         ls.wanted.push(mask);
@@ -5117,9 +5489,15 @@ impl PyRuntime {
         // one is complete: no event of it can still arrive.
         let ready: Vec<GroupEvent> = {
             let mut held = sh.held.borrow_mut();
-            let (ready, keep): (Vec<_>, Vec<_>) =
-                held.drain(..).partition(|h| h.event.ts < event.ts);
-            *held = keep;
+            // The usual group holds one timestamp: nothing is complete, and nothing is moved.
+            let ready = if held.iter().any(|h| h.event.ts < event.ts) {
+                let (ready, keep): (Vec<_>, Vec<_>) =
+                    held.drain(..).partition(|h| h.event.ts < event.ts);
+                *held = keep;
+                ready
+            } else {
+                Vec::new()
+            };
             held.push(pushed);
             ready
         };
@@ -5178,15 +5556,15 @@ impl PyRuntime {
     /// subscribed to it.
     fn mark_time(&self, py: Python<'_>, g: InstrumentId, ts: i64) -> PyResult<()> {
         let sh = &*self.shared;
-        let _guard = self.live_loop()?;
+        let guard = self.live_loop()?;
         self.settle_push();
         let subs: Vec<StrategyId> = match &*sh.inner.borrow() {
             Inner::Running(c) => c.subscribers(g).to_vec(),
             _ => return Err(finished()),
         };
-        let strats: Vec<Rc<Strat>> = sh.strats.borrow().clone();
+        let ls = guard.as_ref().expect("checked by live_loop");
         for sid in subs {
-            let st = strats.iter().find(|s| s.sid == sid).expect("subscribed");
+            let st = ls.by_sid[sid.index()].as_ref().expect("subscribed");
             time_only(py, sh, st, g, ts)?;
         }
         Ok(())
@@ -5213,10 +5591,48 @@ fn run_one(py: Python<'_>, sh: &Shared, ls: &mut LoopState, e: GroupEvent) -> Py
         core.advance_pushed(e.event, e.payload).map_err(runtime_err)?;
         *core.current().expect("advance sets the current event")
     };
+    join_built_bar(sh, &cur)?;
     open_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     rest_phase(py, sh, ls, std::slice::from_ref(&e), false)?;
     let delivered = dispatch(py, sh, ls, &e.event, &cur, None);
     hook_error(sh, delivered)
+}
+
+/// A primary bar the engine built from a print joins the instrument's bar series, once its first
+/// pushed bar has been delivered; before that its series is its ticks, which it stays. It is
+/// stamped as a pushed bar of the same close would be (the symbol's offset moves the close back
+/// to the caller's stamp) and goes after the pushed bars delivered so far, before any strategy
+/// hears the print, so `on_bar` already reads it in the series, as it does a pushed bar. A batch
+/// run keeps it with the run's bars, a live node and a windowed run in their rings (see
+/// [`SeriesBars`]). Neither ever refuses it, since the print was already taken in (see
+/// [`LiveFeed::push_built`] for why no kept row is lost by that).
+fn join_built_bar(sh: &Shared, cur: &Current) -> PyResult<()> {
+    let Some(bar) = cur.primary else { return Ok(()) };
+    let g = cur.event.instrument;
+    let pos = match &*sh.inner.borrow() {
+        Inner::Running(core) => core.watermark(g),
+        _ => return Err(finished()),
+    };
+    if pos == 0 {
+        return Ok(());
+    }
+    let bar = KernelBar {
+        timestamp: bar.timestamp - sh.offset_of(g.index()),
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
+    };
+    let row = BuiltRow { pos, bar };
+    if sh.live_history.is_none() {
+        sh.built.borrow_mut()[g.index()].push(row);
+        return Ok(());
+    }
+    with_feed(sh, |feed| {
+        feed.push_built(g, row);
+        Ok(())
+    })
 }
 
 /// Deliver events that may span several timestamps and kinds: in time order,
@@ -5597,6 +6013,13 @@ fn run_round(
     match &mut *sh.inner.borrow_mut() {
         Inner::Running(core) => core.begin_group(&payloads).map_err(runtime_err)?,
         _ => return Err(finished()),
+    }
+    for i in 0..events.len() {
+        let cur = match &*sh.inner.borrow() {
+            Inner::Running(core) => *core.group_event(i),
+            _ => return Err(finished()),
+        };
+        join_built_bar(sh, &cur)?;
     }
     let mut decided = std::mem::take(&mut ls.decided);
     decided.resize_with(events.len(), Vec::new);
@@ -6254,9 +6677,10 @@ fn time_only(
         strategy.setattr(intern!(py, "clock"), clock)?;
         st.active_clock.set(local);
     }
-    let due = clock.call_method1(intern!(py, "_advance"), (ts,))?;
-    for time_event in due.try_iter()? {
-        strategy.call_method1(intern!(py, "on_time_event"), (ctx, time_event?))?;
+    if let Some(due) = cs.advance(py, ts, &ts.into_pyobject(py)?)? {
+        for time_event in due.try_iter()? {
+            strategy.call_method1(intern!(py, "on_time_event"), (ctx, time_event?))?;
+        }
     }
     if has_commands(py, st) || has_intents(py, st) {
         settle(py, sh, st, global, local, 0, ts)?;
@@ -6364,12 +6788,7 @@ fn enter(
         strategy.setattr(intern!(py, "clock"), clock)?;
         st.active_clock.set(local);
     }
-    let due = if cs.plain && cs.alerts.bind(py).is_empty() && cs.timers.bind(py).is_empty() {
-        clock.setattr(intern!(py, "_now"), ev.ts_obj)?;
-        None
-    } else {
-        Some(clock.call_method1(intern!(py, "_advance"), (ev.event.ts,))?)
-    };
+    let due = cs.advance(py, ev.event.ts, ev.ts_obj)?;
     let mut fired = false;
     if let Some(due) = due {
         if st.mask & HOOK_TIME_EVENT != 0 {

@@ -82,6 +82,7 @@
         "raptorbt.strategy.Bars",
         "raptorbt.strategy.Duration",
         "raptorbt.strategy.Legs",
+        "raptorbt.strategy.PointInTime",
         "raptorbt.strategy.ParamSchema",
         "raptorbt.strategy.ParamSpec",
         "raptorbt.strategy.Issue",
@@ -154,7 +155,8 @@
         "Preparing OHLCV arrays, trade ticks, quotes and order-book depth.",
         "Handling timestamps, bar_stamp, bar open versus close stamps and ordering.",
         "Checking what a strategy can see at an event (no lookahead).",
-        "Computing tick features or running tick-level simulation."
+        "Computing tick features or running tick-level simulation.",
+        "Feeding ticks to a live node: what one push_tick row delivers, when a bar built from ticks closes, and what ctx.series holds once built bars join a symbol's bars."
       ],
       "depends_on": [
         "raptorbt-core",
@@ -324,7 +326,8 @@
         "Submitting or managing orders: limit, stop, stop-limit, trailing, bracket, OCO, modify, cancel.",
         "Implementing a stop-loss, target or time in force (day, gtd, ioc, fok).",
         "Explaining why an order was rejected, or placing a multi-leg option structure.",
-        "Putting an ATR stop or target on an option leg: the premium or the index."
+        "Putting an ATR stop or target on an option leg: the premium or the index.",
+        "Moving a stop-loss or take-profit on an open position with exit rules (ExitRule, set_exit, cancel_exit, ExitEvents)."
       ],
       "depends_on": [
         "raptorbt-core",

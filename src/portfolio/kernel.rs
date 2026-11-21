@@ -461,6 +461,9 @@ pub struct EngineKernel {
     pub(crate) squareoff_outbox: bool,
     /// Position ids the strategy asked to close, applied on the next step.
     pub(crate) pending_closes: Vec<u64>,
+    /// Scratch for the ids of the open positions a step walks while it may close them, kept
+    /// so a step with a position open does not allocate. Empty between uses.
+    open_ids: Vec<u64>,
     /// A forced flatten (halt, margin call, daily loss) the strategy's book
     /// asked for: the exit reason, and the first bar stamp that may fill it. It is
     /// an ordinary reduce-only market order for every position, so it fills
@@ -628,6 +631,7 @@ impl EngineKernel {
             slice_outbox: Vec::new(),
             squareoff_outbox: false,
             pending_closes: Vec::new(),
+            open_ids: Vec::new(),
             flatten_request: None,
             account: AccountMode::Cash,
             margin: MarginBook::default(),
@@ -1901,8 +1905,10 @@ impl EngineKernel {
         // that bar generated. Exits before the entry, mirroring the phase
         // order below; the entry then participates in this bar's own
         // stop/target checks, since a position opened at the open lives
-        // through the rest of the bar.
-        if mode == StepMode::Bar && !opened {
+        // through the rest of the bar. With nothing stashed the call is skipped: taking `None`
+        // leaves `None`, and the call alone (a large frame that reads the whole intent) was a
+        // measurable part of every step.
+        if mode == StepMode::Bar && !opened && self.deferred.is_some() {
             self.fill_deferred(idx, bar, gate.data_open, &mut events);
         }
 
@@ -2132,6 +2138,10 @@ impl EngineKernel {
         }
         let (swept, held_before) = if opened {
             (std::mem::take(&mut self.open_swept), std::mem::take(&mut self.open_held_before))
+        } else if !self.orders.has_working() {
+            // Nothing is working, so the sweep would find nothing to fill and return two empty
+            // lists; its call is skipped.
+            (Vec::new(), Vec::new())
         } else {
             self.sweep_market(idx, bar, gate.data_open, mode, defer_signals, &mut events)
         };
@@ -2212,8 +2222,10 @@ impl EngineKernel {
 
         // Protective exits, per position in opening order: stop > target. Net policy holds one
         // position, reproducing the original sequence exactly.
-        let open_ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
-        for position_id in open_ids {
+        let mut open_ids = std::mem::take(&mut self.open_ids);
+        debug_assert!(open_ids.is_empty());
+        open_ids.extend(self.ledger.positions().iter().map(|p| p.id));
+        for &position_id in &open_ids {
             if let Some(event) = self.try_exit_position(idx, bar, position_id, false, false) {
                 events.push(event);
             }
@@ -2228,6 +2240,8 @@ impl EngineKernel {
                 }
             }
         }
+        open_ids.clear();
+        self.open_ids = open_ids;
 
         // Session square-off: the first event at or after the cutoff flattens
         // the book, after the position's own protective exits and before
@@ -2464,11 +2478,13 @@ impl EngineKernel {
             })
             .map(|o| o.id)
             .collect();
-        let held_before: Vec<u64> = if defer_signals && mode == StepMode::Bar {
-            self.ledger.positions().iter().map(|p| p.id).collect()
-        } else {
-            Vec::new()
-        };
+        // Read only by the entry-bar protection, which runs only when something was swept.
+        let held_before: Vec<u64> =
+            if defer_signals && mode == StepMode::Bar && !market_ids.is_empty() {
+                self.ledger.positions().iter().map(|p| p.id).collect()
+            } else {
+                Vec::new()
+            };
         let swept = market_ids.clone();
         for id in market_ids {
             // Under deferral an order of this instrument was acknowledged on
@@ -2923,6 +2939,7 @@ impl EngineKernel {
             },
         )?;
 
+        trade.exit_fee_breakdown = exit_breakdown;
         let refund =
             self.restate_same_day(&mut trade, entry_breakdown, exit_breakdown, squared, None);
         self.credit_close(position_id, &trade);
@@ -3000,6 +3017,12 @@ impl EngineKernel {
         combined.add(&c.exit);
         combined.exact_total = Some(trade.fees);
         trade.fee_breakdown = Some(combined);
+        // each leg as repriced on the intraday row, its total the booked amount of the leg
+        let booked = |parts: crate::execution::costs::FeeBreakdown, total: f64| {
+            Some(crate::execution::costs::FeeBreakdown { exact_total: Some(total), ..parts })
+        };
+        trade.entry_fee_breakdown = booked(c.entry, trade.entry_fees);
+        trade.exit_fee_breakdown = booked(c.exit, trade.exit_fees);
         if let Some(r) = open.and_then(|id| self.ledger.get_mut(id)) {
             let mut parts = c.entry_parts;
             if let Some((earlier, _)) = squared {
@@ -3537,6 +3560,7 @@ impl EngineKernel {
         // The slice's cash movement is the whole-close arithmetic on the
         // slice's booked amounts; the lock was released above, not here.
         let squared = self.ledger.get(position_id).and_then(|m| m.same_day_squared);
+        trade.exit_fee_breakdown = exit_breakdown;
         let refund =
             self.restate_same_day(&mut trade, None, exit_breakdown, squared, Some(position_id));
         self.credit_slice(&trade);

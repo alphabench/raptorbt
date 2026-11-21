@@ -61,8 +61,17 @@ def test_the_example_says_what_it_shows_and_which_skills_it_uses(script):
     assert skills and skills <= known, (_id(script), skills - known)
 
 
+def _ticks_only(script: Path) -> bool:
+    """A tick-level script, or one elsewhere whose only run is ``run_tick_strategy``."""
+    text = script.read_text()
+    bar_runs = ("run_strategies(", "run_strategy_backtest(", "run_strategies_windowed(", "LiveNode(")
+    return script.parent.name == "tick-level" or (
+        "run_tick_strategy(" in text and not any(r in text for r in bar_runs)
+    )
+
+
 # a tick-only run takes no bars, so it has no stamp to declare
-@pytest.mark.parametrize("script", [s for s in SCRIPTS if s.parent.name != "tick-level"], ids=_id)
+@pytest.mark.parametrize("script", [s for s in SCRIPTS if not _ticks_only(s)], ids=_id)
 def test_the_example_passes_the_bar_stamp_it_means(script):
     assert "bar_stamp=" in script.read_text(), f"{_id(script)} must pass bar_stamp explicitly"
 

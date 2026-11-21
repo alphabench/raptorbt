@@ -45,10 +45,28 @@ as the harness requires. Other machines will differ; compare only within one har
 | 1,000,000 | 157.3 ms | 6.36 | 5,703 | yes |
 | 10,000,000 | 1.908 s | 5.24 | 35,700 | no |
 
+The tick rows above ran on the harness's then default of 100,000 of capital. At 10,000,000 ticks the account ran
+out of cash: 1,132,518 entries were refused as unfunded and the last exit was at tick 8,752,707 (87.5% of the
+input), so that figure times a run that had stopped trading. The 1.0.0 harness recorded `reached_end` but did not
+check it. The harness now funds the tick runs with 10,000,000 and exits with an error when a run does not trade to
+the end of its input.
+
 Spread batch: 394.8 ms serial, 58.3 ms parallel, 6.77x, 8,571 per second, 500 distinct returns, matches the serial run.
 Sweep (184 combinations of 93,750 bars, 17.25M bar evaluations): 2.74 s wall, 2.52 s in the engine, peak RSS
 71.9 MB. Determinism: 20 runs, 1 distinct result hash. Metrics: 48 attributes, 31 keys in `to_dict()`.
 Engine extension: 6.4 MB.
+
+## Measured on raptorbt 1.1.0
+
+Not yet measured. To be filled in from `run_all.py` on the release build: the bar table, the tick table (tick runs
+funded with 10,000,000, every row reaching the end of its input), and the machine, Python and numpy versions.
+
+| Ticks | Best | M ticks/s | Trades | Reached the end |
+|---|---|---|---|---|
+| 10,000 | _to be measured_ | | | |
+| 100,000 | _to be measured_ | | | |
+| 1,000,000 | _to be measured_ | | | |
+| 10,000,000 | _to be measured_ | | | |
 
 ## Slower than 0.13.x
 
@@ -66,7 +84,9 @@ On this harness and this machine, 1.0.0 is slower on the bar and tick paths than
 | 1,000,000 ticks | 145.6M ticks/s | 6.4M ticks/s |
 | 10,000,000 ticks | 135.3M ticks/s | 5.2M ticks/s |
 
-The 0.13.4 column is a single run; the 1.0.0 column is the median of 3. A build of the 1.0.0 source made locally
+The 0.13.4 column is a single run; the 1.0.0 column is the median of 3. The 10,000,000-tick rows ran on 100,000
+of capital: the 1.0.0 run stopped trading at 87.5% of its input (see above), and the 0.13.4 run was not checked
+for it. A build of the 1.0.0 source made locally
 measures the same as the wheel, so this is a change in the engine, not in the measurement or the packaging. Do
 not read the 0.7.0 note above as covering it: that one was a change of harness.
 
@@ -78,7 +98,105 @@ number that is wrong:
 
 - **Release build only.** A `cargo build` without `--release` is several times
   slower and not what ships.
-- **Tick runs must traverse the whole array.** `run_tick_backtest` defaults to
-  `max_trades=50` and *stops early* once it hits the cap, so a naive timing
-  measures a partial run and reports an inflated ticks/sec. The harness raises
-  the cap and asserts the last trade's `exit_idx` lands at the end of the input.
+- **Tick runs must trade to the end of the array.** A `max_trades` cap makes
+  `run_tick_backtest` *stop early* once it is reached, and an account that runs
+  out of cash refuses every later entry; either way a naive timing measures a
+  run that stopped trading and reports a flattering ticks/sec. The harness sets
+  no effective cap, funds the runs with 10,000,000, and exits non-zero unless
+  every run's last exit lands within 100 ticks of the end and no entry was
+  refused as unfunded. (Up to 1.0.0 it recorded this check without enforcing
+  it.)
+
+## Live path, memory and concurrency benchmarks
+
+`run_all.py` times the signal-array runners. These scripts time what a strategy written
+against the `Strategy` API costs: on a `LiveNode` fed one event at a time, and in
+`run_strategies`. They share `_live.py` (seeded synthetic data, the strategies, the
+timing and memory helpers) and need nothing beyond numpy and the standard library
+(`psutil` is used for RSS if it happens to be installed, `ps -o rss=` otherwise).
+
+```bash
+uv run maturin develop --release
+uv run python benches/python/live_latency.py
+uv run python benches/python/live_memory.py
+uv run python benches/python/live_concurrency.py
+uv run python benches/python/live_multi.py
+uv run python benches/python/strategy_backtest.py
+```
+
+Each script prints the raptorbt, Python and numpy versions, the platform, machine and
+CPU count, a table, and writes `<script>_results.json` next to itself (`--json PATH`
+to write elsewhere). `--quick` runs a tiny configuration in a few seconds, to check a
+script works; its numbers mean nothing. A case that fails, or whose checks fail, is
+reported as an error entry with whatever it measured, and the remaining cases still run.
+
+The data: ticks and 1-minute bars around a mean-reverting random walk on a 0.05 price
+grid, timestamps strictly increasing inside a 09:00-15:30 UTC session on consecutive
+weekdays. No session schedule or square-off is configured. Every strategy trades a fixed
+10 units with no fees on an account of 1,000,000,000, so it cannot run out of cash. The
+trading strategies carry a fixed stop on every entry and a trailing stop from the config,
+so a position is open much of the time and stops are checked on most events.
+
+What one number means:
+
+- **`live_latency.py`**: one `LiveNode.push_tick` call, `perf_counter_ns` immediately
+  before the call and after it returns. Inside: the Python wrapper's checks, the core
+  applying the print and the quote, the 1-minute aggregation, every strategy hook the tick
+  fires, the orders those hooks submit being matched in-process, stops and trailing stops,
+  and the journal record when there is a journal. Not inside: preparing the arguments,
+  storing the sample, the loop. The first 5 percent of ticks are excluded as warm-up. The
+  bare timer overhead (two `perf_counter_ns` calls and a store) is measured and printed:
+  subtract its p50 from a per-call p50. Cases are hook (`bars`: no tick hook, `noop`: a
+  tick hook that only counts, `momentum`: a tick hook that reads an indicator and trades)
+  x journal (`none`, `file` with fsync policy `--fsync`, default `orders`, `memory`
+  keeping the latest `--journal-memory` records) x 1 / 10 / 50 strategies on one
+  symbol, 1,000,000 ticks each. Each case checks that every tick produced its two events,
+  that every strategy saw every print (or, for `bars`, a session of bars) and that every
+  momentum strategy traded. `ticks/s` is the whole loop, timing included. Equity curves
+  are unbounded (the node's default) unless `--curve-samples` is given: at 50 strategies
+  x 1,000,000 ticks they hold about 1.6 GB, and their growth is inside the timed region.
+- **`live_memory.py`**: one configuration per fresh interpreter. RSS over the baseline of
+  an interpreter with raptorbt and numpy imported, after the node was built and fed;
+  peak RSS (`getrusage`) over the same baseline; `node.memory_report()` (the Rust heap
+  by category: rings, curves, books, indicators); and, in a second fresh interpreter,
+  what `tracemalloc` sees Python allocate (never in the same pass as the RSS reading,
+  because tracing changes RSS). The tape is generated in chunks as it is pushed. Matrix:
+  1 / 10 / 50 / 200 symbols x `history` default / 512 (20,000 ticks per symbol), the
+  same symbol counts with a 5-level depth snapshot after every 10th tick, and 100,000 /
+  1,000,000 / 5,000,000 ticks on one symbol with `curve_samples` unset / 1,000, which
+  shows what grows per million ticks.
+- **`live_concurrency.py`**: `inproc`, 1 / 10 / 50 / 100 / 200 nodes in one process fed
+  round-robin (one number is one push to one node; RSS per node is the RSS over the
+  baseline divided by the node count); `procs`, 1 / 2 / 4 / 8 / `os.cpu_count()`
+  processes with one node each, started with `multiprocessing` spawn and released by a
+  barrier once built (aggregate ticks/s is every tick over the span from the first start
+  to the last finish; RSS is the sum over the children, so shared pages count once per
+  child); `threads`, 1 / 2 / 4 / 8 threads, each building and feeding its own node, to
+  show what the interpreter lock allows.
+- **`live_multi.py`**: one node, one strategy over 1 / 5 / 20 / 50 symbols, with
+  timeframe sets `1m`, `1m+5m`, `1m+5m+15m+1h+1d` (composite streams through
+  `subscribe(timeframe=)`, an SMA on each) and `1m+at` (one `ctx.indicators.expr` per
+  symbol reading `at("5m", ...)` through `at("1d", ...)`). Fed 1,000,000 ticks over five
+  sessions (one number is one `push_tick`) and twenty sessions of closed 1-minute bars
+  through `push_group`, one bar per symbol per timestamp (one number is one
+  `push_group` of K bars). Pushes are split into three distributions: those on which a
+  coarser bar reached the strategy (for `1m+at`, the 1-minute bar that opens a new
+  5-minute window, which is when an `at` value can move), those on which only a 1-minute
+  bar closed, and the rest. A `chain` case runs an underlying and 50 option contracts
+  given as `instruments=`, every contract receiving ticks, with the strategy reading
+  `ctx.option_chain` on every 100th print of the underlying.
+- **`strategy_backtest.py`**: one `run_strategies` call, call to return (runtime build,
+  hooks, matching, results), for 1,000 / 100,000 / 1,000,000 bars and 100,000 /
+  1,000,000 ticks; best and median of several runs (one run at the largest sizes);
+  `ns/event` is the best time over the input length. Each run checks that the strategy
+  saw every bar or print and traded.
+
+Discipline for published figures:
+
+- **Release build only** (`maturin develop --release`), as for `run_all.py`.
+- **Run each script standalone on a quiet machine**: nothing else building or testing,
+  one script at a time. `live_concurrency.py` and `live_memory.py` start their own
+  processes; do not run anything beside them.
+- **Three runs, report the medians**, and state the machine (CPU, cores, memory, OS,
+  Python, numpy), as each script prints it.
+- Compare only within one harness and one machine.
