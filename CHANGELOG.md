@@ -5,17 +5,17 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-11-21
 
 Faster live and kernel paths, bars built from prints in `ctx.series()`, a restore that
 works after `warm_up()`, a basket whose members change over time, each leg's fees on a
 trade, and a roll that goes on when the old contract settles at its expiry. No call is
 removed or renamed; a `Future` role read before the first event is now refused (see
-Changed). **Bars and ticks are still slower than
+Changed). **1.0.0's bars and ticks were slower than
 0.13.x**: on the published harness 1.0.0 took 137.5 µs for 1,000 bars where 0.13.4 took
 72.6 µs, and 288.1 ms for 1,875,000 bars where 0.13.4 took 151.1 ms
 (`benches/python/README.md`, "Slower than 0.13.x"). 1.1.0 has not been measured on that
-harness yet, so nothing below says how much faster it is, and nothing here claims to close
+harness, so nothing below says how much faster it is, and nothing here claims to close
 that gap.
 
 ### Changed
@@ -142,7 +142,7 @@ that gap.
   baskets, each leg's fees, reading a `Future` role, feeding a symbol's bars and ticks one way at
   a time, and declaring the look-back a strategy reads.
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-11-19
 
 The first stable release. It covers everything since 0.13.4, including the
 changes first prepared as 0.14.0, which was never published. **Several results
