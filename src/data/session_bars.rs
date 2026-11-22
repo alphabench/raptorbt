@@ -235,6 +235,23 @@ mod tests {
     }
 
     #[test]
+    fn an_evening_session_closing_at_2355_ends_its_last_bar_at_the_close_not_after_midnight() {
+        // MCX in US standard time: the evening window 17:00-23:55. A bucket of 30, 60 or 75
+        // minutes from 17:00 that would end after 23:55 ends at the close, in its own day.
+        let mcx = SessionSchedule::mcx();
+        for (width, unit) in [
+            (30, AggregationUnit::Minute),
+            (1, AggregationUnit::Hour),
+            (75, AggregationUnit::Minute),
+        ] {
+            let spec = BarSpec::new(width, unit).unwrap();
+            let got = ends(spec, &mcx, 17 * 60, 355); // one-minute records 17:00 to 23:54
+            assert_eq!(*got.last().unwrap(), 23 * 60 + 55, "{width} {unit:?}");
+            assert!(got.iter().all(|&m| m <= 23 * 60 + 55));
+        }
+    }
+
+    #[test]
     fn without_a_calendar_intraday_bars_are_cut_on_the_clock_grid() {
         let spec = BarSpec::new(30, AggregationUnit::Minute).unwrap();
         let mut b = builder_for_session(spec, IST, BuilderParams::default(), None).unwrap();
