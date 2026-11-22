@@ -46,6 +46,10 @@ and hosts load strategy code with.
 
 ### Fixed
 
+- **The equity-derivatives close moves to 15:45 on 2026-12-07.** `SessionSchedule.nse_fo()` and
+  `bse_fo()` closed at 15:40 from 2026-08-03 with no later change, so from 2026-12-07 the engine
+  would have refused and expired NFO and BFO orders between 15:40 and 15:45 while the market
+  trades.
 - **A session's last coarse bar is delivered at the close.** With a session calendar, a coarse
   time bar (`30m`, `1h`) built from close-stamped bars was completed only by the first record of
   the next window, so the last bar of a session reached a strategy the next morning. It is now

@@ -79,7 +79,7 @@ impl PySessionSchedule {
     }
 
     /// NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from
-    /// 2026-08-03.
+    /// 2026-08-03, 09:15-15:45 from 2026-12-07.
     #[staticmethod]
     #[pyo3(signature = (holidays=None, squareoff_minute=None))]
     fn nse_fo(holidays: Option<Vec<i32>>, squareoff_minute: Option<u32>) -> PyResult<Self> {

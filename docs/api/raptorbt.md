@@ -1565,7 +1565,7 @@ Python-exposed trading-session calendar.
 | `mcx_select_agri(holidays=None, squareoff_minute=None)` | MCX internationally referenceable agricultural contracts (Cotton, Cotton Seed Oil / CPO, Kapas): 09:00-21:00 all year, covered as `mcx`. |
 | `next_open_ns(self, /, ts_ns)` | The first window open strictly after `ts_ns`, or None. |
 | `nse_equity(holidays=None, squareoff_minute=None)` | NSE cash equities: Mon-Fri 09:15-15:30 IST. No square-off unless `squareoff_minute` is given. |
-| `nse_fo(holidays=None, squareoff_minute=None)` | NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from 2026-08-03. |
+| `nse_fo(holidays=None, squareoff_minute=None)` | NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from 2026-08-03, 09:15-15:45 from 2026-12-07. |
 | `overrides` | Per-date overrides as `{yyyymmdd: [(open, close), ...]}`. |
 | `session_close_ns(self, /, date)` | UTC nanoseconds of the last close on a `yyyymmdd` date; None if that date is not a trading day. |
 | `session_date(self, /, ts_ns)` | `yyyymmdd` of the trading day `ts_ns` falls on, or None on a weekend or holiday. Time of day is ignored. |

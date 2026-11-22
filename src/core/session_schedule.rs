@@ -42,6 +42,10 @@ const NEXT_OPEN_HORIZON_DAYS: i64 = 400;
 /// The first date (`yyyymmdd`) the equity-derivatives segments close at 15:40.
 pub const NFO_CLOSE_1540_FROM: i32 = 20260803;
 
+/// The first date (`yyyymmdd`) the equity-derivatives segments close at 15:45 (the closing
+/// auction session 2.0 of the SEBI circular of 2026-10-15).
+pub const NFO_CLOSE_1545_FROM: i32 = 20261207;
+
 /// Days since 1970-01-01 for a proleptic Gregorian date.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
@@ -390,9 +394,9 @@ impl SessionSchedule {
         Self::weekdays(IST_OFFSET_NS, 9 * 60 + 15, 15 * 60 + 30, None).expect("preset is valid")
     }
 
-    /// NSE equity derivatives: Mon-Fri 09:15-15:40 IST (the NSE market-timings
-    /// page), 09:15-15:30 before 2026-08-03 (the Closing Auction Session for F&O
-    /// stocks moves the close; the cash segment keeps 15:30).
+    /// NSE equity derivatives: Mon-Fri 09:15-15:45 IST from 2026-12-07, 09:15-15:40 from
+    /// 2026-08-03 (the NSE market-timings page), 09:15-15:30 before (the Closing Auction
+    /// Session for F&O stocks moves the close; the cash segment keeps 15:30).
     pub fn nse_fo() -> Self {
         Self::nse_equity()
             .with_window_change(
@@ -400,6 +404,13 @@ impl SessionSchedule {
                 None,
                 Self::monday_to_friday(vec![(9 * 60 + 15, 15 * 60 + 40)]),
             )
+            .and_then(|s| {
+                s.with_window_change(
+                    NFO_CLOSE_1545_FROM,
+                    None,
+                    Self::monday_to_friday(vec![(9 * 60 + 15, 15 * 60 + 45)]),
+                )
+            })
             .expect("preset is valid")
     }
 
@@ -1013,6 +1024,20 @@ mod tests {
         assert_eq!(s.windows_on(20260803), vec![(555, 940)]);
         // The cash segment kept 15:30.
         assert!(!SessionSchedule::nse_equity().is_open(ist(20260803, 15, 31)));
+    }
+
+    #[test]
+    fn the_equity_derivatives_close_moves_to_1545_on_2026_12_07() {
+        for s in [SessionSchedule::nse_fo(), SessionSchedule::bse_fo()] {
+            // Friday 2026-12-04: still 15:40. Monday 2026-12-07: 15:45.
+            assert!(s.is_open(ist(20261204, 15, 39)) && !s.is_open(ist(20261204, 15, 40)));
+            assert!(s.is_open(ist(20261207, 15, 44)) && !s.is_open(ist(20261207, 15, 45)));
+            assert_eq!(s.session_close_ns(20261204), Some(ist(20261204, 15, 40)));
+            assert_eq!(s.session_close_ns(20261207), Some(ist(20261207, 15, 45)));
+            assert_eq!(s.windows_on(20261207), vec![(555, 945)]);
+        }
+        // The cash segment keeps 15:30.
+        assert!(!SessionSchedule::nse_equity().is_open(ist(20261207, 15, 31)));
     }
 
     #[test]
