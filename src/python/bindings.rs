@@ -159,7 +159,7 @@ pub struct PyBacktestConfig {
     #[pyo3(get, set)]
     pub liquidate_on_margin_call: bool,
     /// Trade out a position still open at the last bar as a charged exit (`exit_reason`
-    /// `"window_end"`) instead of marking it to market with no exit costs (`"end_of_data"`).
+    /// `"WindowEnd"`) instead of marking it to market with no exit costs (`"EndOfData"`).
     ///
     /// Set through `with_close_open_at_end`, not directly.
     #[pyo3(get)]
@@ -346,8 +346,8 @@ impl PyBacktestConfig {
     }
 
     /// A copy that trades out a position still open at the last bar as a charged exit
-    /// (`exit_reason` `"window_end"`: exit fees and slippage paid, the trade counted) when `on`,
-    /// instead of marking it to market with no exit costs (`"end_of_data"`, the default). For a
+    /// (`exit_reason` `"WindowEnd"`: exit fees and slippage paid, the trade counted) when `on`,
+    /// instead of marking it to market with no exit costs (`"EndOfData"`, the default). For a
     /// run that is one window of a longer history.
     #[pyo3(signature = (on=true))]
     fn with_close_open_at_end(&self, on: bool) -> Self {

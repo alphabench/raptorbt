@@ -214,7 +214,7 @@ Python-exposed backtest configuration.
 | --- | --- |
 | `apply_slippage` | Whether `slippage` is applied to fills. Ignored entirely before 0.5.0. |
 | `bar_path_adaptive` | Infer intra-bar high/low order from candle geometry on stop/target conflicts; false keeps the legacy stop-first assumption. |
-| `close_open_at_end` | Trade out a position still open at the last bar as a charged exit (`exit_reason` `"window_end"`) instead of marking it to market with no exit costs (`"end_of_data"`). |
+| `close_open_at_end` | Trade out a position still open at the last bar as a charged exit (`exit_reason` `"WindowEnd"`) instead of marking it to market with no exit costs (`"EndOfData"`). |
 | `fee_schedule` | The fee schedule that prices `fee_segment`, or `None` for the built-in exchange presets. |
 | `fee_segment` | Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT". |
 | `fees` | *No docstring.* |
@@ -254,7 +254,7 @@ Python-exposed backtest configuration.
 | `squareoff_time_minutes` | Squareoff time as minutes from local midnight; `None` disables. |
 | `squareoff_times` | Square-off minutes of single instruments, by symbol: each such symbol is squared off at its own time, every other at `squareoff_time`. |
 | `upon_bar_close` | Deprecated in favor of `fill_timing`: `True` maps to `"same_bar_close"`, `False` to `"next_bar_open"`. An explicit `fill_timing` wins over this flag. |
-| `with_close_open_at_end(self, /, on=True)` | A copy that trades out a position still open at the last bar as a charged exit (`exit_reason` `"window_end"`: exit fees and slippage paid, the trade counted) when `on`, instead of marking it to market with no exit costs (`"end_of_data"`, the default). For a run that is one window of a longer history. |
+| `with_close_open_at_end(self, /, on=True)` | A copy that trades out a position still open at the last bar as a charged exit (`exit_reason` `"WindowEnd"`: exit fees and slippage paid, the trade counted) when `on`, instead of marking it to market with no exit costs (`"EndOfData"`, the default). For a run that is one window of a longer history. |
 | `with_squareoff_time(self, /, hhmm)` | A copy whose `squareoff_time` is `hhmm` (`None` disables it): how a runner applies the flatten time a strategy's requirements declare without changing the caller's config. |
 | `with_squareoff_times(self, /, times)` | A copy that squares off each symbol of `times` at its own "HH:MM" and every other at `squareoff_time`: an instrument whose session closes before the run's square-off (an MCX agricultural contract beside a bullion one) is closed before its own close. It replaces the times a previous call gave; an empty mapping clears them. |
 

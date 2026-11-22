@@ -64,10 +64,20 @@ def test_the_option_trades_the_position_out_at_the_last_close_and_charges_the_ex
     assert charged.metrics.total_return_pct < marked.metrics.total_return_pct
     # the run's return is its trades' net P&L over the capital
     assert abs(charged.metrics.total_return_pct - trade.pnl / CAPITAL * 100.0) < 0.01
-    assert charged.metrics.total_trades == 1
+    # the charged exit is a closed trade; the marked position is still open
+    assert charged.metrics.total_closed_trades == 1
+    assert charged.metrics.total_open_trades == 0
+    assert marked.metrics.total_open_trades == 1
 
 
 def test_the_option_can_be_switched_off_again():
     cfg = BacktestConfig(initial_capital=CAPITAL, fees=FEES).with_close_open_at_end()
     assert cfg.close_open_at_end is True
     assert cfg.with_close_open_at_end(False).close_open_at_end is False
+
+
+def test_slippage_moves_the_charged_exit_against_a_long():
+    config = BacktestConfig(initial_capital=CAPITAL, fees=FEES, slippage=0.001)
+    (trade,) = _run(config.with_close_open_at_end()).trades()
+    assert trade.exit_reason == "WindowEnd"
+    assert trade.exit_price < _bars()["close"][-1]
