@@ -359,6 +359,7 @@ Load when:
 - Deciding what a worker must hold: instruments, bindings, journal and fsync, epoch and fencing, warm-up history, health and heartbeat.
 - Writing the recovery runbook, or the checklist of what to verify before live trading with real money.
 - Pinning versions and the once-a-day release check.
+- Packing strategies as one hashed bundle that a host imports from memory: raptorbt.bundle (pack, load, Definition, contract_hash).
 
 ## Troubleshooting
 

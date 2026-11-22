@@ -10,6 +10,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt`](raptorbt.md) | 121 |
 | [`raptorbt.adapters`](raptorbt.adapters.md) | 26 |
 | [`raptorbt.analysis`](raptorbt.analysis.md) | 1 |
+| [`raptorbt.bundle`](raptorbt.bundle.md) | 12 |
 | [`raptorbt.capabilities`](raptorbt.capabilities.md) | 1 |
 | [`raptorbt.costs`](raptorbt.costs.md) | 2 |
 | [`raptorbt.crash_report`](raptorbt.crash_report.md) | 2 |
@@ -30,4 +31,4 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.structures`](raptorbt.structures.md) | 33 |
 | [`raptorbt.version_check`](raptorbt.version_check.md) | 3 |
 
-Public names and members still without a docstring: 763.
+Public names and members still without a docstring: 775.

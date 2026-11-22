@@ -118,6 +118,7 @@ record raises `replay_diverged`); finish a session before changing the engine.
 | `raptorbt.strategy.params_schema(ConfigClass)`, `ParamSchema.validate(values)`, `param(default, min=, max=, choices=, description=)` | The parameter schema and its issues: `unknown_param`, `missing_param`, `invalid_param`, `out_of_bounds`, `not_a_choice`. |
 | `raptorbt.capabilities()` | A JSON-serialisable dict of what this engine supports (order kinds, time in force, fill timings, hooks, indicators, adapters, error codes): read it to decide what to offer instead of hard-coding. |
 | `LiveNode(..., journal=, epoch=, instruments=, bindings=, order_check=, warmup=, protective=)`, `heartbeat()`, `health()`, `checkpoint()`, `LiveNode.restore(...)`, `halt(i, flatten=)`, `halt_account(name, flatten=)` | What you wire ([live-trading](../live-trading/SKILL.md)). |
+| `raptorbt.bundle.pack(files)`, `files(sha, content)`, `load(sha, content, prefix=, refuse=)`, `Definition`, `contract_hash()`, `canonical(doc, sha)`, `local(doc, sha)` | Strategy code as one hashed file. `pack` makes a tar of `defs/<family>/<id>.py` and `lib/**.py` (the same files, the same bytes) and returns `(sha256, bytes)`; `files` checks the bytes against the sha and the paths and returns the files without importing; `load` imports the bundle from memory under its own package (`rb_<16 of the sha>`) and returns one `Definition` per `defs` file: its one `Strategy` class, its at most one `StrategyConfig`, `requirements`, `requirements_hash`, `source_sha256` and `fingerprint`. `contract_hash()` is the hash of the API line, the manifest schema and its parser, to record with each admitted bundle. `BundleError` is every refusal. |
 | `raptorbt.version_check` | The once-a-day release check (`check_for_update`, `is_outdated`, `parse_version`). |
 | `raptorbt.crash_report`, `raptorbt.enable_crash_reporting` | Opt-in, off-by-default engine-panic reports, sent to the maintainers' own server (named in the README) unless you name another collector (`RAPTORBT_CRASH_REPORTING=1`, `RAPTORBT_CRASH_ENDPOINT`, `RAPTORBT_CRASH_KEY`); fields listed in the README. |
 
@@ -390,6 +391,71 @@ def preflight():
 assert preflight() == []
 ```
 
+Strategies that other people wrote travel as a bundle: one file named by its
+hash, so a host admits exactly the bytes that were reviewed. `raptorbt.bundle`
+checks the shape (`.py` files under `defs/` and `lib/`, one `Strategy` class
+per definition, a manifest that passes `check_requirements`, a version), imports
+the code from memory under its own package, and returns each definition with its
+fingerprint. A file refers to its own modules as `bundle.lib.<name>`, which the
+loader points at the package it made. `contract_hash()` is stored beside the
+bundle when it is admitted; a host that finds another value on load re-admits:
+
+```python
+from raptorbt import bundle
+
+DEFINITION = b"""
+from dataclasses import dataclass
+from raptorbt import Strategy, StrategyConfig
+from raptorbt.strategy import Holding, Requirements, Underlying, param
+from bundle.lib.sizing import units
+
+
+@dataclass(frozen=True)
+class Config(StrategyConfig):
+    lots: int = param(1, min=1, max=5, description="lots per entry")
+
+
+class Breakout(Strategy):
+    "A breakout on one underlying."
+
+    version = 1
+    requirements = Requirements(roles={"a": Underlying()}, timeframes=["1m"],
+                                holding=Holding.intraday(flatten_before="15:15"), params=Config)
+"""
+LIB = b"def units(lots):\n    return lots * 50\n"
+files = {
+    "defs/__init__.py": b"", "defs/trend/__init__.py": b"", "lib/__init__.py": b"",
+    "defs/trend/breakout.py": DEFINITION, "lib/sizing.py": LIB,
+}
+
+sha, content = bundle.pack(files)
+assert bundle.pack(files) == (sha, content)                   # the same files, the same bytes
+assert bundle.files(sha, content) == files                    # the bytes are the bundle `sha`
+
+(definition,) = bundle.load(sha, content)                     # one definition per defs/<family>/<id>.py
+assert (definition.family, definition.id, definition.version) == ("trend", "breakout", 1)
+assert definition.module == f"{bundle.package_of(sha)}.defs.trend.breakout"
+assert len(definition.requirements.timeframes) == 1          # read from the class, nothing run
+assert definition.source_sha256 and definition.fingerprint    # what a run records
+
+stored = bundle.canonical({"cls": f"{bundle.package_of(sha)}.lib.sizing:X"}, sha)
+assert stored == {"cls": "bundle.lib.sizing:X"}               # a checkpoint at rest names no package
+assert bundle.local(stored, sha) == {"cls": f"{bundle.package_of(sha)}.lib.sizing:X"}
+
+admitted_under = bundle.contract_hash()                       # store it with the sha; compare on load
+assert len(admitted_under) == 64 and bundle.engine_version()
+
+try:
+    bundle.load(*bundle.pack({"defs/trend/__init__.py": b"", "defs/trend/x.py": b"X = 1\n"}))
+except bundle.BundleError as exc:
+    assert "defines 0 raptorbt.Strategy classes" in str(exc)  # a definition is refused whole
+```
+
+A host that must keep a bundle from importing some modules (the network, the
+file system, another package) passes `refuse=` to `load`: it is called with the
+module name of every import in the bundle's files and returns the reason to
+refuse it, or `None`. That is a gate on names, not a sandbox: see section 7.
+
 ## 6. Composition
 
 - Parameters, hooks and the manifest: [strategy](../strategy/SKILL.md).
@@ -401,6 +467,7 @@ assert preflight() == []
   [market-data](../market-data/SKILL.md), [timeframes](../timeframes/SKILL.md).
 - What goes wrong and what it is called: [troubleshooting](../troubleshooting/SKILL.md).
 - Runnable examples: `examples/live-trading/paper_node.py`.
+- Packing strategies for a host that loads code it did not write: `raptorbt.bundle` (section 5).
 
 ## 7. Constraints and correctness
 
@@ -417,7 +484,10 @@ assert preflight() == []
 - **Untrusted authors.** Importing a strategy runs its top level. Admit from
   exported JSON where you cannot import, and run unreviewed strategies only
   where a single misbehaving process is contained (separate process, limits,
-  no credentials).
+  no credentials). `raptorbt.bundle.load` imports a bundle's code and runs its
+  top level with the host's privileges; `refuse=` and `files()` let a host
+  check imports by name first, which narrows what a bundle may reach and
+  contains nothing.
 - **Money is fixed-point.** Cash, fees and P&L are booked in minor units at
   `money_decimals` (default 2); reconcile with the broker in the same units.
   A non-finite or out-of-range amount stops the run with `money_overflow`

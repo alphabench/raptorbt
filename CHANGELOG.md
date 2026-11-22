@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slippage a real exit pays, and the trade counts in the run's statistics. The default is
   unchanged (`EndOfData`, marked to market, no exit fee). `with_close_open_at_end(False)` turns
   it off again (`tests/python/test_close_open_at_end.py`).
+- **`raptorbt.bundle`, strategy code as one hashed file.** `pack(files)` makes a deterministic tar
+  of `defs/<family>/<id>.py` and `lib/**.py` and returns its sha256 and bytes; `files(sha, content)`
+  checks the bytes against the sha and the paths and returns the files without importing;
+  `load(sha, content)` imports the bundle from memory under a package of its own
+  (`rb_<16 of the sha>`, so two bundles with the same module names live in one process) and returns
+  a `Definition` per `defs` file: its one `Strategy`, its at most one `StrategyConfig`, its
+  `requirements`, and the `source_sha256` and `fingerprint` of what ran. `contract_hash()` is the
+  hash of the API line, the manifest's schema and its parser, to record with each admitted bundle
+  (a release inside the line leaves it alone; a new major moves it). `canonical` and `local` turn a
+  checkpoint's module names to `bundle.` and back. `load(..., prefix=, refuse=)` lets a host choose
+  the package prefix and refuse imports by name (a gate on names, not a sandbox)
+  (`docs/api/raptorbt.bundle.md`, `skills/deployment/SKILL.md`, `tests/python/test_bundle.py`).
 - **`raptorbt.research.resample_paths`, a Monte Carlo of a finished result.** It resamples a
   return series with the stationary block bootstrap of `stationary_bootstrap`, or per-trade
   returns with replacement or as an order shuffle, compounds each path and returns the 5th,
