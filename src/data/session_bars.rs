@@ -63,26 +63,42 @@ impl SessionAnchored {
     }
 }
 
+impl SessionAnchored {
+    /// Whether a record bucketed at `ts` is the last the window `end` can take, and that end is
+    /// a trading window's close: a close-stamped bar reaches the close (it is bucketed by the
+    /// last nanosecond it covers), so nothing more of the window follows. A bar stamped at its
+    /// open cannot say so and waits for the next window's first record, as every bucket does.
+    fn reaches_close(&self, ts: Timestamp, end: Timestamp) -> bool {
+        ts + 1 >= end
+            && self.schedule.windows_ns_on_day_of(ts).iter().any(|&(_, close)| close == end)
+    }
+}
+
 impl BarBuilder for SessionAnchored {
     fn push(&mut self, rec: &SourceRecord) -> Option<OhlcvBar> {
         let window = self.window_of(rec.timestamp);
+        let mut done = None;
         match (self.window, &mut self.partial) {
-            (Some(current), Some(partial)) if current == window => {
-                partial.absorb(rec);
-                None
-            }
+            (Some(current), Some(partial)) if current == window => partial.absorb(rec),
             (Some((_, end)), slot) => {
-                let done = slot.take().map(|p| p.into_bar(end));
+                done = slot.take().map(|p| p.into_bar(end));
                 self.window = Some(window);
                 self.partial = Some(Partial::start(rec));
-                done
             }
             (None, _) => {
                 self.window = Some(window);
                 self.partial = Some(Partial::start(rec));
-                None
             }
         }
+        // The session's last bucket is complete at the close: it is emitted there, not with the
+        // first record of the next session (a live strategy would get it the next morning). A
+        // record that also closed an earlier bucket returns that one, so a tail made of that
+        // one record waits for the next push or the flush.
+        if done.is_none() && self.reaches_close(rec.timestamp, window.1) {
+            self.window = None;
+            return self.partial.take().map(|p| p.into_bar(window.1));
+        }
+        done
     }
 
     fn flush(&mut self) -> Option<OhlcvBar> {
@@ -245,10 +261,38 @@ mod tests {
             (75, AggregationUnit::Minute),
         ] {
             let spec = BarSpec::new(width, unit).unwrap();
-            let got = ends(spec, &mcx, 17 * 60, 355); // one-minute records 17:00 to 23:54
+            let got = ends(spec, &mcx, 17 * 60, 415); // one-minute records 17:00 to 23:54
             assert_eq!(*got.last().unwrap(), 23 * 60 + 55, "{width} {unit:?}");
             assert!(got.iter().all(|&m| m <= 23 * 60 + 55));
         }
+    }
+
+    #[test]
+    fn the_last_bucket_of_a_close_stamped_session_is_emitted_at_the_close() {
+        // One-minute bars stamped at their close, 17:01 to 23:55, bucketed by their last
+        // nanosecond as the runtime does: the 23:25-23:55 tail comes out with the bar that
+        // reaches the close, not with the first record of the next session or a flush.
+        let mcx = SessionSchedule::mcx();
+        let thursday = 20_468 * DAY - IST;
+        let spec = BarSpec::new(30, AggregationUnit::Minute).unwrap();
+        let mut b = builder_for_session(spec, 0, BuilderParams::default(), Some(&mcx)).unwrap();
+        let mut ends = Vec::new();
+        for close in (17 * 60 + 1)..=(23 * 60 + 55) {
+            if let Some(bar) = b.push(&rec(thursday + close * MIN - 1, 100.0)) {
+                ends.push((bar.timestamp - thursday) / MIN);
+                assert!(close <= 23 * 60 + 55);
+            }
+        }
+        assert_eq!(*ends.last().unwrap(), 23 * 60 + 55, "{ends:?}");
+        assert!(b.flush().is_none(), "nothing is left to wait for the next session");
+        // a bar stamped at its open cannot say it reaches the close: it waits to be flushed
+        let mut b = builder_for_session(spec, 0, BuilderParams::default(), Some(&mcx)).unwrap();
+        for open in (17 * 60)..(23 * 60 + 55) {
+            if let Some(bar) = b.push(&rec(thursday + open * MIN, 100.0)) {
+                assert!(bar.timestamp <= thursday + (23 * 60 + 30) * MIN, "before the tail");
+            }
+        }
+        assert_eq!(b.flush().map(|bar| (bar.timestamp - thursday) / MIN), Some(23 * 60 + 55));
     }
 
     #[test]

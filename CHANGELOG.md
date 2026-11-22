@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session's last coarse bar is delivered at the close.** With a session calendar, a coarse
+  time bar (`30m`, `1h`) built from close-stamped bars was completed only by the first record of
+  the next window, so the last bar of a session reached a strategy the next morning. It is now
+  emitted with the bar that reaches the session's close. Bars stamped at their open cannot say
+  they reach it and still wait for the next record, as before. A strategy that acts on a
+  session's last coarse bar sees it one session earlier, so its backtest can differ.
+
 ## [1.2.0] - 2026-11-22
 
 New calls only; nothing is removed or renamed. `raptorbt.bundle` is the new public module NEST
