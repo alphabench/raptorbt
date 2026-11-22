@@ -146,6 +146,7 @@ pub(crate) fn exit_reason_prototypes() -> Vec<ExitReason> {
         ExitReason::Liquidation,
         ExitReason::TimeExit,
         ExitReason::Squareoff,
+        ExitReason::WindowEnd,
     ]
 }
 

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BacktestConfig.with_close_open_at_end()`, a charged exit for a position open at the last
+  bar.** A run that is one window of a longer history (an out-of-sample test window) no longer
+  has to value its last position at the final close with no exit costs: with the option the
+  position is traded out at that close as `exit_reason == "WindowEnd"`, paying the exit fees and
+  slippage a real exit pays, and the trade counts in the run's statistics. The default is
+  unchanged (`EndOfData`, marked to market, no exit fee). `with_close_open_at_end(False)` turns
+  it off again (`tests/python/test_close_open_at_end.py`).
 - **`raptorbt.research.resample_paths`, a Monte Carlo of a finished result.** It resamples a
   return series with the stationary block bootstrap of `stationary_bootstrap`, or per-trade
   returns with replacement or as an order shuffle, compounds each path and returns the 5th,

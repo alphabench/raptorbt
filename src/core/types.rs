@@ -405,6 +405,12 @@ pub enum ExitReason {
     /// exit costs at a real in-session price. `EndOfData` is the run simply
     /// running out of bars.
     Squareoff,
+    /// Closed at the last bar of the run by `BacktestConfig::close_open_at_end`.
+    ///
+    /// The run is a window of a longer history (an out-of-sample test window), so a position
+    /// it still holds is traded out at the last close and pays real exit costs. Distinct from
+    /// `EndOfData`, which marks the position to market and charges nothing.
+    WindowEnd,
 }
 
 /// When a decision made from a bar's data is allowed to execute.
@@ -574,6 +580,12 @@ pub struct BacktestConfig {
     /// price and paying exit costs.
     #[serde(default)]
     pub liquidate_on_margin_call: bool,
+    /// Trade out a position still open at the last bar as a charged exit
+    /// ([`ExitReason::WindowEnd`]) instead of marking it to market with no exit costs
+    /// ([`ExitReason::EndOfData`]). For a window of a longer history, where the position
+    /// would have been closed and paid for.
+    #[serde(default)]
+    pub close_open_at_end: bool,
 
     /// Adverse price adjustment on limit fills, as a fraction of the limit
     /// price. `0.0` (default) fills exactly at the limit, as before.
@@ -732,6 +744,7 @@ impl Default for BacktestConfig {
             session_tz_set: false,
             limit_slippage: 0.0,
             liquidate_on_margin_call: false,
+            close_open_at_end: false,
             fill_prob_slippage: 0.0,
             fill_seed: 0,
             bar_path_adaptive: false,

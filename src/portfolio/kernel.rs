@@ -3166,6 +3166,7 @@ impl EngineKernel {
         match reason {
             ExitReason::Order
             | ExitReason::EndOfData
+            | ExitReason::WindowEnd
             | ExitReason::Settlement
             | ExitReason::Delivery
             | ExitReason::CorporateAction => HedgeGuard::Go,
@@ -3788,7 +3789,20 @@ impl EngineKernel {
     }
 
     /// Force-close every open position at end of data, in opening order.
+    ///
+    /// With `close_open_at_end` the positions are instead traded out at the bar's close, paying
+    /// exit costs ([`ExitReason::WindowEnd`]).
     pub fn finalize_all(&mut self, idx: usize, bar: &KernelBar) -> Vec<Trade> {
+        if self.config.close_open_at_end {
+            return self
+                .liquidate_all_as(idx, bar, ExitReason::WindowEnd)
+                .into_iter()
+                .filter_map(|e| match e {
+                    EngineEvent::Exited { trade, .. } => Some(*trade),
+                    _ => None,
+                })
+                .collect();
+        }
         let ids: Vec<u64> = self.ledger.positions().iter().map(|p| p.id).collect();
         let mut trades = Vec::new();
         for position_id in ids {
