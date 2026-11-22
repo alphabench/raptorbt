@@ -20,7 +20,7 @@ Concepts and worked examples are in the [skills](../../skills/INDEX.md); this is
 | [`raptorbt.margin`](raptorbt.margin.md) | 2 |
 | [`raptorbt.pricing`](raptorbt.pricing.md) | 12 |
 | [`raptorbt.report`](raptorbt.report.md) | 1 |
-| [`raptorbt.research`](raptorbt.research.md) | 11 |
+| [`raptorbt.research`](raptorbt.research.md) | 12 |
 | [`raptorbt.sampling`](raptorbt.sampling.md) | 6 |
 | [`raptorbt.sizing`](raptorbt.sizing.md) | 8 |
 | [`raptorbt.skills`](raptorbt.skills.md) | 5 |

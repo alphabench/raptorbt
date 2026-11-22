@@ -5,6 +5,19 @@ All notable changes to raptorbt are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`raptorbt.research.resample_paths`, a Monte Carlo of a finished result.** It resamples a
+  return series with the stationary block bootstrap of `stationary_bootstrap`, or per-trade
+  returns with replacement or as an order shuffle, compounds each path and returns the 5th,
+  50th, 95th and 99th percentile of the ending return and of the maximum drawdown, the share of
+  paths that lose and that fall past each drawdown level, and a 20-bin histogram of the
+  drawdown. A shuffle says that its ending return is the observed one on every path. It needs at
+  least 10 observations and is deterministic for a seed (`docs/research.md`,
+  `tests/python/test_resample_paths.py`).
+
 ## [1.1.0] - 2026-11-21
 
 Faster live and kernel paths, bars built from prints in `ctx.series()`, a restore that

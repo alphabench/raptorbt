@@ -2331,6 +2331,16 @@ def stationary_bootstrap(
     seed: int,
     periods_per_year: float = ...,
 ) -> dict[str, Any]: ...
+def resample_paths(
+    values: Any,
+    method: str,
+    draws: int,
+    block: float | None,
+    replace: bool,
+    seed: int,
+    periods_per_year: float | None,
+    drawdown_levels: Sequence[float],
+) -> dict[str, Any]: ...
 def without_best(returns: Sequence[float], top: int) -> float: ...
 def walk_forward_windows(
     days: Sequence[Any], *, train: int, test: int, step: int | None = ...

@@ -1,18 +1,20 @@
 //! Python bindings for the research numerics (`raptorbt.research`): the deflated Sharpe
-//! ratio, the stationary bootstrap, `without_best`, walk-forward windows and parameter
-//! designs.
+//! ratio, the stationary bootstrap, `without_best`, the Monte Carlo of a result's paths,
+//! walk-forward windows and parameter designs.
 //!
 //! The functions return plain dicts, which `python/raptorbt/research.py` consumes as they
 //! are. Seeds are masked to 64 bits, so a Python int of any size or sign maps the same way.
 
-use super::errors::invalid_input;
+use super::errors::{invalid_input, Fail};
+use super::numpy_bridge::numpy_cow_f64;
+use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyTuple};
 
 use crate::research::{
-    deflated_sharpe as compute_deflated, stationary_bootstrap as compute_bootstrap,
-    without_best as compute_without_best, Bootstrap, DeflatedSharpe, Design, Luck, ParamDraw,
-    ParamSpace, WalkForward,
+    deflated_sharpe as compute_deflated, resample_paths as compute_paths,
+    stationary_bootstrap as compute_bootstrap, without_best as compute_without_best, Bootstrap,
+    DeflatedSharpe, Design, Luck, ParamDraw, ParamSpace, Percentiles, Resample, WalkForward,
 };
 
 /// Seeds are masked to 64 bits; a Python int of any size or sign maps the same way.
@@ -109,6 +111,91 @@ fn stationary_bootstrap<'py>(
             d.set_item("above_zero", above_zero)?;
         }
     }
+    Ok(d)
+}
+
+fn percentiles<'py>(py: Python<'py>, p: &Percentiles) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("p05", p.p05)?;
+    d.set_item("p50", p.p50)?;
+    d.set_item("p95", p.p95)?;
+    d.set_item("p99", p.p99)?;
+    Ok(d)
+}
+
+/// The Monte Carlo of a finished result; `raptorbt.research.resample_paths` checks the Python
+/// arguments and documents the result.
+#[pyfunction]
+#[pyo3(signature = (values, method, draws, block, replace, seed, periods_per_year, drawdown_levels))]
+#[allow(clippy::too_many_arguments)]
+fn resample_paths<'py>(
+    py: Python<'py>,
+    values: PyReadonlyArray1<'py, f64>,
+    method: &str,
+    draws: i64,
+    block: Option<f64>,
+    replace: bool,
+    seed: &Bound<'py, PyAny>,
+    periods_per_year: Option<f64>,
+    drawdown_levels: Vec<f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    const OP: &str = "raptorbt.research.resample_paths";
+    let refuse = |message: String| -> PyErr {
+        Fail::new("invalid_input", message).op(OP).skill("optimization").into()
+    };
+    let resample = match method {
+        "block" if !replace => {
+            return Err(refuse(
+                "the block bootstrap draws with replacement; an order shuffle is method='trades', replace=False".into(),
+            ))
+        }
+        "block" => Resample::Block { block },
+        "trades" if block.is_some() => {
+            return Err(refuse("block applies to method='block' only".into()))
+        }
+        "trades" => Resample::Trades { replace },
+        _ => return Err(refuse("method is 'block' or 'trades'".into())),
+    };
+    let bits = seed_bits(seed)?;
+    let draws = usize::try_from(draws).unwrap_or(0);
+    let x = numpy_cow_f64(&values);
+    let p = py
+        .detach(|| compute_paths(&x, resample, draws, bits, periods_per_year, &drawdown_levels))
+        .map_err(|e| -> PyErr {
+            Fail::new(e.code(), e.to_string()).op(OP).skill("optimization").into()
+        })?;
+    let d = PyDict::new(py);
+    d.set_item("method", method)?;
+    d.set_item("replace", p.replace)?;
+    d.set_item("n", p.n)?;
+    d.set_item("draws", p.draws)?;
+    d.set_item("block", p.block)?;
+    d.set_item("seed", seed)?;
+    d.set_item("periods_per_year", periods_per_year)?;
+    let er = percentiles(py, &p.ending_return)?;
+    er.set_item("observed", p.observed_return)?;
+    d.set_item("ending_return", er)?;
+    match &p.annual_return {
+        Some(a) => d.set_item("annual_return", percentiles(py, a)?)?,
+        None => d.set_item("annual_return", py.None())?,
+    }
+    let dd = percentiles(py, &p.max_drawdown)?;
+    dd.set_item("observed", p.observed_drawdown)?;
+    d.set_item("max_drawdown", dd)?;
+    d.set_item("prob_loss", p.prob_loss)?;
+    let levels = PyList::empty(py);
+    for (level, probability) in &p.prob_drawdown {
+        let row = PyDict::new(py);
+        row.set_item("level", level)?;
+        row.set_item("probability", probability)?;
+        levels.append(row)?;
+    }
+    d.set_item("prob_drawdown", levels)?;
+    let hist = PyDict::new(py);
+    hist.set_item("edges", &p.edges)?;
+    hist.set_item("counts", &p.counts)?;
+    d.set_item("drawdown_histogram", hist)?;
+    d.set_item("ending_return_fixed", p.ending_fixed)?;
     Ok(d)
 }
 
@@ -251,6 +338,7 @@ fn design_random<'py>(
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deflated_sharpe, m)?)?;
     m.add_function(wrap_pyfunction!(stationary_bootstrap, m)?)?;
+    m.add_function(wrap_pyfunction!(resample_paths, m)?)?;
     m.add_function(wrap_pyfunction!(without_best, m)?)?;
     m.add_function(wrap_pyfunction!(walk_forward_windows, m)?)?;
     m.add_function(wrap_pyfunction!(design_grid, m)?)?;

@@ -35,7 +35,8 @@ Three groups, each deterministic for a given input and seed:
   through your function and returns the rows, a streaming summary and the
   deflated Sharpe ratio of the best. `deflated_sharpe`, `stationary_bootstrap`
   and `without_best` answer "is this distinguishable from luck, and how fragile
-  is it".
+  is it"; `resample_paths` answers "how deep could the drawdown have been" by
+  resampling a finished result's returns or trades into many paths.
 - **Portfolio Monte Carlo.** `simulate_portfolio_mc` simulates the combined
   return of several strategies forward from their sample statistics.
 
@@ -65,6 +66,7 @@ could have known (warm-up from earlier days is fine and is your decision).
 | `raptorbt.research.row_from(result)` | A sweep row from a `BacktestResult`: `sharpe`, `sortino`, `total_return`, `max_drawdown` (fractions), `fills`, `fees`, `samples`, `skew`, `kurtosis`. |
 | `raptorbt.research.deflated_sharpe(sharpes, best, *, samples, skew=0.0, kurtosis=3.0, periods_per_year=252.0, luck="trials")` | The deflated Sharpe: `dsr`, `sr0_annualised`, `best_annualised`, `z`, `trials`. |
 | `raptorbt.research.stationary_bootstrap(returns, *, draws, block, seed, periods_per_year)` | The spread of the annualised mean return under block resampling: `annual_return` `p05`, `p50`, `p95` and `above_zero`. |
+| `raptorbt.research.resample_paths(values, *, method="block", draws=2000, block=None, replace=True, seed, periods_per_year=None, drawdown_levels=(0.1, 0.2, 0.3))` | A Monte Carlo of a finished result: `draws` compounded paths from a return series (`method="block"`, the stationary bootstrap) or from per-trade returns (`method="trades"`, with replacement, or a shuffle with `replace=False`). `ending_return` and `max_drawdown` (`p05`, `p50`, `p95`, `p99`, `observed`), `annual_return`, `prob_loss`, `prob_drawdown` per level, `drawdown_histogram` (`edges`, `counts`), `n`, `draws`, `block`, `ending_return_fixed`. At least 10 observations. |
 | `raptorbt.research.without_best(returns, top)` | The sum of a return series with its `top` best periods left out. |
 | `raptorbt.research.OVERFITTING_NOTE` | The reading rule above, as text. |
 | `raptorbt.simulate_portfolio_mc(returns, weights, correlation_matrix, initial_value, n_simulations=10000, horizon_days=252, seed=42)` | Correlated geometric Brownian motion; returns a dict. |
@@ -80,7 +82,8 @@ could have known (warm-up from earlier days is fine and is your decision).
    distinguishable from the search.
 5. Select on the train side, report the test side. Compare the chosen
    parameters' train and test Sharpe across windows; a large drop is overfitting.
-6. Bootstrap the chosen strategy's returns and check `without_best`.
+6. Bootstrap the chosen strategy's returns, check `without_best`, and read the
+   drawdown spread from `resample_paths`.
 7. Report the number of trials, the windows and the costs with the result.
 
 ## 5. Examples
@@ -212,6 +215,40 @@ total = sum(returns)
 assert research.without_best(returns, 5) < total          # five best days removed
 ```
 
+The paths a finished result could have taken. Resample the per-period returns in
+blocks, or the trades with replacement, to see the spread of the ending return and
+the maximum drawdown; shuffle the trades to see how much of the drawdown was the
+order they came in. A shuffle cannot change where the path ends:
+
+```python
+import numpy as np
+from raptorbt import research
+
+rng = np.random.default_rng(11)
+returns = rng.normal(0.0004, 0.01, 500)                  # daily returns of some strategy
+trades = rng.normal(0.004, 0.03, 120)                     # its trades, P&L over capital used
+
+paths = research.resample_paths(returns, seed=3, periods_per_year=252,
+                                drawdown_levels=[0.1, 0.2, 0.3])
+assert paths == research.resample_paths(returns, seed=3, periods_per_year=252,
+                                        drawdown_levels=[0.1, 0.2, 0.3])   # same seed, same paths
+dd = paths["max_drawdown"]
+assert dd["p05"] <= dd["p50"] <= dd["p95"] <= dd["p99"]
+assert paths["block"] == 8.0                              # cube root of 500, rounded
+p10, p20, p30 = (row["probability"] for row in paths["prob_drawdown"])
+assert p10 >= p20 >= p30
+assert sum(paths["drawdown_histogram"]["counts"]) == paths["draws"] == 2000
+
+shuffled = research.resample_paths(trades, method="trades", replace=False, seed=3)
+assert shuffled["ending_return_fixed"]                    # every order ends in the same place
+er = shuffled["ending_return"]
+assert er["p05"] == er["p99"] == er["observed"]
+assert shuffled["max_drawdown"]["p05"] < shuffled["max_drawdown"]["p95"]  # the drawdown is what varies
+
+drawn = research.resample_paths(trades, method="trades", seed=3)          # with replacement
+assert drawn["ending_return"]["p05"] < drawn["ending_return"]["p95"]
+```
+
 A portfolio Monte Carlo. It draws from a Gaussian model fitted to the sample, so
 read it as a sizing aid and not as a forecast. Results are percent of the
 starting value, and the seed makes them repeatable:
@@ -279,6 +316,27 @@ assert np.array_equal(again["final_values"], final)
   raising a clear error: apply `np.ascontiguousarray`.
 - **The bootstrap resamples blocks of a stationary series.** It says nothing
   about a regime that is not in the sample.
+- **`resample_paths` recombines what happened; it is not a forecast.** Every
+  path is built from the observations, so a loss larger than the worst one in
+  the sample never appears. Paths compound their returns from a starting value
+  of 1, and the drawdown is measured on that compounded path from its running
+  peak, the start included.
+- **The block method keeps dependence only within a block.** Autocorrelation
+  and volatility clustering survive inside a block of mean length `block` and
+  are cut at its ends; a longer `block` keeps more of it and recombines less.
+- **The trade methods assume the trades are independent and equally sized.**
+  Each value is one trade's return on the capital it used, compounded as if each
+  trade staked the whole account. Trades that overlapped in time, were sized
+  differently or depend on one another (a losing streak in one regime) are
+  treated as interchangeable.
+- **A shuffle (`replace=False`) only reorders.** Every path holds each trade
+  once, so the ending return is the observed one on every path:
+  `ending_return_fixed` is `True`, its percentiles collapse to `observed`, and
+  `prob_loss` is 0 or 1. Only the drawdown distribution is informative there.
+- **Small samples.** It needs at least 10 observations (fewer raise
+  `insufficient_observations`); a few dozen trades give a drawdown spread that
+  is itself very uncertain, and percentiles in the tail (`p99`) rest on the few
+  largest observations.
 
 ## 8. Common mistakes
 
@@ -311,6 +369,9 @@ research.deflated_sharpe([1.0, 0.5, 0.2], 1.0)   # TypeError: missing the keywor
   alike; if a one-step change flips the sign, the peak is noise.
 - Changing costs or fill timing between variants and ranking them.
 - Treating the Monte Carlo's percentiles as a forecast.
+- Reading the ending return of a shuffle: it is the observed one on every path.
+- Passing P&L in currency or points to `resample_paths`: it takes returns
+  as fractions (0.01 is 1%).
 - Using `workers > 1` with a lambda or nested function under `executor="process"`.
 
 ## 9. Validation
@@ -321,7 +382,8 @@ research.deflated_sharpe([1.0, 0.5, 0.2], 1.0)   # TypeError: missing the keywor
 3. Read `res.deflated["dsr"]`. Below 0.95, the best is not evidence.
 4. Compare train and test Sharpe of what you would have chosen in each window.
 5. Look at the parameter neighbourhood of the chosen point, not only the point.
-6. Bootstrap the chosen strategy and check `above_zero` and `p05`.
+6. Bootstrap the chosen strategy and check `above_zero` and `p05`; read the
+   `max_drawdown` `p95` of `resample_paths` against the drawdown you can bear.
 7. Run `sweep` with `workers=1` and with `workers=3, executor="thread"`; the rows
    must be equal.
 8. Re-run the chosen strategy with `fill_timing="next_bar_open"` and doubled
