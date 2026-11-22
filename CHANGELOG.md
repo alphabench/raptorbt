@@ -20,7 +20,9 @@ and hosts load strategy code with.
   position is traded out at that close as `exit_reason == "WindowEnd"`, paying the exit fees and
   slippage a real exit pays, and the trade counts in the run's statistics. The default is
   unchanged (`EndOfData`, marked to market, no exit fee). `with_close_open_at_end(False)` turns
-  it off again (`tests/python/test_close_open_at_end.py`).
+  it off again. The exit charge is in the last equity sample, its drawdown and its return, so
+  `max_drawdown_pct` and the figures derived from the drawdown curve include it
+  (`tests/python/test_close_open_at_end.py`).
 - **`raptorbt.bundle`, strategy code as one hashed file.** `pack(files)` makes a deterministic tar
   of `defs/<family>/<id>.py` and `lib/**.py` and returns its sha256 and bytes; `files(sha, content)`
   checks the bytes against the sha and the paths and returns the files without importing;

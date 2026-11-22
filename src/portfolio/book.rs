@@ -1528,7 +1528,11 @@ impl PortfolioBook {
         self.close_out_impl();
         // Positions are flat; the final mark is the balance itself.
         let final_cash = self.base_cash();
-        if let Some(last) = self.equity_curve.last_mut() {
+        if self.config.close_open_at_end {
+            // the sample's drawdown and return follow it: the exit charged at the close-out
+            // is in them too
+            self.restate_last_sample(final_cash);
+        } else if let Some(last) = self.equity_curve.last_mut() {
             *last = final_cash;
         }
         let equity_curve = std::mem::take(&mut self.equity_curve).into_vec();

@@ -81,3 +81,21 @@ def test_slippage_moves_the_charged_exit_against_a_long():
     (trade,) = _run(config.with_close_open_at_end()).trades()
     assert trade.exit_reason == "WindowEnd"
     assert trade.exit_price < _bars()["close"][-1]
+
+
+def test_the_exit_charge_is_in_the_drawdown_and_the_last_return():
+    # a flat market: the whole loss is the charges, and the last sample carries the exit's
+    close = np.full(30, 100.0)
+    bars = _bars()
+    bars.update(open=close, high=close, low=close, close=close)
+    base = BacktestConfig(initial_capital=CAPITAL, fees=FEES)
+    charged = run_strategy_backtest(
+        HoldToEnd, **bars, config=base.with_close_open_at_end(), bar_stamp="close"
+    )
+    marked = run_strategy_backtest(HoldToEnd, **bars, config=base, bar_stamp="close")
+    equity = charged.equity_curve()
+    assert equity[-1] < equity[-2]  # the exit charge lands on the last sample
+    drop = (equity.max() - equity[-1]) / equity.max() * 100.0
+    assert abs(charged.metrics.max_drawdown_pct - drop) < 1e-9
+    assert charged.metrics.max_drawdown_pct > marked.metrics.max_drawdown_pct
+    assert abs(charged.returns()[-1] - (equity[-1] / equity[-2] - 1.0)) < 1e-12
