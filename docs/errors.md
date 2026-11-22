@@ -50,6 +50,7 @@ Each class also subclasses the builtin it replaced, so `except ValueError`
 | `duplicate_symbols` | `InvalidParameter` | A symbol appears more than once. | each symbol once | `raptorbt-market-data` |
 | `empty_data` | `InvalidData` | There is no data to run on (zero bars or rows). | at least one bar, tick or instrument | `raptorbt-market-data` |
 | `empty_strategies` | `InvalidParameter` | The strategy list is empty. | at least one Strategy, (strategy, symbols) pair or entry dict | `raptorbt-strategy` |
+| `engine_version_unknown` | `StateError` | raptorbt has no installed version (it was imported from a source tree, not an installed package), so a host cannot record which engine a bundle ran on. | install raptorbt as a package (pip install raptorbt, or maturin develop) | `raptorbt-deployment` |
 | `epoch_required` | `StateError` | restore() of a journal that holds an epoch was given none: the node that wrote it would not be fenced. | epoch= greater than the journal's | `raptorbt-live-trading` |
 | `exit_close_failed` | `StateError` | The closes of an exit rule were refused or cancelled the allowed number of times and the position is still open. | fix what the venue refuses (the refusal reasons are on the handle), then close the position yourself | `raptorbt-live-trading` |
 | `exit_rule_not_cancellable` | `StateError` | An exit rule the venue holds cannot be taken back; it stays held. | an adapter with cancel_exit_rule(request); close the position | `raptorbt-live-trading` |

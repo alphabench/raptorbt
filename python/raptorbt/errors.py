@@ -854,6 +854,11 @@ CODES: dict[str, Code] = {
         StateError, "live-trading", "The live node is finished; create a new one.",
         ["create a new LiveNode, or LiveNode.restore from the journal"],
     ),
+    "engine_version_unknown": _c(
+        StateError, "deployment",
+        "raptorbt has no installed version (it was imported from a source tree, not an installed package), so a host cannot record which engine a bundle ran on.",
+        ["install raptorbt as a package (pip install raptorbt, or maturin develop)"],
+    ),
     # Execution adapters and venues
     "invalid_execution": _c(
         InvalidParameter, "live-trading",

@@ -33,7 +33,7 @@ and hosts load strategy code with.
   hash of the API line, the manifest's schema and its parser, to record with each admitted bundle
   (a release inside the line leaves it alone; a new major moves it). `canonical` and `local` turn a
   checkpoint's module names to `bundle.` and back. `load(..., prefix=, refuse=)` lets a host choose
-  the package prefix and refuse imports by name (a gate on names, not a sandbox)
+  the package prefix and refuse imports by name (a gate on names, not a sandbox). `engine_version()` and `contract_hash()` on a source tree with no installed version raise the registered `engine_version_unknown`
   (`docs/api/raptorbt.bundle.md`, `skills/deployment/SKILL.md`, `tests/python/test_bundle.py`).
 - **`raptorbt.research.resample_paths`, a Monte Carlo of a finished result.** It resamples a
   return series with the stationary block bootstrap of `stationary_bootstrap`, or per-trade

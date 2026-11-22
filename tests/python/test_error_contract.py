@@ -1481,6 +1481,18 @@ def _():
     node.finish()
 
 
+@case("engine_version_unknown")
+def _():
+    from raptorbt import bundle
+
+    real = raptorbt.__version__
+    raptorbt.__version__ = "unknown"
+    try:
+        bundle.engine_version()
+    finally:
+        raptorbt.__version__ = real
+
+
 @case("run_finished")
 def _():
     s = KernelSession(symbol="X")

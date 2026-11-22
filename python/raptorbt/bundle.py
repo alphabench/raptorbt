@@ -46,6 +46,7 @@ from types import CodeType, ModuleType
 from typing import Any
 
 import raptorbt
+from raptorbt.errors import StateError
 from raptorbt.strategy import (
     Requirements,
     Strategy,
@@ -91,7 +92,11 @@ def engine_version() -> str:
     """The raptorbt this process runs (its installed distribution's version)."""
     v: str = raptorbt.__version__
     if v == "unknown":
-        raise RuntimeError("raptorbt has no installed version: install it as a package")
+        raise StateError(
+            "raptorbt has no installed version: install it as a package",
+            code="engine_version_unknown",
+            operation="raptorbt.bundle.engine_version",
+        )
     return v
 
 

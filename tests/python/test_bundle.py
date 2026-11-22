@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import raptorbt
 from raptorbt import bundle
+from raptorbt.errors import StateError
 from raptorbt.strategy import requirements as manifest
 
 REQUIREMENTS = (
@@ -238,8 +239,9 @@ def test_a_release_in_the_same_api_line_keeps_the_hash(monkeypatch: pytest.Monke
             assert (bundle.contract_hash() == base) is same, version
         monkeypatch.setattr(raptorbt, "__version__", "unknown")
         bundle.contract_hash.cache_clear()
-        with pytest.raises(RuntimeError, match="no installed version"):
+        with pytest.raises(StateError, match="no installed version") as e:
             bundle.contract_hash()
+        assert e.value.code == "engine_version_unknown"
     finally:
         monkeypatch.undo()
         bundle.contract_hash.cache_clear()
