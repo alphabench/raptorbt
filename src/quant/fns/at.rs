@@ -18,10 +18,11 @@
 //!
 //! * The window in progress is never read. The final partial window of a run is never emitted
 //!   (nothing calls `flush`, as in the hub), so the last day's value is not part of any output.
-//! * No builder emits at a session close: the session-anchored builder and the plain time
-//!   builder both emit on the first record of the next window, and `flush` is for end of data
-//!   only. The value that closes a day is therefore first visible on the next day's first
-//!   bar, even when the stream has a schedule.
+//! * The runtime's own bars (a strategy's subscriptions) get a session's last bucket at the
+//!   close, from the bar that reaches it. `at` does not: it holds that window back to the next
+//!   bar (the first of the next window), as it does every window, so the value that closes a
+//!   day is first visible on the next day's first bar, whatever the bar stamp and with or
+//!   without a schedule.
 //! * Before the first emission, and until the inner expression's own warm-up has passed, the
 //!   value is NaN.
 //! * An absent bar (NaN fields) and a day the schedule closes follow the builder: a record on a
@@ -35,6 +36,7 @@
 //! bound, `SessionSchedule::windows_ns_on_day_of` returns a `Vec`, so that case allocates per
 //! bar exactly as the hub does.
 
+use crate::core::types::OhlcvBar;
 use crate::data::{AggregationUnit, BarBuilder, BarSpec, SourceRecord};
 use crate::quant::eval::{Bar, ClockCtx, EvalError, Plan, Stream};
 use crate::quant::registry::FnDef;
@@ -165,6 +167,9 @@ pub struct AtState {
     /// until the second arrives, then done.
     inferring: bool,
     first_ts: Option<i64>,
+    /// A window the builder emitted at its own close (the session's last, see the module doc),
+    /// shown from the next bar.
+    deferred: Option<OhlcvBar>,
     session_ns: Option<i64>,
     refusal: Option<EvalError>,
 }
@@ -196,6 +201,7 @@ impl AtState {
             held: f64::NAN,
             inferring: clock.infer_width && clock.base_ns.is_none(),
             first_ts: None,
+            deferred: None,
             session_ns: session_len_ns(clock),
             refusal: None,
         })
@@ -217,24 +223,35 @@ impl AtState {
             volume: bar.volume,
             signed_volume: 0.0,
         };
-        if let Some(done) = self.builder.push(&self.key.bucketed(&rec)) {
-            let window = Bar {
-                open: done.open,
-                high: done.high,
-                low: done.low,
-                close: done.close,
-                volume: done.volume,
-            };
-            // The body reads no named series (the checker gives it none), so it takes no handle
-            // values and cannot fail; were it to, the held value would read unknown.
-            self.held = self
-                .sub
-                .update(&window, &[])
-                .ok()
-                .and_then(|o| o.first().copied())
-                .unwrap_or(f64::NAN);
+        if let Some(done) = self.deferred.take() {
+            self.hold(&done);
+        }
+        let bucketed = self.key.bucketed(&rec);
+        if let Some(done) = self.builder.push(&bucketed) {
+            // A window emitted by a record inside it (the session's last, at the close) is
+            // shown from the next bar, as every other window is from its successor's first.
+            if done.timestamp > bucketed.timestamp {
+                self.deferred = Some(done);
+            } else {
+                self.hold(&done);
+            }
         }
         self.held
+    }
+
+    /// Step the inner expression on a completed window and hold the result.
+    fn hold(&mut self, done: &OhlcvBar) {
+        let window = Bar {
+            open: done.open,
+            high: done.high,
+            low: done.low,
+            close: done.close,
+            volume: done.volume,
+        };
+        // The body reads no named series (the checker gives it none), so it takes no handle
+        // values and cannot fail; were it to, the held value would read unknown.
+        self.held =
+            self.sub.update(&window, &[]).ok().and_then(|o| o.first().copied()).unwrap_or(f64::NAN);
     }
 
     /// The base width from the first two stamps. Once only: the cell then neither looks nor

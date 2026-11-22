@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **A session's last coarse bar is delivered at the close.** With a session calendar, a coarse
-  time bar (`30m`, `1h`) built from close-stamped bars was completed only by the first record of
-  the next window, so the last bar of a session reached a strategy the next morning. It is now
-  emitted with the bar that reaches the session's close. Bars stamped at their open cannot say
-  they reach it and still wait for the next record, as before. A strategy that acts on a
-  session's last coarse bar sees it one session earlier, so its backtest can differ.
-
 ## [1.2.0] - 2026-11-22
 
 New calls only; nothing is removed or renamed. `raptorbt.bundle` is the new public module NEST
@@ -52,6 +43,16 @@ and hosts load strategy code with.
   drawdown. A shuffle says that its ending return is the observed one on every path. It needs at
   least 10 observations and is deterministic for a seed (`docs/research.md`,
   `tests/python/test_resample_paths.py`).
+
+### Fixed
+
+- **A session's last coarse bar is delivered at the close.** With a session calendar, a coarse
+  time bar (`30m`, `1h`) built from close-stamped bars was completed only by the first record of
+  the next window, so the last bar of a session reached a strategy the next morning. It is now
+  emitted with the bar that reaches the session's close. Bars stamped at their open cannot say
+  they reach it and still wait for the next record, as before. `at(...)` still shows that
+  window from the next bar, as it does every window. A strategy that acts on a session's last
+  coarse bar sees it one session earlier, so its backtest can differ.
 
 ## [1.1.0] - 2026-11-21
 
