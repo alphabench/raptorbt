@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-22
+
+New calls only; nothing is removed or renamed. `raptorbt.bundle` is the new public module NEST
+and hosts load strategy code with.
+
 ### Added
 
 - **`BacktestConfig.with_close_open_at_end()`, a charged exit for a position open at the last
