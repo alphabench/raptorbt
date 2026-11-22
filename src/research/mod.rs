@@ -1,5 +1,6 @@
 //! Research numerics: the deflated Sharpe ratio, the stationary bootstrap, the
-//! "without the best days" check, walk-forward windows and parameter designs.
+//! "without the best days" check, the Monte Carlo of a result's paths, walk-forward windows
+//! and parameter designs.
 //!
 //! Every draw comes from [`SplitMix64`] seeded from a declared seed, and every sum is
 //! taken with the crate's own correctly rounded sum (as Python's `math.fsum`), so the
@@ -15,6 +16,8 @@ pub mod walk_forward;
 pub use design::{Design, ParamDraw, ParamSpace};
 pub use splitmix64::SplitMix64;
 pub use stats::{
-    deflated_sharpe, stationary_bootstrap, without_best, Bootstrap, DeflatedSharpe, Luck,
+    deflated_sharpe, resample_paths, stationary_bootstrap, without_best, Bootstrap, DeflatedSharpe,
+    Luck, Paths, Percentiles, Resample, DRAWDOWN_BINS, RESAMPLE_MAX_DRAWS, RESAMPLE_MAX_LEVELS,
+    RESAMPLE_MIN_OBSERVATIONS,
 };
 pub use walk_forward::{WalkForward, WindowRange};

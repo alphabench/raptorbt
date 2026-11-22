@@ -1,8 +1,8 @@
 """Research tooling: deterministic parameter sweeps and walk-forward windows.
 
 The numerics (SplitMix64 designs, walk-forward windows, the deflated Sharpe ratio, the
-stationary bootstrap, ``without_best``) are the Rust ones in ``raptorbt._raptorbt``; this
-module is the orchestration around them.
+stationary bootstrap, ``without_best``, the Monte Carlo of ``resample_paths``) are the Rust
+ones in ``raptorbt._raptorbt``; this module is the orchestration around them.
 
 A ``Design`` is the set of parameter points: a full ``grid``, or a ``random`` design of
 ``n`` points drawn by SplitMix64 from a declared seed. A ``WalkForward`` cuts a list of
@@ -39,6 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from raptorbt import _raptorbt, errors
 from raptorbt._raptorbt import (
     deflated_sharpe,
     design_grid,
@@ -57,6 +60,7 @@ __all__ = [
     "Welford",
     "Window",
     "deflated_sharpe",
+    "resample_paths",
     "row_from",
     "stationary_bootstrap",
     "sweep",
@@ -64,6 +68,65 @@ __all__ = [
 ]
 
 Params = dict[str, Any]
+
+
+# --- Monte Carlo of a finished result ----------------------------------------------------------
+
+_DRAWDOWN_LEVELS = (0.1, 0.2, 0.3)
+
+
+def resample_paths(
+    values: Sequence[float] | np.ndarray,
+    *,
+    method: str = "block",
+    draws: int = 2000,
+    block: float | None = None,
+    replace: bool = True,
+    seed: int,
+    periods_per_year: float | None = None,
+    drawdown_levels: Sequence[float] = _DRAWDOWN_LEVELS,
+) -> dict[str, Any]:
+    """A Monte Carlo of a finished result: ``draws`` paths resampled from ``values``, and the
+    spread of their ending return and maximum drawdown.
+
+    ``method="block"``: ``values`` are per-period simple returns, resampled by the stationary
+    block bootstrap of ``stationary_bootstrap`` (mean block ``block``, default the cube root of
+    the length rounded, at least 1). ``method="trades"``: ``values`` are per-trade returns
+    (each trade's P&L as a fraction of the capital it used), drawn with replacement (a
+    bootstrap of trades) or, with ``replace=False``, put in a random order (a shuffle).
+
+    Each path compounds its returns from a starting value of 1; its drawdown is measured on
+    that compounded path from its running peak, the start included, and is positive (``0.2``
+    is a fall of 20%). A shuffle keeps every trade once, so every path ends at the observed
+    return: ``ending_return_fixed`` is ``True``, the ending-return percentiles all equal the
+    observed one, ``prob_loss`` is 0 or 1, and only the drawdown distribution is informative.
+
+    Returns ``method``, ``replace``, ``n``, ``draws``, ``block`` (``None`` for trades),
+    ``seed``, ``periods_per_year``; ``ending_return`` and ``max_drawdown``, each ``p05``,
+    ``p50``, ``p95``, ``p99`` (nearest rank) and the ``observed`` value of ``values`` in
+    their own order; ``annual_return`` (the ending-return percentiles annualised over
+    ``n / periods_per_year`` years; ``None`` without ``periods_per_year``); ``prob_loss``
+    (share of paths ending below zero); ``prob_drawdown``, ``[{"level", "probability"}]``
+    with the share of paths whose maximum drawdown is at least each level; and
+    ``drawdown_histogram``, ``{"edges", "counts"}``: 20 equal bins from 0 to the largest
+    drawn drawdown (to 1 when no path has one), the last bin closed.
+
+    At least 10 observations; every value finite and at least -1; ``draws`` 1 to 100,000;
+    at most 16 ``drawdown_levels``, each in (0, 1]. Deterministic for a seed. Not a forecast:
+    a path is a recombination of what happened, nothing that did not.
+    """
+    op = "raptorbt.research.resample_paths"
+    try:
+        x = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise errors.make("invalid_input", "values must be numbers", operation=op,
+                          parameter="values", skill="optimization") from None
+    if x.ndim != 1:
+        raise errors.make("invalid_input", "values must be one series", operation=op,
+                          parameter="values", skill="optimization")
+    return _raptorbt.resample_paths(
+        x, method, draws, block, replace, seed, periods_per_year, list(drawdown_levels)
+    )
 
 
 # --- designs --------------------------------------------------------------------------------------

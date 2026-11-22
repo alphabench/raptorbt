@@ -5,8 +5,8 @@
 Research tooling: deterministic parameter sweeps and walk-forward windows.
 
 The numerics (SplitMix64 designs, walk-forward windows, the deflated Sharpe ratio, the
-stationary bootstrap, ``without_best``) are the Rust ones in ``raptorbt._raptorbt``; this
-module is the orchestration around them.
+stationary bootstrap, ``without_best``, the Monte Carlo of ``resample_paths``) are the Rust
+ones in ``raptorbt._raptorbt``; this module is the orchestration around them.
 
 A ``Design`` is the set of parameter points: a full ``grid``, or a ``random`` design of
 ``n`` points drawn by SplitMix64 from a declared seed. A ``WalkForward`` cuts a list of
@@ -41,6 +41,7 @@ must be importable by name (a module-level function) for process workers.
 | [`Welford`](#welford) | class | Running count, mean, sample standard deviation, minimum and maximum of numbers added one at a time. |
 | [`Window`](#window) | class | Window(index: 'int', train: 'tuple[str, ...]', test: 'tuple[str, ...]') |
 | [`deflated_sharpe`](#deflated_sharpe) | function |  |
+| [`resample_paths`](#resample_paths) | function | A Monte Carlo of a finished result: ``draws`` paths resampled from ``values``, and the spread of their ending return and maximum drawdown. |
 | [`row_from`](#row_from) | function | A sweep row from a finished run (a ``BacktestResult``, or a ``PortfolioResult``, whose combined result is read): the run's own figures, the return moments a deflated Sharpe needs, and its sample count. Ratios are fractions, as the engine reports them. |
 | [`stationary_bootstrap`](#stationary_bootstrap) | function |  |
 | [`sweep`](#sweep) | function | Every (point, window) through ``run``; rows in run order whatever ``workers`` is. ``executor``: with ``workers > 1``, ``"process"`` (a spawned pool) or ``"thread"`` (threads of this process; see the module notes). |
@@ -161,6 +162,43 @@ deflated_sharpe(sharpes, best, *, samples, skew=0.0, kurtosis=3.0, periods_per_y
 ```
 
 *No docstring.*
+
+### `resample_paths`
+
+*function*
+
+```python
+resample_paths(values: 'Sequence[float] | np.ndarray', *, method: 'str' = 'block', draws: 'int' = 2000, block: 'float | None' = None, replace: 'bool' = True, seed: 'int', periods_per_year: 'float | None' = None, drawdown_levels: 'Sequence[float]' = (0.1, 0.2, 0.3)) -> 'dict[str, Any]'
+```
+
+A Monte Carlo of a finished result: ``draws`` paths resampled from ``values``, and the
+spread of their ending return and maximum drawdown.
+
+``method="block"``: ``values`` are per-period simple returns, resampled by the stationary
+block bootstrap of ``stationary_bootstrap`` (mean block ``block``, default the cube root of
+the length rounded, at least 1). ``method="trades"``: ``values`` are per-trade returns
+(each trade's P&L as a fraction of the capital it used), drawn with replacement (a
+bootstrap of trades) or, with ``replace=False``, put in a random order (a shuffle).
+
+Each path compounds its returns from a starting value of 1; its drawdown is measured on
+that compounded path from its running peak, the start included, and is positive (``0.2``
+is a fall of 20%). A shuffle keeps every trade once, so every path ends at the observed
+return: ``ending_return_fixed`` is ``True``, the ending-return percentiles all equal the
+observed one, ``prob_loss`` is 0 or 1, and only the drawdown distribution is informative.
+
+Returns ``method``, ``replace``, ``n``, ``draws``, ``block`` (``None`` for trades),
+``seed``, ``periods_per_year``; ``ending_return`` and ``max_drawdown``, each ``p05``,
+``p50``, ``p95``, ``p99`` (nearest rank) and the ``observed`` value of ``values`` in
+their own order; ``annual_return`` (the ending-return percentiles annualised over
+``n / periods_per_year`` years; ``None`` without ``periods_per_year``); ``prob_loss``
+(share of paths ending below zero); ``prob_drawdown``, ``[{"level", "probability"}]``
+with the share of paths whose maximum drawdown is at least each level; and
+``drawdown_histogram``, ``{"edges", "counts"}``: 20 equal bins from 0 to the largest
+drawn drawdown (to 1 when no path has one), the last bin closed.
+
+At least 10 observations; every value finite and at least -1; ``draws`` 1 to 100,000;
+at most 16 ``drawdown_levels``, each in (0, 1]. Deterministic for a seed. Not a forecast:
+a path is a recombination of what happened, nothing that did not.
 
 ### `row_from`
 
