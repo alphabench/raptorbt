@@ -214,6 +214,7 @@ Python-exposed backtest configuration.
 | --- | --- |
 | `apply_slippage` | Whether `slippage` is applied to fills. Ignored entirely before 0.5.0. |
 | `bar_path_adaptive` | Infer intra-bar high/low order from candle geometry on stop/target conflicts; false keeps the legacy stop-first assumption. |
+| `close_open_at_end` | Trade out a position still open at the last bar as a charged exit (`exit_reason` `"WindowEnd"`) instead of marking it to market with no exit costs (`"EndOfData"`). |
 | `fee_schedule` | The fee schedule that prices `fee_segment`, or `None` for the built-in exchange presets. |
 | `fee_segment` | Itemized Indian cost segment, e.g. "NSE", "NFO-OPT", "MCX-FUT". |
 | `fees` | *No docstring.* |
@@ -253,6 +254,7 @@ Python-exposed backtest configuration.
 | `squareoff_time_minutes` | Squareoff time as minutes from local midnight; `None` disables. |
 | `squareoff_times` | Square-off minutes of single instruments, by symbol: each such symbol is squared off at its own time, every other at `squareoff_time`. |
 | `upon_bar_close` | Deprecated in favor of `fill_timing`: `True` maps to `"same_bar_close"`, `False` to `"next_bar_open"`. An explicit `fill_timing` wins over this flag. |
+| `with_close_open_at_end(self, /, on=True)` | A copy that trades out a position still open at the last bar as a charged exit (`exit_reason` `"WindowEnd"`: exit fees and slippage paid, the trade counted) when `on`, instead of marking it to market with no exit costs (`"EndOfData"`, the default). For a run that is one window of a longer history. |
 | `with_squareoff_time(self, /, hhmm)` | A copy whose `squareoff_time` is `hhmm` (`None` disables it): how a runner applies the flatten time a strategy's requirements declare without changing the caller's config. |
 | `with_squareoff_times(self, /, times)` | A copy that squares off each symbol of `times` at its own "HH:MM" and every other at `squareoff_time`: an instrument whose session closes before the run's square-off (an MCX agricultural contract beside a bullion one) is closed before its own close. It replaces the times a previous call gave; an empty mapping clears them. |
 
@@ -1563,7 +1565,7 @@ Python-exposed trading-session calendar.
 | `mcx_select_agri(holidays=None, squareoff_minute=None)` | MCX internationally referenceable agricultural contracts (Cotton, Cotton Seed Oil / CPO, Kapas): 09:00-21:00 all year, covered as `mcx`. |
 | `next_open_ns(self, /, ts_ns)` | The first window open strictly after `ts_ns`, or None. |
 | `nse_equity(holidays=None, squareoff_minute=None)` | NSE cash equities: Mon-Fri 09:15-15:30 IST. No square-off unless `squareoff_minute` is given. |
-| `nse_fo(holidays=None, squareoff_minute=None)` | NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from 2026-08-03. |
+| `nse_fo(holidays=None, squareoff_minute=None)` | NSE equity derivatives: Mon-Fri 09:15-15:30 IST, 09:15-15:40 from 2026-08-03, 09:15-15:45 from 2026-12-07. |
 | `overrides` | Per-date overrides as `{yyyymmdd: [(open, close), ...]}`. |
 | `session_close_ns(self, /, date)` | UTC nanoseconds of the last close on a `yyyymmdd` date; None if that date is not a trading day. |
 | `session_date(self, /, ts_ns)` | `yyyymmdd` of the trading day `ts_ns` falls on, or None on a weekend or holiday. Time of day is ignored. |

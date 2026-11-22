@@ -7883,6 +7883,7 @@ fn exit_reason_name(reason: crate::core::types::ExitReason) -> &'static str {
         R::Liquidation => "liquidation",
         R::TimeExit => "time_exit",
         R::Squareoff => "squareoff",
+        R::WindowEnd => "window_end",
     }
 }
 

@@ -180,6 +180,7 @@ can. See [execution](../execution/SKILL.md).
 | --- | --- | --- |
 | `runtime_busy` | `StateError` | A push was made from inside a hook. Queue it and push after the call returns. |
 | `node_finished`, `session_finished`, `run_finished` | `StateError` | The node or session is finished; create a new one. |
+| `engine_version_unknown` | `StateError` | `raptorbt.bundle.engine_version()` (and so `contract_hash()`) was called on raptorbt imported from a source tree, with no installed version. Install it as a package (`pip install raptorbt`, or `maturin develop`). |
 | `recovering` | `StateError` | The node was rebuilt and has not resumed. Market data and `finish` are refused. Reconcile, push the reports you have, `resend` what the venue does not hold, then `resume(accept=)`. |
 | `fenced` | `StateError` | A newer epoch owns the account. This node sends nothing more and every push raises. Do not retry: stop the process; a supervisor decides who the writer is. |
 | `journal_failed` | `StateError` | The journal could not take a record (disk full, sink raised); the node stopped before acting on it. Fix the sink and recover from what is durable. |

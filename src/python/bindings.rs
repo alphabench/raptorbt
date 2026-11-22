@@ -158,6 +158,12 @@ pub struct PyBacktestConfig {
     /// Force-close positions on a margin call instead of only halting entries.
     #[pyo3(get, set)]
     pub liquidate_on_margin_call: bool,
+    /// Trade out a position still open at the last bar as a charged exit (`exit_reason`
+    /// `"WindowEnd"`) instead of marking it to market with no exit costs (`"EndOfData"`).
+    ///
+    /// Set through `with_close_open_at_end`, not directly.
+    #[pyo3(get)]
+    pub close_open_at_end: bool,
     /// Seed for the stochastic-fill RNG.
     #[pyo3(get, set)]
     pub fill_seed: u64,
@@ -322,6 +328,7 @@ impl PyBacktestConfig {
                 target_config: TargetConfig::None,
                 squareoff_time_minutes,
                 squareoff_times: std::collections::BTreeMap::new(),
+                close_open_at_end: false,
                 fill_timing,
             })
         })()
@@ -336,6 +343,17 @@ impl PyBacktestConfig {
         let mut copy = self.clone();
         copy.squareoff_time_minutes = parse_squareoff_time(hhmm)?;
         Ok(copy)
+    }
+
+    /// A copy that trades out a position still open at the last bar as a charged exit
+    /// (`exit_reason` `"WindowEnd"`: exit fees and slippage paid, the trade counted) when `on`,
+    /// instead of marking it to market with no exit costs (`"EndOfData"`, the default). For a
+    /// run that is one window of a longer history.
+    #[pyo3(signature = (on=true))]
+    fn with_close_open_at_end(&self, on: bool) -> Self {
+        let mut copy = self.clone();
+        copy.close_open_at_end = on;
+        copy
     }
 
     /// A copy that squares off each symbol of `times` at its own "HH:MM" and
@@ -637,6 +655,7 @@ impl From<&PyBacktestConfig> for BacktestConfig {
             session_tz_set: py_config.session_tz_offset_ns.is_some(),
             limit_slippage: py_config.limit_slippage,
             liquidate_on_margin_call: py_config.liquidate_on_margin_call,
+            close_open_at_end: py_config.close_open_at_end,
             fill_prob_slippage: py_config.fill_prob_slippage,
             fill_seed: py_config.fill_seed,
             bar_path_adaptive: py_config.bar_path_adaptive,

@@ -7,8 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-22
+
+New calls only; nothing is removed or renamed. `raptorbt.bundle` is the new public module NEST
+and hosts load strategy code with.
+
 ### Added
 
+- **`BacktestConfig.with_close_open_at_end()`, a charged exit for a position open at the last
+  bar.** A run that is one window of a longer history (an out-of-sample test window) no longer
+  has to value its last position at the final close with no exit costs: with the option the
+  position is traded out at that close as `exit_reason == "WindowEnd"`, paying the exit fees and
+  slippage a real exit pays, and the trade counts in the run's statistics. The default is
+  unchanged (`EndOfData`, marked to market, no exit fee). `with_close_open_at_end(False)` turns
+  it off again. The exit charge is in the last equity sample, its drawdown and its return, so
+  `max_drawdown_pct` and the figures derived from the drawdown curve include it
+  (`tests/python/test_close_open_at_end.py`).
+- **`raptorbt.bundle`, strategy code as one hashed file.** `pack(files)` makes a deterministic tar
+  of `defs/<family>/<id>.py` and `lib/**.py` and returns its sha256 and bytes; `files(sha, content)`
+  checks the bytes against the sha and the paths and returns the files without importing;
+  `load(sha, content)` imports the bundle from memory under a package of its own
+  (`rb_<16 of the sha>`, so two bundles with the same module names live in one process) and returns
+  a `Definition` per `defs` file: its one `Strategy`, its at most one `StrategyConfig`, its
+  `requirements`, and the `source_sha256` and `fingerprint` of what ran. `contract_hash()` is the
+  hash of the API line, the manifest's schema and its parser, to record with each admitted bundle
+  (a release inside the line leaves it alone; a new major moves it). `canonical` and `local` turn a
+  checkpoint's module names to `bundle.` and back. `load(..., prefix=, refuse=)` lets a host choose
+  the package prefix and refuse imports by name (a gate on names, not a sandbox). `engine_version()` and `contract_hash()` on a source tree with no installed version raise the registered `engine_version_unknown`
+  (`docs/api/raptorbt.bundle.md`, `skills/deployment/SKILL.md`, `tests/python/test_bundle.py`).
 - **`raptorbt.research.resample_paths`, a Monte Carlo of a finished result.** It resamples a
   return series with the stationary block bootstrap of `stationary_bootstrap`, or per-trade
   returns with replacement or as an order shuffle, compounds each path and returns the 5th,
@@ -17,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drawdown. A shuffle says that its ending return is the observed one on every path. It needs at
   least 10 observations and is deterministic for a seed (`docs/research.md`,
   `tests/python/test_resample_paths.py`).
+
+### Fixed
+
+- **The equity-derivatives close moves to 15:45 on 2026-12-07.** `SessionSchedule.nse_fo()` and
+  `bse_fo()` closed at 15:40 from 2026-08-03 with no later change, so from 2026-12-07 the engine
+  would have refused and expired NFO and BFO orders between 15:40 and 15:45 while the market
+  trades.
+- **A session's last coarse bar is delivered at the close.** With a session calendar, a coarse
+  time bar (`30m`, `1h`) built from close-stamped bars was completed only by the first record of
+  the next window, so the last bar of a session reached a strategy the next morning. It is now
+  emitted with the bar that reaches the session's close. Bars stamped at their open cannot say
+  they reach it and still wait for the next record, as before. `at(...)` still shows that
+  window from the next bar, as it does every window. A strategy that acts on a session's last
+  coarse bar sees it one session earlier, so its backtest can differ.
 
 ## [1.1.0] - 2026-11-21
 

@@ -166,8 +166,8 @@ per-date override (a special session, Muhurat trading, a half day; empty
 windows close the date), the holiday set, the latest dated window change that
 covers the date, a standing rule that follows the US clocks (MCX), the base weekday windows. Presets (`nse_equity`, `bse_equity`,
 `nse_fo`, `bse_fo`, `mcx`, `cds`, `bcd`) carry no holidays and no square-off;
-the equity-derivatives close is 15:30 until 2026-07-31 and 15:40 from
-2026-08-03 (the Closing Auction Session for F&O stocks); MCX has a day session to
+the equity-derivatives close is 15:30 until 2026-07-31, 15:40 from 2026-08-03 and 15:45 from
+2026-12-07 (the Closing Auction Session for F&O stocks); MCX has a day session to
 17:00 and an evening session whose close follows a standing rule with no end:
 23:55, and 23:30 while the US is on daylight saving, switching on the first
 trading day after the US clocks change (the Monday after the second Sunday of

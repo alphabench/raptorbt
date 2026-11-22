@@ -30,7 +30,7 @@ one in `.result`, with `per_instrument` summaries and `rejected_entries`).
   `result.returns()`: per-bar returns as fractions, with a leading `0.0`.
 - `result.trades()`: round trips. `pnl` is **net of fees**; `fees` is the whole
   round trip; `exit_reason` says how it ended (`Signal`, `Order`, a stop or
-  target, `Settlement`, `EndOfData`). Under a fee schedule, `entry_fee_breakdown`
+  target, `Settlement`, `EndOfData`, `WindowEnd`). Under a fee schedule, `entry_fee_breakdown`
   and `exit_fee_breakdown` give each leg's charge by the schedule's own
   components (`brokerage`, `stt`, `exchange_txn`, `sebi_fee`, `stamp_duty`,
   `gst`, `ipft`, `dp_charge`) and `total`, the booked cost of the leg; `total`
@@ -58,7 +58,10 @@ the account marked at the close of bar `i`; trades carry `entry_idx`,
 `exit_idx` (bar indices) and `entry_time`, `exit_time` (the engine's close
 times, in nanoseconds). A position still open at the last bar is closed there
 with `exit_reason == "EndOfData"`, marked at the final close and charged no exit
-fee. It appears in `trades()`.
+fee. It appears in `trades()`. `config.with_close_open_at_end()` instead trades
+that position out at the same close as `exit_reason == "WindowEnd"`, paying the
+exit fee and slippage; it is then a closed trade (for a run that is one window
+of a longer history).
 
 ## 3. API reference
 
@@ -250,7 +253,7 @@ assert len(result.trades()) == 1                        # the enter() trade, clo
 - **One definition of a win.** `BacktestMetrics` and `full_report` compute win
   rate, profit factor, payoff and expectancy over **closed** trades only (a
   position still open when the data ended, exit reason `EndOfData`, is not a
-  closed trade), and a trade wins or loses on its P&L **net** of fees. They
+  closed trade; a `WindowEnd` exit is), and a trade wins or loses on its P&L **net** of fees. They
   agree on the same run. Sharpe differs slightly: the metrics average over
   `returns()` including its leading zero, the report over the curve's `n - 1`
   returns.
